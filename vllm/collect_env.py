@@ -124,7 +124,7 @@ def run(command):
         else:
             enc = locale.getpreferredencoding()
         output = raw_output.decode(enc)
-        if command in ("nvidia-smi topo -m", "xpu-smi topology -m"):
+        if command == "nvidia-smi topo -m":
             # don't remove the leading whitespace of `nvidia-smi topo -m`
             #   because they are meaningful
             output = output.rstrip()
@@ -301,72 +301,68 @@ def get_xpu_runtime_version():
 
 
 def get_pkg_version(run_lambda, pkg):
+    assert get_platform() == "linux"
+
+    if pkg == "vllm_xpu_kernels":
+        rc, out, _ = run_lambda("pip show vllm-xpu-kernels")
+        if rc == 0:
+            match = re.search(r"Version: (.*)", out)
+            return match.group(1).strip() if match else "N/A"
+        return "N/A"
+
+    pkg_map = {
+        "igc": ["intel-igc-core", "libigc2", "libigc1"],
+        "level_zero_loader": ["level-zero", "libze1"],
+        "level_zero_driver": ["libze-intel-gpu1", "intel-level-zero-gpu"],
+        "oneccl": ["intel-oneapi-ccl", "oneccl"],
+        "libigdgmm": ["libigdgmm12", "libigdgmm"],
+    }
+
+    pkg_candidates = pkg_map.get(pkg, [])
+    if not pkg_candidates:
+        return "N/A"
+
+    mgr_name = None
+    for mgr in ["dpkg", "dnf", "yum", "zypper"]:
+        rc, _, _ = run_lambda(f"which {mgr}")
+        if rc == 0:
+            mgr_name = mgr
+            break
+
+    if not mgr_name:
+        return "N/A"
+
     ret = ""
     index = -1
-    if get_platform() == "linux":
-        mgr_name = ""
-        if mgr_name == "":
-            rc, _, _ = run_lambda("which dpkg")
-            if rc == 0:
-                mgr_name = "dpkg"
-        if mgr_name == "":
-            rc, _, _ = run_lambda("which dnf")
-            if rc == 0:
-                mgr_name = "dnf"
-        if mgr_name == "":
-            rc, _, _ = run_lambda("which yum")
-            if rc == 0:
-                mgr_name = "yum"
-        if mgr_name == "":
-            rc, _, _ = run_lambda("which zypper")
-            if rc == 0:
-                mgr_name = "zypper"
 
-        if mgr_name != "":
-            pkg_candidates = []
-            if pkg == "igc":
-                pkg_candidates = ["intel-igc-core", "libigc2", "libigc1"]
-            if pkg == "level_zero_loader":
-                pkg_candidates = ["level-zero", "libze1"]
-            if pkg == "level_zero_driver":
-                pkg_candidates = ["libze-intel-gpu1", "intel-level-zero-gpu"]
-            if pkg == "oneccl":
-                pkg_candidates = ["intel-oneapi-ccl", "oneccl"]
-            if pkg == "libigdgmm":
-                pkg_candidates = ["libigdgmm12", "libigdgmm"]
-            if pkg == "vllm_xpu_kernels":
-                rc, out, _ = run_lambda("pip show vllm-xpu-kernels")
-                if rc == 0:
-                    return re.search(r"Version: (.*)", out).group(1).strip()
+    for pkg_name in pkg_candidates:
+        if not pkg_name:
+            continue
 
-            for pkg_name in pkg_candidates:
-                cmd = ""
-                if mgr_name in ["dnf", "yum", "zypper"]:
-                    if pkg_name != "":
-                        if mgr_name in ["dnf", "yum"]:
-                            index = 1
-                            cmd = f"{mgr_name} list | grep {pkg_name}"
-                        if mgr_name in ["zypper"]:
-                            index = 2
-                            cmd = f"{mgr_name} info {pkg_name} | grep Version"
-                if mgr_name == "dpkg":
-                    index = 2
-                    if pkg_name != "":
-                        cmd = f"{mgr_name} -l | grep {pkg_name}"
+        cmd = ""
+        if mgr_name in ["dnf", "yum"]:
+            index = 1
+            cmd = f"{mgr_name} list | grep {pkg_name}"
+        elif mgr_name == "zypper":
+            index = 2
+            cmd = f"{mgr_name} info {pkg_name} | grep Version"
+        elif mgr_name == "dpkg":
+            index = 2
+            cmd = f"{mgr_name} -l | grep {pkg_name}"
 
-                if cmd != "":
-                    ret = run_and_read_all(run_lambda, cmd)
-                    if ret:
-                        break
+        if cmd:
+            ret = run_and_read_all(run_lambda, cmd)
+            if ret:
+                break
 
-    lst = []
-    if ret:
-        lst += re.sub(" +", " ", ret).split(" ")
-    if len(lst) > index and index != -1:
-        ret = lst[index]
-    else:
-        ret = "N/A"
-    return ret
+    if not ret or index == -1:
+        return "N/A"
+
+    lst = re.sub(" +", " ", ret).split(" ")
+    if len(lst) > index:
+        return lst[index]
+
+    return "N/A"
 
 
 def get_intel_graphics_compiler_version(run_lambda):
@@ -455,8 +451,6 @@ def get_gpu_topo(run_lambda):
         output = run_and_read_all(run_lambda, "nvidia-smi topo -m")
         if output is None:
             output = run_and_read_all(run_lambda, "rocm-smi --showtopo")
-        if output is None:
-            output = run_and_read_all(run_lambda, "xpu-smi topology -m")
 
     return output
 
@@ -846,39 +840,8 @@ XPU used to build PyTorch    : {xpu_runtime_version}
 ==============================
 Python version               : {python_version}
 Python platform              : {python_platform}
-
-==============================
-       CUDA / GPU Info
-==============================
-Is CUDA available            : {is_cuda_available}
-CUDA runtime version         : {cuda_runtime_version}
-CUDA_MODULE_LOADING set to   : {cuda_module_loading}
-GPU models and configuration : {nvidia_gpu_models}
-Nvidia driver version        : {nvidia_driver_version}
-cuDNN version                : {cudnn_version}
-HIP runtime version          : {hip_runtime_version}
-MIOpen runtime version       : {miopen_runtime_version}
-Is XNNPACK available         : {is_xnnpack_available}
-
-==============================
-      Intel XPU / GPU Info
-==============================
-Is XPU available             : {xpu_available}
-XPU runtime version          : {xpu_runtime_version}
-Intel GPU models             : {intel_gpu_models}
-
---Compile time--
-oneAPI compiler version      : {oneapi_compiler_version}
-SYCL compiler build          : {sycl_version}
-oneCCL version               : {oneccl_version}
-
---Runtime--
-Intel Graphics Compiler (IGC): {intel_graphics_compiler_version}
-Intel GMM (libigdgmm)        : {libigdgmm_version}
-Level Zero loader version    : {level_zero_loader_version}
-Level Zero driver version    : {level_zero_driver_version}
-vLLM XPU kernels version     : {vllm_xpu_kernels_version}
-
+    
+{gpu_info}
 ==============================
           CPU Info
 ==============================
@@ -1023,6 +986,62 @@ def pretty_str(envinfo):
             mutable_dict["conda_packages"], "[conda] "
         )
     mutable_dict["cpu_info"] = envinfo.cpu_info
+
+    CUDA_FMT = """
+==============================
+       CUDA / GPU Info
+==============================
+Is CUDA available            : {is_cuda_available}
+CUDA runtime version         : {cuda_runtime_version}
+CUDA_MODULE_LOADING set to   : {cuda_module_loading}
+GPU models and configuration : {nvidia_gpu_models}
+Nvidia driver version        : {nvidia_driver_version}
+cuDNN version                : {cudnn_version}
+HIP runtime version          : {hip_runtime_version}
+MIOpen runtime version       : {miopen_runtime_version}
+Is XNNPACK available         : {is_xnnpack_available}
+""".strip()
+
+    XPU_FMT = """
+==============================
+      Intel XPU / GPU Info
+==============================
+Is XPU available             : {xpu_available}
+XPU runtime version          : {xpu_runtime_version}
+Intel GPU models             : {intel_gpu_models}
+
+--Compile time--
+oneAPI compiler version      : {oneapi_compiler_version}
+SYCL compiler build          : {sycl_version}
+oneCCL version               : {oneccl_version}
+
+--Runtime--
+Intel Graphics Compiler (IGC): {intel_graphics_compiler_version}
+Intel GMM (libigdgmm)        : {libigdgmm_version}
+Level Zero loader version    : {level_zero_loader_version}
+Level Zero driver version    : {level_zero_driver_version}
+vLLM XPU kernels version     : {vllm_xpu_kernels_version}
+""".strip()
+
+    invalid_vers = {"N/A", "Could not collect", "None"}
+    sections = []
+
+    if (
+        mutable_dict.get("is_cuda_available") in ("True", "Yes")
+        or mutable_dict.get("cuda_compiled_version") not in invalid_vers
+    ):
+        sections.append(CUDA_FMT)
+
+    if (
+        mutable_dict.get("xpu_available") in ("True", "Yes")
+        or mutable_dict.get("xpu_runtime_version") not in invalid_vers
+    ):
+        sections.append(XPU_FMT)
+
+    mutable_dict["gpu_info"] = (
+        ("\n\n".join(sections) + "\n").format(**mutable_dict) if sections else ""
+    )
+
     return env_info_fmt.format(**mutable_dict)
 
 
