@@ -21,7 +21,7 @@ HAS_READY_LABEL=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.la
 MERGED_COUNT=$(gh pr list --repo "$REPO" --author "$AUTHOR" --state merged --limit 4 --json number --jq 'length')
 
 if [[ "$HAS_READY_LABEL" -ge 1 || "$MERGED_COUNT" -ge 4 ]]; then
-  echo "Check passed: ready label=$HAS_READY_LABEL, merged PRs=$MERGED_COUNT"
+  echo "Check passed: ready label=$HAS_READY_LABEL, merged PRs=${MERGED_COUNT}+"
 else
   echo "::error::PR must have the 'ready' label or the author must have at least 4 merged PRs (found $MERGED_COUNT)."
   exit 1
