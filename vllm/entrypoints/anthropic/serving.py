@@ -576,7 +576,6 @@ class AnthropicServingMessages(OpenAIServingChat):
                             exclude_unset=True, exclude_none=True
                         )
                         yield wrap_data_with_event(data, "message_stop")
-                        yield "data: [DONE]\n\n"
                     else:
                         origin_chunk = ChatCompletionStreamResponse.model_validate_json(
                             data_str
@@ -773,7 +772,6 @@ class AnthropicServingMessages(OpenAIServingChat):
                     )
                     data = error_response.model_dump_json(exclude_unset=True)
                     yield wrap_data_with_event(data, "error")
-                    yield "data: [DONE]\n\n"
 
         except Exception as e:
             logger.exception("Error in message stream converter.")
@@ -783,7 +781,6 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
             data = error_response.model_dump_json(exclude_unset=True)
             yield wrap_data_with_event(data, "error")
-            yield "data: [DONE]\n\n"
 
     async def count_tokens(
         self,

@@ -440,13 +440,13 @@ class QwenVLProcessingInfo(BaseProcessingInfo):
         vision_config = config.visual
 
         image_size = vision_config["image_size"]
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
         kwargs.setdefault("size", {"width": image_size, "height": image_size})
 
         return QwenVLImageProcessorFast(**kwargs)
 
     def get_hf_processor(self, **kwargs: object) -> QwenVLProcessor:
-        return self.ctx.init_processor(
-            QwenVLProcessor,
+        return QwenVLProcessor(
             tokenizer=self.get_tokenizer(),
             image_processor=self.get_image_processor(**kwargs),
         )
