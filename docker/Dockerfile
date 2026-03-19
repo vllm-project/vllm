@@ -579,12 +579,22 @@ ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 # Install PyTorch and core CUDA dependencies
 # This is ~2GB and rarely changes
 ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG CUDA_VERSION
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
+# Debug: print resolved index URL and CUDA_VERSION
+RUN echo "DEBUG [vllm-base torch install]:" && \
+    echo "  PYTORCH_CUDA_INDEX_BASE_URL=${PYTORCH_CUDA_INDEX_BASE_URL}" && \
+    echo "  CUDA_VERSION=${CUDA_VERSION}" && \
+    echo "  Resolved extra-index-url: ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" && \
+    cat /tmp/requirements-cuda.txt | grep -i torch
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --prerelease=allow -r /tmp/requirements-cuda.txt \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') -v && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
+# Debug: verify torch version installed
+RUN python3 -c "import torch; print(f'DEBUG: torch={torch.__version__}, cuda={torch.version.cuda}')" && \
+    pip show torch | grep -E "^(Name|Version|Location):"
 
 # Install FlashInfer pre-compiled kernel cache and binaries
 # This is ~1.1GB and only changes when FlashInfer version bumps
@@ -649,6 +659,12 @@ ARG PYTORCH_NIGHTLY
 # Install vLLM wheel first, so that torch etc will be installed.
 # Check whether to install torch nightly instead of release for this build.
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
+# Debug: print torch_lib_versions and resolved index URL before vLLM install
+RUN echo "DEBUG [vllm-base vllm install]:" && \
+    echo "  PYTORCH_CUDA_INDEX_BASE_URL=${PYTORCH_CUDA_INDEX_BASE_URL}" && \
+    echo "  CUDA_VERSION=${CUDA_VERSION}" && \
+    echo "  torch_lib_versions.txt:" && cat torch_lib_versions.txt && \
+    echo "  Resolved extra-index-url: ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')"
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
@@ -663,6 +679,8 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
         && uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
+# Debug: verify torch version after vLLM install
+RUN python3 -c "import torch; print(f'DEBUG [post-vllm]: torch={torch.__version__}, cuda={torch.version.cuda}')"
 
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
