@@ -1084,33 +1084,28 @@ logger = init_logger(__name__)
     "mla_decode_concat_quant_fp8",
     dynamic_arg_dims={"decode_ql_nope": 0, "decode_q_pe": 0},
 )
-class _DecodeConcatQuantFP8(QuantFP8):
+class _DecodeConcatQuantFP8(CustomOp):
     """
     QuantFP8 variant that concatenates decode_ql_nope and decode_q_pe before
     quantization. When disabled, forward_native is compiled via torch.compile,
     fusing cat/reshape/quant/view together.
     """
 
-    def _make_forward(quant_fn):  # noqa: N805
-        """Factory to create forward methods that concat before quantization."""
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.quant_fp8 = QuantFP8(*args, **kwargs)
 
-        def forward(
-            self,
-            decode_ql_nope: torch.Tensor,
-            decode_q_pe: torch.Tensor,
-            scale: torch.Tensor,
-            scale_ub: torch.Tensor | None = None,
-        ) -> torch.Tensor:
-            decode_q0 = torch.cat((decode_ql_nope, decode_q_pe), dim=-1)
-            decode_q_flat = decode_q0.reshape(decode_q0.shape[0], -1)
-            decode_q, _ = quant_fn(self, decode_q_flat, scale, scale_ub)
-            return decode_q.view(decode_q0.shape)
-
-        return forward
-
-    forward_native = _make_forward(QuantFP8.forward_native)  # type: ignore[arg-type]
-    forward_cuda = _make_forward(QuantFP8.forward_cuda)  # type: ignore[arg-type]
-    forward_hip = _make_forward(QuantFP8.forward_hip)  # type: ignore[arg-type]
+    def forward(
+        self,
+        decode_ql_nope: torch.Tensor,
+        decode_q_pe: torch.Tensor,
+        scale: torch.Tensor,
+        scale_ub: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        decode_q0 = torch.cat((decode_ql_nope, decode_q_pe), dim=-1)
+        decode_q_flat = decode_q0.reshape(decode_q0.shape[0], -1)
+        decode_q, _ = self.quant_fp8(decode_q_flat, scale, scale_ub)
+        return decode_q.view(decode_q0.shape)
 
 
 CUDNN_WORKSPACE_SIZE = 12800
