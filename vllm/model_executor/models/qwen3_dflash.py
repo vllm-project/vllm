@@ -109,7 +109,7 @@ class DFlashQwen3Attention(nn.Module):
             self.head_dim,
             max_position=max_position,
             rope_parameters=rope_parameters,
-            dtype=torch.float32,  # required for float32
+            dtype=torch.float32,  # required for flashinfer rope
         )
         self.attn = Attention(
             self.num_heads,
