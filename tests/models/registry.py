@@ -527,6 +527,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
     ),
+    "SolarOpenForCausalLM": _HfExamplesInfo(
+        "upstage/Solar-Open-100B",
+        extras={"tiny-random": "SSON9/solar-open-tiny-dummy"},
+        min_transformers_version="5.0.0",
+    ),
     "TeleChatForCausalLM": _HfExamplesInfo(
         "chuhac/TeleChat2-35B", trust_remote_code=True
     ),
