@@ -650,9 +650,10 @@ class EplbState:
 
         if self.is_async:
             for eplb_model_state in self.model_states.values():
-                if eplb_model_state.is_buffer_ready() and self._all_ranks_buffer_ready(
-                    eplb_model_state
-                ):
+                all_ranks_ready = False
+                if eplb_model_state.is_rebalance_in_progress():
+                    all_ranks_ready = self._all_ranks_buffer_ready(eplb_model_state)
+                if all_ranks_ready:
                     self.move_to_workspace(
                         model_state=eplb_model_state,
                         ep_group=ep_group,
