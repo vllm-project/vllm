@@ -13,9 +13,6 @@ its cached block hashes. Peers merge received filters and can answer "does any
 peer have block X?" in **~0.5 microseconds** with a local memory lookup — no
 network round-trip required.
 
-Based on the OfflineState design from *"Cuckoo for Clients: Disaggregated
-Cuckoo Hashing"* thesis, adapted for vLLM's KV cache block discovery.
-
 ---
 
 ## Architecture
@@ -216,6 +213,7 @@ def wait_for_save(self): ...
 | `max_cache_entries` | 10000 | Max blocks tracked in local LRU cache |
 | `num_nodes` | 1 | Number of nodes in cluster |
 | `zmq_base_port` | 15600 | Base port for ZMQ PUB/SUB |
+| `peer_hosts` | `["localhost", ...]` | List of hostnames/IPs, one per node (index i = node i) |
 
 ---
 
@@ -232,7 +230,8 @@ python -m vllm.entrypoints.openai.api_server \
         "sync_interval_ms": 100,
         "bloom_fp_rate": 0.01,
         "max_cache_entries": 10000,
-        "zmq_base_port": 15600
+        "zmq_base_port": 15600,
+        "peer_hosts": ["node0.local", "node1.local", "node2.local", "node3.local"]
     }' \
     --enable-prefix-caching
 ```
@@ -300,9 +299,9 @@ Generates 7 PNG plots and a `benchmark_results.json` in the output directory.
 
 | Cache Entries | 1 Node | 8 Nodes | 64 Nodes |
 |--------------|--------|---------|----------|
-| 1,000 | 9.4 KB | 28.1 KB | 74.9 KB |
-| 10,000 | 93.6 KB | 280.8 KB | 748.8 KB |
-| 50,000 | 468.0 KB | 1,404 KB | 3,744 KB |
+| 1,000 | 1.2 KB | 3.5 KB | 9.4 KB |
+| 10,000 | 11.7 KB | 35.1 KB | 93.6 KB |
+| 50,000 | 58.5 KB | 175.5 KB | 468.0 KB |
 
 FPR stays well below the 1% target at all cluster scales due to auto-scaling.
 

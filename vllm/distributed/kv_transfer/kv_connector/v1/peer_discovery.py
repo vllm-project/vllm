@@ -74,6 +74,7 @@ class BloomFilterPeerDiscovery:
         bloom_fp_rate: float = 0.01,
         max_cache_entries: int = 10000,
         zmq_base_port: int = 15600,
+        peer_hosts: list[str] | None = None,
     ):
         self._node_id = node_id
         self._num_nodes = num_nodes
@@ -81,6 +82,12 @@ class BloomFilterPeerDiscovery:
         self._bloom_fp_rate = bloom_fp_rate
         self._max_cache_entries = max_cache_entries
         self._zmq_base_port = zmq_base_port
+        # Per-node hostnames/IPs for multi-machine deployments.
+        # Index i = host for node i. Defaults to localhost for all.
+        if peer_hosts is not None:
+            self._peer_hosts = list(peer_hosts)
+        else:
+            self._peer_hosts = ["localhost"] * num_nodes
 
         # Local cache state (block_hash -> node_id for self)
         # Using OrderedDict as LRU cache for block hash metadata
@@ -284,8 +291,9 @@ class BloomFilterPeerDiscovery:
             for i in range(self._num_nodes):
                 if i == self._node_id:
                     continue
+                peer_host = self._peer_hosts[i]
                 peer_port = self._zmq_base_port + i
-                self._sub_socket.connect(f"tcp://localhost:{peer_port}")
+                self._sub_socket.connect(f"tcp://{peer_host}:{peer_port}")
 
             logger.info(
                 "BloomFilterPeerDiscovery node %d: PUB on port %d, "

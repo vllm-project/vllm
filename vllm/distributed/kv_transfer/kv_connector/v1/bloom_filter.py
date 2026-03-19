@@ -14,7 +14,7 @@ Key properties:
 - No false negatives: if a block is cached, the filter will say "maybe"
 - Bounded false positives: tunable via fp_rate parameter
 - Auto-scaling: bloom size adapts to cluster size via sqrt(N) formula
-- Compact: ~12 KB per node for 10K blocks at 1% FPR
+- Compact: ~12 KB per node for 10K blocks at 1% FPR (packed bit storage)
 """
 
 import math
@@ -57,7 +57,9 @@ class BloomFilter:
         self._size_bits = max(64, int(-scaled_items * math.log(fp_rate) / ln2_sq))
         self._num_hashes = max(1, int((self._size_bits / scaled_items) * math.log(2)))
 
-        self._bits = np.zeros(self._size_bits, dtype=np.uint8)
+        # Packed bit storage: each byte holds 8 bits
+        self._num_bytes = (self._size_bits + 7) // 8
+        self._bits = np.zeros(self._num_bytes, dtype=np.uint8)
         self._item_count = 0
 
         # Deterministic seeds for hash functions
@@ -83,13 +85,14 @@ class BloomFilter:
 
     @property
     def size_bytes(self) -> int:
-        """Size of the filter in bytes."""
-        return self._size_bits  # 1 byte per bit in numpy uint8 array
+        """Size of the packed bit array in bytes."""
+        return self._num_bytes
 
     @property
     def fill_rate(self) -> float:
         """Fraction of bits set (saturation indicator)."""
-        return float(np.sum(self._bits)) / self._size_bits
+        set_bits = sum(int(b).bit_count() for b in self._bits)
+        return set_bits / self._size_bits
 
     def _hash(self, key: int, seed: int) -> int:
         """Murmurhash-style 64-bit integer finalizer."""
@@ -99,11 +102,19 @@ class BloomFilter:
         h = h ^ (h >> 33)
         return h % self._size_bits
 
+    def _set_bit(self, bit_idx: int) -> None:
+        """Set a single bit in the packed array."""
+        self._bits[bit_idx >> 3] |= np.uint8(1 << (bit_idx & 7))
+
+    def _get_bit(self, bit_idx: int) -> bool:
+        """Get a single bit from the packed array."""
+        return bool(self._bits[bit_idx >> 3] & np.uint8(1 << (bit_idx & 7)))
+
     def add(self, key: int) -> None:
         """Add a block hash to the filter."""
         for seed in self._seeds:
             idx = self._hash(key, int(seed))
-            self._bits[idx] = 1
+            self._set_bit(idx)
         self._item_count += 1
 
     def contains(self, key: int) -> bool:
@@ -115,7 +126,7 @@ class BloomFilter:
         """
         for seed in self._seeds:
             idx = self._hash(key, int(seed))
-            if self._bits[idx] == 0:
+            if not self._get_bit(idx):
                 return False
         return True
 
@@ -138,6 +149,7 @@ class BloomFilter:
         """Create a deep copy of this filter."""
         bf = BloomFilter.__new__(BloomFilter)
         bf._size_bits = self._size_bits
+        bf._num_bytes = self._num_bytes
         bf._num_hashes = self._num_hashes
         bf._bits = self._bits.copy()
         bf._item_count = self._item_count
@@ -165,6 +177,7 @@ class BloomFilter:
 
         bf = cls.__new__(cls)
         bf._size_bits = size_bits
+        bf._num_bytes = (size_bits + 7) // 8
         bf._num_hashes = num_hashes
         bf._item_count = item_count
         bf._bits = np.frombuffer(data[16:], dtype=np.uint8).copy()

@@ -94,6 +94,7 @@ class OfflineStateConnector(KVConnectorBase_V1):
         self._bloom_fp_rate = extra.get("bloom_fp_rate", 0.01)
         self._max_cache_entries = extra.get("max_cache_entries", 10000)
         self._zmq_base_port = extra.get("zmq_base_port", 15600)
+        self._peer_hosts: list[str] | None = extra.get("peer_hosts", None)
 
         # Determine node identity from engine_id
         engine_id = self._kv_transfer_config.engine_id
@@ -115,6 +116,7 @@ class OfflineStateConnector(KVConnectorBase_V1):
                 bloom_fp_rate=self._bloom_fp_rate,
                 max_cache_entries=self._max_cache_entries,
                 zmq_base_port=self._zmq_base_port,
+                peer_hosts=self._peer_hosts,
             )
             self._discovery.start()
             logger.info(
@@ -196,10 +198,15 @@ class OfflineStateConnector(KVConnectorBase_V1):
 
             peer = self._discovery.find_peer_with_block(block_hash)
             if peer is not None:
-                matched_blocks += 1
-                matched_block_hashes.append(block_hash)
                 if peer_node_id is None:
                     peer_node_id = peer
+                if peer == peer_node_id:
+                    matched_blocks += 1
+                    matched_block_hashes.append(block_hash)
+                else:
+                    # Block is on a different peer; contiguous
+                    # prefix from one source ends here.
+                    break
             else:
                 # Stop at first non-matched block (prefix must be contiguous)
                 break
