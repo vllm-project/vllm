@@ -199,9 +199,6 @@ class Mxfp8LinearOp:
             prepare_mxfp8_layer_for_marlin,
         )
 
-        layer.orig_dtype = torch.get_default_dtype()
-        layer.marlin_size_n = layer.output_size_per_partition
-        layer.marlin_size_k = layer.input_size_per_partition
         prepare_mxfp8_layer_for_marlin(layer)
 
     def _apply_emulation(

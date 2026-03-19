@@ -202,8 +202,8 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
             out_dtype=self.out_dtype,
             bias=bias,
             workspace=getattr(layer, "workspace", None),
-            size_n=getattr(layer, "marlin_size_n", 0),
-            size_k=getattr(layer, "marlin_size_k", 0),
+            size_n=layer.output_size_per_partition,
+            size_k=layer.input_size_per_partition,
         )
 
 

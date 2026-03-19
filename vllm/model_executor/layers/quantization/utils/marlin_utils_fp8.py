@@ -400,7 +400,6 @@ def prepare_mxfp8_layer_for_marlin(layer: torch.nn.Module) -> None:
     Expects the layer to have:
       - weight: [N, K] float8_e4m3fn
       - weight_scale: [N, K//32] uint8 (e8m0 encoded)
-      - orig_dtype: the model parameter dtype (e.g. bfloat16)
       - input_size_per_partition / output_size_per_partition
     """
     part_size_n = layer.output_size_per_partition
@@ -429,9 +428,10 @@ def prepare_mxfp8_layer_for_marlin(layer: torch.nn.Module) -> None:
     # WEIGHT SCALES
     # Convert uint8 scales -> e8m0fnu -> param_dtype for permutation
     # Scales are [N, K//32], need [K//32, N] for marlin_permute_scales
+    param_dtype = torch.get_default_dtype()
     scales = layer.weight_scale.data[:part_size_n, : part_size_k // group_size]
     scales = scales.contiguous()
-    scales = scales.view(torch.float8_e8m0fnu).to(layer.orig_dtype)
+    scales = scales.view(torch.float8_e8m0fnu).to(param_dtype)
     scales = scales.T.contiguous()
 
     # Permute scales to Marlin layout
