@@ -362,7 +362,14 @@ class FalconDecoderLayer(nn.Module):
         return output
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": {0: "b"},
+        "positions": {-1: "b"},
+        "intermediate_tensors": {0: "b"},
+        "inputs_embeds": {0: "b"},
+    }
+)
 class FalconModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

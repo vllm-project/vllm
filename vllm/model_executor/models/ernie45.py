@@ -33,10 +33,10 @@ from .utils import PPMissingLayer
 @support_torch_compile(
     # set dynamic_arg_dims to support mrope
     dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
+        "input_ids": {0: "b"},
+        "positions": {-1: "b"},
+        "intermediate_tensors": {0: "b"},
+        "inputs_embeds": {0: "b"},
     }
 )
 class Ernie4_5ForCausalLM(LlamaForCausalLM):

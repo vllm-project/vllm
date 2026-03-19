@@ -203,7 +203,13 @@ class PhiLayer(nn.Module):
         return hidden_states
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": {0: "b"},
+        "positions": {-1: "b"},
+        "inputs_embeds": {0: "b"},
+    }
+)
 class PhiModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

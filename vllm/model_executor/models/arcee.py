@@ -175,7 +175,14 @@ class ArceeDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": {0: "b"},
+        "positions": {-1: "b"},
+        "intermediate_tensors": {0: "b"},
+        "inputs_embeds": {0: "b"},
+    }
+)
 class ArceeModel(nn.Module, EagleModelMixin):
     """The transformer model backbone for Arcee (embedding layer + stacked
     decoder blocks + final norm)."""

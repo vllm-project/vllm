@@ -286,10 +286,10 @@ class OuroDecoderLayer(nn.Module):
 
 @support_torch_compile(
     dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
+        "input_ids": {0: "b"},
+        "positions": {-1: "b"},
+        "intermediate_tensors": {0: "b"},
+        "inputs_embeds": {0: "b"},
     }
 )
 class OuroModel(nn.Module):
