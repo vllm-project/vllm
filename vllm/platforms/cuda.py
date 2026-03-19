@@ -387,7 +387,8 @@ class CudaPlatformBase(Platform):
                     )
                 if is_backend_supported:
                     logger.info_once(
-                        f"Using backend {vit_attn_backend} for vit attention"
+                        f"Using backend {vit_attn_backend} for vit attention",
+                        scope="local",
                     )
                     return vit_attn_backend
             except ImportError:
