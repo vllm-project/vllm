@@ -283,7 +283,7 @@ if current_platform.is_cuda():
     BACKENDS_FP4 = [AttentionBackendEnum.FLASHINFER]
     PATTERN_TEST_MODELS_FP8_GROUP = [
         (
-            "neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8",
+            "Qwen/Qwen3-30B-A3B-FP8",
             TestAttentionFp8GroupQuantPatternModel,
         )
     ]
