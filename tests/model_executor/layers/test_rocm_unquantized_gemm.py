@@ -6,11 +6,17 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm.model_executor.layers import utils
 from vllm.platforms import current_platform
 
+if current_platform.is_cuda():
+    pytest.skip(
+        "ROCm skinny GEMM tests are not supported on CUDA.",
+        allow_module_level=True,
+    )
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only test")
+from vllm.model_executor.layers import utils
+
+
 def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch):
     x = torch.randn(1, 64, dtype=torch.float16)
     weight = torch.randn(128, 64, dtype=torch.float16)
@@ -35,7 +41,6 @@ def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch):
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only test")
 def test_rocm_unquantized_gemm_gfx1x_n_gt_4_falls_back(monkeypatch):
     x = torch.randn(5, 64, dtype=torch.float16)
     weight = torch.randn(128, 64, dtype=torch.float16)
@@ -60,7 +65,6 @@ def test_rocm_unquantized_gemm_gfx1x_n_gt_4_falls_back(monkeypatch):
     assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only test")
 def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
     x = torch.randn(16, 1024, dtype=torch.float16)
     weight = torch.randn(256, 1024, dtype=torch.float16)
