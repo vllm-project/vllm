@@ -1,0 +1,2 @@
+Qwen3.5-35B-A3B-DEP2.yaml
+Qwen3.5-35B-A3B-FP8-DEP2.yaml
