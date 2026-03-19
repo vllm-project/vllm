@@ -15,7 +15,6 @@ class RequestState:
         num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
-        model_dtype: torch.dtype,
         cache_draft_logits: bool,
     ):
         self.max_num_reqs = max_num_reqs
@@ -81,7 +80,7 @@ class RequestState:
                 self.max_num_reqs,
                 self.num_speculative_steps,
                 self.vocab_size,
-                dtype=model_dtype,
+                dtype=torch.float32,
                 device=device,
             )
 
