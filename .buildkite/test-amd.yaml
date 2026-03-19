@@ -2516,6 +2516,7 @@ steps:
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
+  # grade: Blocking
   optional: true
   source_file_dependencies:
   - vllm/
