@@ -71,19 +71,8 @@ def _cleanup_ray_resources():
         # Tolerate connection errors to the Ray dashboard
         pass
 
-    # Always clean up PGs and shut down Ray, even if actors are dangling,
-    # to avoid leaking GPU resources and blocking subsequent tests.
-    try:
-        for pg_id, pg_info in ray.util.placement_group_table().items():
-            if pg_info["state"] == "CREATED":
-                pg = PlacementGroup(ray.PlacementGroupID(bytes.fromhex(pg_id)))
-                ray.util.remove_placement_group(pg)
-    except Exception:
-        pass
-    finally:
-        ray.shutdown()
-
     assert not dangling_actors
+    ray.shutdown()
 
 
 def create_vllm_config(
