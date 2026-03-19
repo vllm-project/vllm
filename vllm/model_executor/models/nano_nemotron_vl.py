@@ -477,11 +477,10 @@ class NanoNemotronVLMultiModalProcessor(
                 timing_ctx,
             )
 
-        mm_items, audio_items = self._extract_audio_from_videos(
-            processor_inputs.mm_data_items
+        mm_items = processor_inputs.mm_data_items
+        audio_items = processor_inputs.mm_data_items.get_items(
+            "audio", AudioProcessorItems
         )
-        processor_inputs.mm_data_items = mm_items
-
         prompt = processor_inputs.prompt
         tokenizer = self.info.get_tokenizer()
         if not isinstance(prompt, str):
