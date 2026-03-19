@@ -254,6 +254,7 @@ _EMBEDDING_MODELS = {
         "llava_next",
         "LlavaNextForConditionalGeneration",
     ),
+    "MetaClip2Model": ("clip", "CLIPEmbeddingModel"),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
