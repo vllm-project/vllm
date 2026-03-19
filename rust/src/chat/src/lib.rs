@@ -47,6 +47,10 @@ pub struct ChatLlm {
     backend: DynChatBackend,
     reasoning_parser_factory: ReasoningParserFactory,
     tool_parser_factory: ToolParserFactory,
+    /// Explicit tool call parser name override (bypasses model-based auto-detection).
+    tool_call_parser: Option<String>,
+    /// Explicit reasoning parser name override (bypasses model-based auto-detection).
+    reasoning_parser: Option<String>,
 }
 
 impl ChatLlm {
@@ -57,7 +61,21 @@ impl ChatLlm {
             backend,
             reasoning_parser_factory: ReasoningParserFactory::new(),
             tool_parser_factory: ToolParserFactory::new(),
+            tool_call_parser: None,
+            reasoning_parser: None,
         }
+    }
+
+    /// Set an explicit tool call parser name, bypassing model-based auto-detection.
+    pub fn with_tool_call_parser(mut self, name: impl Into<String>) -> Self {
+        self.tool_call_parser = Some(name.into());
+        self
+    }
+
+    /// Set an explicit reasoning parser name, bypassing model-based auto-detection.
+    pub fn with_reasoning_parser(mut self, name: impl Into<String>) -> Self {
+        self.reasoning_parser = Some(name.into());
+        self
     }
 
     /// Render, tokenize, and submit one chat request.
@@ -79,6 +97,8 @@ impl ChatLlm {
             model_id,
             &self.reasoning_parser_factory,
             &self.tool_parser_factory,
+            self.reasoning_parser.as_deref(),
+            self.tool_call_parser.as_deref(),
         )?;
 
         Ok(ChatEventStream::new(

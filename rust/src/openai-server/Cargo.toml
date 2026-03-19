@@ -33,3 +33,6 @@ expect-test.workspace = true
 rmp-serde.workspace = true
 tower.workspace = true
 zeromq.workspace = true
+
+[lints]
+workspace = true

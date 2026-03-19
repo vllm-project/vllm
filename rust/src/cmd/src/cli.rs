@@ -48,6 +48,14 @@ pub struct FrontendRuntimeArgs {
     /// Maximum time to wait for the engine handshake to complete.
     #[arg(long, env = "VLLM_ENGINE_READY_TIMEOUT_S", default_value_t = 30)]
     pub ready_timeout_secs: u64,
+    /// Select the tool call parser depending on the model that you're using.
+    /// When not specified, the parser is auto-detected from the model.
+    #[arg(long)]
+    pub tool_call_parser: Option<String>,
+    /// Select the reasoning parser depending on the model that you're using.
+    /// When not specified, the parser is auto-detected from the model.
+    #[arg(long)]
+    pub reasoning_parser: Option<String>,
 }
 
 impl FrontendRuntimeArgs {
@@ -60,6 +68,8 @@ impl FrontendRuntimeArgs {
             port: self.port,
             engine_local_host: self.engine_local_host,
             ready_timeout: Duration::from_secs(self.ready_timeout_secs),
+            tool_call_parser: self.tool_call_parser,
+            reasoning_parser: self.reasoning_parser,
         }
     }
 }
@@ -144,6 +154,8 @@ mod tests {
                             port: 8000,
                             engine_local_host: "127.0.0.1",
                             ready_timeout_secs: 30,
+                            tool_call_parser: None,
+                            reasoning_parser: None,
                         },
                         python: "../vllm/.venv/bin/python",
                         python_args: [

@@ -38,7 +38,14 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     })
     .await?;
 
-    let chat = Arc::new(ChatLlm::new(Llm::new(client), backend));
+    let mut chat = ChatLlm::new(Llm::new(client), backend);
+    if let Some(ref name) = config.tool_call_parser {
+        chat = chat.with_tool_call_parser(name);
+    }
+    if let Some(ref name) = config.reasoning_parser {
+        chat = chat.with_reasoning_parser(name);
+    }
+    let chat = Arc::new(chat);
     Ok(Arc::new(AppState::new(config.model.clone(), chat)))
 }
 

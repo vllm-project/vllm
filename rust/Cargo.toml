@@ -66,3 +66,6 @@ zeromq = { version = "0.6.0-pre.1", default-features = false, features = [
     "tokio-runtime",
     "all-transport",
 ] }
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"

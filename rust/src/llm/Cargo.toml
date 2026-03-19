@@ -18,3 +18,6 @@ tokio.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 zeromq.workspace = true
+
+[lints]
+workspace = true

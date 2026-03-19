@@ -101,9 +101,20 @@ pub(crate) fn output_stream(
     model_id: Option<&str>,
     reasoning_parser_factory: &ReasoningParserFactory,
     tool_parser_factory: &ToolParserFactory,
+    reasoning_parser_name: Option<&str>,
+    tool_call_parser_name: Option<&str>,
 ) -> Result<impl ChatEventStream> {
     let tool_parser = if request.tool_parsing_enabled() {
-        if let Some(model_id) = model_id {
+        if let Some(name) = tool_call_parser_name {
+            // Explicit parser name takes precedence.
+            tool_parser_factory
+                .registry()
+                .create_parser(name)
+                .ok_or_else(|| Error::ToolParserUnavailableByName {
+                    name: name.to_string(),
+                })?
+                .into()
+        } else if let Some(model_id) = model_id {
             tool_parser_factory
                 .registry()
                 .create_for_model(model_id)
@@ -117,11 +128,23 @@ pub(crate) fn output_stream(
     } else {
         None
     };
-    let reasoning_parser = model_id.and_then(|model_id| {
-        reasoning_parser_factory
-            .registry()
-            .create_for_model(model_id)
-    });
+    let reasoning_parser = if let Some(name) = reasoning_parser_name {
+        // Explicit parser name takes precedence.
+        Some(
+            reasoning_parser_factory
+                .registry()
+                .create_parser(name)
+                .ok_or_else(|| Error::ReasoningParserUnavailableByName {
+                    name: name.to_string(),
+                })?,
+        )
+    } else {
+        model_id.and_then(|model_id| {
+            reasoning_parser_factory
+                .registry()
+                .create_for_model(model_id)
+        })
+    };
 
     // Chain the streams together.
     let decoded = decoded_text_event_stream(request.clone(), backend, raw_stream);

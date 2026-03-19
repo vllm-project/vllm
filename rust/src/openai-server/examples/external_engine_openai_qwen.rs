@@ -46,6 +46,8 @@ async fn main() -> Result<()> {
         port,
         engine_local_host: args.host,
         ready_timeout: Duration::from_secs(args.ready_timeout_secs),
+        tool_call_parser: None,
+        reasoning_parser: None,
     };
 
     let bind_address = config.bind_address();

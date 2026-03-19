@@ -15,6 +15,10 @@ pub struct Config {
     pub engine_local_host: String,
     /// Maximum time to wait for the engine to become ready.
     pub ready_timeout: Duration,
+    /// Explicit tool call parser name, or `None` for model-based auto-detection.
+    pub tool_call_parser: Option<String>,
+    /// Explicit reasoning parser name, or `None` for model-based auto-detection.
+    pub reasoning_parser: Option<String>,
 }
 
 impl Config {
