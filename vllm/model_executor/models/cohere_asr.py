@@ -1704,6 +1704,10 @@ class ConformerEncoder(nn.Module):
 # ----- Encoder END -----
 
 
+class CohereASRProjector(nn.Linear):
+    pass
+
+
 class CohereASRModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1714,7 +1718,7 @@ class CohereASRModel(nn.Module):
         )
 
         if self.encoder.d_model != self.decoder.hidden_size:
-            self.encoder_decoder_proj = torch.nn.Linear(
+            self.encoder_decoder_proj = CohereASRProjector(
                 self.encoder.d_model, self.decoder.hidden_size
             )
 
@@ -2096,18 +2100,25 @@ class CohereASRForConditionalGeneration(
         self.config = config
         self.dtype = vllm_config.model_config.dtype
 
-        self.model = CohereASRModel(vllm_config=vllm_config, prefix=prefix)
-        lm_head_config = config.head
-        self.unpadded_vocab_size = lm_head_config["num_classes"]
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=CohereASRDecoder,
+            tower_targets={"audio": (ConformerEncoder, CohereASRProjector)},
+        ):
+            self.model = CohereASRModel(vllm_config=vllm_config, prefix=prefix)
+
+        head_config = config.head
+
         self.proj_out = ParallelLMHead(
-            lm_head_config["num_classes"],
-            lm_head_config["hidden_size"],
+            head_config["num_classes"],
+            head_config["hidden_size"],
             quant_config=quant_config,
             bias=True,
         )  # NOTE: bias is True
-        logit_scale = getattr(lm_head_config, "logit_scale", 1.0)
+
+        logit_scale = getattr(head_config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, lm_head_config["num_classes"], logit_scale
+            head_config["num_classes"], scale=logit_scale
         )
 
     def forward(
