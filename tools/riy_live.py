@@ -57,6 +57,7 @@ class Stats:
     num_shared: int = 0
     timestamp:  float = 0.0
     error: Optional[str] = None
+    model_name: str = ""
 
     @property
     def max_freq(self):
@@ -231,19 +232,33 @@ def init_colors():
         curses.init_pair(9, curses.COLOR_BLACK,   curses.COLOR_WHITE)
 
 
+def _log_normalize(value, max_value):
+    """Log-scale normalization: makes rare experts visible.
+
+    Maps [0, max_value] -> [0.0, 1.0] using log scale.
+    A linear scale hides everything below 10% of max;
+    log scale spreads the low end so pruning candidates
+    are distinguishable from truly dead experts.
+    """
+    if max_value <= 0 or value <= 0:
+        return 0.0
+    # log(1 + x) / log(1 + max) gives 0..1 with log compression
+    return math.log1p(value) / math.log1p(max_value)
+
+
 def gate_color_pair(norm):
     if   norm <= 0.0:  return curses.color_pair(1)
-    elif norm < 0.2:   return curses.color_pair(1) | curses.A_DIM
-    elif norm < 0.4:   return curses.color_pair(2)
-    elif norm < 0.6:   return curses.color_pair(3)
-    elif norm < 0.8:   return curses.color_pair(4)
+    elif norm < 0.15:  return curses.color_pair(1) | curses.A_DIM
+    elif norm < 0.35:  return curses.color_pair(2)
+    elif norm < 0.55:  return curses.color_pair(3)
+    elif norm < 0.75:  return curses.color_pair(4)
     else:              return curses.color_pair(5) | curses.A_BOLD
 
 
 def freq_char(freq, max_freq):
     if max_freq <= 0 or freq <= 0:
         return '\u00b7'
-    r = freq / max_freq
+    r = _log_normalize(freq, max_freq)
     chars = '\u00b7\u2591\u2592\u2593\u2588'
     return chars[min(int(r * (len(chars) - 1) + 0.5), len(chars) - 1)]
 
@@ -251,12 +266,15 @@ def freq_char(freq, max_freq):
 # ── Main dashboard ────────────────────────────────────────────────────────────
 
 class Dashboard:
-    def __init__(self, host, port, interval, block_size, demo=False):
+    def __init__(self, host, port, interval, block_size, demo=False,
+                 vllm_port=8011):
         self.host       = host
         self.port       = port
+        self.vllm_port  = vllm_port
         self.interval   = interval
-        self.block_size = block_size
+        self.block_size = block_size  # 0 = auto (fit to terminal width)
         self.demo       = demo
+        self.model_name = ""
 
         self.demo_src   = DemoSource() if demo else None
         self.current    = Stats()
@@ -273,9 +291,24 @@ class Dashboard:
         self.running    = True
         self.flash_set  = set()
 
+    def _fetch_model_name(self):
+        """Fetch model name from vLLM /v1/models endpoint."""
+        try:
+            url = f"http://{self.host}:{self.vllm_port}/v1/models"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                data = json.loads(resp.read().decode())
+                models = data.get("data", [])
+                if models:
+                    self.model_name = models[0].get("id", "")
+        except Exception:
+            pass
+
     def fetch_loop(self):
+        self._fetch_model_name()
         while self.running:
             new = self.demo_src.fetch() if self.demo else fetch_stats(self.host, self.port)
+            new.model_name = self.model_name
             with self.lock:
                 self.previous = self.current
                 self.current  = new
@@ -321,6 +354,9 @@ class Dashboard:
             stdscr.refresh()
 
     def _handle_key(self, key, stdscr):
+        if key == curses.KEY_RESIZE:
+            stdscr.clear()
+            return
         if key in (ord('q'), ord('Q')):
             self.running = False
         elif key == ord('r'):
@@ -399,10 +435,10 @@ class Dashboard:
         connected = "DEMO" if self.demo else f"{self.host}:{self.port}"
         err = f" ERR:{stats.error[:30]}" if stats.error else ""
         age = f"{time.time()-stats.timestamp:.1f}s ago" if stats.timestamp else "---"
-        hdr = (f" vllm-riy live | {connected}{err} | "
-               f"tokens:{stats.token_total:,} | "
-               f"layers:{stats.max_layer+1} experts:{stats.max_expert+1} | "
-               f"refresh:{self.interval:.1f}s | {age} | ?=help ")
+        model = stats.model_name or "?"
+        hdr = (f" riy live | {model} | {connected}{err} | "
+               f"layers:{stats.max_layer+1} exp:{stats.max_expert+1} | "
+               f"{self.interval:.1f}s | {age} | ?=help ")
         try:
             stdscr.addstr(0, 0, hdr[:w-1], curses.color_pair(9) | curses.A_BOLD)
         except:
@@ -419,38 +455,53 @@ class Dashboard:
             except: pass
             return
 
-        # Column layout
+        # Column layout — 1 char per expert, auto-fit to terminal width
         num_shared = stats.num_shared
         routed_start = num_shared
         routed_all = list(range(routed_start, stats.max_expert + 1))
-        blocks = [routed_all[i:i+self.block_size]
-                  for i in range(0, len(routed_all), self.block_size)]
+        prefix_w = 8  # "  L0094 "
+        shared_w = num_shared + 1 if num_shared else 0  # 1 char each + separator
+        avail_w = w - prefix_w - shared_w - 2  # available for routed experts
+        effective_block = self.block_size if self.block_size > 0 else max(avail_w, 1)
+
+        blocks = [routed_all[i:i+effective_block]
+                  for i in range(0, len(routed_all), effective_block)]
 
         self.scroll_x = min(self.scroll_x, max(0, len(blocks) - 1))
         block_experts = blocks[self.scroll_x] if blocks else []
         num_blocks = len(blocks)
 
-        prefix_w = 8
-
-        # Column header
+        # Column header — two rows: tens/hundreds on row 1, ones on row 2
         row = 1
         try:
-            shared_hdr = "".join(f" S{e}" for e in range(num_shared))
-            routed_hdr = "".join(f"{e%1000:3}" for e in block_experts)
-            block_info = (f" block {self.scroll_x+1}/{num_blocks} "
-                          f"[{block_experts[0] if block_experts else 0}-"
+            tens_hdr = "".join(
+                str((e // 10) % 10) if e % 10 == 0 else " "
+                for e in block_experts)
+            ones_hdr = "".join(str(e % 10) for e in block_experts)
+            block_info = (f" [{block_experts[0] if block_experts else 0}-"
                           f"{block_experts[-1] if block_experts else 0}]"
-                          f"  h/l=scroll  [{self.block_size}exp/block")
-            hdr2 = f"{'':>{prefix_w}}"
+                          f" {self.scroll_x+1}/{num_blocks}")
+            # Row 1: tens + block info
+            hdr_prefix = f"{'':>{prefix_w}}"
             if num_shared:
-                hdr2 += f"|{shared_hdr} "
-            hdr2 += f"|{routed_hdr}  {block_info}"
-            stdscr.addstr(row, 0, hdr2[:w-1], curses.color_pair(7))
+                hdr_prefix += "|" + " " * num_shared
+            stdscr.addstr(row, 0,
+                          (hdr_prefix + "|" + tens_hdr + block_info)[:w-1],
+                          curses.color_pair(7))
+            # Row 2: ones
+            row = 2
+            hdr_prefix2 = f"{'':>{prefix_w}}"
+            if num_shared:
+                shared_ones = "".join(str(e % 10) for e in range(num_shared))
+                hdr_prefix2 += "|" + shared_ones
+            stdscr.addstr(row, 0,
+                          (hdr_prefix2 + "|" + ones_hdr)[:w-1],
+                          curses.color_pair(7))
         except:
             pass
 
         # Layer rows
-        max_rows = h - 4
+        max_rows = h - 6  # header(1) + col_hdr(2) + summary + legend + status + prune
         num_layers = stats.max_layer + 1
         self.scroll_y = min(self.scroll_y, max(0, num_layers - max_rows))
 
@@ -461,7 +512,7 @@ class Dashboard:
             layer = i + self.scroll_y
             if layer > stats.max_layer:
                 break
-            row = i + 2
+            row = i + 3  # after header(1) + 2 col_hdr rows
 
             line_prefix = f"  L{layer:04d} "
             try:
@@ -479,10 +530,7 @@ class Dashboard:
                     v = stats.experts.get((layer, e), ExpertData())
                     self._draw_expert(stdscr, row, col, layer, e, v,
                                       mf, mg, flash, shared=True)
-                    col += 3
-                try: stdscr.addstr(row, col, " ", curses.color_pair(7))
-                except: pass
-                col += 1
+                    col += 1  # 1 char per expert
 
             try: stdscr.addstr(row, col, "|", curses.color_pair(7))
             except: pass
@@ -492,28 +540,58 @@ class Dashboard:
                 v = stats.experts.get((layer, e), ExpertData())
                 self._draw_expert(stdscr, row, col, layer, e, v,
                                   mf, mg, flash, shared=False)
-                col += 3
+                col += 1  # 1 char per expert
                 if col >= w - 1:
                     break
 
-        # Status bar
-        status = self.status_msg if time.time() < self.status_ts else (
-            "  q=quit  r=reset  e=enable  d=disable  m=mask  s=save  ?=help  "
-            "j/k=scroll-layers  h/l=scroll-blocks  [/]=block-size  +/-=interval"
-        )
+        # Summary statistics (REAP-style)
+        summary_row = h - 4
         try:
-            stdscr.addstr(h-1, 0, status[:w-1].ljust(w-1),
-                          curses.color_pair(9))
+            total_pairs = stats.max_layer * stats.max_expert if stats.max_layer > 0 else 1
+            all_freqs = []
+            all_gates = []
+            dead = 0
+            rare = 0      # freq > 0 but < 1% of max
+            low = 0       # freq 1-10% of max
+            active = 0    # freq > 10% of max
+            high_gate_low_freq = 0  # specialists: low freq but high contribution
+            for (l, e), v in stats.experts.items():
+                all_freqs.append(v.frequency)
+                all_gates.append(v.avg_gate)
+                if v.frequency <= 0:
+                    dead += 1
+                elif v.frequency < mf * 0.01:
+                    rare += 1
+                    if mg > 0 and v.avg_gate > mg * 0.3:
+                        high_gate_low_freq += 1
+                elif v.frequency < mf * 0.1:
+                    low += 1
+                else:
+                    active += 1
+
+            pct_dead = dead * 100 // max(len(stats.experts), 1)
+            pct_prunable = (dead + rare) * 100 // max(len(stats.experts), 1)
+
+            summary = (
+                f" dead:{dead}({pct_dead}%)"
+                f"  rare:{rare}"
+                f"  low:{low}"
+                f"  active:{active}"
+                f"  |  prunable:{dead+rare}({pct_prunable}%)"
+                f"  specialists:{high_gate_low_freq}"
+                f"  |  total:{len(stats.experts)}"
+            )
+            stdscr.addstr(summary_row, 0, summary[:w-1], curses.color_pair(7))
         except:
             pass
 
         # Legend
-        legend_row = h - 2
-        legend = (" \u00b7 dead  "
+        legend_row = h - 3
+        legend = (" freq: \u00b7 dead  "
                   "\u2591 rare  "
                   "\u2592 low  "
                   "\u2593 high  "
-                  "\u2588 dominant  |  color: ")
+                  "\u2588 dominant  |  color=contribution: ")
         try:
             stdscr.addstr(legend_row, 0, legend, curses.color_pair(7))
             lc = len(legend)
@@ -523,18 +601,42 @@ class Dashboard:
         except:
             pass
 
+        # Status bar
+        status = self.status_msg if time.time() < self.status_ts else (
+            "  q=quit  r=reset  e=enable  d=disable  m=mask  s=save  ?=help  "
+            "j/k=scroll  h/l=blocks  [/]=size  +/-=interval"
+        )
+        try:
+            stdscr.addstr(h-1, 0, status[:w-1].ljust(w-1),
+                          curses.color_pair(9))
+        except:
+            pass
+
+        # Pruning bar (visual: how much could be pruned)
+        prune_row = h - 2
+        try:
+            bar_w = min(w - 30, 60)
+            if len(stats.experts) > 0:
+                pct = (dead + rare) / len(stats.experts)
+                filled = int(pct * bar_w)
+                bar = "\u2588" * filled + "\u2591" * (bar_w - filled)
+                prune_label = f" prune potential: [{bar}] {pct*100:.0f}%"
+                stdscr.addstr(prune_row, 0, prune_label[:w-1],
+                              curses.color_pair(5) if pct > 0.3 else curses.color_pair(3))
+        except:
+            pass
+
     def _draw_expert(self, stdscr, row, col, layer, expert, v,
                      max_freq, max_gate, flash, shared):
         is_masked = self.show_mask and (layer, expert) in self.mask
         is_flash  = (layer, expert) in flash
 
         if is_masked:
-            ch   = " X "
+            ch   = "X"
             attr = curses.color_pair(6) | curses.A_DIM
         else:
-            ch_c = freq_char(v.frequency, max_freq)
-            ch   = f" {ch_c}{ch_c}"
-            g    = v.avg_gate / max_gate if max_gate > 0 else 0.0
+            ch   = freq_char(v.frequency, max_freq)
+            g    = _log_normalize(v.avg_gate, max_gate)
             attr = gate_color_pair(g)
             if is_flash:
                 attr = curses.color_pair(8) | curses.A_BOLD
@@ -565,7 +667,7 @@ class Dashboard:
             "",
             "  Display:",
             "  \u00b7 = never    \u2591 = rare    \u2592 = medium    \u2593 = high    \u2588 = dominant",
-            "  Color = avg gate magnitude (dark->cyan->green->orange->red)",
+            "  Color = avg gate magnitude, log scale (dark->cyan->green->orange->red)",
             "  Flash (yellow) = expert activation spiked since last poll",
             "  Underline = shared expert",
             "",
@@ -593,8 +695,10 @@ def main():
     parser.add_argument("--port",     type=int, default=8019)
     parser.add_argument("--interval", type=float, default=2.0,
                         help="Refresh interval in seconds (default: 2.0)")
-    parser.add_argument("--block",    type=int, default=32,
-                        help="Experts per column block (default: 32)")
+    parser.add_argument("--block",    type=int, default=0,
+                        help="Experts per column block (0=auto-fit to terminal)")
+    parser.add_argument("--vllm-port", type=int, default=8011,
+                        help="vLLM API port for model name (default: 8011)")
     parser.add_argument("--demo",     action="store_true",
                         help="Run with synthetic animated data (no vLLM needed)")
     args = parser.parse_args()
@@ -605,6 +709,7 @@ def main():
         interval=args.interval,
         block_size=args.block,
         demo=args.demo,
+        vllm_port=args.vllm_port,
     )
 
     curses.wrapper(dash.run)

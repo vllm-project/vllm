@@ -13,17 +13,18 @@ from vllm.model_executor.layers.fused_moe.riy import (
 
 
 def _is_capturing() -> bool:
-    """Check if we're inside torch.compile tracing or CUDA graph capture.
+    """Check if we're inside torch.compile tracing.
 
-    During either, we must not perform side-effect ops (scatter_add_ on
-    non-graph tensors, HTTP calls, etc.) that would invalidate the capture.
+    During tracing, we must not perform side-effect ops (scatter_add_ on
+    non-graph tensors, HTTP calls, etc.).
+
+    Note: we only check torch.compiler.is_compiling(), NOT
+    torch.cuda.is_current_stream_capturing(). The latter returns True
+    during both CUDA graph capture AND replay, which would permanently
+    block RIY stats. The scatter_add_ on separate tensors is safe
+    during graph replay (it's just not captured into the graph).
     """
-    if torch.compiler.is_compiling():
-        return True
-    try:
-        return torch.cuda.is_current_stream_capturing()
-    except Exception:
-        return False
+    return torch.compiler.is_compiling()
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
