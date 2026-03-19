@@ -26,10 +26,9 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
-import queue as _queue
 import threading
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -195,13 +194,13 @@ class EplbModelState:
     """
     CUDA device index for the async EPLB worker thread.
     """
-    result_queue: _queue.SimpleQueue = field(default_factory=_queue.SimpleQueue)
+    pending_result: AsyncEPLBLayerResult | None = None
     """
-    Producer/consumer channel between the async worker and step().
-
-    The worker puts one AsyncEPLBLayerResult per layer after
-    cuda_stream.synchronize(), guaranteeing all GPU writes to expert_buffer
-    are complete.  step() calls get_nowait() to check for a ready result.
+    Set by the async worker after cuda_stream.synchronize() completes for a
+    layer, guaranteeing all GPU writes to expert_buffer are done.  Consumed
+    and reset to None by step() via move_to_workspace().  At most one result
+    is ever pending at a time — the GPU ordering via consumed_event ensures
+    the previous result is consumed before the next one is produced.
     """
 
 
@@ -561,10 +560,11 @@ class EplbState:
         if self.is_async:
             for eplb_model_state in self.model_states.values():
                 if (
-                    not eplb_model_state.result_queue.empty()
+                    eplb_model_state.pending_result is not None
                     and self._all_ranks_result_ready(eplb_model_state)
                 ):
-                    result = eplb_model_state.result_queue.get_nowait()
+                    result = eplb_model_state.pending_result
+                    eplb_model_state.pending_result = None
                     self.move_to_workspace(
                         model_state=eplb_model_state,
                         result=result,
@@ -823,7 +823,7 @@ class EplbState:
         cause a forward pass to run with partially-updated weights.
         """
         parallel_state = get_ep_group()
-        has_result = int(not model_state.result_queue.empty())
+        has_result = int(model_state.pending_result is not None)
 
         cpu_group = getattr(parallel_state, "cpu_group", None)
         if cpu_group is not None and cpu_group.size() > 1:

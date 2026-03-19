@@ -53,7 +53,7 @@ class AsyncEPLBLayerResult:
     cuda_stream.synchronize() is called — meaning all GPU writes to
     expert_buffer are finished before step() ever dequeues this object.
 
-    Consumed by EplbState.step() via EplbModelState.result_queue.
+    Consumed by EplbState.step() via EplbModelState.pending_result.
     """
 
     layer_idx: int

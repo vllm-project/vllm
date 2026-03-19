@@ -164,17 +164,15 @@ async def transfer_run_periodically(
                 consumed_event = torch.cuda.Event()
                 cuda_stream.wait_event(consumed_event)
 
-                model_state.result_queue.put(
-                    AsyncEPLBLayerResult(
-                        layer_idx=layer_idx,
-                        new_physical_to_logical_map=new_physical_to_logical_map,
-                        new_logical_to_physical_map=new_logical_to_physical_map,
-                        new_logical_replica_count=new_logical_replica_count,
-                        is_unchanged=is_unchanged,
-                        is_received_locally=is_received_locally,
-                        recv_metadata=recv_metadata,
-                        consumed_event=consumed_event,
-                    )
+                model_state.pending_result = AsyncEPLBLayerResult(
+                    layer_idx=layer_idx,
+                    new_physical_to_logical_map=new_physical_to_logical_map,
+                    new_logical_to_physical_map=new_logical_to_physical_map,
+                    new_logical_replica_count=new_logical_replica_count,
+                    is_unchanged=is_unchanged,
+                    is_received_locally=is_received_locally,
+                    recv_metadata=recv_metadata,
+                    consumed_event=consumed_event,
                 )
                 layer_idx += 1
 
