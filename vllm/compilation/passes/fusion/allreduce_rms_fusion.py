@@ -46,9 +46,12 @@ if find_spec("flashinfer"):
     except ImportError:
         pass
 
-if hasattr(torch.ops._C, "scaled_fp4_quant") and hasattr(
-    torch.ops._C.scaled_fp4_quant, "out"
-):
+_SCALED_FP4_QUANT_OUT_AVAILABLE = (
+    hasattr(torch.ops._C, "scaled_fp4_quant")
+    and hasattr(torch.ops._C.scaled_fp4_quant, "out")
+)
+
+if _SCALED_FP4_QUANT_OUT_AVAILABLE:
     STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
 # Max size of the input tensor per world size per device capability
