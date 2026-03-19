@@ -199,7 +199,7 @@ class Parser:
             request: The request object used to generate the output.
 
         Returns:
-            A tuple of (reasoning_content, response_content).
+            A tuple of (reasoning, response_content).
         """
 
     @abstractmethod
