@@ -218,6 +218,7 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
         if hasattr(self, "in_proj_qkv"):
             # LoRA path: separate in_proj_qkv and in_proj_z
             mixed_qkv, _ = self.in_proj_qkv(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
             z, _ = self.in_proj_z(hidden_states)
         else:
             mixed_qkvz, ba = torch.ops.vllm.gdn_in_proj(
