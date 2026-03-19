@@ -3,12 +3,12 @@
 """Benchmark offline inference throughput."""
 
 import argparse
-import dataclasses
 import json
 import os
 import random
 import time
 import warnings
+from dataclasses import fields
 from typing import Any
 
 import torch
@@ -53,7 +53,7 @@ def run_vllm(
 ) -> tuple[float, list[RequestOutput] | None]:
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
     assert all(
         llm.llm_engine.model_config.max_model_len
         >= (request.prompt_len + request.expected_output_len)
@@ -141,7 +141,7 @@ def run_vllm_chat(
     """
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
 
     assert all(
         llm.llm_engine.model_config.max_model_len
