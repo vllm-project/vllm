@@ -643,13 +643,8 @@ steps:
         
         echo "Loaded base image: $${ECR_IMAGE_TAG}"
         
-        # Clean up old per-commit rocm-base tags (keep rolling window of 300)
-        bash .buildkite/scripts/cleanup-ecr-rocm-base-tags.sh "$${ECR_IMAGE_TAG}" 300 || echo "WARNING: ECR tag cleanup failed (non-fatal)"
-
-        # Tag the base image for release (optional, but useful for tracking)
-        docker tag "$${ECR_IMAGE_TAG}" public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base
-        docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base
-        echo "Pushed base image: public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base"
+        # Pass the base image ECR tag to downstream steps (nightly publish)
+        buildkite-agent meta-data set "rocm-base-ecr-tag" "$${ECR_IMAGE_TAG}"
         
         # Extract GPU architectures from Dockerfile.rocm_base (single source of truth)
         PYTORCH_ROCM_ARCH=$$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
