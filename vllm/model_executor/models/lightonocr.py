@@ -16,7 +16,6 @@ from vllm.model_executor.models.mistral3 import (
     Mistral3ForConditionalGeneration,
     Mistral3MultiModalProjector,
     Mistral3ProcessingInfo,
-    _build_mistral3_info,
     init_vision_tower_for_llava,
 )
 from vllm.model_executor.models.pixtral import PixtralHFEncoderInfo
@@ -27,11 +26,9 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (
-    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     PromptReplacement,
     PromptUpdate,
@@ -128,19 +125,9 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingIn
         ]
 
 
-def _build_LightOnOCR_processor(
-    info: _I,
-    dummy_inputs: BaseDummyInputsBuilder[_I],
-    *,
-    cache: BaseMultiModalProcessorCache | None = None,
-):
-    assert isinstance(info, Mistral3ProcessingInfo)
-    return LightOnOCRMultiModalProcessor(info, dummy_inputs, cache=cache)
-
-
 @MULTIMODAL_REGISTRY.register_processor(
-    _build_LightOnOCR_processor,
-    info=_build_mistral3_info,
+    LightOnOCRMultiModalProcessor,
+    info=Mistral3ProcessingInfo,
     dummy_inputs=Mistral3DummyInputsBuilder,
 )
 class LightOnOCRForConditionalGeneration(Mistral3ForConditionalGeneration):
