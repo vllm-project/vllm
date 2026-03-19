@@ -51,6 +51,8 @@ pub struct ChatLlm {
     tool_call_parser: Option<String>,
     /// Explicit reasoning parser name override (bypasses model-based auto-detection).
     reasoning_parser: Option<String>,
+    /// Explicit override for the maximum model context length.
+    max_model_len: Option<u32>,
 }
 
 impl ChatLlm {
@@ -63,6 +65,7 @@ impl ChatLlm {
             tool_parser_factory: ToolParserFactory::new(),
             tool_call_parser: None,
             reasoning_parser: None,
+            max_model_len: None,
         }
     }
 
@@ -78,6 +81,13 @@ impl ChatLlm {
         self
     }
 
+    /// Override the maximum model context length, taking priority over the backend's
+    /// `max_position_embeddings` from `config.json`.
+    pub fn with_max_model_len(mut self, max_model_len: u32) -> Self {
+        self.max_model_len = Some(max_model_len);
+        self
+    }
+
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
         request.validate()?;
@@ -86,7 +96,10 @@ impl ChatLlm {
 
         let prompt = self.backend.apply_chat_template(&request)?;
         let prompt_token_ids = self.backend.encode(&prompt)?;
-        let sampling_hints = self.backend.sampling_hints()?;
+        let mut sampling_hints = self.backend.sampling_hints()?;
+        if let Some(max_model_len) = self.max_model_len {
+            sampling_hints.max_model_len = Some(max_model_len);
+        }
         let prepared = lower_chat_request(request, prompt_token_ids, sampling_hints)?;
 
         let raw_stream = self.llm.generate(prepared.generate_request).await?;

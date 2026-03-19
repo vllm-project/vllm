@@ -19,6 +19,9 @@ pub struct Config {
     pub tool_call_parser: Option<String>,
     /// Explicit reasoning parser name, or `None` for model-based auto-detection.
     pub reasoning_parser: Option<String>,
+    /// Override for the maximum model context length. Takes priority over the model's
+    /// `max_position_embeddings` from `config.json`.
+    pub max_model_len: Option<u32>,
 }
 
 impl Config {

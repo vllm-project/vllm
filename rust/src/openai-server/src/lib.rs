@@ -45,6 +45,9 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     if let Some(ref name) = config.reasoning_parser {
         chat = chat.with_reasoning_parser(name);
     }
+    if let Some(max_model_len) = config.max_model_len {
+        chat = chat.with_max_model_len(max_model_len);
+    }
     let chat = Arc::new(chat);
     Ok(Arc::new(AppState::new(config.model.clone(), chat)))
 }

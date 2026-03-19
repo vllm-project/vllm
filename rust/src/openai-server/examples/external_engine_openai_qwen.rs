@@ -48,6 +48,7 @@ async fn main() -> Result<()> {
         ready_timeout: Duration::from_secs(args.ready_timeout_secs),
         tool_call_parser: None,
         reasoning_parser: None,
+        max_model_len: None,
     };
 
     let bind_address = config.bind_address();

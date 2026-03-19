@@ -56,6 +56,10 @@ pub struct FrontendRuntimeArgs {
     /// When not specified, the parser is auto-detected from the model.
     #[arg(long)]
     pub reasoning_parser: Option<String>,
+    /// Override the maximum model context length. When set, the frontend uses this value
+    /// instead of the model's `max_position_embeddings` from `config.json`.
+    #[arg(long)]
+    pub max_model_len: Option<u32>,
 }
 
 impl FrontendRuntimeArgs {
@@ -70,6 +74,7 @@ impl FrontendRuntimeArgs {
             ready_timeout: Duration::from_secs(self.ready_timeout_secs),
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            max_model_len: self.max_model_len,
         }
     }
 }
@@ -112,12 +117,18 @@ impl ServeArgs {
 
     /// Build the managed Python-engine spawn configuration for one resolved handshake port.
     pub fn into_managed_engine_config(self, handshake_port: u16) -> ManagedEngineConfig {
+        let mut python_args = self.python_args;
+        // Forward `--max-model-len` to the Python engine so both sides agree on the limit.
+        if let Some(max_model_len) = self.runtime.max_model_len {
+            python_args.push("--max-model-len".to_string());
+            python_args.push(max_model_len.to_string());
+        }
         ManagedEngineConfig {
             python: self.python,
             model: self.runtime.model,
             handshake_host: MANAGED_ENGINE_HANDSHAKE_HOST.to_string(),
             handshake_port,
-            python_args: self.python_args,
+            python_args,
         }
     }
 }
@@ -156,11 +167,12 @@ mod tests {
                             ready_timeout_secs: 30,
                             tool_call_parser: None,
                             reasoning_parser: None,
+                            max_model_len: Some(
+                                512,
+                            ),
                         },
                         python: "../vllm/.venv/bin/python",
                         python_args: [
-                            "--max-model-len",
-                            "512",
                             "--dtype",
                             "float16",
                         ],
