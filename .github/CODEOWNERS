@@ -171,6 +171,7 @@ mkdocs.yaml @hmellor
 
 # Pooling models
 /examples/pooling @noooop
+/docs/models/pooling_models @noooop
 /tests/models/*/pooling* @noooop
 /tests/entrypoints/pooling @noooop
 /vllm/config/pooler.py @noooop
