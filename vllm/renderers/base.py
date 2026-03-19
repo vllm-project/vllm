@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import copy
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -90,10 +91,17 @@ class BaseRenderer(ABC, Generic[_T]):
 
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
 
+            # Deep-copy the tokenizer so the multimodal processor gets its
+            # own Rust tokenizer backend.  Without this, concurrent access
+            # from AsyncMicrobatchTokenizer and call_hf_processor causes
+            # "RuntimeError: Already borrowed" from the Rust RefCell.
+            # See: https://github.com/huggingface/tokenizers/issues/537
+            mm_tokenizer = copy.deepcopy(tokenizer)
+
             with set_default_torch_num_threads():
                 self.mm_processor = mm_registry.create_processor(
                     config.model_config,
-                    tokenizer=tokenizer,
+                    tokenizer=mm_tokenizer,
                     cache=mm_processor_cache,
                 )
 
@@ -168,16 +176,20 @@ class BaseRenderer(ABC, Generic[_T]):
         For multi-modal requests:
         - Importing libraries such as librosa triggers JIT compilation.
         """
+        from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
+
         try:
-            logger.info("Warming up chat template processing...")
+            logger.debug("Warming up chat template processing...")
             start_time = time.perf_counter()
 
             self.render_chat([[{"role": "user", "content": "warmup"}]], chat_params)
 
             elapsed = time.perf_counter() - start_time
-            logger.info("Chat template warmup completed in %.3fs", elapsed)
+            logger.debug("Chat template warmup completed in %.3fs", elapsed)
+        except ChatTemplateResolutionError:
+            logger.debug("This model does not support chat template.")
         except Exception:
-            logger.exception("Chat template warmup failed")
+            logger.warning("Chat template warmup failed", exc_info=True)
 
         if self.mm_processor:
             from vllm.multimodal.processing import TimingContext
@@ -188,7 +200,7 @@ class BaseRenderer(ABC, Generic[_T]):
             mm_limits = processor.info.allowed_mm_limits
 
             try:
-                logger.info("Warming up multi-modal processing...")
+                logger.debug("Warming up multi-modal processing...")
                 start_time = time.perf_counter()
 
                 processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
@@ -197,14 +209,13 @@ class BaseRenderer(ABC, Generic[_T]):
                     mm_options=mm_config.limit_per_prompt,
                 )
                 _ = processor.apply(
-                    processor_inputs,
-                    timing_ctx=TimingContext(enabled=False),
+                    processor_inputs, timing_ctx=TimingContext(enabled=False)
                 )
 
                 elapsed = time.perf_counter() - start_time
                 logger.info("Multi-modal warmup completed in %.3fs", elapsed)
             except Exception:
-                logger.exception("Multi-modal warmup failed")
+                logger.warning("Multi-modal warmup failed")
             finally:
                 self.clear_mm_cache()
 
@@ -689,12 +700,20 @@ class BaseRenderer(ABC, Generic[_T]):
         enc_prompt = prompt["encoder_prompt"]
         dec_prompt = prompt["decoder_prompt"]
 
+        skip_decoder_start_token = False
+        if self.mm_processor is not None:
+            from vllm.multimodal.processing import EncDecMultiModalProcessor
+
+            if isinstance(self.mm_processor, EncDecMultiModalProcessor):
+                skip_decoder_start_token = self.mm_processor.skip_decoder_start_token
+
         return build_enc_dec_inputs(
             encoder_inputs=self._process_singleton(enc_prompt),
             decoder_inputs=(
                 None if dec_prompt is None else self._process_singleton(dec_prompt)
             ),
             decoder_start_token_id=self.get_dec_start_token_id(),
+            skip_decoder_start_token=skip_decoder_start_token,
         )
 
     def process_for_engine(
