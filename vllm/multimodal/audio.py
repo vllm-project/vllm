@@ -235,7 +235,7 @@ def resample_audio_resampy(
     orig_sr: float,
     target_sr: float,
 ) -> npt.NDArray[np.floating]:
-    return resampy.resample(audio, orig_sr=orig_sr, target_sr=target_sr)
+    return resampy.resample(audio, sr_orig=orig_sr, sr_new=target_sr)
 
 
 def resample_audio_scipy(
