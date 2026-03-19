@@ -12,9 +12,6 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.attention.encoder_only_attention import (
-    EncoderOnlyAttention,
-)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -103,7 +100,6 @@ class Lfm2Attention(nn.Module):
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -154,11 +150,7 @@ class Lfm2Attention(nn.Module):
             rope_parameters=config.rope_parameters,
             is_neox_style=True,
         )
-        # Pooling runners do not need KV cache; use encoder-only attention to
-        # avoid initializing KV caches and to enable bidirectional attention.
-        is_pooling_runner = model_config is not None and model_config.runner_type == "pooling"
-        attn_cls = EncoderOnlyAttention if is_pooling_runner else Attention
-        self.attn = attn_cls(
+        self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -214,7 +206,6 @@ class Lfm2AttentionDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
-            model_config=model_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )

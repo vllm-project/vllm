@@ -27,9 +27,9 @@ from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 
 from .bert import BertEmbeddingModel, BertModel
-from .interfaces import SupportsLateInteraction
+from .interfaces import HasInnerState, IsHybrid, SupportsLateInteraction
 from .interfaces_base import default_pooling_type
-from .lfm2 import Lfm2Model
+from .lfm2 import Lfm2ForCausalLM, Lfm2Model
 
 
 class ColBERTMixin(nn.Module, SupportsLateInteraction):
@@ -423,7 +423,7 @@ class ColBERTJinaRobertaModel(ColBERTMixin, nn.Module):
 
 
 @default_pooling_type(seq_pooling_type="CLS", tok_pooling_type="ALL")
-class ColBERTLfm2Model(ColBERTMixin, nn.Module):
+class ColBERTLfm2Model(ColBERTMixin, nn.Module, HasInnerState, IsHybrid):
     """ColBERT late interaction model with LFM2 backbone.
 
     For ``LiquidAI/LFM2-ColBERT-350M`` and similar models.
@@ -433,6 +433,23 @@ class ColBERTLfm2Model(ColBERTMixin, nn.Module):
     """
 
     is_pooling_model = True
+    # LFM2 is a hybrid model (attention + SSM layers); these flags ensure
+    # HybridAttentionMambaModelConfig.verify_and_update_config runs so that
+    # mamba_block_size and related cache settings are correctly initialised.
+    is_hybrid = True
+    has_inner_state = True
+
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        return Lfm2ForCausalLM.get_mamba_state_shape_from_config(vllm_config)
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
+        return Lfm2ForCausalLM.get_mamba_state_dtype_from_config(vllm_config)
+
+    @classmethod
+    def get_mamba_state_copy_func(cls):
+        return Lfm2ForCausalLM.get_mamba_state_copy_func()
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
