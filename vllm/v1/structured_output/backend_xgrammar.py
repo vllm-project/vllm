@@ -192,6 +192,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
         self.matcher.fill_next_token_bitmask(bitmask, idx)
 
     def is_terminated(self) -> bool:
+        self._is_terminated = self.matcher.is_terminated()
         return self._is_terminated
 
     def reset(self):
