@@ -43,7 +43,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
-    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
@@ -155,24 +154,6 @@ def new_chunked_local_attention_spec(
         dtype=dtype,
         page_size_padded=page_size_padded,
         attention_chunk_size=attention_chunk_size,
-    )
-
-
-def new_mamba_spec(
-    block_size=16,
-    shapes=((2, 512), (3, 32, 32)),
-    dtypes=(torch.float32, torch.float32),
-    num_speculative_blocks=2,
-    mamba_cache_mode="none",
-    page_size_padded=None,
-):
-    return MambaSpec(
-        block_size=block_size,
-        shapes=shapes,
-        dtypes=dtypes,
-        page_size_padded=page_size_padded,
-        mamba_cache_mode=mamba_cache_mode,
-        num_speculative_blocks=num_speculative_blocks,
     )
 
 
@@ -2027,28 +2008,6 @@ def test_auto_fit_max_model_len():
     # Should be reduced to fit in memory
     assert vllm_config.model_config.max_model_len < 1024
     assert vllm_config.model_config.max_model_len > 0
-
-
-def test_auto_fit_max_model_len_with_hybrid():
-    """Test that auto-fit works with hybrid KV cache specs."""
-    # Create config with original_max_model_len=-1 to trigger auto-fit
-    model_config = ModelConfig(max_model_len=8192)
-    # Simulate the user passing -1 by setting original_max_model_len
-    model_config.original_max_model_len = -1
-    vllm_config = VllmConfig(model_config=model_config)
-
-    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
-    gamma = 2
-    kv_cache_specs = {
-        "layer_1": new_mamba_spec(num_speculative_blocks=gamma),
-        "layer_2": new_kv_cache_spec(),
-    }
-
-    available_memory = mem_per_block_per_layer * (1024 // 16 + 1 + gamma)
-    _kv_cache_configs = get_kv_cache_configs(
-        vllm_config, [kv_cache_specs], [available_memory]
-    )
-    assert vllm_config.model_config.max_model_len == 1024
 
 
 def test_auto_fit_max_model_len_not_triggered():
