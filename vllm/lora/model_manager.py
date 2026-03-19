@@ -5,7 +5,6 @@ import math
 from collections.abc import Callable
 from typing import TypeVar
 
-import regex as re
 import torch
 from torch import nn
 
@@ -25,7 +24,9 @@ from vllm.lora.utils import (
     from_layer,
     from_layer_logits_processor,
     get_supported_lora_modules,
+    is_in_target_modules,
     is_moe_model,
+    is_supported_lora_module,
     process_packed_modules_mapping,
     replace_submodule,
 )
@@ -160,6 +161,7 @@ class LoRAModelManager:
             device=self.device,
             lora_config=self.lora_config,
         )
+
         lm_prefix = self.mm_mapping.language_model[0]
         self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
 
@@ -170,12 +172,27 @@ class LoRAModelManager:
             not self.lora_config.enable_tower_connector_lora
             and self.supports_tower_connector_lora
         ):
-            self.supports_tower_connector_lora = False
             logger.info(
                 "%s supports adding LoRA to the tower modules. If needed, "
                 "please set `enable_tower_connector_lora=True`.",
                 self.model.__class__.__name__,
             )
+            self.supports_tower_connector_lora = False
+            return
+
+        if (
+            vllm_config.model_config.multimodal_config
+            and vllm_config.model_config.multimodal_config.language_model_only
+        ):
+            if (
+                self.supports_tower_connector_lora
+                and self.lora_config.enable_tower_connector_lora
+            ):
+                logger.warning(
+                    "Disabling `enable_tower_connector_lora` because the multimodal "
+                    "model is configured to initialize the language model only."
+                )
+                self.supports_tower_connector_lora = False
             return
 
         logger.warning(
@@ -552,14 +569,23 @@ class LoRAModelManager:
                 model.loras[module_name] = lora
         return model
 
-    def _match_target_modules(self, module_name: str):
-        return any(
-            re.match(
-                r".*\.{target_module}$".format(target_module=target_module), module_name
-            )
-            or target_module == module_name
-            for target_module in self.supported_lora_modules
-        )
+    def _match_target_modules(self, module_name: str) -> bool:
+        """Check if a module should have LoRA applied.
+
+        This method first checks if the module is in vLLM's supported LoRA
+        modules, then applies deployment-time restrictions based on
+        LoRAConfig.target_modules.
+
+        Args:
+            module_name: Full dot-separated module name (e.g.,
+                "model.layers.0.self_attn.o_proj")
+
+        Returns:
+            True if LoRA should be applied to this module, False otherwise.
+        """
+        if not is_supported_lora_module(module_name, self.supported_lora_modules):
+            return False
+        return is_in_target_modules(module_name, self.lora_config.target_modules)
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
         """

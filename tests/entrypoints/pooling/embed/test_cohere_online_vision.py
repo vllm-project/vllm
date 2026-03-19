@@ -6,11 +6,11 @@ Validates image embedding, batching, normalisation, and embedding type
 conversions through the /v2/embed endpoint.
 """
 
-import base64
 import struct
 import zlib
 
 import numpy as np
+import pybase64 as base64
 import pytest
 import requests
 
