@@ -154,6 +154,25 @@ def native_w8a8_block_matmul(
     return C
 
 
+def test_group_broadcast_no_dde():
+    """Verify group_broadcast compiles without DDE
+    when scale dim is 1 and target dim is an unbacked SymInt."""
+
+    def fn(x, scale):
+        return group_broadcast(scale, x.shape)
+
+    compiled = torch.compile(fn, fullgraph=True, backend="eager")
+    x = torch.randn(16, 64, device="cuda")
+    torch._dynamo.decorators.mark_unbacked(x, 0)
+
+    scale = torch.ones(1, 1, device="cuda")
+    # scale (1,1) stays (1,1) — size-1 dims are skipped
+    # for implicit PyTorch broadcast. The key assertion is
+    # that this compiles at all without a DDE.
+    result = compiled(x, scale)
+    assert result.shape == (1, 1)
+
+
 def native_per_token_group_quant_fp8(
     x, group_size, eps=1e-10, dtype=torch.float8_e4m3fn
 ):
