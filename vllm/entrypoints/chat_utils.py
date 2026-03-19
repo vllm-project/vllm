@@ -322,7 +322,7 @@ class ConversationMessage(TypedDict, total=False):
     content: ReadOnly[str | None | list[dict[str, str]]]
     """The contents of the message"""
 
-    tool_call_id: ReadOnly[str | None]
+    tool_call_id: str | None
     """Tool call that this message is responding to."""
 
     name: ReadOnly[str | None]
