@@ -339,7 +339,7 @@ class IsaacProcessingInfo(BaseProcessingInfo):
             "image_token": hf_config.vision_token,
         }
         processor_kwargs.update(kwargs)
-        return self.ctx.get_hf_processor(IsaacProcessor, **processor_kwargs)
+        return self.ctx.init_processor(IsaacProcessor, **processor_kwargs)
 
     def get_tokenizer(self):
         return self.ctx.tokenizer
