@@ -66,6 +66,17 @@ class ProfilerConfig:
     """If `True`, enables memory profiling in the torch profiler.
     Disabled by default."""
 
+    capture_torch_profiler_dir: str = ""
+    """Directory to save profiler traces captured during CUDA graph capture.
+    If set and non-empty, a torch profiler will be enabled during graph capture
+    on rank 0. Must be an absolute path."""
+
+    detailed_trace_annotation: bool = False
+    """If `True`, uses detailed annotations with roofline metrics (sk, sqsq,
+    sqsk) in profiler trace events. If `False`, uses simple annotations with
+    only context/generation request counts and token counts.
+    Disabled by default."""
+
     ignore_frontend: bool = False
     """If `True`, disables the front-end profiling of AsyncLLM when using the
     'torch' profiler. This is needed to reduce overhead when using delay/limit options,
@@ -143,5 +154,15 @@ class ProfilerConfig:
         # These paths should not be converted to absolute paths
         if profiler_dir and not _is_uri_path(profiler_dir):
             self.torch_profiler_dir = os.path.abspath(os.path.expanduser(profiler_dir))
+                capture_dir = self.capture_torch_profiler_dir
+        
+        if capture_dir and self.profiler != "torch":
+            raise ValueError(
+                "capture_torch_profiler_dir is only applicable when profiler is set to 'torch'"
+            )
+        if capture_dir and not _is_uri_path(capture_dir):
+            self.capture_torch_profiler_dir = os.path.abspath(
+                os.path.expanduser(capture_dir)
+            )
 
         return self
