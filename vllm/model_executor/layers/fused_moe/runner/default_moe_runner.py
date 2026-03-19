@@ -457,11 +457,7 @@ class DefaultMoERunner(MoERunner):
         shared_experts_input: torch.Tensor,
         has_separate_shared_experts: bool,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Run routed experts and optionally combine with shared expert output.
-
-        Shared by forward_impl_chunked (per-chunk) and forward_impl_scan
-        (pre-staged scan body).
-        """
+        """Run routed experts and optionally combine with shared expert output."""
         out = self.quant_method.apply(
             layer=layer,
             x=x,
@@ -480,10 +476,7 @@ class DefaultMoERunner(MoERunner):
         self,
         full_hidden_states: torch.Tensor,
     ) -> tuple[int, int, int]:
-        """Return (max_tokens_across, chunk_size, num_chunks) for DP chunking.
-
-        Shared by forward_impl_chunked and forward_impl_scan.
-        """
+        """Return (max_tokens_across, chunk_size, num_chunks) for DP chunking."""
         ctx = get_forward_context()
         max_tokens_across: int = int(
             ctx.dp_metadata.max_tokens_across_dp_cpu.item()
@@ -634,19 +627,7 @@ class DefaultMoERunner(MoERunner):
             return (full_shared_final_hidden_states, full_fused_final_hidden_states)
 
     def _can_use_scan(self) -> bool:
-        """
-        Return True when forward_impl_scan() can replace forward_impl_chunked().
-
-        Conditions:
-        - VLLM_MOE_USE_SCAN_CHUNKING must be enabled.
-        - Only the DeepEP low-latency kernel path is supported; MORI and
-          FlashInfer all2allv backends read local_sizes from a context manager
-          that is not compatible with torch.scan's pure-function requirement.
-        - DBO (dynamic batching with overlapping) uses ubatch-indexed staging
-          buffers; that indexing is handled by forward_impl_chunked, not here.
-        - Monolithic quant methods have a different apply() signature; they are
-          not yet ported to the scan path.
-        """
+        """True when forward_impl_scan() can replace forward_impl_chunked()."""
         if not envs.VLLM_MOE_USE_SCAN_CHUNKING:
             return False
         pc = self.moe_config.moe_parallel_config
@@ -669,24 +650,11 @@ class DefaultMoERunner(MoERunner):
         """
         Scan-based replacement for forward_impl_chunked().
 
-        Replaces the Python for-loop over DP chunks with torch.scan so that the
-        chunking loop is visible to torch.compile and can be traced without graph
-        breaks.  The original forward_impl_chunked() is preserved and is always
-        available as a fallback (VLLM_MOE_USE_SCAN_CHUNKING=0).
-
-        Design notes
-        ------------
-        * Chunks are independent (no data dependency across iterations), so the
-          scan carry is a dummy scalar used only for sequencing.
-        * Inputs are pre-staged into (num_chunks, max_tokens, H) tensors with
-          zero-padding before the scan starts. The scan body receives one chunk
-          at a time as fixed-shape slices, giving torch.compile static shapes.
-        * The chunked_sizes() context manager is NOT called inside the scan body.
-          For the DeepEP-LL path (the only backend this method supports) that
-          context is not read by the dispatch kernel, so omitting it is safe.
-          Other backends (FlashInfer, MORI) still go through forward_impl_chunked.
-        * Results are stacked by torch.scan into (num_chunks, max_tokens, H) and
-          trimmed back to (num_tokens, H) after the scan returns.
+        Wraps the DP chunk loop in torch.scan so it is visible to
+        torch.compile.  Inputs are pre-staged into (num_chunks, max_tokens, H)
+        tensors with zero-padding; chunks are independent so the scan carry is
+        a dummy scalar.  chunked_sizes() is not called — DeepEP-LL (the only
+        supported backend) does not read it.
         """
         assert self.batched_hidden_states is not None
         assert self.batched_router_logits is not None
@@ -695,11 +663,7 @@ class DefaultMoERunner(MoERunner):
         num_tokens: int = full_hidden_states.size(0)
         H: int = full_hidden_states.size(-1)
 
-        # ------------------------------------------------------------------
-        # Pre-stage: build (num_chunks, max_tokens, feat) tensors.
-        # Re-use the pre-allocated staging buffers when they fit; otherwise
-        # allocate fresh tensors (avoids crashes on unexpected large batches).
-        # ------------------------------------------------------------------
+        # Pre-stage into (num_chunks, max_tokens, feat) with zero-padding.
         def _make_staged(src: torch.Tensor, feat_dim: int) -> torch.Tensor:
             total_padded = num_chunks * max_tokens
             buf = src.new_zeros(num_chunks, max_tokens, feat_dim)
@@ -711,10 +675,8 @@ class DefaultMoERunner(MoERunner):
 
         chunked_hidden = _make_staged(full_hidden_states, H)
 
-        # Pre-compute routing from real tokens only (before zero-padding).
-        # Calling select_experts inside chunk_fn on zero-padded router_logits
-        # produces uniform softmax → topk_ids=[0,1,...] for all padding tokens,
-        # creating phantom expert traffic that corrupts outputs.
+        # Route on real tokens only; zero-padded logits produce uniform softmax
+        # that creates phantom expert traffic.
         full_topk_weights, full_topk_ids = self.router.select_experts(
             hidden_states=full_hidden_states,
             router_logits=full_router_logits,
@@ -722,13 +684,9 @@ class DefaultMoERunner(MoERunner):
         topk_K = full_topk_ids.size(1)
         # Padding positions get weight=0 → zero expert contribution.
         chunked_topk_weights = _make_staged(full_topk_weights, topk_K)
-        # Stage topk_ids: fill padding with last real token's routing instead of
-        # zeros.  Zero-initialized ids produce topk_ids=[0,0,...] which sends all
-        # padding tokens to expert 0 with duplicate entries — invalid for DeepEP-LL.
-        # Using the last real token mirrors what forward_impl_chunked does for its
-        # filler iterations (skip_result_store=True).  The combine output for these
-        # positions is zeroed out by the zero weights above, so the final result is
-        # still correct (padding positions contribute nothing).
+        # Fill padding ids with last real token's routing; all-zero ids send
+        # every padding token to expert 0 with duplicates, invalid for DeepEP-LL.
+        # Zero weights above ensure padding positions contribute nothing.
         total_padded = num_chunks * max_tokens
         _buf_ids = full_topk_ids.new_empty(total_padded, topk_K)
         _buf_ids[:] = full_topk_ids[-1]  # broadcast-fill with last real routing
@@ -744,22 +702,10 @@ class DefaultMoERunner(MoERunner):
         else:
             chunked_shared = None
 
-        # ------------------------------------------------------------------
-        # Scan body: one chunk per iteration.
-        #
-        # @allow_in_graph: tells dynamo to record _apply_chunk as an opaque
-        # call in the FX graph rather than tracing into its internals.
-        # This prevents dynamo from encountering untraceable C++ RDMA objects
-        # (deep_ep.Buffer, dispatch handles — Errors 1 and 2).
-        #
-        # is_fake guard: reenter_make_fx inside trace_scan calls combine_fn
-        # with FakeTensors to build the scan's combine_graph submodule.
-        # Executing RDMA-backed CUDA kernels on FakeTensors crashes (Error 3).
-        # The guard short-circuits to return correctly shaped zero tensors for
-        # shape inference without touching any RDMA state.
-        # The return type must match the real path exactly (Error 6):
-        # two-output case returns a 2-tuple, single-output returns a tensor.
-        # ------------------------------------------------------------------
+        # @allow_in_graph prevents dynamo from tracing into untraceable RDMA
+        # objects (deep_ep.Buffer, dispatch handles).  The FakeTensor guard
+        # short-circuits shape inference to avoid executing RDMA kernels on
+        # fake inputs; return shape must match the real path exactly.
         has_two_outputs = (
             has_separate_shared_experts
             or self.quant_method.mk_owns_shared_expert
@@ -779,7 +725,7 @@ class DefaultMoERunner(MoERunner):
             ],
         ) -> tuple:
             chunk_h, chunk_tw, chunk_ti, chunk_s = xs_slice
-            # is_fake guard (Error 3 / Error 6)
+            # FakeTensor guard: return shaped zeros for trace-time inference.
             if isinstance(chunk_h, torch._subclasses.FakeTensor):
                 if _has_two:
                     return (carry.clone(), (torch.zeros_like(chunk_s), torch.zeros_like(chunk_h)))
@@ -797,23 +743,9 @@ class DefaultMoERunner(MoERunner):
         dummy_carry = full_hidden_states.new_zeros(1)
         xs_tuple = (chunked_hidden, chunked_topk_weights, chunked_topk_ids, chunk_s_input)
 
-        # ------------------------------------------------------------------
-        # Run the scan via scan_op directly (not via torch.scan).
-        #
-        # torch.scan() wraps scan_op inside _maybe_compile_and_run_fn which
-        # calls torch.compile(backend="eager") inside setup_compilation_env().
-        # setup_compilation_env() temporarily removes vLLM's pre-dispatch
-        # TorchFunctionMode from the stack; DeepEP-LL RDMA dispatch depends
-        # on that mode being present, so removing it corrupts the protocol
-        # and produces garbled output.
-        #
-        # Calling scan_op directly bypasses _maybe_compile_and_run_fn and
-        # leaves all TorchFunctionModes intact.  Dispatch behaviour:
-        #   - Eager mode (Blocker 1 present): scan_op_dense → generic_scan
-        #     → N calls with real tensors, no extra RDMA dispatch.
-        #   - Under outer torch.compile (post-Blocker 1): ScanHigherOrderVariable
-        #     in dynamo traces combine_fn_flat as a subgraph correctly.
-        # ------------------------------------------------------------------
+        # Call scan_op directly instead of torch.scan().  torch.scan() runs
+        # _maybe_compile_and_run_fn which strips vLLM's TorchFunctionModes;
+        # DeepEP-LL RDMA dispatch depends on those modes being present.
         leaves_init, spec_init = pytree.tree_flatten(dummy_carry)
         leaves_xs, spec_xs = pytree.tree_flatten(xs_tuple)
         combine_fn_flat = functools.partial(
@@ -829,10 +761,7 @@ class DefaultMoERunner(MoERunner):
         )
         _, out_leaves = _extract_carry_and_out(raw_result, len(leaves_init))
 
-        # ------------------------------------------------------------------
-        # Trim stacked (num_chunks, max_tokens, feat) -> (num_tokens, feat)
-        # out_leaves: flat list of stacked output tensors, one per output.
-        # ------------------------------------------------------------------
+        # Trim (num_chunks, max_tokens, feat) -> (num_tokens, feat).
         if has_two_outputs:
             stacked_shared, stacked_fused = out_leaves[0], out_leaves[1]
             H_shared_final = stacked_shared.size(-1)
