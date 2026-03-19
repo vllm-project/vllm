@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import AttentionBackend
@@ -66,7 +67,8 @@ def expand_block_ids(
 
 
 def pin_mmap_region(region: SharedMmapRegion) -> None:
-    """Register a worker's mmap slice as CUDA pinned memory via cudaHostRegister."""
+    """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
+    tp_rank = get_tensor_model_parallel_rank()
     libcudart = find_library("cudart") or "libcudart.so"
     cuda = ctypes.CDLL(libcudart)
     cuda.cudaHostRegister.argtypes = [
@@ -78,25 +80,66 @@ def pin_mmap_region(region: SharedMmapRegion) -> None:
 
     mv = memoryview(region.mmap_obj)
     base_ptr = ctypes.addressof(ctypes.c_char.from_buffer(mv))
-    offset, size = region.worker_region()
-    ptr = base_ptr + offset
 
     result = cuda.cudaHostRegister(
-        ctypes.c_void_p(ptr), ctypes.c_size_t(size), ctypes.c_uint(0)
+        ctypes.c_void_p(base_ptr),
+        ctypes.c_size_t(region.total_size_bytes),
+        ctypes.c_uint(0),
     )
     if result != 0:
         logger.warning(
             "cudaHostRegister failed for tp_rank=%d (code=%d) — "
             "falling back to standard pin_memory allocation",
-            region.tp_rank,
+            tp_rank,
             result,
         )
     else:
         logger.info(
             "Pinned mmap region for tp_rank=%d: %.2f GB",
-            region.tp_rank,
-            size / 1e9,
+            tp_rank,
+            region.total_size_bytes / 1e9,
         )
+
+
+class RemappedBlockHandler(OffloadingHandler):
+    """
+    Wraps a SingleDirectionOffloadingHandler and remaps logical CPU block IDs
+    to physical block IDs for the interleaved mmap layout:
+
+        physical = logical * num_workers + rank
+
+    For GPU->CPU transfers the CPU side is dst; for CPU->GPU it is src.
+    """
+
+    def __init__(
+        self,
+        inner: "SingleDirectionOffloadingHandler",
+        num_workers: int,
+        rank: int,
+        remap_src: bool,
+    ) -> None:
+        self._inner = inner
+        self._num_workers = num_workers
+        self._rank = rank
+        self._remap_src = remap_src
+
+    def _remap(self, spec: BlockIDsLoadStoreSpec) -> BlockIDsLoadStoreSpec:
+        spec.block_ids = spec.block_ids * self._num_workers + self._rank
+        return spec
+
+    def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
+        src_spec, dst_spec = transfer_spec
+        if self._remap_src:
+            src_spec = self._remap(src_spec)
+        else:
+            dst_spec = self._remap(dst_spec)
+        return self._inner.transfer_async(job_id, (src_spec, dst_spec))
+
+    def get_finished(self) -> list[TransferResult]:
+        return self._inner.get_finished()
+
+    def wait(self, job_ids: set[int]) -> None:
+        return self._inner.wait(job_ids)
 
 
 class SingleDirectionOffloadingHandler(OffloadingHandler):
@@ -266,6 +309,7 @@ class CpuGpuOffloadingHandlers:
         gpu_caches: dict[str, torch.Tensor],
         attn_backends: dict[str, type[AttentionBackend]],
         mmap_region: SharedMmapRegion | None = None,
+        num_workers: int = 1,
     ):
         assert gpu_caches
         assert cpu_block_size % gpu_block_size == 0
@@ -325,7 +369,8 @@ class CpuGpuOffloadingHandlers:
         assert kernel_block_size is not None
         cpu_block_size_factor = cpu_block_size // kernel_block_size
         gpu_block_size_factor = gpu_block_size // kernel_block_size
-        num_cpu_kernel_blocks = num_cpu_blocks * cpu_block_size_factor
+        # Total kernel blocks in the CPU tensor covers all workers' data
+        num_cpu_kernel_blocks = num_cpu_blocks * cpu_block_size_factor * num_workers
 
         # allocate cpu tensors
         pin_memory = is_pin_memory_available()
@@ -357,16 +402,33 @@ class CpuGpuOffloadingHandlers:
             gpu_tensors.extend(gpu_tensor.unbind(0) if split_k_and_v else [gpu_tensor])
             cpu_tensors.extend(cpu_tensor.unbind(0) if split_k_and_v else [cpu_tensor])
 
-        self.gpu_to_cpu_handler = SingleDirectionOffloadingHandler(
+        inner_gpu_to_cpu = SingleDirectionOffloadingHandler(
             src_tensors=gpu_tensors,
             dst_tensors=cpu_tensors,
             src_block_size_factor=gpu_block_size_factor,
             dst_block_size_factor=cpu_block_size_factor,
         )
-
-        self.cpu_to_gpu_handler = SingleDirectionOffloadingHandler(
+        inner_cpu_to_gpu = SingleDirectionOffloadingHandler(
             src_tensors=cpu_tensors,
             dst_tensors=gpu_tensors,
             src_block_size_factor=cpu_block_size_factor,
             dst_block_size_factor=gpu_block_size_factor,
         )
+
+        if num_workers > 1:
+            rank = get_tensor_model_parallel_rank()
+            self.gpu_to_cpu_handler: OffloadingHandler = RemappedBlockHandler(
+                inner=inner_gpu_to_cpu,
+                num_workers=num_workers,
+                rank=rank,
+                remap_src=False,  # CPU is dst
+            )
+            self.cpu_to_gpu_handler: OffloadingHandler = RemappedBlockHandler(
+                inner=inner_cpu_to_gpu,
+                num_workers=num_workers,
+                rank=rank,
+                remap_src=True,  # CPU is src
+            )
+        else:
+            self.gpu_to_cpu_handler = inner_gpu_to_cpu
+            self.cpu_to_gpu_handler = inner_cpu_to_gpu

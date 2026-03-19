@@ -118,7 +118,6 @@ class CPUOffloadingSpec(OffloadingSpec):
             mmap_region = SharedMmapRegion(
                 instance_id=self.vllm_config.instance_id,
                 total_size_bytes=int(self.extra_config["cpu_bytes_to_use"]),
-                tp_world_size=self.vllm_config.parallel_config.world_size,
             )
             self._handlers = CpuGpuOffloadingHandlers(
                 attn_backends=attn_backends,
@@ -127,6 +126,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 num_cpu_blocks=self.num_blocks,
                 gpu_caches=kv_caches,
                 mmap_region=mmap_region,
+                num_workers=self.vllm_config.parallel_config.world_size,
             )
 
         assert self._handlers is not None
