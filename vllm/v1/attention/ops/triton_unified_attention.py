@@ -11,6 +11,9 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    FP8_QUANT_EPS as _FP8_QUANT_EPS,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVQuantMode
@@ -18,9 +21,7 @@ from vllm.v1.kv_cache_interface import KVQuantMode
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
-# Minimum scale to avoid division by zero in per-group FP8 quantization.
-# Matches the eps used by per_token_group_fp8_quant (fp8_utils.py).
-FP8_QUANT_EPS = tl.constexpr(1e-10)
+FP8_QUANT_EPS = tl.constexpr(_FP8_QUANT_EPS)
 
 
 @triton.jit
