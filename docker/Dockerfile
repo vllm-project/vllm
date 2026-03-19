@@ -745,6 +745,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         fi \
     fi
 
+# install CI-specific test dependencies previously fetched at test runtime
+COPY requirements/test-ci.txt requirements/test-ci.txt
+COPY requirements/kv_connectors.txt requirements/kv_connectors.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --no-build-isolation -r requirements/test-ci.txt \
+    && uv pip install --system -r requirements/kv_connectors.txt
+
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -e tests/vllm_test_utils
