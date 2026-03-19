@@ -95,7 +95,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
 
         self.hidden_states[:num_context] = target_hidden_states
 
-        # Allocate output for token_indices_to_sample
         token_indices_to_sample = torch.empty(
             batch_size * self.num_speculative_tokens,
             dtype=torch.int32,
