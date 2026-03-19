@@ -15,7 +15,6 @@ from transformers import WhisperConfig as HFWhisperConfig
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import PromptType, TokensPrompt
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
@@ -54,7 +53,6 @@ from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
 from vllm.transformers_utils.processor import cached_feature_extractor_from_config
 from vllm.transformers_utils.processors.kimi_audio import KimiAudioProcessor
-from vllm.v1.sample.metadata import SamplingMetadata
 
 # Kimi-Audio constants
 KIMIA_WHISPER_SUBFOLDER = "whisper-large-v3"
@@ -431,28 +429,24 @@ class KimiAudioForConditionalGeneration(
             )
         ]
 
-        self.audio_tower = KimiAudioWhisperEncoder(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "audio_tower"),
-        )
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.audio_tower = KimiAudioWhisperEncoder(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "audio_tower"),
+            )
+            self.multi_modal_projector = KimiAudioMultiModalProjector(
+                whisper_dim=getattr(self.config, "kimia_adaptor_input_dim", 5120),
+                llm_dim=self.config.hidden_size,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
+            )
 
-        self.multi_modal_projector = KimiAudioMultiModalProjector(
-            whisper_dim=getattr(self.config, "kimia_adaptor_input_dim", 5120),
-            llm_dim=self.config.hidden_size,
-            prefix=maybe_prefix(prefix, "multi_modal_projector"),
-        )
-
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config.with_hf_config(
-                self.config, architectures=["Qwen2ForCausalLM"]
-            ),
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-
-        self.logits_processor = LogitsProcessor(
-            self.config.vocab_size,
-            self.config.vocab_size,
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config.with_hf_config(
+                    self.config, architectures=["Qwen2ForCausalLM"]
+                ),
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -595,12 +589,8 @@ class KimiAudioForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata | None = None,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(
-            self.language_model.lm_head, hidden_states, sampling_metadata
-        )
-        return logits
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights, skipping MIMO layers (TTS-only) for ASR."""

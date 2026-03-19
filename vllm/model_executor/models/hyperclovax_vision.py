@@ -21,7 +21,6 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -31,7 +30,6 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
 )
@@ -336,28 +334,6 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
         return fields
 
 
-def _build_hcxvision_hf_info(
-    ctx: InputProcessingContext,
-) -> HCXVisionProcessingInfo:
-    return HCXVisionProcessingInfo(ctx)
-
-
-def _build_hcxvision_hf_processor(
-    info: HCXVisionProcessingInfo,
-    dummy_inputs: BaseDummyInputsBuilder[HCXVisionProcessingInfo],
-    *,
-    cache: BaseMultiModalProcessorCache | None = None,
-) -> BaseMultiModalProcessor:
-    if isinstance(info, HCXVisionProcessingInfo):
-        return HCXVisionMultiModalProcessor(
-            info,
-            dummy_inputs,  # type: ignore
-            cache=cache,
-        )
-
-    raise NotImplementedError(type(info))
-
-
 def init_vision_tower_for_hcxvision(
     vision_config,
     quant_config: QuantizationConfig | None,
@@ -587,8 +563,8 @@ class HCXVisionCAbstractor(nn.Module):
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    _build_hcxvision_hf_processor,
-    info=_build_hcxvision_hf_info,
+    HCXVisionMultiModalProcessor,
+    info=HCXVisionProcessingInfo,
     dummy_inputs=HCXVisionDummyInputsBuilder,
 )
 class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
