@@ -94,6 +94,8 @@ def transformers_moe_forward(
     self = forward_context.no_compile_layers[layer_name]
     self._topk_ids = topk_ids
     # Clone hidden_states because it will be mutated in-place in FusedMoE
+    # TODO(bnell): figure out a way to avoid calling runner directly.
+    # it is a hack that the weight are being passed via logits.
     return self.runner.forward(hidden_states.clone(), topk_weights)
 
 
@@ -202,8 +204,6 @@ class MoEMixin(MixtureOfExperts):
         )
         assert intermediate_size is not None
 
-        # If there are shared experts, the results are
-        # reduced after mlp.forward() not inside FusedMoE
         num_shared_experts = getattr_iter(
             text_config,
             [
@@ -212,17 +212,6 @@ class MoEMixin(MixtureOfExperts):
             ],
             0,
         )
-        reduce_results = num_shared_experts == 0
-
-        def add_all_reduce(mlp: nn.Module):
-            """Adds an all-reduce to the output of `mlp.forward()`."""
-
-            class MLPWithAllReduce(mlp.__class__):
-                def forward(self, *args, **kwargs):
-                    output = super().forward(*args, **kwargs)
-                    return self.experts.maybe_all_reduce_tensor_model_parallel(output)
-
-            mlp.__class__ = MLPWithAllReduce
 
         # Unused kwargs since we use custom_routing_function:
         # - `scoring_func` and `e_score_correction_bias` only used for grouped
@@ -287,14 +276,11 @@ class MoEMixin(MixtureOfExperts):
                         if "bias" in experts_param_name:
                             has_bias = True
                             break
-                    # Double check there are no shared experts
-                    nonlocal reduce_results
-                    if reduce_results:
+                    # If the config does not specify num_shared_experts, but
+                    # the model has shared experts, we assume there is one.
+                    if self.num_shared_experts == 0:
                         for mlp_param_name, _ in mlp.named_parameters():
                             if "shared_expert" in mlp_param_name:
-                                reduce_results = False
-                                # If the config does not specify num_shared_experts, but
-                                # the model has shared experts, we assume there is one.
                                 self.num_shared_experts = 1
                                 break
                     # Replace experts module with FusedMoE
@@ -303,7 +289,6 @@ class MoEMixin(MixtureOfExperts):
                         top_k=top_k,
                         hidden_size=hidden_size,
                         intermediate_size=intermediate_size,
-                        reduce_results=reduce_results,
                         renormalize=renormalize,
                         # Hard coded because topk happens in Transformers
                         use_grouped_topk=False,
@@ -324,13 +309,6 @@ class MoEMixin(MixtureOfExperts):
                     self.moe_layers.append(fused_experts)
                     self.expert_weights.append(fused_experts.get_expert_weights())
                     self.num_moe_layers += 1
-                    # If results are not all-reduced in FusedMoE, ensure they
-                    # are all-reduced at the end of mlp.forward() if tensor
-                    # parallel or expert parallel is enabled
-                    if not reduce_results and (
-                        fused_experts.tp_size > 1 or fused_experts.ep_size > 1
-                    ):
-                        add_all_reduce(mlp)
                 else:
                     _recursive_replace(child_module, prefix=qual_name)
 

@@ -98,7 +98,6 @@ def test_routed_input_transform_inside_vs_outside(
             top_k=top_k,
             hidden_size=latent_size,
             intermediate_size=intermediate_size,
-            reduce_results=False,
             renormalize=True,
             params_dtype=dtype,
             tp_size=1,
@@ -116,7 +115,6 @@ def test_routed_input_transform_inside_vs_outside(
             top_k=top_k,
             hidden_size=latent_size,
             intermediate_size=intermediate_size,
-            reduce_results=False,
             renormalize=True,
             params_dtype=dtype,
             tp_size=1,
@@ -140,28 +138,19 @@ def test_routed_input_transform_inside_vs_outside(
         router_logits = torch.randn(num_tokens, num_experts, device="cuda", dtype=dtype)
 
         with set_forward_context(None, vllm_config, num_tokens=num_tokens):
-            shared_out_A, routed_out_A = moe_with_transform(
-                hidden_states, router_logits
-            )
+            # Method A: combined output (shared + routed)
+            combined_A = moe_with_transform(hidden_states, router_logits)
 
+            # Method B: manually transform, get routed output, add shared
             transformed_hidden = routed_transform(hidden_states)
-            shared_out_B, routed_out_B = moe_without_transform(
-                transformed_hidden, router_logits
-            )
+            routed_out_B = moe_without_transform(transformed_hidden, router_logits)
+            shared_out_B = shared_experts(hidden_states)
+            combined_B = shared_out_B + routed_out_B
 
         torch.testing.assert_close(
-            routed_out_A,
-            routed_out_B,
+            combined_A,
+            combined_B,
             atol=1e-3,
             rtol=1e-3,
-            msg="Routed output should match: transform inside vs outside",
-        )
-
-        expected_shared_out = shared_experts(hidden_states)
-
-        torch.testing.assert_close(
-            shared_out_A,
-            expected_shared_out,
-            atol=1e-3,
-            rtol=1e-3,
+            msg="Combined output should match: transform inside vs outside",
         )

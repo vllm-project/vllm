@@ -39,8 +39,14 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
-from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import (
-    DefaultMoERunner,
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    MoERunner,
+)
+from vllm.model_executor.layers.fused_moe.runner.moe_runner_factory import (
+    create_moe_runner,
+)
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -289,7 +295,6 @@ class FusedMoE(CustomOp):
         hidden_size: Input hidden state size of the transformer
         intermediate_size: Intermediate size of the experts
         params_dtype: Data type for the parameters.
-        reduce_results: Whether to all_reduce on the output of the layer
         renormalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
@@ -305,7 +310,6 @@ class FusedMoE(CustomOp):
         hidden_size: int,
         intermediate_size: int,
         params_dtype: torch.dtype | None = None,
-        reduce_results: bool = False,
         renormalize: bool = True,
         use_grouped_topk: bool = False,
         num_expert_group: int | None = None,
@@ -333,12 +337,16 @@ class FusedMoE(CustomOp):
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
+        routed_output_transform: torch.nn.Module | None = None,
+        apply_scale_to_output: bool = False,
+        zero_expert_type: str | None = None,
     ):
         super().__init__()
 
         self._gate = gate
-        self._shared_experts = shared_experts
         self._routed_input_transform = routed_input_transform
+        self._routed_output_transform = routed_output_transform
+        self._apply_scale_to_output = apply_scale_to_output
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -485,7 +493,6 @@ class FusedMoE(CustomOp):
 
         assert intermediate_size % self.tp_size == 0
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
-        self.reduce_results = reduce_results
         self.renormalize = renormalize
 
         # TODO(bnell): these attributes are only used by monolithic kernels.
@@ -504,6 +511,8 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = MoEActivation.from_str(activation)
 
+        # TODO(bnell): we should not have to create a router if the kernel is
+        # monolithic.
         self.router = create_fused_moe_router(
             top_k=top_k,
             global_num_experts=self.global_num_experts,
@@ -514,15 +523,27 @@ class FusedMoE(CustomOp):
             topk_group=topk_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
+            routed_scaling_factor=routed_scaling_factor
+            if not apply_scale_to_output
+            else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=self.num_fused_shared_experts,
             enable_eplb=enable_eplb,
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
+            zero_expert_type=zero_expert_type,
+            num_logical_experts=self.logical_num_experts,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
+
+        # When using zero experts, slice e_score_correction_bias to cover
+        # only real experts, for compatibility with monolithic kernels that
+        # read it directly.
+        if zero_expert_type is not None and e_score_correction_bias is not None:
+            self.e_score_correction_bias = e_score_correction_bias[
+                : self.logical_num_experts
+            ]
 
         # Round up hidden size before creating moe_config.
         # This way moe_config is created with the correct hidden_size from the start.
@@ -563,7 +584,7 @@ class FusedMoE(CustomOp):
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
             # TODO: in_dtype == out_dtype?
-            disable_inplace=disable_inplace() or self._shared_experts is not None,
+            disable_inplace=disable_inplace() or shared_experts is not None,
         )
         if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
@@ -630,35 +651,41 @@ class FusedMoE(CustomOp):
         self.quant_method.create_weights(layer=self, **moe_quant_params)
         self.base_quant_method = self.quant_method
 
-        # Disable shared expert overlap if:
-        #   - we are using eplb with non-default backend, because of correctness issues
-        #   - we are using flashinfer with DP, since there nothing to gain
-        #   - we are using marlin kernels
-        backend = self.moe_parallel_config.all2all_backend
-        self.use_overlapped = (
-            not (
-                (self.enable_eplb and backend != "allgather_reducescatter")
-                or self.moe_parallel_config.use_fi_nvl_two_sided_kernels
-            )
-            and self._shared_experts is not None
-        )
-
+        self._shared_experts = shared_experts
+        self.shared_experts = self._init_shared_experts()
         self.runner = self._init_runner()
 
-    def _init_runner(self):
+    def _init_shared_experts(self) -> SharedExperts | None:
+        if self._shared_experts is None:
+            return None
+
+        return SharedExperts(
+            self._shared_experts,
+            moe_config=self.moe_config,
+            # Note: For now we must pass quant_method along to SharedExperts so it
+            # can property determine where the shared experts are supposed to be
+            # called, i.e. by a MK or by the MoERunner.
+            # Once the MK can be created upfront, we can just pass in the proper
+            # flags derived from the quant_method's MK.
+            quant_method=self.quant_method,
+        )
+
+    def _init_runner(self) -> MoERunner:
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
-        return DefaultMoERunner(
+        return create_moe_runner(
             layer=self,
             moe_config=self.moe_config,
             router=self.router,
             routed_input_transform=self._routed_input_transform,
-            gate=self.gate,
+            gate=self._gate,
             shared_experts=self.shared_experts,
             quant_method=self.quant_method,
-            reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
+            routed_output_transform=self._routed_output_transform,
+            apply_scale_to_output=self._apply_scale_to_output,
+            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py
@@ -703,19 +730,11 @@ class FusedMoE(CustomOp):
             )
 
     @property
-    def shared_experts(self) -> torch.nn.Module | None:
-        return self._shared_experts if self.use_overlapped else None
-
-    @property
     def layer_id(self):
         # Delayed import to avoid circular dependency
         from vllm.model_executor.models.utils import extract_layer_index
 
         return extract_layer_index(self.layer_name)
-
-    @property
-    def gate(self) -> torch.nn.Module | None:
-        return self._gate if self.use_overlapped else None
 
     @property
     def tp_size(self):
@@ -740,7 +759,7 @@ class FusedMoE(CustomOp):
     @property
     def is_internal_router(self) -> bool:
         # By default, router/gate is called before FusedMoE forward pass
-        return self.gate is not None
+        return self._gate is not None
 
     def _maybe_init_expert_routing_tables(
         self,
@@ -1478,32 +1497,11 @@ class FusedMoE(CustomOp):
         self.ensure_moe_quant_config_init()
         return self.quant_method.moe_quant_config
 
-    def must_reduce_shared_expert_outputs(self) -> bool:
-        """
-        The shared_experts are typically computed using the RowParallelLinear
-        layer. The result of this function is typically used as
-        the reduce_results argument to the module.
-        When just tensor-parallel is used, it is not required to reduce
-        the shared_experts results immediately. Instead we reduce at the
-        once at the end of the MoE op. (Refer to DeepSeekV2MoE module)
-        With EP and all2all kernels - this is no longer viable as all
-        GPU ranks in DP, produce the complete set of hidden_states.
-        Therefore it is required that we reduce the shared_experts output
-        early.
-        """
-        return self.runner.must_reduce_shared_expert_outputs()
-
-    def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
-        """
-        Some combine kernels reduce across GPU ranks by default.
-        """
-        return self.runner.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
-
     def forward_native(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         return self.runner.forward(
             hidden_states,
             router_logits,
@@ -1519,7 +1517,7 @@ class FusedMoE(CustomOp):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         return self.forward_native(hidden_states, router_logits)
 
     @classmethod
@@ -1576,7 +1574,6 @@ class FusedMoE(CustomOp):
             f"intermediate_size_per_partition={self.intermediate_size_per_partition}, "  # noqa: E501
             f"tp_size={self.tp_size},\n"
             f"ep_size={self.ep_size}, "
-            f"reduce_results={self.reduce_results}, "
         )
 
         return s

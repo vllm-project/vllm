@@ -301,12 +301,7 @@ class AriaTextMoELayer(nn.Module):
 
         router_output = torch.nn.functional.linear(hidden_states, self.router_weight)
 
-        sparse_expert_output = self.experts(hidden_states, router_output)
-
-        if self.shared_experts is not None:
-            return sparse_expert_output[0] + sparse_expert_output[1]
-        else:
-            return sparse_expert_output
+        return self.experts(hidden_states, router_output)
 
 
 class AriaTextDecoderLayer(LlamaDecoderLayer):

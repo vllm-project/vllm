@@ -216,7 +216,6 @@ class NemotronHMoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=self.moe_hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
@@ -231,6 +230,11 @@ class NemotronHMoE(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             routed_input_transform=self.fc1_latent_proj,
+            routed_output_transform=self.fc2_latent_proj
+            if self.use_latent_moe
+            else None,
+            routed_scaling_factor=self.routed_scaling_factor,
+            apply_scale_to_output=True,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -243,38 +247,15 @@ class NemotronHMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        # SharedFusedMoE handles:
-        #   - shared experts (with original hidden_states)
-        #   - routed_input_transform (fc1_latent_proj) for latent MoE
-        #   - multistream parallelism between shared and routed experts
-        shared_output, final_hidden_states = self.experts(
+        final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-
-        # Fix FP16 overflow
-        # See DeepseekV2DecoderLayer for more details.
-        if hidden_states.dtype != torch.float16:
-            final_hidden_states *= self.routed_scaling_factor
-        elif self.shared_experts is not None:
-            shared_output *= 1.0 / self.routed_scaling_factor
-
-        # TODO: See SharedFusedMoE.apply_routed_input_transform
-        # for bandwidth optimization
-        if self.use_latent_moe:
-            final_hidden_states, _ = self.fc2_latent_proj(final_hidden_states)
-
-        if self.shared_experts is not None:
-            final_hidden_states += shared_output
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0
             )
             final_hidden_states = final_hidden_states[:num_tokens]
-        elif self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states
-            )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 

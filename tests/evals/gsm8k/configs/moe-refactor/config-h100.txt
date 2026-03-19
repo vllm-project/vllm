@@ -10,3 +10,4 @@ Qwen3-30B-A3B-Fp8-CT-Channel-marlin.yaml
 Qwen3-30B-A3B-Fp8-CT-Channel-vllm-cutlass.yaml
 Qwen3-30B-A3B-BF16-fi-cutlass.yaml
 Qwen3-30B-A3B-BF16-triton.yaml
+LongCat-Flash-Chat-FP8.yaml
