@@ -34,8 +34,11 @@ try:
         amdsmi_shut_down,
         amdsmi_topo_get_link_type,
     )
+
+    _amdsmi_available = True
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
+    _amdsmi_available = False
 
 try:
     import vllm._C  # noqa: F401
@@ -132,6 +135,12 @@ _sync_hip_cuda_env_vars()
 def with_amdsmi_context(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        if not _amdsmi_available:
+            raise RuntimeError(
+                f"amdsmi is not available (e.g. WSL2 environment). "
+                f"Cannot call {fn.__name__}. "
+                f"Caller should handle this gracefully."
+            )
         amdsmi_init()
         try:
             return fn(*args, **kwargs)
@@ -616,36 +625,63 @@ class RocmPlatform(Platform):
         return DeviceCapability(major=major, minor=minor)
 
     @classmethod
-    @with_amdsmi_context
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
         """
         Query if the set of gpus are fully connected by xgmi (1 hop)
         """
-        handles = [amdsmi_get_processor_handles()[i] for i in physical_device_ids]
-        for i, handle in enumerate(handles):
-            for j, peer_handle in enumerate(handles):
-                if i < j:
-                    try:
-                        link_type = amdsmi_topo_get_link_type(handle, peer_handle)
-                        # type is 2 for XGMI
-                        if link_type["hops"] != 1 or link_type["type"] != 2:
+        if not _amdsmi_available:
+            logger.warning_once(
+                "amdsmi is not available (e.g. WSL2 environment). "
+                "Cannot determine GPU topology. "
+                "Assuming GPUs are NOT fully connected."
+            )
+            return False
+        amdsmi_init()
+        try:
+            handles = [amdsmi_get_processor_handles()[i] for i in physical_device_ids]
+            for i, handle in enumerate(handles):
+                for j, peer_handle in enumerate(handles):
+                    if i < j:
+                        try:
+                            link_type = amdsmi_topo_get_link_type(handle, peer_handle)
+                            # type is 2 for XGMI
+                            if link_type["hops"] != 1 or link_type["type"] != 2:
+                                return False
+                        except AmdSmiException as error:
+                            logger.error(
+                                "AMD 1 hop XGMI detection failed.", exc_info=error
+                            )
                             return False
-                    except AmdSmiException as error:
-                        logger.error("AMD 1 hop XGMI detection failed.", exc_info=error)
-                        return False
-        return True
+            return True
+        finally:
+            amdsmi_shut_down()
 
     @classmethod
-    @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
-        physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        handle = amdsmi_get_processor_handles()[physical_device_id]
-        asic_info = amdsmi_get_gpu_asic_info(handle)
-        asic_info_device_id: str = asic_info["device_id"]
-        if asic_info_device_id in _ROCM_DEVICE_ID_NAME_MAP:
-            return _ROCM_DEVICE_ID_NAME_MAP[asic_info_device_id]
-        return asic_info["market_name"]
+        # Try amdsmi first (no CUDA init), fallback to torch.cuda
+        if _amdsmi_available:
+            try:
+                amdsmi_init()
+                try:
+                    physical_device_id = cls.device_id_to_physical_device_id(device_id)
+                    handle = amdsmi_get_processor_handles()[physical_device_id]
+                    asic_info = amdsmi_get_gpu_asic_info(handle)
+                    asic_info_device_id: str = asic_info["device_id"]
+                    if asic_info_device_id in _ROCM_DEVICE_ID_NAME_MAP:
+                        return _ROCM_DEVICE_ID_NAME_MAP[asic_info_device_id]
+                    return asic_info["market_name"]
+                finally:
+                    amdsmi_shut_down()
+            except Exception as e:
+                logger.debug("Failed to get device name via amdsmi: %s", e)
+        # Fallback: use torch.cuda (works on WSL2 and other
+        # environments where amdsmi is not available)
+        logger.warning_once(
+            "Using torch.cuda fallback for get_device_name(). "
+            "This may return a less specific device name."
+        )
+        return torch.cuda.get_device_name(device_id)
 
     @classmethod
     @with_amdsmi_context
