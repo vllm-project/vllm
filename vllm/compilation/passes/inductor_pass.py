@@ -57,14 +57,20 @@ class InductorPass(CustomGraphPass):  # type: ignore[misc]
     This is defined as a convenience and should work in most cases.
     """
 
+    _uuid_cache: dict[type, str] = {}
+
     def uuid(self) -> str:
         """
         Provide a unique identifier for the pass, used in Inductor code cache.
         This should depend on the pass implementation, so that changes to the
         pass result in recompilation.
-        By default, the object source is hashed.
+        By default, the object source is hashed. The result is cached at the
+        class level since source code doesn't change at runtime.
         """
-        return InductorPass.hash_source(self)
+        cls = type(self)
+        if cls not in InductorPass._uuid_cache:
+            InductorPass._uuid_cache[cls] = InductorPass.hash_source(self)
+        return InductorPass._uuid_cache[cls]
 
     @staticmethod
     def hash_source(*srcs: str | Any) -> str:
