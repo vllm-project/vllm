@@ -4,6 +4,7 @@
 from enum import Enum
 
 import torch
+from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
 from vllm.utils import flashinfer as vllm_flashinfer
@@ -22,6 +23,28 @@ class Mxfp8LinearBackend(Enum):
 MXFP8_VALUE_DTYPE = torch.float8_e4m3fn
 MXFP8_SCALE_DTYPE = torch.uint8
 MXFP8_BLOCK_SIZE = 32
+
+
+def select_mxfp8_linear_backend() -> Mxfp8LinearBackend:
+    """Select the best MXFP8 linear backend for the current device.
+
+    - SM100+ (Blackwell): FLASHINFER_CUTLASS (native CUTLASS MXFP8 GEMM)
+    - SM80+ (Ampere/Ada): MARLIN (weight-only FP8 with e8m0 scales)
+    - Otherwise: EMULATION (dequant to BF16 fallback)
+    """
+    from vllm.platforms import current_platform
+
+    if current_platform.has_device_capability(100):
+        return Mxfp8LinearBackend.FLASHINFER_CUTLASS
+
+    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+        is_fp8_marlin_supported,
+    )
+
+    if is_fp8_marlin_supported():
+        return Mxfp8LinearBackend.MARLIN
+
+    return Mxfp8LinearBackend.EMULATION
 
 
 def swizzle_mxfp8_scale(sf: torch.Tensor, M: int, K: int) -> torch.Tensor:
@@ -134,6 +157,52 @@ class Mxfp8LinearOp:
             raise ValueError(f"Unsupported backend: {backend}")
 
         self.backend = backend
+        logger.info_once("Using %s backend for MXFP8 GEMM", self.backend.value)
+
+    def process_weights(self, layer: torch.nn.Module) -> None:
+        """Process MXFP8 weights after loading into backend-specific format."""
+        if self.backend == Mxfp8LinearBackend.MARLIN:
+            self._process_weights_marlin(layer)
+        elif self.backend == Mxfp8LinearBackend.FLASHINFER_CUTLASS:
+            self._process_weights_flashinfer_cutlass(layer)
+        else:
+            self._process_weights_emulation(layer)
+
+    def _process_weights_emulation(self, layer: torch.nn.Module) -> None:
+        """Keep scales as 2D uint8 for dequant-to-BF16 emulation."""
+        weight = layer.weight.data  # [N, K]
+        N, K = weight.shape
+        scale_k = K // MXFP8_BLOCK_SIZE
+
+        weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
+
+        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+
+    def _process_weights_flashinfer_cutlass(self, layer: torch.nn.Module) -> None:
+        """Swizzle scales to F8_128x4 layout for flashinfer CUTLASS."""
+        weight = layer.weight.data  # [N, K]
+        N, K = weight.shape
+
+        scale_k = K // MXFP8_BLOCK_SIZE
+        weight_scale_2d = layer.weight_scale.data[:N, :scale_k].contiguous()
+        weight_scale_swizzled = swizzle_mxfp8_scale(weight_scale_2d, M=N, K=K)
+
+        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
+        layer.weight_scale = Parameter(
+            weight_scale_swizzled.contiguous(), requires_grad=False
+        )
+
+    def _process_weights_marlin(self, layer: torch.nn.Module) -> None:
+        """Repack MXFP8 weights and scales into Marlin kernel format."""
+        from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+            prepare_mxfp8_layer_for_marlin,
+        )
+
+        layer.orig_dtype = torch.get_default_dtype()
+        layer.marlin_size_n = layer.output_size_per_partition
+        layer.marlin_size_k = layer.input_size_per_partition
+        prepare_mxfp8_layer_for_marlin(layer)
 
     def _apply_emulation(
         self,
@@ -143,7 +212,6 @@ class Mxfp8LinearOp:
         out_dtype: torch.dtype,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # Validate weight_scale dtype and shape (must be 2D for TORCH backend)
         if weight_scale.dtype != MXFP8_SCALE_DTYPE:
             raise ValueError(
                 f"TORCH backend requires {MXFP8_SCALE_DTYPE} weight_scale dtype, "
@@ -220,6 +288,32 @@ class Mxfp8LinearOp:
         output_shape = (*input_shape[:-1], N)
         return output.view(output_shape)
 
+    def _apply_marlin(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        out_dtype: torch.dtype,
+        bias: torch.Tensor | None = None,
+        *,
+        workspace: torch.Tensor,
+        size_n: int,
+        size_k: int,
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+            apply_mxfp8_marlin_linear,
+        )
+
+        return apply_mxfp8_marlin_linear(
+            input=input,
+            weight=weight,
+            weight_scale=weight_scale,
+            workspace=workspace,
+            size_n=size_n,
+            size_k=size_k,
+            bias=bias,
+        )
+
     def apply(
         self,
         input: torch.Tensor,
@@ -227,9 +321,26 @@ class Mxfp8LinearOp:
         weight_scale: torch.Tensor,
         out_dtype: torch.dtype,
         bias: torch.Tensor | None = None,
+        *,
+        workspace: torch.Tensor | None = None,
+        size_n: int = 0,
+        size_k: int = 0,
     ) -> torch.Tensor:
         if self.backend == Mxfp8LinearBackend.EMULATION:
             return self._apply_emulation(input, weight, weight_scale, out_dtype, bias)
+
+        if self.backend == Mxfp8LinearBackend.MARLIN:
+            assert workspace is not None
+            return self._apply_marlin(
+                input,
+                weight,
+                weight_scale,
+                out_dtype,
+                bias,
+                workspace=workspace,
+                size_n=size_n,
+                size_k=size_k,
+            )
 
         assert self.backend == Mxfp8LinearBackend.FLASHINFER_CUTLASS
         return self._apply_flashinfer_cutlass(
