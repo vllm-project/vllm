@@ -50,6 +50,7 @@ Image.MAX_IMAGE_PIXELS = None  # Disable the limit entirely
 # Alternative: Set a specific higher limit
 # Image.MAX_IMAGE_PIXELS = 300000000  # ~300M pixels
 
+
 def calculate_timestamps(
     indices: list[int] | torch.Tensor,
     frame_duration_ms: int,
@@ -950,10 +951,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             )
             num_tubelets = math.ceil(num_frames / T) if T > 1 else num_frames
 
-            if (
-                self.video_pruning_rate is not None
-                and self.video_pruning_rate > 0.0
-            ):
+            if self.video_pruning_rate is not None and self.video_pruning_rate > 0.0:
                 # Start of EVS-specific code
                 num_tokens = compute_retained_tokens_count(
                     tokens_per_frame=tokens_in_single_frame,
