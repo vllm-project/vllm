@@ -24,6 +24,9 @@ steps:
     device: intel_gpu
     no_plugin: true
     intel_wrapper: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
     source_file_dependencies:
       - vllm/
       - .buildkite/intel_jobs/test-intel.yaml 
@@ -45,6 +48,9 @@ steps:
     device: intel_gpu
     no_plugin: true
     intel_wrapper: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
     source_file_dependencies:
       - vllm/
       - .buildkite/intel_jobs/test-intel.yaml 
