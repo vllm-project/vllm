@@ -928,6 +928,7 @@ class OpenAIServingResponses(OpenAIServing):
             num_tool_output_tokens = 0
 
         assert isinstance(context, (SimpleContext, HarmonyContext, ParsableContext))
+        status = self._check_tool_choice_violation(request, output, status, context)
         num_prompt_tokens = context.num_prompt_tokens
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
@@ -1138,6 +1139,37 @@ class OpenAIServingResponses(OpenAIServing):
                 type="message",
             )
         ]
+
+    def _check_tool_choice_violation(
+        self,
+        request: ResponsesRequest,
+        output: list[ResponseOutputItem],
+        status: ResponseStatus,
+        context: ConversationContext,
+    ) -> ResponseStatus:
+        """Detect when tool_choice requires a function call but none was
+        produced.  Returns ``"incomplete"`` if the constraint is violated,
+        otherwise returns *status* unchanged."""
+        if request.tool_choice != "required" and not isinstance(
+            request.tool_choice, dict
+        ):
+            return status
+        has_function_call = any(
+            isinstance(item, ResponseFunctionToolCall) for item in output
+        )
+        if not has_function_call:
+            logger.warning(
+                "tool_choice=%r but no function tool call in output "
+                "(output_items=%d, status=%s, finish_reason=%s, "
+                "output_tokens=%d). Grammar enforcement may have failed.",
+                request.tool_choice,
+                len(output),
+                status,
+                getattr(context, "finish_reason", None),
+                context.num_output_tokens,
+            )
+            return "incomplete"
+        return status
 
     def _make_response_output_items_with_harmony(
         self,
