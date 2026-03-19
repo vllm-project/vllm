@@ -128,7 +128,6 @@ steps:
   - export NCCL_CUMEM_HOST_ENABLE=0
   # test with torchrun tp=2 and dp=4 with ep
   - torchrun --nproc-per-node=8 ../examples/offline_inference/torchrun_dp_example.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
-  - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
 
 - label: Distributed Tests (4 GPUs)(A100)
   device: a100
@@ -165,6 +164,9 @@ steps:
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
+    - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
+
+    
 
 - label: 2 Node Test (4 GPUs)
   timeout_in_minutes: 30
