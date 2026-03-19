@@ -171,7 +171,7 @@ class CoreEngineProcManager:
             for sentinel in died_sentinels:
                 proc = sentinel_to_proc.pop(cast(int, sentinel))
                 exitcode = proc.exitcode
-                if exitcode != 0:
+                if exitcode != 0 and not self.manager_stopped.is_set():
                     logger.error("Engine core proc %s died unexpectedly.", proc.name)
             if died_sentinels:
                 # Any engine exit currently triggers a shutdown. Future
@@ -850,6 +850,8 @@ class CoreEngineActorManager:
             actor_done_refs, _ = ray.wait(actor_run_refs, timeout=5)
             unexpected_failure = False
             for actor_ref in actor_done_refs:
+                if self.manager_stopped.is_set():
+                    break
                 if actor_ref not in self.get_run_refs():
                     # The run refs may have been updated by elastic scale-down.
                     continue
