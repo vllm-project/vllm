@@ -657,6 +657,16 @@ class DefaultMoERunner(MoERunner):
         num_tokens: int = full_hidden_states.size(0)
         H: int = full_hidden_states.size(-1)
 
+        # Empty input: return correctly shaped zeros immediately.
+        if num_tokens == 0:
+            empty = full_hidden_states.new_zeros(0, H)
+            if has_separate_shared_experts or self.quant_method.mk_owns_shared_expert:
+                H_shared = (
+                    full_shared_input.size(-1) if full_shared_input is not None else H
+                )
+                return (empty.new_zeros(0, H_shared), empty)
+            return empty
+
         # Pre-stage into (num_chunks, max_tokens, feat) with zero-padding.
         def _make_staged(src: torch.Tensor, feat_dim: int) -> torch.Tensor:
             total_padded = num_chunks * max_tokens
