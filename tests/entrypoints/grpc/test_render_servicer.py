@@ -6,9 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
 import pytest
+from smg_grpc_servicer.vllm import RenderGrpcServicer
 from starlette.datastructures import State
-
-from vllm.entrypoints.grpc.render_servicer import RenderGrpcServicer
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -124,7 +123,7 @@ async def test_get_model_info_custom():
 
 @pytest.mark.asyncio
 async def test_get_server_info(servicer):
-    with patch("vllm.entrypoints.grpc.render_servicer.time") as mock_time:
+    with patch("smg_grpc_servicer.vllm.render_servicer.time") as mock_time:
         mock_time.time.return_value = START_TIME + 60.0
         resp = await servicer.GetServerInfo(None, _make_context())
     assert resp.server_type == "vllm-render-grpc"
@@ -162,7 +161,7 @@ async def test_render_chat_success():
     servicer = RenderGrpcServicer(state, START_TIME)
     ctx = _make_context()
 
-    with patch("vllm.entrypoints.grpc.render_servicer.from_proto") as mock_from_proto:
+    with patch("smg_grpc_servicer.vllm.render_servicer.from_proto") as mock_from_proto:
         mock_from_proto.return_value = MagicMock()
         result = await servicer.RenderChat(MagicMock(), ctx)
 
@@ -187,7 +186,7 @@ async def test_render_chat_error_response():
     ctx = _make_context()
 
     with (
-        patch("vllm.entrypoints.grpc.render_servicer.from_proto") as mock_from_proto,
+        patch("smg_grpc_servicer.vllm.render_servicer.from_proto") as mock_from_proto,
         pytest.raises(grpc.aio.AbortError),
     ):
         mock_from_proto.return_value = MagicMock()
@@ -208,7 +207,7 @@ async def test_render_chat_internal_error():
     ctx = _make_context()
 
     with (
-        patch("vllm.entrypoints.grpc.render_servicer.from_proto") as mock_from_proto,
+        patch("smg_grpc_servicer.vllm.render_servicer.from_proto") as mock_from_proto,
         pytest.raises(grpc.aio.AbortError),
     ):
         mock_from_proto.return_value = MagicMock()
@@ -250,7 +249,7 @@ async def test_render_completion_success():
     servicer = RenderGrpcServicer(state, START_TIME)
     ctx = _make_context()
 
-    with patch("vllm.entrypoints.grpc.render_servicer.from_proto") as mock_from_proto:
+    with patch("smg_grpc_servicer.vllm.render_servicer.from_proto") as mock_from_proto:
         mock_from_proto.return_value = MagicMock()
         result = await servicer.RenderCompletion(MagicMock(), ctx)
 
@@ -275,7 +274,7 @@ async def test_render_completion_error_response():
     ctx = _make_context()
 
     with (
-        patch("vllm.entrypoints.grpc.render_servicer.from_proto") as mock_from_proto,
+        patch("smg_grpc_servicer.vllm.render_servicer.from_proto") as mock_from_proto,
         pytest.raises(grpc.aio.AbortError),
     ):
         mock_from_proto.return_value = MagicMock()
@@ -295,7 +294,7 @@ async def test_render_completion_internal_error():
     ctx = _make_context()
 
     with (
-        patch("vllm.entrypoints.grpc.render_servicer.from_proto") as mock_from_proto,
+        patch("smg_grpc_servicer.vllm.render_servicer.from_proto") as mock_from_proto,
         pytest.raises(grpc.aio.AbortError),
     ):
         mock_from_proto.return_value = MagicMock()

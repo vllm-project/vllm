@@ -9,16 +9,16 @@ import time
 import grpc
 import uvloop
 from grpc_reflection.v1alpha import reflection
+from smg_grpc_proto import (  # type: ignore[import-untyped]
+    vllm_render_pb2,
+    vllm_render_pb2_grpc,
+)
+from smg_grpc_servicer.vllm import RenderGrpcServicer
 from starlette.datastructures import State
 
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.grpc import (  # type: ignore[attr-defined]
-    vllm_render_pb2,
-    vllm_render_pb2_grpc,
-)
-from vllm.entrypoints.grpc.render_servicer import RenderGrpcServicer
 from vllm.entrypoints.openai.api_server import (
     build_and_serve_renderer,
     init_render_app_state,
