@@ -4,8 +4,8 @@ vLLM offers support for reasoning models like [DeepSeek R1](https://huggingface.
 
 Reasoning models return an additional `reasoning` field in their outputs, which contains the reasoning steps that led to the final conclusion. This field is not present in the outputs of other models.
 
-!!! warning "Field rename: `reasoning_content` → `reasoning`"
-    The response field formerly named `reasoning_content` has been renamed to `reasoning`. Prefer `reasoning` in all new code; support for `reasoning_content` is deprecated and may be removed in a future release.
+!!! warning 
+    Field rename: `reasoning_content` → `reasoning`. The response field formerly named `reasoning_content` has been renamed to `reasoning`. Prefer `reasoning` in all new code; support for `reasoning_content` is deprecated and may be removed in a future release.
 
 ## Supported Models
 
