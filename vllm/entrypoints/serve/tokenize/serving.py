@@ -110,7 +110,7 @@ class OpenAIServingTokenization(OpenAIServing):
         token_strs = None
         if request.return_token_strs:
             tokenizer = self.renderer.get_tokenizer()
-            token_strs = tokenizer.convert_ids_to_tokens(input_ids)
+            token_strs = [tokenizer.decode(token_id) for token_id in input_ids]
 
         return TokenizeResponse(
             tokens=input_ids,
