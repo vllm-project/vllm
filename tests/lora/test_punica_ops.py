@@ -16,6 +16,7 @@ from .utils import PunicaTensors, assert_close, generate_data_for_nslices
 
 DEVICE_TYPE = current_platform.device_type
 
+
 @pytest.fixture(autouse=True)
 def reset_device(reset_default_device):
     pass

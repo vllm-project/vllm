@@ -10,6 +10,7 @@ from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
 
+
 def round_up(x, base):
     return ((x + base - 1) // base) * base
 
@@ -29,9 +30,7 @@ def sample_data(num_experts, max_loras, num_tokens, topk_num):
             topk_ids[i, j] = pool[j]
         token_lora_mapping[i] = random.randint(0, max_loras - 1)
 
-    return topk_ids.to(DEVICE_TYPE), token_lora_mapping.to(
-        DEVICE_TYPE
-    )
+    return topk_ids.to(DEVICE_TYPE), token_lora_mapping.to(DEVICE_TYPE)
 
 
 @pytest.mark.parametrize("num_tokens", [100, 200, 1024, 4096])  # 81920
@@ -74,9 +73,7 @@ def test_moe_lora_align_block_size(
     adapter_enabled = torch.ones(
         (max_loras + 1,), dtype=torch.int32, device=DEVICE_TYPE
     )
-    lora_ids = torch.arange(
-        max_loras + 2, dtype=torch.int32, device=DEVICE_TYPE
-    )
+    lora_ids = torch.arange(max_loras + 2, dtype=torch.int32, device=DEVICE_TYPE)
 
     # call kernel
     ops.moe_lora_align_block_size(

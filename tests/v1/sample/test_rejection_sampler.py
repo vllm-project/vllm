@@ -662,10 +662,8 @@ def test_top_k(rejection_sampler, top_k):
 
     # Randomly create top-k indices.
     top_k_indices = [
-        torch.randperm(
-            vocab_size,
-            device=DEVICE_TYPE
-        )[:top_k] for _ in range(num_tokens)
+        torch.randperm(vocab_size, device=DEVICE_TYPE)[:top_k]
+        for _ in range(num_tokens)
     ]
     top_k_indices = torch.stack(top_k_indices)
 

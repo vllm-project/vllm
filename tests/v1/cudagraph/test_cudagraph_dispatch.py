@@ -272,9 +272,7 @@ class TestCUDAGraphWrapper:
     def setup_method(self):
         self.vllm_config = _create_vllm_config(CompilationConfig())
         self.model = SimpleMLP().to(DEVICE_TYPE)
-        self.persistent_input_buffer = torch.zeros(
-            1, 10, device=DEVICE_TYPE
-        )
+        self.persistent_input_buffer = torch.zeros(1, 10, device=DEVICE_TYPE)
         self.input_tensor = torch.randn(1, 10, device=DEVICE_TYPE)
 
     def test_capture_and_replay(self):
@@ -435,9 +433,7 @@ class TestCudagraphIntegration:
         model = SimpleMLP().to(DEVICE_TYPE)
         full_wrapper = CUDAGraphWrapper(model, self.vllm_config, CUDAGraphMode.FULL)
         max_bs = 16
-        persistent_input_buffer = torch.zeros(
-            max_bs, 10, device=DEVICE_TYPE
-        )
+        persistent_input_buffer = torch.zeros(max_bs, 10, device=DEVICE_TYPE)
         input_1 = persistent_input_buffer[:1]
         input_2 = persistent_input_buffer[:2]
         input_3 = persistent_input_buffer[:3]

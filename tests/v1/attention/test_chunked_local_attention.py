@@ -22,6 +22,7 @@ class LocalAttentionTestData:
     expected_k_seqlens: list[int]
     expected_local_block_table: list[list[int]]
 
+
 DEVICE_TYPE = current_platform.device_type
 
 test_data_list = [

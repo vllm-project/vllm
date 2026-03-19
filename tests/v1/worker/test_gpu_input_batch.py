@@ -24,8 +24,7 @@ NUM_OUTPUT_TOKENS = 20
 MAX_PROMPT_SIZE = 100
 DEVICE_TYPE = current_platform.device_type
 CUDA_DEVICES = [
-    f"{DEVICE_TYPE}:{i}"
-    for i in range(min(current_platform.device_count(), 2))
+    f"{DEVICE_TYPE}:{i}" for i in range(min(current_platform.device_count(), 2))
 ]
 MAX_NUM_PROMPT_TOKENS = 64
 
