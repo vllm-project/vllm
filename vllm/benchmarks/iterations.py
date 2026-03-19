@@ -1030,11 +1030,16 @@ async def run_benchmark(
                     num_tokens_to_generate,
                 )
 
-                # wait_for_all_first_tokens confirmed all prefills are done.
+                # wait_for_all_first_tokens confirmed all first tokens received.
+                # With chunked prefill, requests may still have outstanding
+                # prefill chunks. Poll batch_info until all are fully in
+                # decode (num_running >= batch_size, num_waiting == 0).
+                await wait_for_batch_ready(
+                    session, rotator, global_batch_size,
+                    timeout_s=600.0)
+
                 # Now poll step_stats for decode_steps >= 3 to ensure
                 # steady-state decode before starting the profiler.
-                # Skip wait_for_batch_ready — it's redundant after
-                # wait_for_all_first_tokens and can timeout on fast decode.
                 steady_deadline = time.perf_counter() + 30.0
                 while time.perf_counter() < steady_deadline:
                     try:
