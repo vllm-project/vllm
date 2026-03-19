@@ -111,7 +111,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
-    VLLM_ROCM_USE_AITER_MLA_PERSISTENT: bool = False
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -931,10 +930,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
-    ),
-    "VLLM_ROCM_USE_AITER_MLA_PERSISTENT": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_MLA_PERSISTENT", "False").lower()
-        in ("true", "1")
     ),
     # Whether to use aiter mha ops.
     # By default is enabled.

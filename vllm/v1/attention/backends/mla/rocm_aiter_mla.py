@@ -6,7 +6,6 @@ from typing import ClassVar
 
 import torch
 
-from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
@@ -127,58 +126,54 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             max_num_pages, dtype=torch.int32, device=device
         )
 
-        if envs.VLLM_ROCM_USE_AITER_MLA_PERSISTENT:
-            from aiter import dtypes, get_mla_metadata_info_v1
+        from aiter import dtypes, get_mla_metadata_info_v1
 
-            num_attention_heads = vllm_config.model_config.get_num_attention_heads(
-                vllm_config.parallel_config
-            )
-            q_dtype = self.decode_attn_out_dtype
-            kv_cache_dtype_str = getattr(
-                vllm_config.cache_config, "cache_dtype", "auto"
-            )
-            if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
-                kv_cache_dtype_str = "fp8"
-            else:
-                kv_cache_dtype_str = "bf16"
-            kv_dtype = dtypes.d_dtypes.get(kv_cache_dtype_str, dtypes.bf16)
-            (
-                (work_meta_data_size, work_meta_data_type),
-                (work_indptr_size, work_indptr_type),
-                (work_info_set_size, work_info_set_type),
-                (reduce_indptr_size, reduce_indptr_type),
-                (reduce_final_map_size, reduce_final_map_type),
-                (reduce_partial_map_size, reduce_partial_map_type),
-            ) = get_mla_metadata_info_v1(
-                max_num_reqs,
-                1,
-                num_attention_heads,
-                q_dtype,
-                kv_dtype,
-                is_sparse=False,
-                fast_mode=True,
-            )
-            self._mla_work_meta_data = torch.empty(
-                work_meta_data_size, dtype=work_meta_data_type, device=device
-            )
-            self._mla_work_indptr = torch.empty(
-                work_indptr_size, dtype=work_indptr_type, device=device
-            )
-            self._mla_work_info_set = torch.empty(
-                work_info_set_size, dtype=work_info_set_type, device=device
-            )
-            self._mla_reduce_indptr = torch.empty(
-                reduce_indptr_size, dtype=reduce_indptr_type, device=device
-            )
-            self._mla_reduce_final_map = torch.empty(
-                reduce_final_map_size, dtype=reduce_final_map_type, device=device
-            )
-            self._mla_reduce_partial_map = torch.empty(
-                reduce_partial_map_size,
-                dtype=reduce_partial_map_type,
-                device=device,
-            )
-            self._num_attention_heads = num_attention_heads
+        self._num_attention_heads = vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config
+        )
+        q_dtype = self.decode_attn_out_dtype
+        kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
+        if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
+            kv_cache_dtype_str = "fp8"
+        else:
+            kv_cache_dtype_str = "bf16"
+        kv_dtype = dtypes.d_dtypes.get(kv_cache_dtype_str, dtypes.bf16)
+        (
+            (work_meta_data_size, work_meta_data_type),
+            (work_indptr_size, work_indptr_type),
+            (work_info_set_size, work_info_set_type),
+            (reduce_indptr_size, reduce_indptr_type),
+            (reduce_final_map_size, reduce_final_map_type),
+            (reduce_partial_map_size, reduce_partial_map_type),
+        ) = get_mla_metadata_info_v1(
+            max_num_reqs,
+            1,
+            self._num_attention_heads,
+            q_dtype,
+            kv_dtype,
+            is_sparse=False,
+            fast_mode=True,
+        )
+        self._mla_work_meta_data = torch.empty(
+            work_meta_data_size, dtype=work_meta_data_type, device=device
+        )
+        self._mla_work_indptr = torch.empty(
+            work_indptr_size, dtype=work_indptr_type, device=device
+        )
+        self._mla_work_info_set = torch.empty(
+            work_info_set_size, dtype=work_info_set_type, device=device
+        )
+        self._mla_reduce_indptr = torch.empty(
+            reduce_indptr_size, dtype=reduce_indptr_type, device=device
+        )
+        self._mla_reduce_final_map = torch.empty(
+            reduce_final_map_size, dtype=reduce_final_map_type, device=device
+        )
+        self._mla_reduce_partial_map = torch.empty(
+            reduce_partial_map_size,
+            dtype=reduce_partial_map_type,
+            device=device,
+        )
 
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indptr = torch.zeros(
@@ -248,28 +243,27 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 0, num_reqs + 1, step=1, dtype=torch.int32, device=device
             )
 
-        if getattr(self, "_mla_work_meta_data", None) is not None:
-            from aiter import get_mla_metadata_v1
+        from aiter import get_mla_metadata_v1
 
-            get_mla_metadata_v1(
-                qo_indptr,
-                paged_kv_indptr,
-                paged_kv_last_page_len,
-                self._num_attention_heads,
-                1,
-                True,
-                self._mla_work_meta_data,
-                self._mla_work_info_set,
-                self._mla_work_indptr,
-                self._mla_reduce_indptr,
-                self._mla_reduce_final_map,
-                self._mla_reduce_partial_map,
-                page_size=1,
-                kv_granularity=16,
-                max_seqlen_qo=max_qo_len,
-                uni_seqlen_qo=max_qo_len,
-                fast_mode=True,
-            )
+        get_mla_metadata_v1(
+            qo_indptr,
+            paged_kv_indptr,
+            paged_kv_last_page_len,
+            self._num_attention_heads,
+            1,
+            True,
+            self._mla_work_meta_data,
+            self._mla_work_info_set,
+            self._mla_work_indptr,
+            self._mla_reduce_indptr,
+            self._mla_reduce_final_map,
+            self._mla_reduce_partial_map,
+            page_size=1,
+            kv_granularity=16,
+            max_seqlen_qo=max_qo_len,
+            uni_seqlen_qo=max_qo_len,
+            fast_mode=True,
+        )
 
         attn_metadata = AiterMLADecodeMetadata(
             block_table=block_table_tensor,
@@ -294,13 +288,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         attn_metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build
         )
-        if getattr(self, "_mla_work_meta_data", None) is not None:
-            attn_metadata.work_meta_data = self._mla_work_meta_data
-            attn_metadata.work_indptr = self._mla_work_indptr
-            attn_metadata.work_info_set = self._mla_work_info_set
-            attn_metadata.reduce_indptr = self._mla_reduce_indptr
-            attn_metadata.reduce_final_map = self._mla_reduce_final_map
-            attn_metadata.reduce_partial_map = self._mla_reduce_partial_map
+        attn_metadata.work_meta_data = self._mla_work_meta_data
+        attn_metadata.work_indptr = self._mla_work_indptr
+        attn_metadata.work_info_set = self._mla_work_info_set
+        attn_metadata.reduce_indptr = self._mla_reduce_indptr
+        attn_metadata.reduce_final_map = self._mla_reduce_final_map
+        attn_metadata.reduce_partial_map = self._mla_reduce_partial_map
         return attn_metadata
 
 
