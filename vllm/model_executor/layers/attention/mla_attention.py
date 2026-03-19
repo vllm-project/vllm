@@ -358,12 +358,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert cache_config is not None
             cache_config.cache_dtype = "fp8_ds_mla"
             kv_cache_dtype = "fp8_ds_mla"
+            logger.info_once(
+                "Using DeepSeek's fp8_ds_mla KV cache format. To use standard "
+                "fp8 kv-cache format, please set `--attention-backend "
+                "FLASHINFER_MLA_SPARSE`"
+            )
 
         if (
             self.attn_backend.get_name() == "FLASHINFER_MLA_SPARSE"
             and kv_cache_dtype.startswith("fp8")
         ):
-            pass
+            logger.info_once(
+                "Using standard fp8 KV cache format. To use DeepSeek's fp8_ds_mla "
+                "KV cache format, please set `--attention-backend FLASHMLA_SPARSE`"
+            )
 
         # Initialize KV cache quantization attributes
         self.kv_cache_dtype = kv_cache_dtype
@@ -443,6 +451,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
         self.is_aiter_triton_fp4_bmm_enabled = (
             rocm_aiter_ops.is_fp4bmm_enabled()
+            and hasattr(self.kv_b_proj, "weight")
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
 
@@ -550,59 +559,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            self_kv_cache = self.kv_cache[0]
             slot_mapping = forward_context.slot_mapping
 
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
-
-            # Determine rope_applied based on use_fused_path flag
-            # Unfused path: RoPE applied in mla.py (rope_applied=True)
-            # Fused path: RoPE NOT applied in mla.py (rope_applied=False)
-            rope_applied = not use_fused_path
-
-            # SIMPLIFIED: Skip KV cache update if using fused path
-            # Fused path handles KV cache write either:
-            #   - In forward_impl() after applying RoPE for prefill
-            #   - In fused kernel for decode
-            skip_kv_cache_update = use_fused_path
-
-            # logger.info_once breaks torch.compile, commented out
-            # logger.info_once(
-            #     f"[MLA forward()] Path: {'FUSED' if use_fused_path else 'UNFUSED'}, "
-            #     f"skip_kv_cache_update={skip_kv_cache_update}",
-            #     scope="local",
-            # )
-
-            if not skip_kv_cache_update:
-                # Unfused path: update KV cache before attention
-                # (RoPE already applied in mla.py)
-                current_slot_mapping = slot_mapping.get(self.layer_name)
-
-                # VERIFY: Log unfused KV cache write (EAGER MODE ONLY)
-                # COMMENTED OUT: Breaks torch compile / CUDA graph capture
-                # if current_slot_mapping is not None and \
-                #         len(current_slot_mapping) > 0:
-                #     logger.warning(
-                #         f"[VERIFY UNFUSED KV] "
-                #         f"slot[0]={current_slot_mapping[0].item()}, "
-                #         f"k_nope: abs_max="
-                #         f"{kv_c_normed.float().abs().max().item():.6e}, "
-                #         f"first_3={kv_c_normed[0,:3].tolist()}, "
-                #         f"k_rope: abs_max="
-                #         f"{k_pe.float().abs().max().item():.6e}, "
-                #         f"first_3={k_pe[0,0,:3].tolist()}"
-                #     )
-
-                self.impl.do_kv_cache_update(
-                    kv_c_normed,
-                    k_pe,
-                    self_kv_cache,
-                    current_slot_mapping,
-                    self.kv_cache_dtype,
-                    self._k_scale,
-                )
+            self.impl.do_kv_cache_update(
+                kv_c_normed,
+                k_pe,
+                self_kv_cache,
+                slot_mapping.get(self.layer_name),
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 self.forward_impl(
@@ -612,35 +582,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self_kv_cache,
                     attn_metadata,
                     output=output,
-                    # Pass positions for AITER fused kernel
-                    positions=positions,
-                    # Pass slot_mapping for AITER fused kernel
-                    slot_mapping=slot_mapping.get(self.layer_name),
-                    # Pass RoPE status
-                    rope_applied=rope_applied,
-                    # Pass use_fused_path flag
-                    use_fused_path=use_fused_path,
-                    # Pass rotary_emb module
-                    rotary_emb=rotary_emb,
                 )
                 return output
             else:
                 return self.forward_impl(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    self_kv_cache,
-                    attn_metadata,
-                    # Pass positions for AITER fused kernel
-                    positions=positions,
-                    # Pass slot_mapping for AITER fused kernel
-                    slot_mapping=slot_mapping.get(self.layer_name),
-                    # Pass RoPE status
-                    rope_applied=rope_applied,
-                    # Pass use_fused_path flag
-                    use_fused_path=use_fused_path,
-                    # Pass rotary_emb module
-                    rotary_emb=rotary_emb,
+                    q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
                 )
         else:
             # Custom ops path (ROCm)
@@ -1038,25 +984,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     y_scale=self._q_scale if fp8_attention else None,
                 )
             elif self.is_aiter_triton_fp8_bmm_enabled:
-                # UNFUSED PATH: RoPE already applied in mla.py
-                # mqa_q_pe already has RoPE!
-                # Just do FP8 BMM (K = W_K @ kv_c_normed)
-                # logger.info("[MLA DECODE PATH] Using UNFUSED FP8 BMM")
-
-                # VERIFY: Log unfused decode inputs (EAGER MODE ONLY)
-                # COMMENTED OUT: Breaks torch compile / CUDA graph capture
-                # logger.warning(
-                #     f"[VERIFY UNFUSED IN] Shapes: "
-                #     f"q_nope={mqa_q_nope.shape}, q_pe={mqa_q_pe.shape}"
-                # )
-                # logger.warning(
-                #     f"[VERIFY UNFUSED IN] "
-                #     f"W_K_scale={self.W_K_scale.item():.6e}, "
-                #     f"k_scale={self._k_scale.item():.6e}, "
-                #     f"q_nope: abs_max="
-                #     f"{mqa_q_nope.float().abs().max().item():.6e}"
-                # )
-
                 # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
                 mqa_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
                     mqa_q_nope,
@@ -1065,21 +992,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     group_size=128,
                     transpose_bm=True,
                 )
-
-                # VERIFY: Log unfused decode output (EAGER MODE ONLY)
-                # COMMENTED OUT: Breaks torch compile / CUDA graph
-                # capture
-                # logger.warning(
-                #     f"[VERIFY UNFUSED OUT] ql_nope "
-                #     f"shape={mqa_ql_nope.shape}, "
-                #     f"dtype={mqa_ql_nope.dtype}, "
-                #     f"abs_max={mqa_ql_nope.float().abs().max().item():.6e}"
-                # )
-
             else:
-                # UNFUSED PATH: RoPE already applied in mla.py
-                # mqa_q_pe already has RoPE!
-                # Standard PyTorch BMM (K = W_K @ kv_c_normed)
                 # Pads the head_dim if necessary (for the underlying kernel)
                 N, B, P = mqa_q_nope.shape
                 _, _, L = self.W_UK_T.shape
@@ -1096,7 +1009,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
-            # DEBUG: Show intermediate values before concat
             if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
@@ -1572,7 +1484,7 @@ def unified_mla_kv_cache_update(
     #     "[unified_mla_kv_cache_update] UNFUSED path: writing all KV (num_tokens=%s)",
     #     kv_c_normed.shape[0],
     # )
-    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    kv_cache = attn_layer.kv_cache[0]
 
     slot_mapping = forward_context.slot_mapping
     assert isinstance(slot_mapping, dict), (
@@ -1632,23 +1544,12 @@ def unified_mla_attention_with_output(
     # positions and slot_mapping come from parameters (passed through compiled graph)
     # If slot_mapping is None, retrieve it from attn_metadata as fallback
     # (happens when called from mla.py which doesn't have slot_mapping)
-    if slot_mapping is None and attn_metadata is not None:
-        if hasattr(attn_metadata, "slot_mapping"):
-            slot_mapping = attn_metadata.slot_mapping
-            # DEBUG: Commented out - logs once per worker (8x with TP8)
-            # logger.info_once(
-            #     "[custom op] Retrieved slot_mapping from attn_metadata: %s",
-            #     (slot_mapping.shape if slot_mapping is not None else "None"),
-            #     scope="local",
-            # )
-        else:
-            # DEBUG: Commented out - logs once per worker (8x with TP8)
-            # logger.info_once(
-            #     f"[custom op] attn_metadata type={type(attn_metadata).__name__}, "
-            #     f"has slot_mapping attr={hasattr(attn_metadata, 'slot_mapping')}",
-            #     scope="local",
-            # )
-            pass
+    if (
+        slot_mapping is None
+        and attn_metadata is not None
+        and hasattr(attn_metadata, "slot_mapping")
+    ):
+        slot_mapping = attn_metadata.slot_mapping
 
     # positions and slot_mapping come from parameters (passed through compiled graph)
     # rotary_emb retrieved from layer (stored as class attribute during __init__)
@@ -1837,7 +1738,7 @@ class MLACommonBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [576]
+        return [320, 576]
 
     @classmethod
     def is_mla(cls) -> bool:
