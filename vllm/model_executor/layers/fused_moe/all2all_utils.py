@@ -204,7 +204,7 @@ def maybe_make_prepare_finalize(
             quant_dtype=quant_dtype,
             token_hidden_size=moe.hidden_dim,
             scale_dim=scale_dim,
-            scale_type_size=torch.float32.itemsize,
+            scale_type_size=0 if scale_dim == 0 else torch.float32.itemsize,
             max_num_tokens_per_dp_rank=moe.max_num_tokens,
             input_dtype=moe.in_dtype,
             num_local_experts=moe.num_experts // all2all_manager.world_size,
