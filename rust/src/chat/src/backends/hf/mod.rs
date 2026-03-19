@@ -11,10 +11,10 @@ use thiserror_ext::AsReport;
 use tokenizers::Tokenizer as HfTokenizer;
 use tracing::info;
 
-use self::config::{load_generation_config, load_tokenizer_config};
+use self::config::{load_generation_config, load_model_config, load_tokenizer_config};
 use self::model_files::{ResolvedModelFiles, resolve_model_files};
 use crate::backend::{ChatBackend, SamplingHints};
-use crate::backends::hf::config::GenerationConfig;
+use crate::backends::hf::config::{GenerationConfig, ModelConfig};
 use crate::error::{Error, Result};
 use crate::request::ChatRequest;
 use crate::template::ChatTemplate;
@@ -102,6 +102,8 @@ struct HfChatBackendInner {
     /// Generation-config for sampling defaults that may be inherited when the user does not
     /// explicitly override them.
     generation_config: GenerationConfig,
+    /// Model config (`config.json`).
+    model_config: ModelConfig,
 }
 
 impl fmt::Debug for HfChatBackend {
@@ -135,6 +137,7 @@ impl HfChatBackend {
             .as_ref()
             .and_then(|token| tokenizer.token_to_id(token.as_str()));
 
+        let model_config = load_model_config(files.config_path.as_deref())?;
         let generation_config = load_generation_config(files.generation_config_path.as_deref())?;
         let mut extra_eos_token_ids = generation_config
             .eos_token_id
@@ -153,6 +156,7 @@ impl HfChatBackend {
                 primary_eos_token_id,
                 extra_eos_token_ids,
                 generation_config,
+                model_config,
             }),
         })
     }
@@ -185,6 +189,7 @@ impl ChatBackend for HfChatBackend {
             default_min_p: self.inner.generation_config.min_p,
             default_repetition_penalty: self.inner.generation_config.repetition_penalty,
             default_max_tokens: self.inner.generation_config.max_new_tokens,
+            max_model_len: self.inner.model_config.max_position_embeddings,
         })
     }
 }

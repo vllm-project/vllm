@@ -15,6 +15,7 @@ pub(super) struct ResolvedModelFiles {
     pub tokenizer_config_path: Option<PathBuf>,
     pub generation_config_path: Option<PathBuf>,
     pub chat_template_path: Option<PathBuf>,
+    pub config_path: Option<PathBuf>,
 }
 
 /// Resolve tokenizer/config files from the local HF cache first, then fall back
@@ -72,12 +73,18 @@ async fn resolve_remote_model_files(model_id: &str) -> Result<ResolvedModelFiles
     } else {
         None
     };
+    let config_path = if siblings.contains("config.json") {
+        Some(download_known_file(&repo, model_id, "config.json").await?)
+    } else {
+        None
+    };
 
     Ok(ResolvedModelFiles {
         tokenizer_path,
         tokenizer_config_path,
         generation_config_path,
         chat_template_path,
+        config_path,
     })
 }
 
@@ -90,12 +97,14 @@ fn resolve_cached_model_files(model_id: &str) -> Option<ResolvedModelFiles> {
     // Chat templates are sometimes stored as dedicated .jinja files rather
     // than as a fixed-name config entry, so we scan the cached model dir.
     let chat_template_path = discover_chat_template_in_dir(model_dir);
+    let config_path = cache_repo.get("config.json");
 
     Some(ResolvedModelFiles {
         tokenizer_path,
         tokenizer_config_path,
         generation_config_path,
         chat_template_path,
+        config_path,
     })
 }
 

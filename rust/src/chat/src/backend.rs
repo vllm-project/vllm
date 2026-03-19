@@ -16,6 +16,9 @@ pub struct SamplingHints {
     pub default_min_p: Option<f32>,
     pub default_repetition_penalty: Option<f32>,
     pub default_max_tokens: Option<u32>,
+    /// Model context window size (`max_position_embeddings` from `config.json`). When available,
+    /// used to cap `max_tokens` to `max_model_len - prompt_len` and reject prompts that exceed it.
+    pub max_model_len: Option<u32>,
 }
 
 /// Minimal prompt-processing backend needed by `vllm-chat`.

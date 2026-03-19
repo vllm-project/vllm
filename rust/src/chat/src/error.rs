@@ -21,6 +21,11 @@ pub enum Error {
     ToolParserUnavailableByName { name: String },
     #[error("reasoning parser `{name}` is not registered")]
     ReasoningParserUnavailableByName { name: String },
+    #[error(
+        "this model's maximum context length is {max_model_len} tokens, \
+         but the prompt contains {prompt_len} input tokens"
+    )]
+    PromptTooLong { max_model_len: u32, prompt_len: u32 },
     #[error("chat request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error("llm request failed: {0}")]

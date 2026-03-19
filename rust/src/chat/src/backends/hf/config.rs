@@ -31,7 +31,14 @@ impl NamedSpecialToken {
     }
 }
 
-/// Minimal subset of `generation_config.json` used to recover extra EOS ids.
+/// Minimal subset of `config.json` (the model's main HF config).
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct ModelConfig {
+    #[serde(default)]
+    pub max_position_embeddings: Option<u32>,
+}
+
+/// Minimal subset of `generation_config.json`.
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct GenerationConfig {
     #[serde(default)]
@@ -74,6 +81,11 @@ pub(super) fn load_tokenizer_config(path: Option<&Path>) -> Result<HfTokenizerCo
 
 /// Load the generation-side EOS metadata if a config file is present.
 pub(super) fn load_generation_config(path: Option<&Path>) -> Result<GenerationConfig> {
+    read_json_file(path)
+}
+
+/// Load the model-side config (`config.json`) if present.
+pub(super) fn load_model_config(path: Option<&Path>) -> Result<ModelConfig> {
     read_json_file(path)
 }
 
