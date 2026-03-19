@@ -10,7 +10,7 @@ Classification involves predicting which predefined category, class, or label be
     - `LLM.classify(...)`
     - `LLM.encode(..., pooling_task="classify")`
 - Online APIs:
-    - [Classification API](classify.md#online-serving)(`/classify`)
+    - [Classification API](classify.md#online-serving) (`/classify`)
     - Pooling API (`/pooling`)
 
 The key distinction between (sequence) classification and token classification lies in their output granularity: (sequence) classification produces a single result for an entire input sequence, whereas token classification yields a result for each individual token within the sequence.
@@ -50,13 +50,13 @@ The most fundamental application of classification models is to categorize input
 If your model is not in the above list, we will try to automatically convert the model using
 [as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
-### As cross-encoder models
+### Cross-encoder Models
 
 Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. Most [cross-encoder models](scoring.md#cross-encoder-models) can also be used as classification models. For more information on cross-encoder models, please refer to [this page](scoring.md).
 
 --8<-- "disable/docs/models/pooling_models/scoring.md:supported-score-models"
 
-### As reward Models
+### Reward Models
 
 Using (sequence) classification models as reward models. For more information, see [Reward Models](reward.md).
 
