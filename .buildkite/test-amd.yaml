@@ -1441,7 +1441,7 @@ steps:
 
 - label: Python-only Installation Test # 10min
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   optional: true
   # grade: Blocking
