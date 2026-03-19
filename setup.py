@@ -79,6 +79,66 @@ def is_freethreaded():
     return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
 
 
+def should_bundle_tcmalloc() -> bool:
+    import platform
+
+    return (
+        VLLM_TARGET_DEVICE == "cpu"
+        and sys.platform.startswith("linux")
+        and platform.machine() in ("aarch64", "x86_64")
+    )
+
+
+def find_tcmalloc() -> Path | None:
+    try:
+        # get all shared libs the dynamic loader knows about
+        output = subprocess.check_output(
+            ["ldconfig", "-p"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return None
+
+    # search for libtcmalloc and libtcmalloc_minimal
+    for library_pattern in (
+        r"\blibtcmalloc_minimal\.so\.(\d+)\b",
+        r"\blibtcmalloc\.so\.(\d+)\b",
+    ):
+        candidates: list[tuple[int, Path]] = []
+        for line in output.splitlines():
+            match = re.search(library_pattern, line)
+            if match is None or "=>" not in line:
+                continue
+            candidate = Path(line.split("=>")[1].strip())
+            if candidate.exists():
+                candidates.append((int(match.group(1)), candidate))
+
+        if candidates:
+            # if multiple candidates are found, pick the one with the highest
+            # version number
+            return max(candidates, key=lambda item: item[0])[1]
+
+    return None
+
+
+def bundle_tcmalloc(build_lib: str) -> None:
+    tcmalloc_library = find_tcmalloc()
+    if tcmalloc_library is None:
+        logger.warning(
+            "Failed to locate tcmalloc. For best performance, "
+            "please install tcmalloc (e.g. `sudo apt-get "
+            "install -y --no-install-recommends libtcmalloc-minimal4`)"
+        )
+        return
+
+    bundle_dir = os.path.join(build_lib, "vllm", "libs")
+    os.makedirs(bundle_dir, exist_ok=True)
+    bundle_path = os.path.join(bundle_dir, tcmalloc_library.name)
+    shutil.copy2(tcmalloc_library, bundle_path)
+    logger.info("Bundled tcmalloc into wheel: %s", bundle_path)
+
+
 class CMakeExtension(Extension):
     def __init__(self, name: str, cmake_lists_dir: str = ".", **kwa) -> None:
         super().__init__(name, sources=[], py_limited_api=not is_freethreaded(), **kwa)
@@ -281,6 +341,10 @@ class cmake_build_ext(build_ext):
     def run(self):
         # First, run the standard build_ext command to compile the extensions
         super().run()
+
+        # bundle tcmalloc into CPU wheels for best OOB perf
+        if should_bundle_tcmalloc():
+            bundle_tcmalloc(self.build_lib)
 
         # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
         # directory so that they can be included in the editable build
@@ -941,6 +1005,7 @@ if _build_custom_ops():
 package_data = {
     "vllm": [
         "py.typed",
+        "libs/*.so*",
         "model_executor/layers/fused_moe/configs/*.json",
         "model_executor/layers/quantization/utils/configs/*.json",
         "entrypoints/serve/instrumentator/static/*.js",
