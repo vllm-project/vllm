@@ -557,6 +557,8 @@ class Qwen3_5ForCausalLMBase(
         "gate_up_proj": ["gate_proj", "up_proj"],
         # GDN fused projections.
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_b": ["in_proj_b"],
+        "in_proj_a": ["in_proj_a"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -666,6 +668,8 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
     packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_b": ["in_proj_b"],
+        "in_proj_a": ["in_proj_a"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):

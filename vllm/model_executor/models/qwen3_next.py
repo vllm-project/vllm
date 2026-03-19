@@ -80,9 +80,8 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
+from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import (
     aux_stream,
     direct_register_custom_op,
@@ -816,12 +815,22 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
     def _forward_in_proj(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        projected_states_qkvz, projected_states_ba = maybe_execute_in_parallel(
-            lambda: self.in_proj_qkvz(hidden_states)[0],
-            lambda: self.in_proj_ba(hidden_states)[0],
-            self.events[0],
-            self.events[1],
-            self.aux_stream,
+        # Replicated B/A projections — full output, sliced to local TP rank.
+        # Execute b and a on aux_stream concurrently with qkvz on default stream.
+        # Manual stream management avoids nested tuple returns that break torch.compile.
+        with torch.cuda.stream(self.aux_stream):
+            b_full = self.in_proj_b(hidden_states)[0]
+            a_full = self.in_proj_a(hidden_states)[0]
+        projected_states_qkvz = self.in_proj_qkvz(hidden_states)[0]
+        self.aux_stream.synchronize()
+        _ba_chunk = self.num_v_heads // self.tp_size
+        _ba_start = self.tp_rank * _ba_chunk
+        projected_states_ba = torch.cat(
+            [
+                b_full[:, _ba_start : _ba_start + _ba_chunk],
+                a_full[:, _ba_start : _ba_start + _ba_chunk],
+            ],
+            dim=-1,
         )
         return projected_states_qkvz, projected_states_ba
 
@@ -1602,6 +1611,8 @@ class Qwen3NextForCausalLM(
         ],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj_qkvz": ["in_proj_qkvz"],
+        "in_proj_b": ["in_proj_b"],
+        "in_proj_a": ["in_proj_a"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
