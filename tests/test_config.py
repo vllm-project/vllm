@@ -31,6 +31,7 @@ from vllm.config.vllm import (
     OPTIMIZATION_LEVEL_TO_CONFIG,
     OptimizationLevel,
 )
+from vllm.model_executor.models.config import NomicBertModelConfig
 from vllm.platforms import current_platform
 
 
@@ -1452,3 +1453,41 @@ def test_mtp_draft_model_config_allows_non_dict_nested_override_values():
     draft_model_config = speculative_config.draft_model_config
     assert draft_model_config.hf_config.text_config is None
     assert draft_model_config.hf_config.model_type == "qwen3_5_mtp"
+
+
+def test_nomic_config_honors_mapping_like_max_model_len_override():
+    """Mapping-like draft overrides should still affect Nomic max_model_len."""
+
+    class NomicBertConfig(_FakeHFConfig):
+        pass
+
+    hf_config = NomicBertConfig(
+        activation_function="swiglu",
+        mlp_fc1_bias=False,
+        mlp_fc2_bias=False,
+        qkv_proj_bias=False,
+        rotary_emb_scale_base=None,
+        rotary_emb_interleaved=False,
+        layer_norm_epsilon=1e-5,
+        n_inner=64,
+        n_embd=32,
+        n_layer=4,
+        num_attention_heads=4,
+        max_trained_positions=2048,
+        rope_parameters={"rope_type": "yarn"},
+    )
+    model_config = SimpleNamespace(
+        hf_config=hf_config,
+        hf_text_config=hf_config,
+        hf_overrides=SpeculativeConfig._get_draft_hf_overrides({"max_model_len": 1024}),
+        original_max_model_len=None,
+        max_model_len=4096,
+        encoder_config={"max_seq_length": 512},
+        model_arch_config=SimpleNamespace(),
+        get_and_verify_max_len=lambda value: value,
+    )
+
+    NomicBertModelConfig.verify_and_update_model_config(model_config)
+
+    assert model_config.max_model_len == 1024
+    assert model_config.encoder_config == {}
