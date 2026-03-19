@@ -62,7 +62,10 @@ class FlashInferMLASparseBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
     ]
 
     @staticmethod
@@ -104,7 +107,7 @@ class FlashInferMLASparseBackend(AttentionBackend):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: CacheDType | None,
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -304,6 +307,11 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
+        # fp8 query quantization is required when using fp8 kv_cache,
+        # as the TRTLLM-GEN sparse MLA kernel requires matching dtypes
+        # for query and kv_cache (mixed bf16+fp8 is not supported).
+        self.supports_quant_query_input = True
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -332,9 +340,13 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
             self._workspace_buffer = _get_workspace_buffer(q.device)
 
         if self.bmm1_scale is None:
-            self.bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
+            self.bmm1_scale = self.scale
+            if self.kv_cache_dtype.startswith("fp8"):
+                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
         if self.bmm2_scale is None:
-            self.bmm2_scale = layer._v_scale_float
+            self.bmm2_scale = 1.0
+            if self.kv_cache_dtype.startswith("fp8"):
+                self.bmm2_scale *= layer._k_scale_float
 
         o = trtllm_batch_decode_with_kv_cache_mla(
             query=q.unsqueeze(1),

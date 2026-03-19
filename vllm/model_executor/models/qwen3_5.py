@@ -75,6 +75,7 @@ from .interfaces import (
     IsHybrid,
     MixtureOfExperts,
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
     _require_is_multimodal,
@@ -145,6 +146,24 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             prefix=prefix,
         )
 
+    def create_ba_proj(
+        self,
+        hidden_size: int,
+        num_v_heads: int,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> MergedColumnParallelLinear:
+        # Qwen3.5 has separate in_proj_b and in_proj_a weights in the
+        # checkpoint, which are loaded into the fused in_proj_ba parameter
+        # via stacked_params_mapping with shard_id 0 and 1 respectively.
+        return MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[num_v_heads] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -161,12 +180,16 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+        mixed_qkvz, ba = torch.ops.vllm.gdn_in_proj(
+            hidden_states,
+            self.in_proj_qkvz.weight.shape[0],
+            self.in_proj_ba.weight.shape[0],
+            self.prefix,
+        )
         qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
         z_size = self.value_dim // self.tp_size
         mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
         z = z.reshape(z.size(0), -1, self.head_v_dim)
-        ba, _ = self.in_proj_ba(hidden_states)
         b, a = ba.chunk(2, dim=-1)
 
         b = b.contiguous()
@@ -274,7 +297,6 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                     1,
                     1,
                     config.hidden_size,
-                    dtype=config.dtype,
                 ),
             )
             self.ffn_layer_scale = torch.nn.Parameter(
@@ -282,7 +304,6 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                     1,
                     1,
                     config.hidden_size,
-                    dtype=config.dtype,
                 ),
             )
 
@@ -336,6 +357,8 @@ class Qwen3_5Model(Qwen3NextModel):
             self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+
+        self.aux_hidden_state_layers: tuple[int, ...] = ()
 
     def load_fused_expert_weights(
         self,
@@ -520,6 +543,7 @@ class Qwen3_5Model(Qwen3NextModel):
 class Qwen3_5ForCausalLMBase(
     nn.Module,
     HasInnerState,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
 ):
@@ -576,6 +600,13 @@ class Qwen3_5ForCausalLMBase(
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -630,6 +661,9 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
+    # Qwen3.5 does not support multimodal pruning (EVS).
+    supports_multimodal_pruning = False
+
     packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
@@ -645,10 +679,8 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         self.config = config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        self.video_pruning_rate = multimodal_config.video_pruning_rate
-        self.is_multimodal_pruning_enabled = (
-            multimodal_config.is_multimodal_pruning_enabled()
-        )
+        # Qwen3.5 does not support multimodal pruning (EVS).
+        self.is_multimodal_pruning_enabled = False
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
@@ -673,13 +705,11 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.language_model.embed_input_ids,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
@@ -694,6 +724,12 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         )
 
         return inputs_embeds
+
+    def recompute_mrope_positions(self, *args, **kwargs):
+        raise NotImplementedError(
+            "Qwen3.5 does not support multimodal pruning (EVS). "
+            "recompute_mrope_positions should never be called."
+        )
 
     def forward(
         self,
@@ -853,10 +889,8 @@ class Qwen3_5MoeForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        self.video_pruning_rate = multimodal_config.video_pruning_rate
-        self.is_multimodal_pruning_enabled = (
-            multimodal_config.is_multimodal_pruning_enabled()
-        )
+        # Qwen3.5 does not support multimodal pruning (EVS).
+        self.is_multimodal_pruning_enabled = False
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
