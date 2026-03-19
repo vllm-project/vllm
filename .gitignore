@@ -241,3 +241,25 @@ vllm/grpc/vllm_engine_pb2.pyi
 
 # Ignore generated cpu headers 
 csrc/cpu/cpu_attn_dispatch_generated.h
+
+# Local documentation and analysis files (visible in all branches, not committed)
+AITER_*.md
+ATOM_*.md
+AMD_*.md
+*_SUMMARY.md
+*_GUIDE.md
+*_EXPLAINED.md
+*_ANALYSIS.md
+*_CHECKLIST.md
+GIT_PR_command_issues/
+TRACE_analysis/
+amd_vllm_profiling_scripts/
+amd_vllm_profiling_scripts_using_vllm_serve/
+amd_vllm_aiter_research/
+amd_vllm_cuda_graph/
+amd_vllm_optimization_ideas_like_atom/
+amd_fp4_issue_mi300x/
+deepseek_v3_comparison_*/
+CUDA_graph_in_vllm/
+*.trace.json
+*_traces/
