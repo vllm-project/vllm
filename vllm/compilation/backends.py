@@ -20,6 +20,7 @@ import torch
 import torch.fx as fx
 from torch._dynamo.utils import dynamo_timed
 from torch._logging._internal import trace_structured
+from torch.fx._lazy_graph_module import _use_lazy_graph_module
 
 import vllm.envs as envs
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
@@ -517,9 +518,13 @@ def split_graph(
     # otherwise pytorch might reorder the nodes and
     # the semantics of the graph will change when we
     # have mutations in the graph
-    split_gm = torch.fx.passes.split_module.split_module(
-        graph, None, lambda node: node_to_subgraph_id[node], keep_original_order=True
-    )
+    with _use_lazy_graph_module(True):
+        split_gm = torch.fx.passes.split_module.split_module(
+            graph,
+            None,
+            lambda node: node_to_subgraph_id[node],
+            keep_original_order=True,
+        )
 
     outputs = []
 
