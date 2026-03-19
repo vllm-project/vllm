@@ -144,7 +144,7 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             prefix=prefix,
             create_in_proj_qkvz=create_in_proj_qkvz,
         )
-        if vllm_config.load_config is not None:
+        if vllm_config.lora_config is not None:
             # Separate in_proj_qkv (Q,K,V) and in_proj_z for LoRA compatibility.
             # Use MergedColumnParallelLinear for in_proj_qkv because GDN can have
             # linear_num_key_heads != linear_num_value_heads (e.g. 16 vs 32), so
