@@ -16,7 +16,7 @@ from vllm.model_executor.models.mistral3 import (
     Mistral3ForConditionalGeneration,
     Mistral3MultiModalProjector,
     Mistral3ProcessingInfo,
-    init_vision_tower_for_llava,
+    init_vision_tower_for_mistral3,
 )
 from vllm.model_executor.models.pixtral import PixtralHFEncoderInfo
 from vllm.model_executor.models.utils import (
@@ -151,7 +151,7 @@ class LightOnOCRForConditionalGeneration(Mistral3ForConditionalGeneration):
         self.multimodal_config = multimodal_config
 
         with self._mark_tower_model(vllm_config, "image"):
-            self.vision_tower = init_vision_tower_for_llava(
+            self.vision_tower = init_vision_tower_for_mistral3(
                 config,
                 quant_config=quant_config,
                 require_post_norm=False,

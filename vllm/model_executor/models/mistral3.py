@@ -331,7 +331,7 @@ def _get_num_hidden_layers(hf_config: Mistral3Config) -> int:
     )
 
 
-def init_vision_tower_for_llava(
+def init_vision_tower_for_mistral3(
     hf_config: Mistral3Config,
     quant_config: QuantizationConfig | None,
     *,
@@ -416,7 +416,7 @@ class Mistral3ForConditionalGeneration(
             config.projector_hidden_act = "gelu"
 
         with self._mark_tower_model(vllm_config, "image"):
-            self.vision_tower = init_vision_tower_for_llava(
+            self.vision_tower = init_vision_tower_for_mistral3(
                 config,
                 quant_config=quant_config,
                 require_post_norm=False,
