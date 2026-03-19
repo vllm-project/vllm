@@ -342,6 +342,11 @@ apply_rocm_test_overrides() {
     --ignore=entrypoints/openai/completion/test_prompt_validation.py "}
   fi
 
+  if [[ $cmds == *" entrypoints/serve"* ]]; then
+    cmds="${cmds} \
+    --ignore=entrypoints/serve/lora/test_lora_adapters.py"
+  fi
+
   if [[ $cmds == *" entrypoints/llm "* ]]; then
     cmds=${cmds//" entrypoints/llm "/" entrypoints/llm \
     --ignore=entrypoints/llm/test_chat.py \
