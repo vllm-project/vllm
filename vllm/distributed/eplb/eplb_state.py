@@ -71,7 +71,7 @@ class EPLBPhase(Enum):
     # PLANNING: async worker is running policy.rebalance_experts().
     # TRANSFER_PENDING: plan is ready; async worker will transfer the next layer.
     #
-    # We intentionally track sync phases too (even though sync is blocking) so
+    # We intentionally track sync phases too so that
     # sync and async share one lifecycle model, which simplifies invariants,
     # logging, and debugging across both EPLB flows.
 
@@ -266,6 +266,12 @@ class EplbModelState:
 
     def is_buffer_ready(self) -> bool:
         return self.phase == EPLBPhase.BUFFER_READY
+
+    def is_worker_phase(self) -> bool:
+        """True when the async worker should acquire the lock and act
+        (SCHEDULED: plan + transfer; TRANSFER_PENDING: transfer next layer).
+        """
+        return self.is_scheduled() or self.can_prepare_next_layer()
 
     def set_phase(self, phase: EPLBPhase) -> None:
         self.phase = phase

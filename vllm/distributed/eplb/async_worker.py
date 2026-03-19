@@ -106,7 +106,7 @@ async def transfer_run_periodically(
                 model_state.is_rebalance_in_progress()
                 and model_state.layer_to_transfer < current_num_layers
             ):
-                if model_state.is_scheduled() or model_state.can_prepare_next_layer():
+                if model_state.is_worker_phase():
                     # Polling the lock directly in the async thread avoids
                     # the thread switch overhead of asyncio.to_thread.
                     # This is typically faster than offloading to a worker thread.
@@ -152,6 +152,7 @@ async def transfer_run_periodically(
                             cuda_stream.wait_event(model_state.buffer_consumed_event)
                             model_state.buffer_consumed_event = None
 
+                        assert model_state.phase == EPLBPhase.TRANSFER_PENDING
                         model_state.set_phase(EPLBPhase.TRANSFERRING_LAYER)
                         (
                             model_state.is_unchanged,
