@@ -75,19 +75,6 @@ steps:
   commands:
   - pytest -v -s entrypoints/openai/responses
 
-- label: Entrypoints V1
-  timeout_in_minutes: 50
-  source_file_dependencies:
-    - vllm/
-    - tests/v1
-  commands:
-    - pytest -v -s v1/entrypoints
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
-
 - label: OpenAI API Correctness
   timeout_in_minutes: 30
   source_file_dependencies:
