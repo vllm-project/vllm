@@ -35,10 +35,9 @@ from vllm.model_executor.layers.quantization.fp8 import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
-    Mxfp8LinearBackend,
     Mxfp8LinearOp,
     mxfp8_e4m3_quantize,
-    swizzle_mxfp8_scale,
+    select_mxfp8_linear_backend,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
@@ -76,7 +75,8 @@ class Mxfp8Config(Fp8Config):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 100
+        # Marlin kernel supports MXFP8 on SM80+
+        return 80
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "Mxfp8Config":
@@ -133,24 +133,8 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
     def __init__(self, quant_config: "Mxfp8Config"):
         self.quant_config = quant_config
         self.out_dtype = torch.get_default_dtype()
-        self.mxfp8_linear = Mxfp8LinearOp(self._select_backend())
-        logger.info_once(
-            "Using %s backend for MXFP8 GEMM", self.mxfp8_linear.backend.value
-        )
-
-    @staticmethod
-    def _select_backend() -> Mxfp8LinearBackend:
-        try:
-            from vllm.utils import flashinfer as fi
-
-            _ = fi.mm_mxfp8
-            return Mxfp8LinearBackend.FLASHINFER_CUTLASS
-        except Exception:
-            logger.warning(
-                "FlashInfer mm_mxfp8 not available, "
-                "falling back to MXFP8 emulation backend."
-            )
-            return Mxfp8LinearBackend.EMULATION
+        backend = select_mxfp8_linear_backend()
+        self.mxfp8_linear = Mxfp8LinearOp(backend)
 
     def create_weights(
         self,
@@ -194,15 +178,15 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
             layer.register_parameter("weight", weight)
             initialize_single_dummy_weight(layer.weight)
 
+        # Quantize BF16/FP16 weights to MXFP8
         weight_fp8, weight_scale = mxfp8_e4m3_quantize(layer.weight.contiguous())
-
-        if self.mxfp8_linear.backend == Mxfp8LinearBackend.FLASHINFER_CUTLASS:
-            N, K = layer.weight.shape[0], layer.weight.shape[1]
-            weight_scale = swizzle_mxfp8_scale(weight_scale, N, K)
 
         layer.input_scale = None
         replace_parameter(layer, "weight", weight_fp8.data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
+
+        # Delegate backend-specific weight processing (swizzle/repack)
+        self.mxfp8_linear.process_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
 
@@ -218,6 +202,9 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
             weight_scale=layer.weight_scale,
             out_dtype=self.out_dtype,
             bias=bias,
+            workspace=getattr(layer, "workspace", None),
+            size_n=getattr(layer, "marlin_size_n", 0),
+            size_k=getattr(layer, "marlin_size_k", 0),
         )
 
 
