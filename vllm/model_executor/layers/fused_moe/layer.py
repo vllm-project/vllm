@@ -485,7 +485,12 @@ class FusedMoE(CustomOp):
         _layer_match = re.search(r"layers\.(\d+)\.", prefix)
         _layer_idx = int(_layer_match.group(1)) if _layer_match else -1
         if _layer_idx >= 0:
-            get_riy_state().register_layer(_layer_idx, num_experts)
+            _quant_name = quant_config.__class__.__name__ if quant_config else ""
+            get_riy_state().register_layer(
+                _layer_idx, num_experts,
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                quantization=_quant_name)
 
         # TODO(bnell): we should not have to create a router if the kernel is
         # monolithic.

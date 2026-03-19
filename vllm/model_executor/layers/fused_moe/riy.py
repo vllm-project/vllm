@@ -77,6 +77,10 @@ class RiyState:
         # Pre-computed per-layer mask tensors on device (for hot path)
         self._mask_tensors: dict[int, torch.Tensor] = {}
         self._profile_loaded = False
+        # Expert dimensions for VRAM estimation
+        self._hidden_size = 0
+        self._intermediate_size = 0
+        self._quantization = ""
 
     def initialize(self, num_layers: int, num_experts: int):
         """Called once during model init."""
@@ -90,9 +94,15 @@ class RiyState:
             logger.info("RIY initialized: %d layers, %d experts/layer",
                         num_layers, num_experts)
 
-    def register_layer(self, layer_idx: int, num_experts: int):
+    def register_layer(self, layer_idx: int, num_experts: int,
+                       hidden_size: int = 0, intermediate_size: int = 0,
+                       quantization: str = ""):
         """Register a MoE layer. Called from FusedMoE.__init__."""
         with self._lock:
+            if hidden_size and not self._hidden_size:
+                self._hidden_size = hidden_size
+                self._intermediate_size = intermediate_size
+                self._quantization = quantization
             if num_experts > self._num_experts:
                 self._num_experts = num_experts
             if layer_idx >= self._num_layers:
@@ -318,6 +328,10 @@ def _start_riy_server(port: int = 8019):
                     "collecting": riy.collecting,
                     "num_layers": riy._num_layers,
                     "num_experts": riy._num_experts,
+                    "hidden_size": riy._hidden_size,
+                    "intermediate_size": riy._intermediate_size,
+                    "quantization": riy._quantization,
+                    "mask_size": len(riy._mask),
                 })
             else:
                 self._json_response({"error": "not found"}, 404)
