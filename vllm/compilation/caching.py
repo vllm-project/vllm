@@ -15,6 +15,7 @@ from torch.utils import _pytree as pytree
 
 import vllm.envs as envs
 from vllm.compilation.compiler_interface import get_inductor_factors
+from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
@@ -59,6 +60,7 @@ class StandaloneCompiledArtifacts:
         self.submodule_bytes[f"{submod_name}_{shape}"] = hex_digest
         if hex_digest not in self.submodule_bytes_store:
             self.submodule_bytes_store[hex_digest] = entry
+            compilation_counter.num_compiled_artifacts_saved += 1
             logger.debug(
                 "inserting new artifact for submod %s with shape %s "
                 "(%s bytes) at hash %s",
@@ -122,6 +124,7 @@ class StandaloneCompiledArtifacts:
 
         def _load_entry(entry_bytes: bytes) -> AOTCompiledArtifact:
             entry = pickle.loads(entry_bytes)
+            compilation_counter.num_compiled_artifacts_loaded += 1
             return AOTCompiledArtifact.deserialize(entry)
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
