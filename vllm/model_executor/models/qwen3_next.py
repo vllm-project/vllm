@@ -80,7 +80,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import Qwen3NextConfig
+from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import (
@@ -427,7 +427,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.aux_stream = aux_stream()
         self.events = (
             [torch.cuda.Event(), torch.cuda.Event()]
-            if current_platform.is_cuda()
+            if current_platform.is_cuda_alike()
             else [None, None]
         )
 
@@ -842,7 +842,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 a=a,
                 core_attn_out=core_attn_out,
                 attn_metadata=attn_metadata,
-                virtual_engine=forward_context.virtual_engine,
             )
 
         has_initial_state = attn_metadata.has_initial_state
@@ -853,7 +852,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+        self_kv_cache = self.kv_cache[0]
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -1036,13 +1035,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
         attn_metadata: GDNAttentionMetadata,
-        virtual_engine: int,
     ):
         """
         Core attention computation with a packed non-spec decode fast path.
         """
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        self_kv_cache = self.kv_cache[virtual_engine]
+        self_kv_cache = self.kv_cache[0]
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens

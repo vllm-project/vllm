@@ -21,11 +21,12 @@ __all__ = [
     "HunYuanVLProcessor",
     "HunYuanVLImageProcessor",
     "InternVLProcessor",
+    "IsaacProcessor",
     "KimiAudioProcessor",
+    "KimiK25Processor",
     "MistralCommonPixtralProcessor",
     "MistralCommonVoxtralProcessor",
     "NanoNemotronVLProcessor",
-    "NemotronParseProcessor",
     "NemotronVLProcessor",
     "LlamaNemotronVLEmbedProcessor",
     "NVLMProcessor",
@@ -33,6 +34,7 @@ __all__ = [
     "Ovis2_5Processor",
     "QwenVLProcessor",
     "Qwen3ASRProcessor",
+    "Step3VLProcessor",
 ]
 
 _CLASS_TO_MODULE: dict[str, str] = {
@@ -46,11 +48,12 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "HunYuanVLProcessor": "vllm.transformers_utils.processors.hunyuan_vl",
     "HunYuanVLImageProcessor": "vllm.transformers_utils.processors.hunyuan_vl_image",
     "InternVLProcessor": "vllm.transformers_utils.processors.internvl",
+    "IsaacProcessor": "vllm.transformers_utils.processors.isaac",
     "KimiAudioProcessor": "vllm.transformers_utils.processors.kimi_audio",
+    "KimiK25Processor": "vllm.transformers_utils.processors.kimi_k25",
     "MistralCommonPixtralProcessor": "vllm.transformers_utils.processors.pixtral",
     "MistralCommonVoxtralProcessor": "vllm.transformers_utils.processors.voxtral",
     "NanoNemotronVLProcessor": "vllm.transformers_utils.processors.nano_nemotron_vl",
-    "NemotronParseProcessor": "vllm.transformers_utils.processors.nemotron_parse",
     "NemotronVLProcessor": "vllm.transformers_utils.processors.nemotron_vl",
     "LlamaNemotronVLEmbedProcessor": "vllm.transformers_utils.processors.nemotron_vl",
     "NVLMProcessor": "vllm.transformers_utils.processors.nvlm_d",
@@ -58,6 +61,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Ovis2_5Processor": "vllm.transformers_utils.processors.ovis2_5",
     "QwenVLProcessor": "vllm.transformers_utils.processors.qwen_vl",
     "Qwen3ASRProcessor": "vllm.transformers_utils.processors.qwen3_asr",
+    "Step3VLProcessor": "vllm.transformers_utils.processors.step3_vl",
 }
 
 
