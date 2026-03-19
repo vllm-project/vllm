@@ -50,20 +50,43 @@ def pytest_collection_modifyitems(config, items):
     )
 
 
+def _patch_encoder_layers(encoder):
+    """Set _attn_implementation='sdpa' on all encoder self_attn layers."""
+    for layer in encoder.layers:
+        if hasattr(layer, "self_attn"):
+            attn = layer.self_attn
+            for cfg_attr in ("vision_config", "config"):
+                cfg = getattr(attn, cfg_attr, None)
+                if cfg is not None and hasattr(cfg, "_attn_implementation"):
+                    cfg._attn_implementation = "sdpa"
+                    break
+
+
 def patch_hf_vision_attn_for_rocm(model):
     """Force SDPA for HF vision encoders on ROCm.
 
     HF's flash_attention_2 has accuracy issues on ROCm that bypass
     torch.backends.cuda settings. This forces SDPA which then uses
     math_sdp via the pytest_collection_modifyitems settings.
+
+    Supports both Isaac-style models (vision_embedding) and
+    SigLIP-based models like Nemotron VL (vision_model).
     """
     if not current_platform.is_rocm():
         return
 
     inner = getattr(model, "model", model)
 
+    # Isaac-style: inner.vision_embedding[0].encoder
     if hasattr(inner, "vision_embedding"):
         vit = inner.vision_embedding[0]
-        for layer in vit.encoder.layers:
-            if hasattr(layer, "self_attn"):
-                layer.self_attn.vision_config._attn_implementation = "sdpa"
+        _patch_encoder_layers(vit.encoder)
+
+    # SigLIP-based (e.g. Nemotron VL): inner.vision_model.vision_model.encoder
+    # or inner.vision_model.encoder
+    if hasattr(inner, "vision_model"):
+        vm = inner.vision_model
+        # SiglipVisionModel wraps SiglipVisionTransformer as .vision_model
+        vm_inner = getattr(vm, "vision_model", vm)
+        if hasattr(vm_inner, "encoder"):
+            _patch_encoder_layers(vm_inner.encoder)

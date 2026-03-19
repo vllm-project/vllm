@@ -24,6 +24,8 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.pooling.score.utils import ScoreMultiModalParam
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
+from ....utils import ROCM_ENGINE_KWARGS
+from ...conftest import patch_hf_vision_attn_for_rocm
 from ...utils import check_embeddings_close
 
 # Prefixes used by the model API
@@ -70,11 +72,13 @@ def _run_test(
         max_model_len=2048,
         enforce_eager=True,
         trust_remote_code=True,
+        **ROCM_ENGINE_KWARGS,
     ) as vllm_model:
         vllm_outputs = vllm_model.embed(input_texts, images=input_images)
 
     # Run HF inference using the model's encode_queries/encode_documents API
     with hf_runner(model, dtype=dtype, auto_cls=AutoModel) as hf_model:
+        patch_hf_vision_attn_for_rocm(hf_model.model)
         hf_outputs = []
         for text, image in zip(input_texts, input_images):
             with torch.inference_mode():
@@ -207,6 +211,7 @@ def _run_hf_reranker(
         trust_remote_code=True,
         auto_cls=AutoModelForSequenceClassification,
     ) as hf_model:
+        patch_hf_vision_attn_for_rocm(hf_model.model)
         processor = AutoProcessor.from_pretrained(
             model,
             trust_remote_code=True,
@@ -250,6 +255,7 @@ def _run_vllm_reranker(
         max_model_len=2048,
         enforce_eager=True,
         trust_remote_code=True,
+        **ROCM_ENGINE_KWARGS,
     ) as vllm_model:
         has_images = any(img is not None for _, img in docs)
 
