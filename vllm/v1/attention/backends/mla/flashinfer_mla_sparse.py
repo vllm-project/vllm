@@ -122,9 +122,8 @@ class FlashInferMLASparseBackend(AttentionBackend):
             qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
             if qk_nope_head_dim not in [128, 192]:
                 return (
-                    "FlashInfer MLA Sparse kernel requires qk_nope_head_dim in "
-                    f"[128, 192], "
-                    f"but got {qk_nope_head_dim}"
+                    "FlashInfer MLA Sparse kernel requires qk_nope_head_dim "
+                    f"in [128, 192], but got {qk_nope_head_dim}"
                 )
             # Check for index_topk which indicates sparse model
             if not hasattr(hf_text_config, "index_topk"):

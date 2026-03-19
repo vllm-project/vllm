@@ -86,9 +86,8 @@ class FlashInferMLABackend(MLACommonBackend):
             qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
             if qk_nope_head_dim not in [64, 128, 192]:
                 return (
-                    "FlashInfer MLA kernel requires qk_nope_head_dim in [64, 128, "
-                    f"192], "
-                    f"but got {qk_nope_head_dim}"
+                    "FlashInfer MLA kernel requires qk_nope_head_dim "
+                    f"in [64, 128, 192], but got {qk_nope_head_dim}"
                 )
         return None
 
