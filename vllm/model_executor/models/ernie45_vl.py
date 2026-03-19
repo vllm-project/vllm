@@ -1373,7 +1373,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        """compute logits"""
         return self.language_model.compute_logits(hidden_states)
 
     def _vision_forward(
