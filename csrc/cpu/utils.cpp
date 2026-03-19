@@ -173,10 +173,13 @@ ScratchPadManager::ScratchPadManager() : size_(0), ptr_(nullptr) {
 void ScratchPadManager::realloc(size_t new_size) {
   new_size = round(new_size);
   if (new_size > size_) {
+    void* new_ptr = std::aligned_alloc(64, new_size);
+    TORCH_CHECK(new_ptr != nullptr,
+                "ScratchPadManager: aligned_alloc failed for size ", new_size);
     if (ptr_ != nullptr) {
       std::free(ptr_);
     }
-    ptr_ = std::aligned_alloc(64, new_size);
+    ptr_ = new_ptr;
     size_ = new_size;
   }
 }
