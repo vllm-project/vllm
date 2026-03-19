@@ -1,50 +1,3 @@
-"""
-修复后的 FireRedASR-AED 模型适配 vLLM
-
-问题分析：
-==========
-vLLM 启动时报错: "This model does not support `--runner generate`"
-
-根本原因：
-- vLLM 在 ModelConfig 初始化时会检查模型是否支持 generate runner
-- 检查逻辑在 /root/vllm/vllm/config/model.py:510 行：
-  if self.runner_type == "generate" and not is_generative_model:
-      raise ValueError("This model does not support `--runner generate`.")
-  
-- is_generative_model 通过 registry.is_text_generation_model() 判断
-- 该方法检查模型类是否实现了 VllmModelForTextGeneration 接口
-
-解决方案：
-=========
-FireRedASR 模型需要遵循 Whisper 的模式（因为两者都是音频转录模型）：
-
-1. 继承自 nn.Module （不需要继承 VllmModelForTextGeneration，通过鸭子类型即可）
-2. 实现必需的方法：
-   - __init__(vllm_config, prefix=""): vLLM 标准初始化
-   - forward(input_ids, positions, encoder_outputs=None): vLLM 标准前向传播
-   - embed_multimodal(**kwargs): 编码音频特征
-   - embed_input_ids(input_ids, ...): 获取 decoder token embeddings
-   - compute_logits(hidden_states): 计算输出 logits
-   
-3. 设置类属性：
-   - supports_transcription_only = True: 标记为仅支持转录任务
-
-关键修改点：
-==========
-1. __init__ 方法签名必须是 (self, *, vllm_config, prefix="")
-2. forward 方法签名必须是 (self, input_ids, positions, encoder_outputs=None, **kwargs)
-3. 必须实现 compute_logits 方法（这是 is_text_generation_model 检查的关键）
-4. 必须实现 embed_input_ids 方法
-5. 对于多模态模型，需要实现 embed_multimodal 方法
-
-替换步骤：
-=========
-将此文件复制到: /root/vllm/vllm/model_executor/models/fireredasr_aed.py
-
-命令：
-cp /root/.vscode-server/libin_test/fireredasr_aed_fixed.py /root/vllm/vllm/model_executor/models/fireredasr_aed.py
-"""
-
 import dataclasses
 import math
 from collections.abc import Mapping, Sequence
@@ -100,60 +53,7 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.utils.jsontree import json_map_leaves
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
-
-
-# Configuration class
-class FireRedASRConfig(PretrainedConfig):
-    """Configuration class for FireRedASR model"""
-    model_type = "fireredasr_aed"
-
-    def __init__(
-        self,
-        num_mel_bins: int = 80,
-        vocab_size: int = 7832,
-        sos_id: int = 3,
-        eos_id: int = 4,
-        pad_id: int = 2,
-        encoder_layers: int = 16,
-        decoder_layers: int = 16,
-        encoder_attention_heads: int = 20,
-        decoder_attention_heads: int = 20,
-        d_model: int = 1280,
-        residual_dropout: float = 0.1,
-        dropout_rate: float = 0.1,
-        kernel_size: int = 33,
-        pe_maxlen: int = 5000,
-        activation_function: str = "gelu",
-        max_target_positions: int = 448,
-        max_source_positions: int = 1500,
-        is_encoder_decoder: bool = True,
-        scale_embedding: bool = False,
-        **kwargs
-    ):
-        self.num_mel_bins = num_mel_bins
-        self.vocab_size = vocab_size
-        self.sos_id = sos_id
-        self.eos_id = eos_id
-        self.pad_id = pad_id
-        self.encoder_layers = encoder_layers
-        self.decoder_layers = decoder_layers
-        self.encoder_attention_heads = encoder_attention_heads
-        self.decoder_attention_heads = decoder_attention_heads
-        self.d_model = d_model
-        self.residual_dropout = residual_dropout
-        self.dropout_rate = dropout_rate
-        self.kernel_size = kernel_size
-        self.pe_maxlen = pe_maxlen
-        self.activation_function = activation_function
-        self.max_target_positions = max_target_positions
-        self.max_source_positions = max_source_positions
-        self.is_encoder_decoder = is_encoder_decoder
-        self.scale_embedding = scale_embedding
-        
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-        
-        super().__init__(**kwargs)
+from vllm.model_executor.models.fireredasr2 import Conv2dSubsampling, RelPositionalEncoding, RelPosEmbConformerBlock
 
 
 class FireRedASRAudioInputs(TensorSchema):
@@ -192,8 +92,7 @@ class ConformerEncoder(nn.Module):
         self.layer_stack = nn.ModuleList()
         for l in range(config.encoder_layers):
             block = RelPosEmbConformerBlock(config.d_model, config.encoder_attention_heads,
-                        config.residual_dropout,
-                        config.dropout_rate, config.kernel_size)
+                        config.kernel_size)
             self.layer_stack.append(block)
 
     def forward(self, input_features):
@@ -219,280 +118,6 @@ class ConformerEncoder(nn.Module):
         mask = pos < input_lengths.unsqueeze(1)
         return mask.unsqueeze(1).float()
 
-
-class RelPosEmbConformerBlock(nn.Module):
-    def __init__(self, d_model, n_head,
-                 residual_dropout=0.1,
-                 dropout_rate=0.1, kernel_size=33):
-        super().__init__()
-        self.ffn1 = ConformerFeedForward(d_model, dropout_rate)
-        self.mhsa = RelPosMultiHeadAttention(n_head, d_model,
-                                             residual_dropout)
-        self.conv = ConformerConvolution(d_model, kernel_size,
-                                         dropout_rate)
-        self.ffn2 = ConformerFeedForward(d_model, dropout_rate)
-        self.layer_norm = nn.LayerNorm(d_model)
-
-    def forward(self, x, pos_emb, slf_attn_mask=None, pad_mask=None):
-        out = 0.5 * x + 0.5 * self.ffn1(x)
-        out = self.mhsa(out, out, out, pos_emb, mask=slf_attn_mask)[0]
-        out = self.conv(out, pad_mask)
-        out = 0.5 * out + 0.5 * self.ffn2(out)
-        out = self.layer_norm(out)
-        return out
-
-class Swish(nn.Module):
-    def forward(self, x):
-        return x * torch.sigmoid(x)
-
-
-class Conv2dSubsampling(nn.Module):
-    def __init__(self, num_mel_bins, d_model, out_channels=32):
-        super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(1, out_channels, 3, 2),
-            nn.ReLU(),
-            nn.Conv2d(out_channels, out_channels, 3, 2),
-            nn.ReLU(),
-        )
-        subsample_idim = ((num_mel_bins - 1) // 2 - 1) // 2
-        self.out = nn.Linear(out_channels * subsample_idim, d_model)
-
-        self.subsampling = 4
-        left_context = right_context = 3  # both exclude currect frame
-        self.context = left_context + 1 + right_context  # 7
-
-    def forward(self, x, x_mask):
-        x = x.unsqueeze(1)
-        x = self.conv(x)
-        N, C, T, D = x.size()
-        x = self.out(x.transpose(1, 2).contiguous().view(N, T, C * D))
-        mask = x_mask[:, :, :-2:2][:, :, :-2:2]
-        input_lengths = mask[:, -1, :].sum(dim=-1)
-        return x, input_lengths, mask
-
-
-class RelPositionalEncoding(torch.nn.Module):
-    def __init__(self, d_model, max_len=5000):
-        super().__init__()
-        pe_positive = torch.zeros(max_len, d_model, requires_grad=False)
-        pe_negative = torch.zeros(max_len, d_model, requires_grad=False)
-        position = torch.arange(0, max_len).unsqueeze(1).float()
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() *
-                             -(torch.log(torch.tensor(10000.0)).item()/d_model))
-        pe_positive[:, 0::2] = torch.sin(position * div_term)
-        pe_positive[:, 1::2] = torch.cos(position * div_term)
-        pe_negative[:, 0::2] = torch.sin(-1 * position * div_term)
-        pe_negative[:, 1::2] = torch.cos(-1 * position * div_term)
-
-        pe_positive = torch.flip(pe_positive, [0]).unsqueeze(0)
-        pe_negative = pe_negative[1:].unsqueeze(0)
-        pe = torch.cat([pe_positive, pe_negative], dim=1)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        # Tmax = 2 * max_len - 1
-        Tmax, T = self.pe.size(1), x.size(1)
-        pos_emb = self.pe[:, Tmax // 2 - T + 1 : Tmax // 2 + T].clone().detach()
-        return pos_emb
-
-
-class ConformerFeedForward(nn.Module):
-    def __init__(self, d_model, dropout_rate=0.1):
-        super().__init__()
-        pre_layer_norm = nn.LayerNorm(d_model)
-        linear_expand = nn.Linear(d_model, d_model*4)
-        nonlinear = Swish()
-        dropout_pre = nn.Dropout(dropout_rate)
-        linear_project = nn.Linear(d_model*4, d_model)
-        dropout_post = nn.Dropout(dropout_rate)
-        self.net = nn.Sequential(pre_layer_norm,
-                                 linear_expand,
-                                 nonlinear,
-                                 dropout_pre,
-                                 linear_project,
-                                 dropout_post)
-
-    def forward(self, x):
-        residual = x
-        output = self.net(x)
-        output = output + residual
-        return output
-
-
-class ConformerConvolution(nn.Module):
-    def __init__(self, d_model, kernel_size=33, dropout_rate=0.1):
-        super().__init__()
-        assert kernel_size % 2 == 1
-        self.pre_layer_norm = nn.LayerNorm(d_model)
-        self.pointwise_conv1 = nn.Conv1d(d_model, d_model*4, kernel_size=1, bias=False)
-        self.glu = F.glu
-        self.padding = (kernel_size - 1) // 2
-        self.depthwise_conv = nn.Conv1d(d_model*2, d_model*2,
-                                        kernel_size, stride=1,
-                                        padding=self.padding,
-                                        groups=d_model*2, bias=False)
-        self.batch_norm = nn.LayerNorm(d_model*2)
-        self.swish = Swish()
-        self.pointwise_conv2 = nn.Conv1d(d_model*2, d_model, kernel_size=1, bias=False)
-        self.dropout = nn.Dropout(dropout_rate)
-
-    def forward(self, x, mask=None):
-        residual = x
-        out = self.pre_layer_norm(x)
-        out = out.transpose(1, 2)
-        if mask is not None:
-            out.masked_fill_(mask.ne(1), 0.0)
-        out = self.pointwise_conv1(out)
-        out = F.glu(out, dim=1)
-        out = self.depthwise_conv(out)
-
-        out = out.transpose(1, 2)
-        out = self.swish(self.batch_norm(out))
-        out = out.transpose(1, 2)
-
-        out = self.dropout(self.pointwise_conv2(out))
-        if mask is not None:
-            out.masked_fill_(mask.ne(1), 0.0)
-        out = out.transpose(1, 2)
-        return out + residual
-
-
-class EncoderMultiHeadAttention(nn.Module):
-    def __init__(self, n_head, d_model,
-                 residual_dropout=0.1):
-        super().__init__()
-        assert d_model % n_head == 0
-        self.n_head = n_head
-        self.d_k = d_model // n_head
-        self.d_v = self.d_k
-
-        self.w_qs = nn.Linear(d_model, n_head * self.d_k, bias=False)
-        self.w_ks = nn.Linear(d_model, n_head * self.d_k, bias=False)
-        self.w_vs = nn.Linear(d_model, n_head * self.d_v, bias=False)
-
-        self.layer_norm_q = nn.LayerNorm(d_model)
-        self.layer_norm_k = nn.LayerNorm(d_model)
-        self.layer_norm_v = nn.LayerNorm(d_model)
-
-        self.attention = ScaledDotProductAttention(temperature=self.d_k ** 0.5)
-        self.fc = nn.Linear(n_head * self.d_v, d_model, bias=False)
-        self.dropout = nn.Dropout(residual_dropout)
-
-    def forward(self, q, k, v, mask=None):
-        sz_b, len_q = q.size(0), q.size(1)
-
-        residual = q
-        q, k, v = self.forward_qkv(q, k, v)
-
-        output, attn = self.attention(q, k, v, mask=mask)
-
-        output = self.forward_output(output, residual, sz_b, len_q)
-        return output, attn
-
-    def forward_qkv(self, q, k, v):
-        d_k, d_v, n_head = self.d_k, self.d_v, self.n_head
-        sz_b, len_q, len_k, len_v = q.size(0), q.size(1), k.size(1), v.size(1)
-
-        q = self.layer_norm_q(q)
-        k = self.layer_norm_k(k)
-        v = self.layer_norm_v(v)
-
-        q = self.w_qs(q).view(sz_b, len_q, n_head, d_k)
-        k = self.w_ks(k).view(sz_b, len_k, n_head, d_k)
-        v = self.w_vs(v).view(sz_b, len_v, n_head, d_v)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        return q, k, v
-
-    def forward_output(self, output, residual, sz_b, len_q):
-        output = output.transpose(1, 2).contiguous().view(sz_b, len_q, -1)
-        fc_out = self.fc(output)
-        output = self.dropout(fc_out)
-        output = output + residual
-        return output
-
-
-class ScaledDotProductAttention(nn.Module):
-    def __init__(self, temperature):
-        super().__init__()
-        self.temperature = temperature
-        self.dropout = nn.Dropout(0.0)
-        self.INF = float('inf')
-
-    def forward(self, q, k, v, mask=None):
-        attn = torch.matmul(q, k.transpose(2, 3)) / self.temperature
-        output, attn = self.forward_attention(attn, v, mask)
-        return output, attn
-
-    def forward_attention(self, attn, v, mask=None):
-        if mask is not None:
-            mask = mask.unsqueeze(1)
-            mask = mask.eq(0)
-            attn = attn.masked_fill(mask, -self.INF)
-            attn = torch.softmax(attn, dim=-1).masked_fill(mask, 0.0)
-        else:
-            attn = torch.softmax(attn, dim=-1)
-
-        d_attn = self.dropout(attn)
-        output = torch.matmul(d_attn, v)
-
-        return output, attn
-
-
-class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
-    def __init__(self, n_head, d_model,
-                 residual_dropout=0.1):
-        super().__init__(n_head, d_model,
-                         residual_dropout)
-        d_k = d_model // n_head
-        self.scale = 1.0 / (d_k ** 0.5)
-        self.linear_pos = nn.Linear(d_model, n_head * d_k, bias=False)
-        # CRITICAL: Use torch.empty() instead of torch.FloatTensor()
-        # torch.FloatTensor always creates on CPU, ignoring device context
-        # torch.empty() respects 'with device:' context and creates on correct device
-        self.pos_bias_u = nn.Parameter(torch.empty(n_head, d_k))
-        self.pos_bias_v = nn.Parameter(torch.empty(n_head, d_k))
-        torch.nn.init.xavier_uniform_(self.pos_bias_u)
-        torch.nn.init.xavier_uniform_(self.pos_bias_v)
-
-    def _rel_shift(self, x):
-        N, H, T1, T2 = x.size()
-        zero_pad = torch.zeros((N, H, T1, 1), device=x.device, dtype=x.dtype)
-        x_padded = torch.cat([zero_pad, x], dim=-1)
-
-        x_padded = x_padded.view(N, H, T2 + 1, T1)
-        x = x_padded[:, :, 1:].view_as(x)
-        x = x[:, :, :, : x.size(-1) // 2 + 1]
-        return x
-
-    def forward(self, q, k, v, pos_emb, mask=None):
-        sz_b, len_q = q.size(0), q.size(1)
-
-        residual = q
-        q, k, v = self.forward_qkv(q, k, v)
-
-        q = q.transpose(1, 2)
-        n_batch_pos = pos_emb.size(0)
-        p = self.linear_pos(pos_emb).view(n_batch_pos, -1, self.n_head, self.d_k)
-        p = p.transpose(1, 2)
-
-        q_with_bias_u = (q + self.pos_bias_u).transpose(1, 2)
-        q_with_bias_v = (q + self.pos_bias_v).transpose(1, 2)
-
-        matrix_ac = torch.matmul(q_with_bias_u, k.transpose(-2, -1))
-
-        matrix_bd = torch.matmul(q_with_bias_v, p.transpose(-2, -1))
-        matrix_bd = self._rel_shift(matrix_bd)
-
-        attn_scores = matrix_ac + matrix_bd
-        attn_scores.mul_(self.scale)
-
-        output, attn = self.attention.forward_attention(attn_scores, v, mask=mask)
-
-        output = self.forward_output(output, residual, sz_b, len_q)
-        return output, attn
 
 
 class TransformerDecoder(nn.Module):
@@ -1199,15 +824,32 @@ class FireRedAsrAedLForConditionalGeneration(
     
     def load_weights(self, weights):
         """Load model weights from checkpoint.
-        
+
         The checkpoint uses FireRedASR naming convention which matches
         our model structure exactly.
         """
+        import re
+
         params_dict = dict(self.named_parameters())
         buffers_dict = dict(self.named_buffers())
         loaded_params = set()
 
+        # Mapping from Sequential index to named module for FFN layers
+        # Sequential: 0=pre_layer_norm, 1=linear_expand, 4=linear_project
+        ffn_net_mapping = {
+            '.net.0.': '.pre_layer_norm.',
+            '.net.1.': '.linear_expand.',
+            '.net.4.': '.linear_project.',
+        }
+
         for name, loaded_weight in weights:
+            # Remap FFN Sequential indices to named modules
+            # e.g., ffn1.net.0.weight -> ffn1.pre_layer_norm.weight
+            for old_pattern, new_pattern in ffn_net_mapping.items():
+                if old_pattern in name:
+                    name = name.replace(old_pattern, new_pattern)
+                    break
+
             # Handle parameters
             if name in params_dict:
                 param = params_dict[name]
@@ -1221,7 +863,7 @@ class FireRedAsrAedLForConditionalGeneration(
             elif name in buffers_dict:
                 buffers_dict[name].data.copy_(loaded_weight)
                 loaded_params.add(name)
-        
+
         return loaded_params
     
     def get_language_model(self) -> nn.Module:
