@@ -54,7 +54,7 @@ If your model is not in the above list, we will try to automatically convert the
 
 Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. Most [cross-encoder models](scoring.md#cross-encoder-models) can also be used as classification models. For more information on cross-encoder models, please refer to [this page](scoring.md).
 
---8<-- "docs/models/pooling_models/score.md:supported-score-models"
+--8<-- "docs/models/pooling_models/scoring.md:supported-score-models"
 
 ### As reward Models
 

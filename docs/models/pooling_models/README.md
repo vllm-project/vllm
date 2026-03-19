@@ -31,26 +31,26 @@ Of course, we also have "plugin" tasks that allow users to customize input and o
 
 ### Pooling Tasks
 
-| Pooling Tasks      | Granularity   | Outputs                               |
-|--------------------|---------------|---------------------------------------|
-| `classify`         | Sequence-wise | class labels                          |
-| `score` (see note) | Sequence-wise | reranker score                        |
-| `embed`            | Sequence-wise | vector representations                |
-| `token_classify`   | Token-wise    | class for each token                  |
-| `token_embed`      | Token-wise    | vector representations for each token |
+| Pooling Tasks      | Granularity   | Outputs                                         |
+|--------------------|---------------|-------------------------------------------------|
+| `classify`         | Sequence-wise | probability vector of classes for each sequence |
+| `score` (see note) | Sequence-wise | reranker score for each sequence                |
+| `embed`            | Sequence-wise | vector representations for each sequence        |
+| `token_classify`   | Token-wise    | probability vector of classes for each token    |
+| `token_embed`      | Token-wise    | vector representations for each token           |
 
 !!! note
     Within classification tasks, there is a specialized subcategory: Cross-encoder (aka reranker) models. These models are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
 ### Score Types
 
-| Pooling Tasks      | Granularity   | Outputs                               | Score Types        | scoring function         |
-|--------------------|---------------|---------------------------------------|--------------------|--------------------------|
-| `classify`         | Sequence-wise | class labels                          | nan                | nan                      |
-| `score` (see note) | Sequence-wise | reranker                              | `cross-encoder`    | linear classifier        |
-| `embed`            | Sequence-wise | vector representations                | `bi-encoder`       | cosine similarity        |
-| `token_classify`   | Token-wise    | class for each token                  | nan                | nan                      |
-| `token_embed`      | Token-wise    | vector representations for each token | `late-interaction` | late interaction(MaxSim) |
+| Pooling Tasks      | Granularity   | Outputs                                         | Score Types        | scoring function         |
+|--------------------|---------------|-------------------------------------------------|--------------------|--------------------------|
+| `classify`         | Sequence-wise | probability vector of classes for each sequence | nan                | nan                      |
+| `score` (see note) | Sequence-wise | reranker score for each sequence                | `cross-encoder`    | linear classifier        |
+| `embed`            | Sequence-wise | vector representations for each sequence        | `bi-encoder`       | cosine similarity        |
+| `token_classify`   | Token-wise    | probability vector of classes for each token    | nan                | nan                      |
+| `token_embed`      | Token-wise    | vector representations for each token           | `late-interaction` | late interaction(MaxSim) |
 
 The score models is designed to compute similarity scores between two input prompts. It supports three model types (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
 
