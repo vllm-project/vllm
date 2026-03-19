@@ -530,26 +530,27 @@ async def run_single_iteration(
             tasks.append(task)
 
         # Wait for all requests to arrive at the engine
-        if config.mode == "decode":
-            endpoint = rotator.all()[0]
-            for _ in range(100):
-                try:
-                    resp = await session.get(f"{endpoint}/debug/batch_info")
-                    if resp.status == 200:
-                        info = await resp.json()
-                        total = (info.get("num_running", 0)
-                                 + info.get("num_waiting", 0))
-                        if total >= batch_size:
-                            logger.info(
-                                "All %d requests queued (running=%d, "
-                                "waiting=%d)",
-                                total, info["num_running"],
-                                info["num_waiting"])
-                            break
-                except Exception:
-                    pass
-                await asyncio.sleep(0.1)
-        else:
+        endpoint = rotator.all()[0]
+        for _ in range(100):
+            try:
+                resp = await session.get(f"{endpoint}/debug/batch_info")
+                if resp.status == 200:
+                    info = await resp.json()
+                    total = (info.get("num_running", 0)
+                             + info.get("num_waiting", 0))
+                    if total >= batch_size:
+                        logger.info(
+                            "All %d requests queued (running=%d, "
+                            "waiting=%d)",
+                            total, info["num_running"],
+                            info["num_waiting"])
+                        break
+                elif resp.status == 404:
+                    # No batch_info endpoint, fall back to fixed delay
+                    await asyncio.sleep(0.1)
+                    break
+            except Exception:
+                pass
             await asyncio.sleep(0.1)
 
         # 4. Resume scheduling (prefill_only: only prefills run)
