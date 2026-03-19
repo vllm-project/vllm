@@ -181,8 +181,8 @@ class ExampleConnector(KVConnectorBase_V1):
                 # Only process layers that have kv_cache
                 # attribute (attention layers) Skip non-attention
                 # layers like FusedMoE/MLP etc.
-                kv_cache_attr = getattr(layer, "kv_cache", None)
-                if kv_cache_attr is None:
+                kv_cache_layer = getattr(layer, "kv_cache", None)
+                if kv_cache_layer is None:
                     continue
 
                 filename = self._generate_filename_debug(
@@ -191,7 +191,7 @@ class ExampleConnector(KVConnectorBase_V1):
                 kv_cache = safetensors.torch.load_file(filename)["kv_cache"].cuda()
                 if isinstance(attn_metadata, dict):
                     inject_kv_into_layer(
-                        kv_cache_attr,
+                        kv_cache_layer,
                         kv_cache,
                         request.slot_mapping,
                         attn_metadata[layer_name],
