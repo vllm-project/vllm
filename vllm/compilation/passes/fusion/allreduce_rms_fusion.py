@@ -14,11 +14,6 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
-from vllm.distributed.device_communicators.aiter_all_reduce import (
-    _AR_MAX_SIZE,
-    destroy_aiter_allreduce,
-    initialize_aiter_allreduce,
-)
 from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -983,17 +978,28 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
         self.ca_comm = ca_comm
 
         assert isinstance(ca_comm, CustomAllreduce)
-        hidden_dim = config.model_config.get_hidden_size()
 
+        group = get_tp_group().cpu_group
+        rocm_aiter_ops.initialize_aiter_allreduce(group, self.device)
+        hidden_dim = config.model_config.get_hidden_size()
         element_size = torch.tensor([], dtype=self.model_dtype).element_size()
-        self.max_token_num = (_AR_MAX_SIZE / 2) // (hidden_dim * element_size)
+        max_size = rocm_aiter_ops.get_aiter_allreduce_max_size()
+        if max_size is None:
+            logger.warning("AITER allreduce fusion must be initialized")
+            return
+
+        max_token_num = (max_size / 2) // (hidden_dim * element_size)
         self.max_token_num = min(
-            self.max_token_num, config.scheduler_config.max_num_batched_tokens
+            max_token_num,
+            config.scheduler_config.max_num_batched_tokens,
         )
 
-        rank = get_tensor_model_parallel_rank()
-        group = get_tp_group().cpu_group
-        initialize_aiter_allreduce(self.tp_size, rank, group, self.device)
+        logger.debug_once(
+            f"AITER stage-1 fused allreduce max tokens: {self.max_token_num} "
+            f"(tp={self.tp_size}, hidden={hidden_dim})",
+            scope="global",
+        )
+
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="rocm_aiter_allreduce_rmsnorm_fusion_pass"
         )
@@ -1039,7 +1045,7 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
         if getattr(self, "disabled", True):
             return
         with contextlib.suppress(Exception):
-            destroy_aiter_allreduce()
+            rocm_aiter_ops.destroy_aiter_allreduce()
 
     def uuid(self) -> str:
         return VllmInductorPass.hash_source(

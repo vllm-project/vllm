@@ -482,11 +482,7 @@ class GroupCoordinator:
 
             aiter_enabled = rocm_aiter_ops.is_enabled()
             if aiter_enabled:
-                from vllm.distributed.device_communicators.aiter_all_reduce import (
-                    get_aiter_allreduce,
-                )
-
-                aiter_ar = get_aiter_allreduce()
+                aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
                 if aiter_ar is not None:
                     maybe_aiter_context = aiter_ar.capture()  # type: ignore
 
