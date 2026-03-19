@@ -7,6 +7,7 @@ import pytest
 from vllm.config import PassConfig
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import is_flashinfer_fp8_blockscale_gemm_supported
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .common import (
     INDUCTOR_GRAPH_PARTITION,
@@ -98,6 +99,10 @@ def test_tp1_fp8_fusions(
     if block_fp8 and "-quant_fp8" in custom_ops:
         # This is why config forces +quant_fp8 by default
         pytest.skip("native QuantFP8 matching not supported for group quant")
+
+    # Per-group FP8 attn fusion is only supported on Triton backend
+    if block_fp8 and attn_backend.backend != AttentionBackendEnum.TRITON_ATTN:
+        matches = matches._replace(attn_quant_fusion=0)
 
     # Reduce size of model and skip weight loading time
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
