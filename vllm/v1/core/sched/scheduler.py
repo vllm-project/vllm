@@ -2260,10 +2260,10 @@ class Scheduler(SchedulerInterface):
                 # beyond the known-invalid range, it must also be reset.
                 if req.num_computed_tokens > min_valid_tokens:
                     num_failed_tokens += req.num_computed_tokens - min_valid_tokens
-                    req.num_computed_tokens = min_valid_tokens
                     req.num_external_computed_tokens -= (
                         req.num_computed_tokens - min_valid_tokens
                     )
+                    req.num_computed_tokens = min_valid_tokens
                     async_failed_req_ids.add(req.request_id)
 
         total_failed_requests = len(async_failed_req_ids)
