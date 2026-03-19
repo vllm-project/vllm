@@ -31,7 +31,10 @@ class TritonMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
     ]
 
     @classmethod
@@ -108,10 +111,11 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TritonMLAImpl"
             )
 
+        # For FP8 KV cache, we dequantize to BF16 on load inside the
+        # Triton kernel. Tell the common layer not to quantize queries
+        # to FP8 — we handle FP8 KV cache with BF16 queries (Mode 1).
         if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "TritonMLA V1 with FP8 KV cache not yet supported"
-            )
+            self.supports_quant_query_input = False
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
@@ -134,9 +138,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
-
-        if self.kv_cache_dtype.startswith("fp8"):
-            raise NotImplementedError("FP8 Triton MLA not yet supported")
 
         if type(q) is tuple:
             q = torch.cat(q, dim=-1)
@@ -171,7 +172,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
         PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
 
-        # Run MQA
+        # Run MQA — always pass layer scales. When KV cache is
+        # BF16 the kernel's `if dtype.is_fp8()` check is a no-op.
         decode_attention_fwd(
             q,
             kv_c_and_k_pe_cache,
@@ -184,6 +186,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             num_kv_splits,
             self.scale,
             PAGE_SIZE,
+            k_scale=layer._k_scale,
+            v_scale=layer._k_scale,
         )
 
         return o, lse
