@@ -16,9 +16,11 @@ The following open-source RL libraries use vLLM for fast rollouts (sorted alphab
 - [Unsloth](https://github.com/unslothai/unsloth)
 - [verl](https://github.com/volcengine/verl)
 
-For weight synchronization between training and inference, see the [Weight Transfer](weight_transfer/README.md) documentation, which covers the pluggable backend system with [NCCL](weight_transfer/nccl.md) (multi-GPU) and [IPC](weight_transfer/ipc.md) (same-GPU) engines.
+See the following basic examples to get started if you don't want to use an existing library:
 
-For pipelining generation and training to improve GPU utilization and throughput, see the [Async Reinforcement Learning](async_rl.md) guide, which covers the pause/resume API for safely updating weights mid-flight.
+- [Training and inference processes are located on separate GPUs (inspired by OpenRLHF)](../examples/offline_inference/rlhf.md)
+- [Training and inference processes are colocated on the same GPUs using Ray](../examples/offline_inference/rlhf_colocate.md)
+- [Utilities for performing RLHF with vLLM](../examples/offline_inference/rlhf_utils.md)
 
 See the following notebooks showing how to use vLLM for GRPO:
 
