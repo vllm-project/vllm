@@ -68,6 +68,7 @@ def init_pooling_state(
             OpenAIServingPooling(
                 engine_client,
                 state.openai_serving_models,
+                state.openai_serving_render,
                 request_logger=request_logger,
                 chat_template=resolved_chat_template,
                 chat_template_content_format=args.chat_template_content_format,

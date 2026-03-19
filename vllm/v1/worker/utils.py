@@ -180,7 +180,7 @@ class KVBlockZeroer:
         )
         self._ids_gpu = torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
         self._meta = (
-            torch.tensor(seg_addrs, dtype=torch.int64, device=self.device),
+            torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
             page_size_el,
             blk_size,
             len(seg_addrs),
@@ -510,7 +510,7 @@ def bind_kv_cache(
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
-        # NOTE: Use list because of v0 PP virtual engine.
+        # NOTE: Keep list wrapper for layers that index kv_cache by engine slot.
         forward_context[layer_name].kv_cache = [kv_cache]
 
 
