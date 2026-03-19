@@ -8,8 +8,14 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
+from vllm.model_executor.models.vision import get_load_balance_assignment
 from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
     EncoderCudaGraphConfig,
 )
@@ -361,14 +367,6 @@ class EncoderCudaGraphManager:
             max_output_tokens_per_rank: Max output tokens across all ranks
                 (for padding during all_gather).
         """
-        from vllm.distributed import (
-            get_tensor_model_parallel_rank,
-            get_tensor_model_parallel_world_size,
-        )
-        from vllm.model_executor.models.vision import (
-            get_load_balance_assignment,
-        )
-
         tp_size = get_tensor_model_parallel_world_size()
         current_rank = get_tensor_model_parallel_rank()
 
@@ -431,8 +429,6 @@ class EncoderCudaGraphManager:
         pad -> all_gather -> unpad -> reorder algorithm as
         run_dp_sharded_mrope_vision_model() in the eager path.
         """
-        from vllm.distributed import tensor_model_parallel_all_gather
-
         hidden_size = self.config.out_hidden_size
         tp_size = len(images_per_rank)
 
