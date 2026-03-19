@@ -55,7 +55,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.renderers import TokenizeParams
 from vllm.transformers_utils.configs.radio import RadioConfig
-from vllm.transformers_utils.processors.nemotron_parse import NemotronParseProcessor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backend import AttentionType
 
@@ -368,17 +367,6 @@ class NemotronParsePixelInputs(TensorSchema):
 
 
 class NemotronParseProcessingInfo(BaseProcessingInfo):
-    def get_hf_config(self):
-        return self.ctx.get_hf_config()
-
-    def get_hf_processor(self, **kwargs) -> NemotronParseProcessor:
-        return self.ctx.init_processor(
-            NemotronParseProcessor,
-            config=self.get_hf_config(),
-            tokenizer=self.get_tokenizer(),
-            **kwargs,
-        )
-
     def get_default_tok_params(self) -> TokenizeParams:
         return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
