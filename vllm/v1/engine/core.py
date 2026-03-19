@@ -790,6 +790,9 @@ class EngineCore:
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
         """
+        if level < 1:
+            self._scheduler_paused = True
+            return None
 
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
@@ -797,12 +800,8 @@ class EngineCore:
         if level < 1:
             return pause_future
 
-        if level == 0:
-            # Level 0: Just pause scheduling, don't touch GPU
-            self.pause_scheduler()
-        else:
-            # Level 1+: Delegate to executor for GPU memory management
-            self.model_executor.sleep(level)
+        # Level 1+: Delegate to executor for GPU memory management
+        model_executor = self.model_executor
         if pause_future is None:
             model_executor.sleep(level)
             return None
