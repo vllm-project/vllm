@@ -2928,7 +2928,10 @@ class GPUModelRunner(
 
         pooling_metadata = self.input_batch.get_pooling_metadata()
         pooling_metadata.build_pooling_cursor(
-            num_scheduled_tokens_np, seq_lens_cpu, device=hidden_states.device
+            num_scheduled_tokens_np,
+            seq_lens_cpu,
+            device=hidden_states.device,
+            query_start_loc_gpu=self.query_start_loc.gpu[: num_reqs + 1],
         )
 
         model = cast(VllmModelForPooling, self.model)
@@ -5510,13 +5513,14 @@ class GPUModelRunner(
                             dummy_modality
                         ]
 
-                        logger.info(
+                        logger.info_once(
                             "Encoder cache will be initialized with a "
                             "budget of %s tokens, and profiled with "
                             "%s %s items of the maximum feature size.",
                             encoder_budget,
                             max_mm_items_per_batch,
                             dummy_modality,
+                            scope="local",
                         )
 
                         # Create dummy batch of multimodal inputs.
