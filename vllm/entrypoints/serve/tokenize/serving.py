@@ -139,11 +139,11 @@ class OpenAIServingTokenization(OpenAIServing):
             lora_request=lora_request,
         )
 
-        engine_prompt = await self.renderer.tokenize_prompt_async(
+        tok_prompt = await self.renderer.tokenize_prompt_async(
             TokensPrompt(prompt_token_ids=request.tokens),
             request.build_tok_params(self.model_config),
         )
-        prompt_text = engine_prompt["prompt"]  # type: ignore[typeddict-item]
+        prompt_text = tok_prompt["prompt"]  # type: ignore[typeddict-item]
 
         return DetokenizeResponse(prompt=prompt_text)
 
