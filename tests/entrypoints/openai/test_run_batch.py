@@ -14,7 +14,7 @@ CHAT_MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-small"
 RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 REASONING_MODEL_NAME = "Qwen/Qwen3-0.6B"
-SPEECH_LARGE_MODEL_NAME = "/mnt/data0/LLM/whisper-large-v3"
+SPEECH_LARGE_MODEL_NAME = "openai/whisper-large-v3"
 SPEECH_SMALL_MODEL_NAME = "openai/whisper-small"
 
 INPUT_BATCH = "\n".join(
