@@ -270,12 +270,31 @@ def _verify_bundles(
             )
 
 
+def build_actor_name(
+    instance_id: str,
+    rank: int,
+    tp_size: int,
+    pp_size: int,
+    pcp_size: int,
+) -> str:
+    """Build a descriptive Ray actor name for dashboard visibility."""
+    name = f"vllm_Worker_{instance_id}"
+    if tp_size > 1:
+        name += f"_TP{rank % tp_size}"
+    if pp_size > 1:
+        name += f"_PP{(rank // tp_size) % pp_size}"
+    if pcp_size > 1:
+        name += f"_PCP{rank // (tp_size * pp_size)}"
+    return name
+
+
 def get_bundles_sorted_by_node(
     placement_group: "PlacementGroup",
     world_size: int,
-) -> list[tuple[int, str]]:
+) -> list[tuple[int, str, str]]:
     """
-    Return GPU bundle indices paired with node IDs, sorted driver-first.
+    Return GPU bundle indices paired with node IDs and node IPs,
+    sorted driver-first.
 
     This utility has to be invoked from the driver node.
     """
@@ -288,23 +307,26 @@ def get_bundles_sorted_by_node(
             f"current platform {current_platform.device_name} does not support ray."
         )
 
+    node_id_to_ip = {
+        n["NodeID"]: n["NodeManagerAddress"] for n in ray.nodes() if n["Alive"]
+    }
+
     bundle_specs = placement_group.bundle_specs
     assert bundle_specs is not None
-    bundle_to_node_id: list[tuple[int, str]] = []
+    bundle_to_node_id: list[tuple[int, str, str]] = []
     for i, bundle in enumerate(bundle_specs):
         if bundle.get(ray_device_key):
-            node_id = bundle_to_node.get(i) or bundle_to_node.get(str(i))
-            bundle_to_node_id.append((i, node_id))
+            node_id = bundle_to_node.get(i)
+            bundle_to_node_id.append((i, node_id, node_id_to_ip[node_id]))
 
-    bundle_to_node_id = bundle_to_node_id[:world_size]
     driver_node = ray.get_runtime_context().get_node_id()
 
     def _sort_key(item):
-        _, node_id = item
+        _, node_id, _ = item
         return (0 if node_id == driver_node else 1, node_id)
 
     bundle_to_node_id.sort(key=_sort_key)
-    return bundle_to_node_id
+    return bundle_to_node_id[:world_size]
 
 
 def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
@@ -412,6 +434,10 @@ def initialize_ray_cluster(
     """
     assert_ray_available()
     from vllm.platforms import current_platform
+
+    # Disable Ray usage stats collection
+    if os.environ.get("RAY_USAGE_STATS_ENABLED", "0") != "1":
+        os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
 
     # Prevalidate GPU requirements before Ray processing
     if current_platform.is_cuda() and parallel_config.world_size > 1:

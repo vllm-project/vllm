@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 import threading
 import weakref
 from collections import defaultdict, deque
@@ -17,8 +16,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
     get_distributed_init_method,
-    get_ip,
-    get_loopback_ip,
     get_open_port,
 )
 from vllm.v1.executor.multiproc_executor import (
@@ -27,6 +24,7 @@ from vllm.v1.executor.multiproc_executor import (
     WorkerProc,
 )
 from vllm.v1.executor.ray_utils import (
+    build_actor_name,
     get_bundles_sorted_by_node,
     initialize_ray_cluster,
     ray,
@@ -58,9 +56,6 @@ class RayWorkerHandle:
     node_id: str
     """Node ID of the worker"""
 
-    bundle_index: int
-    """Placement group bundle index to schedule the actor on"""
-
     run_ref: ObjectRef = None
     """run() ObjectRef used as a sentinel for health monitoring"""
 
@@ -76,9 +71,10 @@ class RayWorkerProc(WorkerProc):
         distributed_init_method: str,
         input_shm_handle: Handle,
         is_driver_worker: bool,
-        same_node_as_executor: bool = False,
+        is_driver_node: bool = False,
     ):
-        self._same_node_as_executor = same_node_as_executor
+        self._is_driver_node = is_driver_node
+        self.local_rank = local_rank
         super().__init__(
             vllm_config=vllm_config,
             local_rank=local_rank,
@@ -88,7 +84,6 @@ class RayWorkerProc(WorkerProc):
             shared_worker_lock=None,
             is_driver_worker=is_driver_worker,
         )
-        self.local_rank = local_rank
 
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
@@ -102,9 +97,14 @@ class RayWorkerProc(WorkerProc):
             input_shm_handle, self.worker.rank
         )
 
-        n_local = 1 if self._same_node_as_executor else 0
+        n_local = 1 if self._is_driver_node else 0
+        # Use ray.util.get_node_ip_address() to get Ray's internal IP.
+        # get_ip() returns host's external IP which is typically not
+        # routable between nodes within the cluster.
         self.worker_response_mq = MessageQueue(
-            n_reader=1, n_local_reader=n_local, connect_ip=get_ip()
+            n_reader=1,
+            n_local_reader=n_local,
+            connect_ip=ray.util.get_node_ip_address(),
         )
         self.peer_response_handles: list[dict] = []
 
@@ -140,8 +140,6 @@ class RayExecutorV2(MultiprocExecutor):
     supports_pp: bool = True
 
     def __init__(self, vllm_config: VllmConfig):
-        # Skip MultiprocExecutor.__init__; we monitor via ray.wait()
-        self.monitor_workers = False
         super(MultiprocExecutor, self).__init__(vllm_config)
 
     def _init_executor(self) -> None:
@@ -156,11 +154,6 @@ class RayExecutorV2(MultiprocExecutor):
             raise ImportError("Ray is required for RayExecutorV2")
         initialize_ray_cluster(self.parallel_config, require_gpu_on_driver=False)
         placement_group = self.parallel_config.placement_group
-
-        # Disable Ray usage stats collection
-        ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
-        if ray_usage != "1":
-            os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
 
         tp_size, pp_size, pcp_size = self._get_parallel_sizes()
         assert self.world_size == tp_size * pp_size * pcp_size, (
@@ -177,35 +170,23 @@ class RayExecutorV2(MultiprocExecutor):
         # Assign each worker a local rank
         node_rank_counter: dict[str, int] = defaultdict(int)
         bundle_assignments: list[dict[str, Any]] = []
-        for rank, (bundle_id, node_id) in enumerate(bundle_to_node_id):
+        for rank, (bundle_id_idx, node_id, node_ip) in enumerate(bundle_to_node_id):
             local_rank = node_rank_counter[node_id]
             node_rank_counter[node_id] += 1
             bundle_assignments.append(
                 {
                     "rank": rank,
                     "local_rank": local_rank,
-                    "bundle_id": bundle_id,
+                    "bundle_id_idx": bundle_id_idx,
                     "node_id": node_id,
+                    "node_ip": node_ip,
                 }
             )
-
-        # Determine node topology
-        node_ids = list(dict.fromkeys(a["node_id"] for a in bundle_assignments))
-        is_single_node = len(node_ids) == 1
 
         # Step 3: Resolve the IP for torch.distributed TCPStore.
         # The TCPStore server runs on rank 0's node, so all workers
         # must be able to reach this address.
-        rank0_node_id = bundle_assignments[0]["node_id"]
-        if is_single_node:
-            dist_ip = get_loopback_ip()
-        elif rank0_node_id == driver_node:
-            dist_ip = get_ip()
-        else:
-            node_id_to_ip = {
-                n["NodeID"]: n["NodeManagerAddress"] for n in ray.nodes() if n["Alive"]
-            }
-            dist_ip = node_id_to_ip[rank0_node_id]
+        dist_ip = bundle_assignments[0]["node_ip"]
         distributed_init_method = get_distributed_init_method(dist_ip, get_open_port())
 
         # Step 4: Create broadcast MessageQueue.
@@ -216,22 +197,22 @@ class RayExecutorV2(MultiprocExecutor):
             self.world_size,
             n_local,
             max_chunk_bytes=max_chunk_bytes,
-            connect_ip=get_ip(),
+            connect_ip=ray.util.get_node_ip_address(),
         )
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Step 5: Spawn RayWorkerProc actors into PG bundles
         self.ray_worker_handles: list[RayWorkerHandle] = []
-        self._ray_actors: list[Any] = []
+        instance_id = self.vllm_config.instance_id
 
         # Create the remote actor
-        for assignment in bundle_assignments:
-            is_driver_worker = self._is_driver_worker(assignment["rank"])
+        for bundle in bundle_assignments:
+            is_driver_worker = self._is_driver_worker(bundle["rank"])
+            is_driver_node = bundle["node_id"] == driver_node
 
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
-                placement_group_capture_child_tasks=True,
-                placement_group_bundle_index=assignment["bundle_id"],
+                placement_group_bundle_index=bundle["bundle_id_idx"],
             )
 
             # Prevent Ray from setting CUDA_VISIBLE_DEVICES
@@ -242,9 +223,14 @@ class RayExecutorV2(MultiprocExecutor):
                 },
             }
 
+            actor_name = build_actor_name(
+                instance_id, bundle["rank"], tp_size, pp_size, pcp_size
+            )
+
             actor = (
                 ray.remote(RayWorkerProc)
                 .options(
+                    name=actor_name,
                     num_cpus=0,
                     num_gpus=envs.VLLM_RAY_PER_WORKER_GPUS,
                     scheduling_strategy=scheduling_strategy,
@@ -252,24 +238,22 @@ class RayExecutorV2(MultiprocExecutor):
                 )
                 .remote(
                     vllm_config=self.vllm_config,
-                    local_rank=assignment["local_rank"],
-                    rank=assignment["rank"],
+                    local_rank=bundle["local_rank"],
+                    rank=bundle["rank"],
                     distributed_init_method=distributed_init_method,
                     input_shm_handle=scheduler_output_handle,
                     is_driver_worker=is_driver_worker,
-                    same_node_as_executor=(assignment["node_id"] == driver_node),
+                    is_driver_node=is_driver_node,
                 )
             )
 
             handle = RayWorkerHandle(
                 actor=actor,
-                rank=assignment["rank"],
-                local_rank=assignment["local_rank"],
-                node_id=assignment["node_id"],
-                bundle_index=assignment["bundle_id"],
+                rank=bundle["rank"],
+                local_rank=bundle["local_rank"],
+                node_id=bundle["node_id"],
             )
             self.ray_worker_handles.append(handle)
-            self._ray_actors.append(actor)
 
         # Step 6: Collect response MQ handles
         init_refs = [h.actor.wait_for_init.remote() for h in self.ray_worker_handles]
@@ -303,7 +287,7 @@ class RayExecutorV2(MultiprocExecutor):
         """Monitor worker liveness via ray.wait() on run() ObjectRefs."""
         run_refs = [h.run_ref for h in self.ray_worker_handles if h.run_ref is not None]
         if not run_refs:
-            return
+            raise RuntimeError("Ray workers have not started successfully.")
 
         self_ref = weakref.ref(self)
         ref_to_rank = {
