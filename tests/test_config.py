@@ -1289,8 +1289,8 @@ def test_mtp_draft_model_config_preserves_target_hf_overrides():
 
 
 @pytest.mark.skip_global_cleanup
-def test_mtp_draft_model_config_preserves_callable_target_hf_overrides():
-    """Test that callable target HF overrides are composed for MTP drafts."""
+def test_mtp_draft_model_config_does_not_propagate_callable_target_hf_overrides():
+    """Callable target overrides should not leak target-only mutations."""
     target_model_config = _make_fake_target_model_config(_callable_target_hf_overrides)
 
     with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
@@ -1303,10 +1303,9 @@ def test_mtp_draft_model_config_preserves_callable_target_hf_overrides():
 
     draft_model_config = speculative_config.draft_model_config
     assert callable(draft_model_config.hf_overrides)
-    assert (
-        draft_model_config.hf_config.text_config.rope_parameters
-        == _CALLABLE_TARGET_ROPE_PARAMETERS
-    )
+    assert draft_model_config.hf_config.text_config.rope_parameters == {
+        "rope_type": "default"
+    }
     assert draft_model_config.hf_config.model_type == "qwen3_5_mtp"
 
 
@@ -1393,9 +1392,19 @@ def test_mtp_draft_model_config_keeps_default_hf_config_override():
 
 
 @pytest.mark.skip_global_cleanup
-def test_mtp_draft_model_config_callable_hf_overrides_is_picklable():
-    """Composed callable overrides should remain picklable."""
-    target_model_config = _make_fake_target_model_config(_callable_target_hf_overrides)
+def test_mtp_draft_model_config_mapping_hf_overrides_is_picklable():
+    """Mapping-derived draft overrides should remain picklable."""
+    target_hf_overrides = UserDict(
+        {
+            "text_config": {
+                "rope_parameters": {
+                    "rope_type": "yarn",
+                    "factor": 2.0,
+                },
+            },
+        }
+    )
+    target_model_config = _make_fake_target_model_config(target_hf_overrides)
 
     with patch("vllm.config.speculative.ModelConfig", _FakeDraftModelConfig):
         speculative_config = SpeculativeConfig(
@@ -1418,9 +1427,10 @@ def test_mtp_draft_model_config_callable_hf_overrides_is_picklable():
     )
 
     assert restored_config.model_type == "qwen3_5_mtp"
-    assert (
-        restored_config.text_config.rope_parameters == _CALLABLE_TARGET_ROPE_PARAMETERS
-    )
+    assert restored_config.text_config.rope_parameters == {
+        "rope_type": "yarn",
+        "factor": 2.0,
+    }
 
 
 @pytest.mark.skip_global_cleanup

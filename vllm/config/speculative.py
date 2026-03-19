@@ -3,7 +3,7 @@
 
 import ast
 import copy
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, model_validator
@@ -64,20 +64,13 @@ RejectionSampleMethod = Literal["strict", "probabilistic"]
 class _DraftHfOverrides:
     """Compose target-model HF overrides with draft-model overrides."""
 
-    def __init__(
-        self,
-        target_hf_overrides: Mapping[str, Any]
-        | Callable[[PretrainedConfig], PretrainedConfig],
-    ) -> None:
+    def __init__(self, target_hf_overrides: Mapping[str, Any]) -> None:
         self.target_hf_overrides = target_hf_overrides
 
     def __call__(self, hf_config: PretrainedConfig) -> PretrainedConfig:
-        if isinstance(self.target_hf_overrides, Mapping):
-            SpeculativeConfig._apply_hf_overrides_dict(
-                hf_config, dict(self.target_hf_overrides)
-            )
-        else:
-            hf_config = self.target_hf_overrides(hf_config)
+        SpeculativeConfig._apply_hf_overrides_dict(
+            hf_config, dict(self.target_hf_overrides)
+        )
         return SpeculativeConfig.hf_config_override(hf_config)
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -410,9 +403,9 @@ class SpeculativeConfig:
                 return SpeculativeConfig.hf_config_override
             return _DraftHfOverrides(copy.deepcopy(dict(target_hf_overrides)))
 
-        if callable(target_hf_overrides):
-            return _DraftHfOverrides(target_hf_overrides)
-
+        # Arbitrary callable hf_overrides can encode target-only config mutations
+        # (e.g. layer-count or architecture changes) that should not leak into
+        # the derived draft model. Preserve only the draft-specific rewrite here.
         return SpeculativeConfig.hf_config_override
 
     def __post_init__(self):
