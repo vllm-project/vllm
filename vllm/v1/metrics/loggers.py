@@ -413,6 +413,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         labelnames = ["model_name", "engine"]
         model_name = vllm_config.model_config.served_model_name
+        self.model_name = model_name
         max_model_len = vllm_config.model_config.max_model_len
 
         per_engine_labelvalues: dict[int, list[object]] = {
@@ -976,6 +977,18 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_kv_block_reuse_gap = {}
 
         #
+        # CUDAGraph metrics
+        #
+        self._counter_cudagraph_iterations_base = self._counter_cls(
+            name="vllm:cudagraph_iterations",
+            documentation=(
+                "Number of engine iterations by CUDA graph runtime mode."
+            ),
+            labelnames=labelnames + ["runtime_mode"],
+        )
+        self.counter_cudagraph_iterations: dict[str, dict[int, Counter]] = {}
+
+        #
         # LoRA metrics
         #
 
@@ -1085,6 +1098,17 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     idle_hist.observe(event.idle_seconds)
                     for gap in event.reuse_gaps_seconds:
                         reuse_hist.observe(gap)
+
+            if scheduler_stats.cudagraph_stats is not None:
+                mode = scheduler_stats.cudagraph_stats.runtime_mode
+                if mode not in self.counter_cudagraph_iterations:
+                    self.counter_cudagraph_iterations[mode] = {
+                        idx: self._counter_cudagraph_iterations_base.labels(
+                            self.model_name, str(idx), mode
+                        )
+                        for idx in self.engine_indexes
+                    }
+                self.counter_cudagraph_iterations[mode][engine_idx].inc()
 
             if self.gauge_lora_info is not None:
                 running_lora_adapters = ",".join(
