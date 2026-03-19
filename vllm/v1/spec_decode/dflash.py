@@ -227,8 +227,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
             self.query_positions[:num_input_tokens] = all_positions[:, num_tokens:]
 
         # Run the KV projection (GEMM + norms + RoPE) for memory profiling,
-        # but skip the cache write — dummy_run doesn't have valid
-        # context slot_mappings.
         self.model.precompute_and_store_context_kv(context_states, context_positions)
         with set_forward_context(
             None,
