@@ -223,7 +223,7 @@ class BaseRouter(FusedMoERouter):
         self.riy_freq_view: torch.Tensor | None = None
         self.riy_weight_view: torch.Tensor | None = None
         self.riy_collecting_flag: torch.Tensor | None = None
-        self.riy_logit_mask: torch.Tensor | None = None
+        self.prune_logit_mask: torch.Tensor | None = None
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
@@ -331,8 +331,8 @@ class BaseRouter(FusedMoERouter):
         self._validate_eplb_state()
 
         # RIY: mask profile-pruned experts before top-k selection.
-        if self.riy_logit_mask is not None:
-            router_logits = router_logits + self.riy_logit_mask
+        if self.prune_logit_mask is not None:
+            router_logits = router_logits + self.prune_logit_mask
 
         # Step 2: Compute routing (delegated to subclass)
         topk_weights, topk_ids = self._compute_routing(

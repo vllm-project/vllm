@@ -282,7 +282,7 @@ def FusedMoE(
     import re
 
     from vllm.model_executor.layers.fused_moe.riy import (
-        build_riy_expert_map,
+        build_riy_prune_map,
         get_riy_state,
     )
 
@@ -300,9 +300,9 @@ def FusedMoE(
 
     riy_logit_mask = None
     riy_profile = os.environ.get("RIY_EXPERT_PROFILE", "")
-    if riy_profile and os.path.exists(riy_profile):
-        _, _, riy_logit_mask = build_riy_expert_map(
-            global_num_experts, riy_profile
+    if riy_profile and os.path.exists(riy_profile) and layer_idx >= 0:
+        _, _, riy_logit_mask = build_riy_prune_map(
+            layer_idx, global_num_experts, riy_profile
         )
 
     # TODO(bnell): we should not have to create a router if the kernel is
@@ -348,7 +348,7 @@ def FusedMoE(
         )
 
     if riy_logit_mask is not None:
-        router.riy_logit_mask = riy_logit_mask.to(
+        router.prune_logit_mask = riy_logit_mask.to(
             vllm_config.device_config.device
         )
 
