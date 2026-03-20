@@ -168,9 +168,17 @@ class QuantizationConfig(ABC):
         # TODO (@kylesayrs): add implementations for all subclasses
         pass
 
-    def maybe_update_config(self, model_name: str):  # noqa: B027
+    def maybe_update_config(  # noqa: B027
+        self,
+        model_name: str,
+        revision: str | None = None,
+        **kwargs: Any,
+    ):
         """
         Interface to update values after config initialization.
+
+        Keyword args (optional, implementation-specific; e.g. Quark passes
+        ``hf_config`` and ``trust_remote_code`` from :class:`ModelConfig`).
         """
         pass
 

@@ -249,7 +249,9 @@ class AWQMarlinConfig(QuantizationConfig):
                 self.modules_to_not_convert
             )
 
-    def maybe_update_config(self, model_name: str, revision: str | None = None):
+    def maybe_update_config(
+        self, model_name: str, revision: str | None = None, **kwargs: Any
+    ):
         if self.modules_to_not_convert:
             return
 

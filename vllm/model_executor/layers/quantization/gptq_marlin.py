@@ -299,7 +299,9 @@ class GPTQMarlinConfig(QuantizationConfig):
                 self.modules_in_block_to_quantize
             )
 
-    def maybe_update_config(self, model_name: str, revision: str | None = None):
+    def maybe_update_config(
+        self, model_name: str, revision: str | None = None, **kwargs: Any
+    ):
         if self.modules_in_block_to_quantize:
             if is_list_of(self.modules_in_block_to_quantize, list):
                 # original modules_in_block_to_quantize: list[list[str]]
