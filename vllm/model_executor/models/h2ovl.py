@@ -8,14 +8,13 @@
 # Copyright (c) 2024 H2O.AI
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
-from collections.abc import Mapping, Sequence
 
 import torch
 from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargsItems
+from vllm.multimodal.inputs import BatchedTensorInputs
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
@@ -25,7 +24,6 @@ from vllm.multimodal.processing.processor import (
     MultiModalProcessingInfo,
     ProcessorInputs,
     PromptReplacement,
-    PromptUpdate,
     TimingContext,
 )
 from vllm.transformers_utils.processors.h2ovl import H2OVLImageProcessor, H2OVLProcessor
@@ -86,15 +84,12 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
 
 
 class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingInfo]):
-    def _get_prompt_updates(
+    def _get_prompt_repl_image(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargsItems,
-    ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-
-        out_mm_data = out_mm_kwargs.get_data()
+        hf_processor: H2OVLProcessor,
+        out_mm_data: BatchedTensorInputs,
+    ):
         if "image_num_patches" in out_mm_data:
             image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
@@ -130,13 +125,11 @@ class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingIn
 
             return hf_processor.get_image_repl(num_patches, num_features=feature_size)
 
-        return [
-            PromptReplacement(
-                modality="image",
-                target="<image>",
-                replacement=get_replacement_internvl,
-            )
-        ]
+        return PromptReplacement(
+            modality="image",
+            target="<image>",
+            replacement=get_replacement_internvl,
+        )
 
     def _cached_apply_hf_processor(
         self,
