@@ -417,9 +417,7 @@ class Worker(WorkerBase):
         )
 
         self.non_torch_memory = profile_result.non_torch_increase
-        self.peak_activation_memory = (
-            profile_result.torch_peak_increase + cudagraph_memory_estimate_applied
-self.peak_activation_memory = profile_result.torch_peak_increase
+        self.peak_activation_memory = profile_result.torch_peak_increase
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         free_gpu_memory = profile_result.after_profile.free_memory
@@ -639,15 +637,9 @@ self.peak_activation_memory = profile_result.torch_peak_increase
             # So leave a small buffer (=150MiB) to avoid OOM.
             redundancy_buffer_memory = 150 * (1 << 20)
 
-            cudagraph_memory_estimate_applied = (
-                self.cudagraph_memory_estimate
-                if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
-                else 0
-            )
-
             non_kv_cache_memory = (
                 self.model_runner.model_memory_usage
-                + (self.peak_activation_memory - cudagraph_memory_estimate_applied)
+                + self.peak_activation_memory
                 + self.non_torch_memory
                 + cuda_graph_memory_bytes
             )
