@@ -453,7 +453,9 @@ class Llama4UnfoldConvolution(nn.Module):
 
 
 @support_torch_compile(
-    dynamic_arg_dims={"images_flattened": 0}, enable_if=should_torch_compile_mm_encoder
+    dynamic_arg_dims={"images_flattened": 0},
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
 )
 class Llama4VisionModel(nn.Module):
     def __init__(
@@ -754,12 +756,7 @@ class Llama4ForConditionalGeneration(
         self.multimodal_config = multimodal_config
 
         with self._mark_tower_model(vllm_config, "image"):
-            from vllm.compilation.backends import set_model_tag
-
-            with (
-                set_current_vllm_config(vllm_config),
-                set_model_tag("Llama4VisionModel", is_encoder=True),
-            ):
+            with set_current_vllm_config(vllm_config):
                 self.vision_model = Llama4VisionModel(
                     config=config.vision_config,
                     quant_config=None,
