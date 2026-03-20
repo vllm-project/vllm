@@ -832,7 +832,7 @@ class Dashboard:
 
         if is_masked:
             ch   = "X"
-            attr = curses.color_pair(6) | curses.A_DIM
+            attr = curses.color_pair(7) | curses.A_BOLD
         else:
             ch   = freq_char(v.frequency, max_freq)
             g    = _log_normalize(v.avg_gate, max_gate)
