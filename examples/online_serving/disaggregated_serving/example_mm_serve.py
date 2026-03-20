@@ -79,7 +79,9 @@ def main():
         for modality, items in features["kwargs_data"].items():
             print(
                 f"  {modality}: {len(items)} item(s), "
-                f"first item keys: {list(items[0].keys()) if items else '(empty)'}"
+                f"first item type: {type(items[0])} length: {len(items[0])}"
+                if items
+                else "First item: (empty)"
             )
     else:
         print("WARNING: no kwargs_data in render response")
