@@ -153,8 +153,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         w13: torch.Tensor,
         w2: torch.Tensor,
     ) -> None:
-        assert self.unquantized_backend != UnquantizedMoeBackend.CPU
-
         # Shuffle weights to runtime format.
         w13, w2 = convert_to_unquantized_kernel_format(
             self.unquantized_backend,
@@ -165,7 +163,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
 
-        # Setup modular kernels
+        # Setup moe kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
         assert self.experts_cls is not None
@@ -185,7 +183,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
         layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
 
-        if self.unquantized_backend == UnquantizedMoeBackend.CPU:
+        if self.unquantized_backend in [
+            UnquantizedMoeBackend.TPU,
+            UnquantizedMoeBackend.OOT,
+        ]:
+            # OOT handles internally.
+            return
+
+        elif self.unquantized_backend == UnquantizedMoeBackend.CPU:
             # CPU stays on the old path — no oracle, no moe_kernel.
             from vllm.model_executor.layers.fused_moe import cpu_fused_moe
 

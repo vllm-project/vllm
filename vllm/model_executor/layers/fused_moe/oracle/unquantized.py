@@ -37,6 +37,8 @@ class UnquantizedMoeBackend(Enum):
     BATCHED_TRITON = "BATCHED_TRITON"
     CPU = "CPU"
     XPU = "XPU"
+    TPU = "TPU"
+    OOT = "OOT"
 
 
 def _get_priority_backends(
@@ -155,10 +157,11 @@ def select_unquantized_moe_backend(
         # TODO(yzong): migrate CPU backend to FusedMoEExpertsMonolithic
         return UnquantizedMoeBackend.CPU, None
 
-    if current_platform.is_tpu() or current_platform.is_out_of_tree():
-        raise RuntimeError(
-            "Unquantized MoE oracle does not support TPU or OOT platforms."
-        )
+    if current_platform.is_tpu():
+        return UnquantizedMoeBackend.TPU, None
+
+    if current_platform.is_out_of_tree():
+        return UnquantizedMoeBackend.OOT, None
 
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts

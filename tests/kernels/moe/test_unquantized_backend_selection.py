@@ -19,6 +19,8 @@ from vllm.platforms import current_platform
         ("is_rocm", UnquantizedMoeBackend.TRITON),
         ("is_cpu", UnquantizedMoeBackend.CPU),
         ("is_xpu", UnquantizedMoeBackend.XPU),
+        ("is_tpu", UnquantizedMoeBackend.TPU),
+        ("is_out_of_tree", UnquantizedMoeBackend.OOT),
     ],
 )
 @patch(
