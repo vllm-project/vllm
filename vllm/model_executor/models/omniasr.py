@@ -4,7 +4,12 @@ import torch
 from torch import nn
 import math
 from vllm.model_executor.layers.attention import MMEncoderAttention
-from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear, ColumnParallelLinear
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from typing import Iterable
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 class OmniASRModel(nn.Module):
     """Full OmniASR: encoder + projection + LLaMA decoder.
@@ -15,18 +20,47 @@ class OmniASRModel(nn.Module):
         super().__init__()
         self.encoder_frontend = Wav2Vec2Frontend()
         self.encoder = Wav2Vec2TransformerEncoder()
-        self.encoder_proj = nn.Linear(1024, 4096, bias=True)
+        # TODO: replace hard-coded dimensions with config
+        self.encoder_proj = ColumnParallelLinear(1024, 4096, bias=True)
         # TODO: Replace with vLLM's LlamaForCausalLM
         # self.language_model = LlamaForCausalLM(vllm_config)
-        self.text_frontend = nn.Embedding(9813, 4096)
-        self.lang_embeddings = nn.Embedding(1694, 4096)
-        self.final_proj = nn.Linear(4096, 9812, bias=False)
+        self.text_frontend = VocabParallelEmbedding(9813, 4096)
+        self.lang_embeddings = VocabParallelEmbedding(1694, 4096)
+        self.final_proj = ColumnParallelLinear(4096, 9812, bias=False)
 
     def forward(self, audio):
         x = self.encoder_frontend(audio)
         x = self.encoder(x)
-        x = self.encoder_proj(x)
+        x, _ = self.encoder_proj(x)
         return x  # [batch, seq, 4096] ready for LLaMA decoder
+    
+    def load_weights(self, weights:Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+                (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
+                (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
+                (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
+                ]
+        params_dict = dict(self.named_parameters())
+        loaded_params = set()
+        for name, loaded_weight in weights:
+            #TODO:llama decoder implementation
+            if (name.startswith("llama_decoder")):
+                continue
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                #replace weight name with param name
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
         
 class Wav2Vec2FeatureExtractor(nn.Module):
     def __init__(self):
@@ -54,14 +88,18 @@ class Wav2Vec2Attention(nn.Module):
     """Self-attention with separate q/k/v/output projections (matching checkpoint)"""
     def __init__(self, embed_dim=1024, num_heads=16):
         super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        self.total_num_kv_heads = num_heads
+        self.num_heads = self.total_num_heads // tp_size
+        self.num_kv_heads = self.total_num_heads // tp_size
+        self.head_dim = embed_dim // self.total_num_heads
         self.scaling = self.head_dim ** -0.5
         self.qkv_proj = QKVParallelLinear(
             hidden_size=embed_dim,
             head_size=self.head_dim,
-            total_num_heads=num_heads,
-            total_num_kv_heads=num_heads,
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
             bias=True,
         )
         self.output_proj = RowParallelLinear(
@@ -70,13 +108,13 @@ class Wav2Vec2Attention(nn.Module):
             bias=True,
         )
         self.attn = MMEncoderAttention(
-            num_heads,
+            self.num_heads,
             self.head_dim,
             self.scaling,
-            num_kv_heads=num_heads,
+            num_kv_heads=self.num_kv_heads,
         )
-        self.q_size = num_heads * self.head_dim
-        self.kv_size = num_heads * self.head_dim
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
 
     def forward(self, x):
         qkv, _ = self.qkv_proj(x)
@@ -87,15 +125,19 @@ class Wav2Vec2Attention(nn.Module):
 
 
 class Wav2Vec2FFN(nn.Module):
-    def __init__(self, embed_dim=1024, ffn_dim=4096):
+    def __init__(self, embed_dim: int=1024, ffn_dim: int=4096, quant_config: QuantizationConfig | None = None,):
         super().__init__()
-        self.inner_proj = nn.Linear(embed_dim, ffn_dim, bias=True)
-        self.output_proj = nn.Linear(ffn_dim, embed_dim, bias=True)
+        self.inner_proj = ColumnParallelLinear(
+            input_size=embed_dim, output_size=ffn_dim, bias=True, quant_config=quant_config,
+        )
+        self.output_proj = RowParallelLinear(
+            input_size=ffn_dim, output_size=embed_dim, bias=True, quant_config=quant_config,
+        )
 
     def forward(self, x):
-        x = self.inner_proj(x)
+        x, _ = self.inner_proj(x)
         x = nn.functional.gelu(x)
-        x = self.output_proj(x)
+        x, _ = self.output_proj(x)
         return x
 
 
@@ -159,3 +201,5 @@ class Wav2Vec2TransformerEncoder(nn.Module):
             x = layer(x)
         x = self.layer_norm(x)
         return x
+
+
