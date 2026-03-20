@@ -42,7 +42,7 @@ class IPCTrainerSendWeightsArgs:
     IPCWeightTransferUpdateInfo and performs the send. Use
     async_trainer_send_weights when the callable is async."""
     llm_handle: Any = None
-    """Ray ObjectRef to LLM handle (required for 'ray' send_mode)."""
+    """Ray actor handle or list of handles (required for 'ray' send_mode)."""
     url: str | None = None
     """Base URL for HTTP endpoint (required for 'http' send_mode)."""
     packed: bool = False
@@ -482,10 +482,16 @@ class IPCWeightTransferEngine(
                 return args.send_mode(update_info)
             args.send_mode(update_info)
         elif args.send_mode == "ray":
+            handles = (
+                args.llm_handle
+                if isinstance(args.llm_handle, list)
+                else [args.llm_handle]
+            )
             ray.get(
-                args.llm_handle.update_weights.remote(
-                    dict(update_info=asdict(update_info))
-                )
+                [
+                    h.update_weights.remote(dict(update_info=asdict(update_info)))
+                    for h in handles
+                ]
             )
         elif args.send_mode == "http":
             pickled_handles = base64.b64encode(pickle.dumps(ipc_handles)).decode(

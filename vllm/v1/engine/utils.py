@@ -906,21 +906,11 @@ def launch_core_engines(
     if parallel_config.data_parallel_backend == "ray":
         logger.info("Starting ray-based data parallel backend")
 
-        custom_pgs = parallel_config.ray_data_parallel_placement_groups
-        custom_local = parallel_config.ray_data_parallel_local_dp_ranks
-        if (custom_pgs is None) ^ (custom_local is None):
-            raise ValueError(
-                "parallel_config.ray_data_parallel_placement_groups and "
-                "ray_data_parallel_local_dp_ranks must both be set or both be None."
-            )
-
         engine_actor_manager = CoreEngineActorManager(
             vllm_config=vllm_config,
             addresses=addresses,
             executor_class=executor_class,
             log_stats=log_stats,
-            placement_groups=custom_pgs,
-            local_dp_ranks=custom_local,
         )
 
         yield engine_actor_manager, coordinator, addresses

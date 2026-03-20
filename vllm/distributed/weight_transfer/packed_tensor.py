@@ -117,6 +117,7 @@ def pack_tensors(
         return None
 
     packed = torch.cat(tensor_list, dim=0)
+    del tensor_list
     return PackedChunk(
         packed_tensor=packed,
         names=names,
@@ -296,38 +297,100 @@ def packed_ipc_producer(
     post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
 ) -> Iterator[PackedIpcChunk]:
-    """Pack tensors into a buffer and yield IPC handles.
+    """Pack tensors into a reusable IPC buffer and yield handles.
 
-    Each yield produces a PackedIpcChunk with metadata needed to unpack
-    on the receiver side plus IPC handle args from reduce_tensor.
+    Allocates a single GPU buffer of ``buffer_size_bytes`` and registers
+    it for IPC once via ``reduce_tensor``.  Each chunk's packed data is
+    copied into this buffer before yielding, so only one IPC-shared
+    allocation exists for the lifetime of the transfer.
+
+    Callers **must** ensure the consumer has finished reading the buffer
+    (e.g. ``ray.get`` returned) before resuming the generator for the
+    next chunk.
 
     Args:
-        iterator: Iterator of (name, tensor) pairs
-        gpu_uuid: Physical GPU UUID string for this rank
-        post_iter_func: Function to apply to each (name, tensor) pair,
-                       should return a tensor
-        buffer_size_bytes: Max bytes per packed buffer
+        iterator: Iterator of (name, tensor) pairs.
+        gpu_uuid: Physical GPU UUID string for this rank.
+        post_iter_func: Applied to each (name, tensor) before packing.
+        buffer_size_bytes: Exact capacity of the reusable IPC buffer.
+            Every chunk is guaranteed to fit within this size.  A
+            ``ValueError`` is raised if any single tensor exceeds it.
     """
-    chunk_idx = 0
-    chunk = pack_tensors(iterator, post_iter_func, buffer_size_bytes)
+    ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="cuda")
+    _, ipc_args = reduce_tensor(ipc_buffer)
 
-    while chunk is not None:
-        next_chunk = pack_tensors(iterator, post_iter_func, buffer_size_bytes)
-        _, ipc_args = reduce_tensor(chunk.packed_tensor)
-        dtype_names = [str(d).split(".")[-1] for d in chunk.dtypes]
+    chunk_idx = 0
+    pending: tuple[str, torch.Tensor, torch.Tensor] | None = None
+    exhausted = False
+
+    while not exhausted or pending is not None:
+        names: list[str] = []
+        shapes: list[list[int]] = []
+        dtypes: list[torch.dtype] = []
+        tensor_sizes: list[int] = []
+        tensors: list[torch.Tensor] = []
+        total_bytes = 0
+
+        if pending is not None:
+            p_name, p_orig, p_flat = pending
+            tensors.append(p_flat)
+            names.append(p_name)
+            shapes.append(list(p_orig.shape))
+            dtypes.append(p_orig.dtype)
+            tensor_sizes.append(p_flat.numel())
+            total_bytes += p_flat.numel()
+            pending = None
+
+        while not exhausted:
+            item = next(iterator, None)
+            if item is None:
+                exhausted = True
+                break
+
+            name, orig_tensor = item
+            flat = post_iter_func(item).contiguous().view(torch.uint8).view(-1)
+
+            if flat.numel() > buffer_size_bytes:
+                raise ValueError(
+                    f"Tensor '{name}' has size {flat.numel()} bytes, "
+                    f"which exceeds buffer_size_bytes={buffer_size_bytes}. "
+                    f"Increase buffer_size_bytes to at least {flat.numel()}."
+                )
+
+            if total_bytes + flat.numel() > buffer_size_bytes and tensors:
+                pending = (name, orig_tensor, flat)
+                break
+
+            tensors.append(flat)
+            names.append(name)
+            shapes.append(list(orig_tensor.shape))
+            dtypes.append(orig_tensor.dtype)
+            tensor_sizes.append(flat.numel())
+            total_bytes += flat.numel()
+
+        if not tensors:
+            break
+
+        packed = torch.cat(tensors, dim=0)
+        del tensors
+        ipc_buffer[: packed.numel()].copy_(packed)
+        del packed
+
+        is_last = exhausted and pending is None
+        dtype_names = [str(d).split(".")[-1] for d in dtypes]
 
         yield PackedIpcChunk(
-            names=chunk.names,
-            shapes=chunk.shapes,
+            names=names,
+            shapes=shapes,
             dtype_names=dtype_names,
-            tensor_sizes=chunk.tensor_sizes,
+            tensor_sizes=tensor_sizes,
             ipc_handle={gpu_uuid: ipc_args},
             is_first=chunk_idx == 0,
-            is_last=next_chunk is None,
+            is_last=is_last,
         )
-        del chunk
-        chunk = next_chunk
         chunk_idx += 1
+
+    del ipc_buffer
 
 
 def packed_ipc_consumer(
@@ -368,6 +431,9 @@ def packed_ipc_consumer(
     list_args = list(args)
     list_args[6] = device_index
     packed = rebuild_cuda_tensor(*list_args)
+
+    content_size = sum(tensor_sizes)
+    packed = packed[:content_size]
 
     dtypes = [getattr(torch, dn) for dn in dtype_names]
     return unpack_tensor(packed, names, shapes, dtypes, tensor_sizes)
