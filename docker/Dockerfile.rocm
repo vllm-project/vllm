@@ -69,6 +69,13 @@ RUN python3 -m pip install uv
 ARG COMMON_WORKDIR
 WORKDIR ${COMMON_WORKDIR}
 
+# ROCm SDK supplementary setup (symlink + env vars that may not be in the base image)
+ENV SITE_PACKAGES=${SITE_PACKAGES:-/opt/python/lib/python3.12/site-packages}
+ENV CMAKE_PREFIX_PATH=$SITE_PACKAGES/torch/share/cmake
+RUN if [ -d "$SITE_PACKAGES/_rocm_sdk_core/lib" ] && [ ! -e "$SITE_PACKAGES/_rocm_sdk_core/lib/libamdhip64.so" ]; then \
+    ln -s libamdhip64.so.7 $SITE_PACKAGES/_rocm_sdk_core/lib/libamdhip64.so; \
+    fi
+ENV LD_LIBRARY_PATH=$SITE_PACKAGES/_rocm_sdk_core/lib:$LD_LIBRARY_PATH
 
 # -----------------------
 # vLLM fetch stages
@@ -370,7 +377,7 @@ RUN case "$(which python3)" in \
     *) ;; esac
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --upgrade huggingface-hub[cli]
+    uv pip install --upgrade huggingface-hub[cli,hf_transfer] scipy
 
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
