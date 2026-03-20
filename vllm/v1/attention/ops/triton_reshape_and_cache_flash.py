@@ -226,10 +226,10 @@ def _reshape_cache_per_token_head(
 
 # Mapping from cache torch dtype to (QUANT_MAX, QUANT_MIN) for the
 # per-token quantization kernel.  Extend this dict when adding new
-# per-token quantization formats (e.g. fp8_per_token).
+# per-token quantization formats (e.g. fp8_per_token would add the
+# appropriate fp8 torch dtype with its representable range).
 _PER_TOKEN_QUANT_PARAMS: dict[torch.dtype, tuple[float, float]] = {
     torch.int8: (127.0, -128.0),
-    # Future: torch.float8_e4m3fn: (448.0, -448.0),
 }
 
 
