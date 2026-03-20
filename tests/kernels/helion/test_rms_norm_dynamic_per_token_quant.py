@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
 
 from tests.kernels.helion.utils import skip_if_platform_unsupported
 from vllm.kernels.helion.config_manager import ConfigManager
@@ -28,24 +29,27 @@ if not has_helion():
     )
 
 
-def _generate_input(num_tokens: int, hidden_size: int) -> tuple[Any, ...]:
-    input = torch.randn(num_tokens, hidden_size, device="cuda", dtype=torch.bfloat16)
-    result = torch.empty(
-        input.shape, device=input.device, dtype=current_platform.fp8_dtype()
-    )
-    scale = torch.empty((num_tokens, 1), device=input.device, dtype=torch.float32)
-    scale_ub = torch.mean(input).to(torch.float32)
-    residual = torch.randn_like(input)
-    weight = torch.normal(
-        mean=1.0,
-        std=1.0,
-        size=(hidden_size,),
-        dtype=input.dtype,
-        device=input.device,
-    )
-    epsilon = 1e-6
-    args = (result, input, weight, scale, epsilon, scale_ub, residual)
-    return args
+def _generate_fake_input(num_tokens: int, hidden_size: int) -> tuple[Any, ...]:
+    with FakeTensorMode():
+        input = torch.randn(
+            num_tokens, hidden_size, device="cuda", dtype=torch.bfloat16
+        )
+        result = torch.empty(
+            input.shape, device=input.device, dtype=current_platform.fp8_dtype()
+        )
+        scale = torch.empty((num_tokens, 1), device=input.device, dtype=torch.float32)
+        scale_ub = torch.mean(input).to(torch.float32)
+        residual = torch.randn_like(input)
+        weight = torch.normal(
+            mean=1.0,
+            std=1.0,
+            size=(hidden_size,),
+            dtype=input.dtype,
+            device=input.device,
+        )
+        epsilon = 1e-6
+        args = (result, input, weight, scale, epsilon, scale_ub, residual)
+        return args
 
 
 @pytest.fixture(autouse=True)
@@ -64,7 +68,7 @@ class TestRmsNormDynamicPerTokenQuantConfigPicker:
             "hidden_size_4096_num_tokens_16",
         ]
 
-        args = _generate_input(16, 4096)
+        args = _generate_fake_input(16, 4096)
         selected_key = pick_config(args, config_keys)
         assert selected_key == "hidden_size_4096_num_tokens_16"
 
@@ -77,21 +81,21 @@ class TestRmsNormDynamicPerTokenQuantConfigPicker:
             "hidden_size_4096_num_tokens_32",
         ]
 
-        args = _generate_input(20, 3000)
+        args = _generate_fake_input(20, 3000)
         selected_key = pick_config(args, config_keys)
         assert selected_key == "hidden_size_2048_num_tokens_32"
 
     def test_config_picker_fallback_to_default(self):
         config_keys = ["default"]
 
-        args = _generate_input(16, 4096)
+        args = _generate_fake_input(16, 4096)
         selected_key = pick_config(args, config_keys)
         assert selected_key == "default"
 
     def test_config_picker_no_configs(self):
         config_keys: list[str] = []
 
-        args = _generate_input(16, 4096)
+        args = _generate_fake_input(16, 4096)
         selected_key = pick_config(args, config_keys)
         assert selected_key is None
 
@@ -102,7 +106,7 @@ class TestRmsNormDynamicPerTokenQuantConfigPicker:
             "hidden_size_4096_num_tokens_16",
         ]
 
-        args = _generate_input(32, 8192)
+        args = _generate_fake_input(32, 8192)
         selected_key = pick_config(args, config_keys)
         assert selected_key == "hidden_size_4096_num_tokens_16"
 
@@ -111,7 +115,7 @@ class TestRmsNormDynamicPerTokenQuantConfigPicker:
             "bad_key_4096_bad_key_16",
         ]
 
-        args = _generate_input(16, 4096)
+        args = _generate_fake_input(16, 4096)
         with pytest.raises(ValueError):
             pick_config(args, config_keys)
 
@@ -213,5 +217,5 @@ class TestRmsNormDynamicPerTokenQuantIntegration:
         kernel_wrapper = registered_kernels["rms_norm_dynamic_per_token_quant"]
         fake_impl = kernel_wrapper._fake_impl
 
-        args = _generate_input(16, 4096)
+        args = _generate_fake_input(16, 4096)
         assert fake_impl(*args) is None
