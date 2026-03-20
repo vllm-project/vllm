@@ -1570,11 +1570,12 @@ class VllmConfig:
             elif self.load_config.load_format not in (
                 "runai_streamer",
                 "runai_streamer_sharded",
+                "tensorizer",  # Tensorizer also supports S3/GCS/Azure object storage
             ):
                 raise ValueError(
                     f"To load a model from object storage (S3/GCS/Azure), "
-                    f"'load_format' must be 'runai_streamer' or "
-                    f"'runai_streamer_sharded', "
+                    f"'load_format' must be 'runai_streamer', "
+                    f"'runai_streamer_sharded', or 'tensorizer', "
                     f"but got '{self.load_config.load_format}'. "
                     f"Model: {self.model_config.model}"
                 )
