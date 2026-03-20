@@ -278,6 +278,41 @@ class Platform:
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
+    def get_supported_bitmask_backends(cls) -> list[str]:
+        """Return the list of supported bitmask backends on this platform."""
+        return ["auto", "cpu"]
+
+    @classmethod
+    def get_bitmask_backend(cls, backend: str = "auto") -> str:
+        """
+        Get the bitmask backend for structured output on this platform.
+
+        Similar to get_vit_attn_backend:
+            1. If user specifies a backend explicitly, validate and use it.
+            2. If "auto", let the platform choose the best default.
+
+        Args:
+            backend: User-specified backend from StructuredOutputsConfig.
+                     "auto" means platform picks the best.
+
+        Returns:
+            The resolved backend string to pass to
+            xgr.apply_token_bitmask_inplace(backend=...).
+        """
+        if backend != "auto":
+            supported = cls.get_supported_bitmask_backends()
+            if backend not in supported:
+                raise ValueError(
+                    f"Bitmask backend '{backend}' is not supported on "
+                    f"{cls.device_name}. Supported: {supported}"
+                )
+            logger.info_once(
+                "Using user-specified bitmask backend: %s", backend
+            )
+            return backend
+        return "auto"
+
+    @classmethod
     def get_device_capability(
         cls,
         device_id: int = 0,
