@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 import torch
 
+import vllm._custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
@@ -74,7 +75,7 @@ def _scatter_topk_kernel(
     in_range = offsets < topk
     indices = tl.load(topk_row_ptr + offsets, mask=in_range, other=-1)
 
-    # Only write valid indices (remapped topk uses -1 for invalid)
+    # Only write valid indices (-1 marks invalid/padding)
     valid = in_range & (indices >= 0)
     mask_row_ptr = mask_ptr + (b * max_q_len + q_local) * max_seq_len
     tl.store(mask_row_ptr + indices, tl.where(valid, 1, 0), mask=valid)
@@ -87,7 +88,7 @@ def _build_topk_mask(
     max_seq_len: int,
     device: torch.device,
 ) -> torch.Tensor:
-    """Build a dense (B, max_Q, max_S) int32 mask from remapped topk indices.
+    """Build a dense (B, max_Q, max_S) int32 mask from topk indices.
 
     Uses a single Triton kernel to scatter 1s at each valid topk position.
     """
@@ -204,79 +205,28 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
     # Context gathering helpers
     # ------------------------------------------------------------------
 
-    def _gather_and_decompress_topk(
+    def _gather_and_decompress_all(
         self,
         kv_c_and_k_pe_cache: torch.Tensor,
         block_table: torch.Tensor,
-        topk_indices_per_req: list[torch.Tensor],
-        seq_lens: list[int],
-        block_size: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, list[int], list[torch.Tensor]]:
-        """Gather topk-selected positions from paged cache and decompress.
+        seq_lens_t: torch.Tensor,
+        cu_seq_lens: torch.Tensor,
+        total_tokens: int,
+        k_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Gather all positions from paged cache and decompress.
 
-        Finds the unique positions referenced by topk indices across all
-        query tokens and only gathers/decompresses those.
-
-        Args:
-            topk_indices_per_req: List of (q_len_i, topk) tensors with
-                logical KV positions per query token.
-            seq_lens: Per-request sequence lengths (for validity checking).
+        Uses the same fused CUDA gather kernel as standard MLA prefill.
 
         Returns:
-            k: (total_unique, num_heads, qk_head_dim)
-            v: (total_unique, num_heads, v_head_dim)
-            unique_counts: Per-request count of unique gathered positions.
-            remapped_topk: List of (q_len_i, topk) tensors with indices
-                remapped into [0, unique_count_i).
+            k: (total_tokens, num_heads, qk_head_dim)
+            v: (total_tokens, num_heads, v_head_dim)
         """
         device = kv_c_and_k_pe_cache.device
-        B = len(seq_lens)
         head_size = kv_c_and_k_pe_cache.shape[-1]
-        cache_flat = kv_c_and_k_pe_cache.reshape(-1, head_size)
+        num_reqs = seq_lens_t.shape[0]
 
-        unique_counts: list[int] = []
-        all_physical_slots: list[torch.Tensor] = []
-        remapped_topk: list[torch.Tensor] = []
-
-        for i in range(B):
-            seq_len = seq_lens[i]
-            req_topk = topk_indices_per_req[i]  # (q_len, topk)
-
-            if seq_len == 0 or req_topk.numel() == 0:
-                unique_counts.append(0)
-                remapped_topk.append(torch.full_like(req_topk, -1))
-                continue
-
-            # Mask invalid indices
-            valid = (req_topk >= 0) & (req_topk < seq_len)
-            # Replace invalid with 0 so unique doesn't create spurious entries
-            safe_topk = torch.where(valid, req_topk, torch.zeros_like(req_topk))
-
-            # Find unique context positions across all query tokens
-            unique_positions, inverse_flat = torch.unique(
-                safe_topk, return_inverse=True
-            )
-
-            # inverse_flat maps every element of safe_topk to its index in
-            # unique_positions. Invalidate the entries that were originally
-            # invalid so the mask builder ignores them.
-            remapped = inverse_flat.view_as(req_topk).to(req_topk.dtype)
-            remapped[~valid] = -1
-            remapped_topk.append(remapped)
-
-            num_unique = unique_positions.shape[0]
-            unique_counts.append(num_unique)
-
-            # Compute physical slots for unique positions
-            block_ids = unique_positions // block_size
-            in_block = unique_positions % block_size
-            phys_blocks = block_table[i][block_ids.long()]
-            phys_slots = phys_blocks.long() * block_size + in_block.long()
-            all_physical_slots.append(phys_slots)
-
-        total_unique = sum(unique_counts)
-
-        if total_unique == 0:
+        if total_tokens == 0:
             empty_k = torch.empty(
                 0,
                 self.num_heads,
@@ -291,15 +241,32 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                 dtype=kv_c_and_k_pe_cache.dtype,
                 device=device,
             )
-            return empty_k, empty_v, unique_counts, remapped_topk
+            return empty_k, empty_v
 
-        # Gather from cache (only unique positions)
-        all_slots = torch.cat(all_physical_slots)
-        gathered = cache_flat[all_slots]  # (total_unique, head_size)
+        workspace = torch.empty(
+            total_tokens,
+            head_size,
+            dtype=kv_c_and_k_pe_cache.dtype,
+            device=device,
+        )
+        token_to_seq = torch.repeat_interleave(
+            torch.arange(num_reqs, dtype=torch.int32, device=device),
+            seq_lens_t,
+        )
 
-        # Split into kv_c and k_pe, then decompress
-        kv_c = gathered[..., : self.kv_lora_rank]
-        k_pe = gathered[..., self.kv_lora_rank :]
+        ops.gather_and_maybe_dequant_cache(
+            src_cache=kv_c_and_k_pe_cache,
+            dst=workspace,
+            block_table=block_table,
+            cu_seq_lens=cu_seq_lens,
+            token_to_seq=token_to_seq,
+            num_tokens=total_tokens,
+            kv_cache_dtype=self.kv_cache_dtype,
+            scale=k_scale,
+        )
+
+        kv_c = workspace[..., : self.kv_lora_rank]
+        k_pe = workspace[..., self.kv_lora_rank :]
 
         kv_nope = self.kv_b_proj(kv_c)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
@@ -309,7 +276,7 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         k_pe = k_pe.unsqueeze(1).expand(-1, self.num_heads, -1)
         k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
-        return k, v, unique_counts, remapped_topk
+        return k, v
 
     # ------------------------------------------------------------------
     # forward_mha — FA4 masked MHA over topk positions
@@ -343,7 +310,6 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
 
         num_decodes: int = getattr(attn_metadata, "num_decodes", 0)
         num_prefills: int = getattr(attn_metadata, "num_prefills", 0)
-        block_size: int = getattr(attn_metadata, "block_size", 64)
         num_decode_tokens: int = getattr(attn_metadata, "num_decode_tokens", 0)
 
         all_seq_lens = getattr(attn_metadata, "seq_lens", None)
@@ -356,9 +322,14 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             (prefill_qsl_cpu[i + 1] - prefill_qsl_cpu[i]).item()
             for i in range(num_prefills)
         ]
-        prefill_seq_lens_cpu = prefill_seq_lens.cpu()
-        seq_lens = [prefill_seq_lens_cpu[i].item() for i in range(num_prefills)]
         max_q_len = max(q_lens) if q_lens else 0
+
+        # Build cu_seqlens_k from seq_lens
+        seq_lens_t = prefill_seq_lens.to(torch.int32)
+        cu_seqlens_k = torch.zeros(num_prefills + 1, dtype=torch.int32, device=device)
+        torch.cumsum(seq_lens_t, dim=0, out=cu_seqlens_k[1:])
+        total_kv_tokens = cu_seqlens_k[-1].item()
+        max_kv_len = seq_lens_t.max().item() if num_prefills > 0 else 0
 
         # Get topk indices for prefill tokens
         assert self.topk_indices_buffer is not None
@@ -373,29 +344,23 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             topk_per_req.append(topk_all[ti_offset : ti_offset + ql])
             ti_offset += ql
 
-        # Gather + decompress unique topk positions from cache
+        # Gather all positions from cache and decompress
         block_table = getattr(attn_metadata, "block_table", None)
         assert block_table is not None
         prefill_block_table = block_table[num_decodes : num_decodes + num_prefills]
 
-        k, v, unique_counts, remapped_topk = self._gather_and_decompress_topk(
+        k, v = self._gather_and_decompress_all(
             kv_c_and_k_pe_cache,
             prefill_block_table,
-            topk_per_req,
-            seq_lens,
-            block_size,
+            seq_lens_t,
+            cu_seqlens_k,
+            total_kv_tokens,
+            k_scale,
         )
-
-        max_kv_len = max(unique_counts) if unique_counts else 0
-
-        # Build cu_seqlens_k from unique counts
-        cu_seqlens_k = torch.zeros(num_prefills + 1, dtype=torch.int32, device=device)
-        for i in range(num_prefills):
-            cu_seqlens_k[i + 1] = cu_seqlens_k[i] + unique_counts[i]
 
         # Build topk mask + block sparsity
         dense_mask = _build_topk_mask(
-            remapped_topk,
+            topk_per_req,
             q_lens,
             max_q_len,
             max_kv_len,
