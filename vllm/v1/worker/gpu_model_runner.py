@@ -1246,11 +1246,7 @@ class GPUModelRunner(
                         (req_id, optimistic_num_accepted, req_state)
                     )
 
-                    if (
-                        is_ngram_gpu
-                        and optimistic_num_accepted > 0
-                        and req_index is not None
-                    ):
+                    if is_ngram_gpu and optimistic_num_accepted > 0:
                         self.input_batch.num_tokens_no_spec[req_index] += (
                             optimistic_num_accepted
                         )
@@ -1403,15 +1399,14 @@ class GPUModelRunner(
                     correction = optimistic_num_accepted - num_accepted
                     req_state.num_computed_tokens -= correction
                     cur_req_index = self.input_batch.req_id_to_index.get(req_id)
-                    if cur_req_index is not None:
-                        self.input_batch.num_computed_tokens_cpu[cur_req_index] -= (
-                            correction
-                        )
-                        if is_ngram_gpu and correction > 0:
-                            self.input_batch.num_tokens_no_spec[cur_req_index] -= (
-                                correction
-                            )
-                            self.num_tokens_no_spec_gpu[cur_req_index] -= correction
+                    if cur_req_index is None:
+                        continue
+                    self.input_batch.num_computed_tokens_cpu[cur_req_index] -= (
+                        correction
+                    )
+                    if is_ngram_gpu and correction > 0:
+                        self.input_batch.num_tokens_no_spec[cur_req_index] -= correction
+                        self.num_tokens_no_spec_gpu[cur_req_index] -= correction
 
             return correct_spec_decode_token_counts
         else:
