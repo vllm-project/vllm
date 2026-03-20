@@ -577,24 +577,22 @@ def split_graph(
         graph, None, lambda node: node_to_subgraph_id[node], keep_original_order=True
     )
 
-    outputs = []
-
-    names = [name for (name, module) in split_gm.named_modules()]
-
-    for name in names:
+    # Collect per-subgraph metadata: id, role (splitting vs. non-splitting),
+    # and a reference to the submodule inside split_gm.
+    split_items: list[SplitItem] = []
+    for name, _ in split_gm.named_modules():
         if "." in name or name == "":
             # recursive child module or the root module
             continue
-
         module = getattr(split_gm, name)
-
         graph_id = int(name.replace("submod_", ""))
-        outputs.append(SplitItem(name, graph_id, (graph_id in split_op_graphs), module))
-
+        split_items.append(
+            SplitItem(name, graph_id, (graph_id in split_op_graphs), module)
+        )
     # sort by integer graph_id, rather than string name
-    outputs.sort(key=lambda x: x.graph_id)
+    split_items.sort(key=lambda x: x.graph_id)
 
-    return split_gm, outputs
+    return split_gm, split_items
 
 
 compilation_start_time = 0.0
