@@ -291,6 +291,7 @@ class Scheduler(SchedulerInterface):
         num_new_tokens: int,
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
+        mamba_tokens_lag: int = 0,
     ) -> int:
         assert num_external_computed_tokens == 0, (
             "External KV connector is not verified yet"
@@ -333,6 +334,21 @@ class Scheduler(SchedulerInterface):
             else:
                 # prefill the last few tokens
                 pass
+            
+            # Marconi cache admission optimization:
+            # Create cache entries at divergence points of common prefixes.
+            # 
+            # Implementation:
+            # If mamba cache "lags" behind the KVCache hits for >= block_size,
+            # there is a common shared prefix that wasn't cached.
+            if mamba_tokens_lag >= block_size:
+                # If num_new_tokens is longer than lag, 
+                # the prefix normally still wouldn't be cached
+                if num_new_tokens > mamba_tokens_lag:
+                    # So we force caching at mamba_tokens_lag
+                    num_new_tokens = mamba_tokens_lag
+                    assert mamba_tokens_lag % block_size == 0 #TODO?
+                    #num_new_tokens = num_new_tokens // block_size * block_size
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
@@ -602,6 +618,21 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks, num_new_local_computed_tokens = (
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
+                    
+                    # More proper check would be:
+                    # if isinstance(self.kv_cache_manager.coordinator, 
+                    #               HybridKVCacheCoordinator):
+                    # but this check is similar and avoids
+                    # importing HybridKVCacheCoordinator:
+                    if self.has_mamba_layers:
+                        # HybridKVCacheCoordinator returns the longest hit:
+                        longest_hit_length = num_new_local_computed_tokens
+                        # Obtain the shortest cached prefix from the blocks:
+                        num_new_local_computed_tokens = \
+                            len(new_computed_blocks.blocks[0]) * self.block_size
+                        # Mamba tokens "lag" - how far it's behind longest hit:
+                        mamba_tokens_lag = \
+                            longest_hit_length - num_new_local_computed_tokens
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -689,11 +720,12 @@ class Scheduler(SchedulerInterface):
                             break
 
                 if self.need_mamba_block_aligned_split:
-                    num_new_tokens = self._mamba_block_aligned_split(
+                    num_new_tokens = self._mamba_block_aligned_split(  # TODO: HERE SPLIT should know the FA length and break there first
                         request,
                         num_new_tokens,
                         num_new_local_computed_tokens,
                         num_external_computed_tokens,
+                        mamba_tokens_lag,
                     )
                     if num_new_tokens == 0:
                         break
