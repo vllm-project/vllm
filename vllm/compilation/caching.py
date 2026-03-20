@@ -11,6 +11,8 @@ from typing import Any, Literal
 from unittest.mock import patch
 
 import torch
+from torch._subclasses import FakeTensorMode
+from torch.fx._graph_pickler import GraphPickler, Options
 from torch.utils import _pytree as pytree
 
 import vllm.envs as envs
@@ -206,26 +208,8 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         return self.optimized_call(*args, **kwargs)
 
     @classmethod
-    def serialize_compile_artifacts(
-        cls, compiled_fn: "VllmSerializableFunction"
-    ) -> bytes:
+    def serialize_graph_module(cls, graph_module: torch.fx.GraphModule) -> bytes:
         import sympy
-        from torch._subclasses import FakeTensorMode
-        from torch.fx._graph_pickler import GraphPickler, Options
-
-        state = compiled_fn.__dict__.copy()
-        state.pop("optimized_call")
-        state.pop("shape_env")
-        state.pop("vllm_backend", None)
-        state.pop("_fake_mode", None)
-        for node in state["graph_module"].graph.nodes:
-            node.meta.pop("source_fn_stack", None)
-            node.meta.pop("nn_module_stack", None)
-        for name, submod in state["graph_module"].named_children():
-            if hasattr(submod, "graph"):
-                for node in submod.graph.nodes:
-                    node.meta.pop("source_fn_stack", None)
-                    node.meta.pop("nn_module_stack", None)
 
         graph_reducer_override = GraphPickler.reducer_override
 
@@ -242,6 +226,37 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
                 return type(None), ()
             return graph_reducer_override(self, obj)
 
+        with (
+            patch.object(GraphPickler, "reducer_override", _graph_reducer_override),
+            patch_pytree_map_over_slice(),
+        ):
+            return GraphPickler.dumps(graph_module, Options(ops_filter=None))
+
+    @classmethod
+    def deserialize_graph_module(
+        cls, data: bytes, fake_mode: FakeTensorMode
+    ) -> torch.fx.GraphModule:
+        with patch_pytree_map_over_slice():
+            return GraphPickler.loads(data, fake_mode)
+
+    @classmethod
+    def serialize_compile_artifacts(
+        cls, compiled_fn: "VllmSerializableFunction"
+    ) -> bytes:
+        state = compiled_fn.__dict__.copy()
+        state.pop("optimized_call")
+        state.pop("shape_env")
+        state.pop("vllm_backend", None)
+        state.pop("_fake_mode", None)
+        for node in state["graph_module"].graph.nodes:
+            node.meta.pop("source_fn_stack", None)
+            node.meta.pop("nn_module_stack", None)
+        for name, submod in state["graph_module"].named_children():
+            if hasattr(submod, "graph"):
+                for node in submod.graph.nodes:
+                    node.meta.pop("source_fn_stack", None)
+                    node.meta.pop("nn_module_stack", None)
+
         if state.get("sym_tensor_indices"):
             # put tensor inputs on meta device since their data
             # isn't needed, yet we need the meta for make_copy_and_call
@@ -257,14 +272,9 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
                 lambda inp: torch.empty_like(inp, device="meta"),
                 state["example_inputs"],
             )
-        with (
-            patch.object(GraphPickler, "reducer_override", _graph_reducer_override),
-            patch_pytree_map_over_slice(),
-        ):
-            state["graph_module"] = GraphPickler.dumps(
-                state["graph_module"], Options(ops_filter=None)
-            )
-            state["example_inputs"] = GraphPickler.dumps(state["example_inputs"])
+
+        state["graph_module"] = cls.serialize_graph_module(state["graph_module"])
+        state["example_inputs"] = GraphPickler.dumps(state["example_inputs"])
 
         if compiled_fn.vllm_backend:
             (
@@ -280,14 +290,14 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
     @classmethod
     def deserialize_compile_artifacts(cls, data: bytes) -> "VllmSerializableFunction":
         from torch._guards import TracingContext, tracing
-        from torch._subclasses import FakeTensorMode
-        from torch.fx._graph_pickler import GraphPickler
         from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
         state = pickle.loads(data)
         fake_mode = FakeTensorMode(shape_env=ShapeEnv())
-        with patch_pytree_map_over_slice():
-            state["graph_module"] = GraphPickler.loads(state["graph_module"], fake_mode)
+
+        state["graph_module"] = cls.deserialize_graph_module(
+            state["graph_module"], fake_mode
+        )
         state["graph_module"].recompile()
         state["example_inputs"] = GraphPickler.loads(state["example_inputs"], fake_mode)
 
