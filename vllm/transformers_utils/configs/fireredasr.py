@@ -3,7 +3,7 @@ from transformers import PretrainedConfig
 # Configuration class
 class FireRedASRConfig(PretrainedConfig):
     """Configuration class for FireRedASR model"""
-    model_type = "fireredasr_aed"
+    model_type = "whisper"
 
     def __init__(
         self,

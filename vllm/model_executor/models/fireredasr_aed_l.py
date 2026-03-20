@@ -845,7 +845,3 @@ class FireRedAsrAedLForConditionalGeneration(
                 loaded_params.add(name)
 
         return loaded_params
-    
-    def get_language_model(self) -> nn.Module:
-        """Return the decoder (language model) component."""
-        return self.model.decoder
