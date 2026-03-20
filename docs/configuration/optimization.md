@@ -5,6 +5,17 @@ This guide covers optimization strategies and performance tuning for vLLM V1.
 !!! tip
     Running out of memory? Consult [this guide](./conserving_memory.md) on how to conserve memory.
 
+## Optimization Levels
+
+vLLM provides 4 optimization levels (`-O0`, `-O1`, `-O2`, `-O3`) that allow users to trade off startup time for performance:
+
+- `-O0`: No optimizations. Fastest startup time, but lowest performance.
+- `-O1`: Fast optimization. Simple compilation and fast fusions, and PIECEWISE cudagraphs.
+- `-O2`: Default optimization. Additional compilation ranges, additional fusions, FULL_AND_PIECEWISE cudagraphs.
+- `-O3`: Aggressive optimization. Currently equal to `-O2`, but may include additional time-consuming or experimental optimizations in the future.
+
+For more information, see the [optimization level documentation](../design/optimization_levels.md).
+
 ## Preemption
 
 Due to the autoregressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
@@ -282,7 +293,7 @@ llm = LLM(
 Based on the configuration, the content of the multi-modal caches on `P0` and `P1` are as follows:
 
 | mm_processor_cache_type | Cache Type | `P0` Cache | `P1` Engine Cache | `P1` Worker Cache | Max. Memory |
-|-------------------|-------------|------------|------------|-------------|-------------|
+| ----------------- | ----------- | ---------- | ---------- | ----------- | ----------- |
 | lru | Processor Caching | K + V | N/A | N/A | `mm_processor_cache_gb * data_parallel_size` |
 | lru | Key-Replicated Caching | K | K + V | N/A | `mm_processor_cache_gb * api_server_count` |
 | shm | Shared Memory Caching | K | N/A | V | `mm_processor_cache_gb * api_server_count` |
