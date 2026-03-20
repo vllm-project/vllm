@@ -5,7 +5,6 @@
 import os
 import warnings
 
-import pytest
 import torch
 
 from vllm.platforms import current_platform
@@ -34,46 +33,21 @@ def pytest_collection_modifyitems(config, items):
         return
 
     skip_patterns = ["test_granite_speech.py"]
-    if any(pattern in item.nodeid for item in items for pattern in skip_patterns):
+    if any(pattern in str(arg) for arg in config.args for pattern in skip_patterns):
         return
 
     # Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
     # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
     # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
-    # NOTE: SDP overrides moved to _rocm_math_sdp fixture to avoid
-    # leaking into vLLM's forked EngineCore subprocess, which causes
-    # vision encoder OOM (e.g. SigLIP in gemma3-transformers).
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
     warnings.warn(
         "ROCm: Disabled flash_sdp and mem_efficient_sdp, enabled math_sdp "
         "to avoid HuggingFace Transformers accuracy issues",
         UserWarning,
         stacklevel=1,
     )
-
-
-@pytest.fixture(autouse=True)
-def _rocm_math_sdp(request):
-    """Force math-only SDP on ROCm for HF runner accuracy.
-
-    Skipped for gemma3-transformers: SigLIP's vision encoder needs
-    efficient SDP during vLLM's profile run (32 max-size dummy images).
-    Forcing math SDP materializes a ~32 GiB attention matrix and OOMs.
-    See: https://github.com/vllm-project/vllm/issues/30167
-    """
-    if not current_platform.is_rocm():
-        yield
-        return
-
-    if "gemma3" in request.node.nodeid:
-        yield
-        return
-
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
-    torch.backends.cuda.enable_math_sdp(True)
-    yield
-    torch.backends.cuda.enable_flash_sdp(True)
-    torch.backends.cuda.enable_mem_efficient_sdp(True)
 
 
 def patch_hf_vision_attn_for_rocm(model):

@@ -86,10 +86,6 @@
 #                                                   and to run plamo2 model in vLLM.                                                #
 #   * [Multi-Modal Models (Standard) 1-4]:                                                                                          #
 #     - Do NOT remove `VLLM_WORKER_MULTIPROC_METHOD=spawn` setting as ROCm requires this for certain models to function.            #
-#   * [Multi-Modal Models (Standard) 2: qwen3 + gemma]: `qwen3` and `gemma` run as separate pytest sessions so that the conftest    #
-#                                                       `math_sdp` override (needed for HF accuracy on most models) does not leak   #
-#                                                       into gemma3-transformers, whose SigLIP vision encoder OOMs when forced      #
-#                                                       into math-only SDPA on ROCm (<80GB).                                        #
 #   * [Transformers Nightly Models]: Whisper needs `VLLM_WORKER_MULTIPROC_METHOD=spawn` to avoid deadlock.                          #
 #   * [Plugin Tests (2 GPUs)]:                                                                                                      #
 #     - {`pytest -v -s entrypoints/openai/test_oot_registration.py`}: It needs a clean process                                      #
@@ -1045,8 +1041,7 @@ steps:
   - tests/models/multimodal
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k 'qwen3'
-  - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k 'gemma'
+  - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
   - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
 
 
