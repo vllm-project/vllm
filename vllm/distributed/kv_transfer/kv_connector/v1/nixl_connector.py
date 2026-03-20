@@ -970,15 +970,18 @@ class NixlConnectorScheduler:
         delay_free_blocks = any(len(group) > 0 for group in block_ids)
 
         if delay_free_blocks:
-            # Prefill request on remote. It will be read from D upon completion
+            # Prefill request on remote. It will be read from D upon completion.
+            # Use initial lease duration - D will send heartbeats to extend.
+            initial_lease = envs.VLLM_NIXL_INITIAL_LEASE_DURATION
             logger.debug(
-                "NIXLConnector request_finished(%s) waiting for %d seconds "
-                "for remote decode to fetch blocks",
+                "NIXLConnector request_finished(%s) waiting for initial lease "
+                "of %d seconds for remote decode to fetch blocks "
+                "(will be extended by heartbeats)",
                 request.request_id,
-                envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT,
+                initial_lease,
             )
             self._reqs_need_send[request.request_id] = (
-                time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
+                time.perf_counter() + initial_lease
             )
             # NOTE HMA will "mark" empty/null blocks in groups with 0s (eg SWA ones),
             # trimming down after allocating for the whole sequence length. Empty
@@ -1187,6 +1190,18 @@ class NixlConnectorWorker:
         self._invalid_block_ids: set[int] = set()
         # requests that skipped transfer (handshake or transfer failures)
         self._failed_recv_reqs: set[ReqId] = set()
+
+        # Heartbeat/lease management for D-side (consumer).
+        # Track pending transfers by P engine for batched heartbeat sending.
+        self._pending_transfers_by_engine: dict[EngineId, set[ReqId]] = defaultdict(
+            set
+        )
+        # Last time we sent a heartbeat to each P engine.
+        self._last_lease_renewal: dict[EngineId, float] = {}
+        # Lease renewal interval from env var.
+        self._lease_renewal_interval: float = float(
+            envs.VLLM_NIXL_LEASE_RENEWAL_INTERVAL
+        )
 
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlHandshakePayload | None = None
@@ -2295,6 +2310,10 @@ class NixlConnectorWorker:
             meta = self._recving_metadata.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
             assert meta.remote is not None
+
+            # Remove from pending transfers (D-side heartbeat tracking).
+            self._pending_transfers_by_engine[meta.remote.engine_id].discard(req_id)
+
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
 
@@ -2315,7 +2334,9 @@ class NixlConnectorWorker:
         ) in block_ids_for_blocksize_post_process.items():
             self.post_process_device_kv_on_receive(block_size_ratio, block_ids_list)
 
-        # Handle timeout to avoid stranding blocks on remote.
+        # Handle lease expiration to avoid stranding blocks on remote.
+        # Leases start with VLLM_NIXL_INITIAL_LEASE_DURATION and are extended
+        # by heartbeats from D. If no heartbeat is received, lease expires.
         now = time.perf_counter()
         while self._reqs_to_send:
             req_id, expires = next(iter(self._reqs_to_send.items()))
@@ -2325,11 +2346,11 @@ class NixlConnectorWorker:
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
             self.xfer_stats.record_kv_expired_req()
             logger.warning(
-                "Releasing expired KV blocks for request %s which were "
-                "retrieved by %d decode worker(s) within %d seconds.",
+                "Releasing KV blocks for request %s: lease expired "
+                "(retrieved by %d decode worker(s)). This may indicate "
+                "D crashed or network issues preventing heartbeats.",
                 req_id,
                 count,
-                envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT,
             )
             self._reqs_to_process.remove(req_id)
             del self._reqs_to_send[req_id]
@@ -2342,12 +2363,40 @@ class NixlConnectorWorker:
         Get req_ids which got a remote xfer message. When multiple consumers
         are reading from the same producer (heterogeneous TP scenario), wait
         for all consumers to be done pulling.
+
+        Also handles heartbeat messages from D (consumer) to extend KV block
+        leases. Heartbeat format: "HB:<req_id1>,<req_id2>,..."
         """
         assert self.kv_topo is not None
         notified_req_ids: set[str] = set()
+        now = time.perf_counter()
+        lease_extension = float(envs.VLLM_NIXL_LEASE_EXTENSION)
+
         for notifs in self.nixl_wrapper.get_new_notifs().values():
             for notif in notifs:
-                req_id, tp_size = notif.decode("utf-8").rsplit(":", 1)
+                decoded = notif.decode("utf-8")
+
+                # Handle heartbeat messages from D (consumer).
+                if decoded.startswith("HB:"):
+                    req_ids_str = decoded[3:]  # Skip "HB:" prefix
+                    if not req_ids_str:
+                        continue
+                    heartbeat_req_ids = req_ids_str.split(",")
+                    extended_count = 0
+                    for req_id in heartbeat_req_ids:
+                        if req_id in self._reqs_to_send:
+                            # Extend the lease for this request.
+                            self._reqs_to_send[req_id] = now + lease_extension
+                            extended_count += 1
+                    if extended_count > 0:
+                        logger.debug(
+                            "Extended lease for %d requests via heartbeat",
+                            extended_count,
+                        )
+                    continue
+
+                # Handle completion notifications (original format: "req_id:tp_size")
+                req_id, tp_size = decoded.rsplit(":", 1)
                 if (
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
@@ -2503,12 +2552,63 @@ class NixlConnectorWorker:
             if req_id in self._reqs_to_process:
                 self._reqs_to_send[req_id] = expiration_time
 
+        # Send heartbeats to P engines with pending transfers (D-side).
+        self._send_lease_heartbeats()
+
+    def _send_lease_heartbeats(self) -> None:
+        """
+        Send batched heartbeat notifications to P engines to extend KV block leases.
+
+        This is called periodically from start_load_kv on the D (consumer) side.
+        Heartbeats are batched per P engine to minimize notification overhead.
+        Format: "HB:<req_id1>,<req_id2>,..."
+        """
+        now = time.perf_counter()
+
+        for engine_id, req_ids in self._pending_transfers_by_engine.items():
+            if not req_ids:
+                continue
+
+            # Check if enough time has passed since last heartbeat to this engine.
+            last_renewal = self._last_lease_renewal.get(engine_id, 0.0)
+            if now - last_renewal < self._lease_renewal_interval:
+                continue
+
+            # Get any agent for this engine (all P workers share state).
+            remote_agents = self._remote_agents.get(engine_id)
+            if not remote_agents:
+                # Handshake not yet complete for this engine.
+                continue
+
+            # Build batched heartbeat message: "HB:req1,req2,req3,..."
+            heartbeat_msg = ("HB:" + ",".join(req_ids)).encode()
+
+            # Send to the first available agent for this engine.
+            agent_name = next(iter(remote_agents.values()))
+            try:
+                self.nixl_wrapper.send_notif(agent_name, notif_msg=heartbeat_msg)
+                self._last_lease_renewal[engine_id] = now
+                logger.debug(
+                    "Sent heartbeat to engine %s for %d pending requests",
+                    engine_id,
+                    len(req_ids),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to send heartbeat to engine %s: %s", engine_id, e
+                )
+
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.kv_topo is not None
+        remote_engine_id = meta.remote.engine_id
+
+        # Track this transfer for heartbeat sending (D-side lease renewal).
+        self._pending_transfers_by_engine[remote_engine_id].add(req_id)
+
         remote_ranks = self.kv_topo.get_target_remote_ranks_from_engine_id(
-            meta.remote.engine_id
+            remote_engine_id
         )
-        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(meta.remote.engine_id)
+        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(remote_engine_id)
         # D may have to perform multiple reads from different remote ranks.
         for i, remote_rank in enumerate(remote_ranks):
             if self.use_mla and tp_ratio < 0 and i > 0:
