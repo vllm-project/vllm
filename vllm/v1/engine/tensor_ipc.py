@@ -10,17 +10,14 @@ state such as request association, handle generation, queue routing, buffering,
 and cleanup lives here.
 """
 
-import contextlib
 import dataclasses
-import threading
-from collections.abc import Collection
+import uuid
 from multiprocessing.queues import Queue as MPQueue
 from typing import Any
 
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.engine import EngineCoreRequestType
 
 logger = init_logger(__name__)
 
@@ -32,11 +29,10 @@ class TensorIpcData:
     """
     Data sent via torch.multiprocessing.Queue for zero-copy IPC.
 
-    Contains the request_id, tensor_id and the actual tensor. The tensor is
+    Contains the tensor_id and the actual tensor. The tensor is
     shared in memory (GPU or CPU) for efficient inter-process communication.
     """
 
-    request_id: str | None
     tensor_id: str
     tensor: torch.Tensor
 
@@ -51,14 +47,7 @@ class TensorIpcSender:
     def __init__(self, queue: TensorIpcQueue):
         self.queue = queue
         self._tensor_id_counter = 0
-        self._current_request_id: str | None = None
-
-    @property
-    def current_request_id(self) -> str | None:
-        return self._current_request_id
-
-    def set_request_context(self, request_id: str | None) -> None:
-        self._current_request_id = request_id
+        self._sender_id = uuid.uuid4().hex
 
     def set_target_engine(self, target_engine: int) -> None:
         if target_engine != 0:
@@ -73,8 +62,7 @@ class TensorIpcSender:
             if not tensor.is_cuda:
                 return None
 
-            request_id = self._current_request_id
-            tensor_id = f"{id(self)}_{self._tensor_id_counter}"
+            tensor_id = f"{self._sender_id}_{self._tensor_id_counter}"
             self._tensor_id_counter += 1
 
             # Move tensor to shared memory for IPC
@@ -82,26 +70,19 @@ class TensorIpcSender:
             if not tensor.is_shared():
                 tensor = tensor.share_memory_()
 
-            ipc_data = TensorIpcData(
-                request_id=request_id, tensor_id=tensor_id, tensor=tensor
-            )
+            ipc_data = TensorIpcData(tensor_id=tensor_id, tensor=tensor)
             # Use a timeout to avoid blocking indefinitely
             self.queue.put(ipc_data, timeout=10.0)
 
             logger.debug(
-                "Sent tensor %s for request %s (shape=%s, device=%s) "
+                "Sent tensor %s for (shape=%s, device=%s) "
                 "via IPC queue (shared memory)",
                 tensor_id,
-                request_id,
                 tensor.shape,
                 tensor.device,
             )
 
-            return {
-                "request_id": request_id,
-                "tensor_id": tensor_id,
-                "device": str(tensor.device),
-            }
+            return {"tensor_id": tensor_id, "device": str(tensor.device)}
         except Exception as e:
             logger.warning(
                 "Failed to send tensor via IPC queue: %s. "
@@ -117,11 +98,11 @@ class TensorIpcReceiver:
     Wraps the queue receive logic previously embedded in MsgpackDecoder.
     """
 
-    def __init__(self, queue: TensorIpcQueue):
+    def __init__(self, queue: TensorIpcQueue, max_senders: int = 1):
         self.queue = queue
-        self._tensor_buffer: dict[tuple[str | None, str], torch.Tensor] = {}
-        self._request_to_tensors: dict[str, list[tuple[str | None, str]]] = {}
-        self._buffer_lock = threading.Lock()
+        self.max_senders = max_senders
+        self._tensor_buffer: dict[str, tuple[int, torch.Tensor]] = {}
+        self._counter = 0
 
     def recv_tensor(
         self, dtype: str, shape: tuple[int, ...], meta: dict[str, Any]
@@ -134,105 +115,38 @@ class TensorIpcReceiver:
         """
 
         # Create lookup key from handle
-        lookup_key = (meta.get("request_id"), meta["tensor_id"])
+        lookup_key = meta["tensor_id"]
 
         # Drain all available tensors. We save them regardless if this is
         # the one we're waiting for as they may arrive out of order from
         # multiple producers.
         while True:
-            # Check if tensor is already in buffer (with lock)
-            with self._buffer_lock:
-                # Retrieve and remove tensor from buffer
-                tensor = self._tensor_buffer.pop(lookup_key, None)
-                if tensor is not None:
-                    # Remove from request tracking when consumed
-                    if request_id := meta.get("request_id"):  # noqa: SIM102
-                        if tensors := self._request_to_tensors.get(request_id):
-                            tensors.remove(lookup_key)
-                            # Clean up if this is the last tensor for
-                            # the request
-                            if not tensors:
-                                del self._request_to_tensors[request_id]
+            _, tensor = self._tensor_buffer.pop(lookup_key, (None, None))
+            if tensor is not None:
+                logger.debug(
+                    "Received tensor %s for (shape=%s, device=%s) "
+                    "via IPC queue (shared memory)",
+                    meta["tensor_id"],
+                    tensor.shape,
+                    tensor.device,
+                )
+                return tensor
 
-                    logger.debug(
-                        "Received tensor %s for request %s "
-                        "(shape=%s, device=%s) via IPC queue (shared memory)",
-                        meta["tensor_id"],
-                        request_id,
-                        tensor.shape,
-                        tensor.device,
-                    )
-                    return tensor
+            # Clear out any stale tensors from the buffer. This should only occur if
+            # there was some error sending the main message.
+            while self._tensor_buffer:
+                next_id, (next_count, _) = next(iter(self._tensor_buffer.items()))
+                if self._counter - next_count < self.max_senders:
+                    break
+                logger.warning(
+                    "Discarding stale tensor from buffer with id %s", next_id
+                )
+                self._tensor_buffer.pop(next_id)
 
             # Release lock while waiting on queue (important to avoid
             # blocking cleanup)
             ipc_data: TensorIpcData = self.queue.get(timeout=10.0)
 
-            # Store the received tensor (with lock)
-            with self._buffer_lock:
-                # Store tensor with tuple key (request_id, tensor_id)
-                tensor_key = (ipc_data.request_id, ipc_data.tensor_id)
-                self._tensor_buffer[tensor_key] = ipc_data.tensor
-
-                # Track which request this tensor belongs to for cleanup
-                if ipc_data.request_id is not None:
-                    if ipc_data.request_id not in self._request_to_tensors:
-                        self._request_to_tensors[ipc_data.request_id] = []
-                    self._request_to_tensors[ipc_data.request_id].append(tensor_key)
-
-    def cleanup_request_tensors(self, request_ids: Collection[str] | str) -> int:
-        """Remove all orphaned tensors associated with a request.
-
-        This should be called when a request is aborted, times out, or fails
-        to ensure tensors in the buffer don't accumulate indefinitely.
-
-        Args:
-            request_id: The request ID whose tensors should be cleaned up.
-
-        Returns:
-            The number of tensors that were removed from the buffer.
-        """
-        if not request_ids:
-            return 0
-        if isinstance(request_ids, str):
-            request_ids = request_ids
-
-        removed_count = 0
-        with self._buffer_lock:
-            for request_id in request_ids:
-                tensor_keys = self._request_to_tensors.pop(request_id, ())
-                for tensor_key in tensor_keys:
-                    if tensor_key in self._tensor_buffer:
-                        del self._tensor_buffer[tensor_key]
-                        removed_count += 1
-                        logger.debug(
-                            "Cleaned up orphaned tensor %s for request %s",
-                            tensor_key[1],  # Just log the tensor_id part
-                            request_id,
-                        )
-
-        return removed_count
-
-
-@contextlib.contextmanager
-def encoder_request_context(
-    sender: TensorIpcSender | None,
-    request_type: EngineCoreRequestType,
-    request: Any,
-):
-    """Context manager for setting request state during request encoding.
-
-    When tensor IPC is in use, sets the request context on entry and
-    clears it on exit.
-    """
-    if sender is None:
-        yield
-        return
-
-    # Set request context if this is an ADD request with a request_id
-    if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
-        sender.set_request_context(request.request_id)
-    try:
-        yield
-    finally:
-        sender.set_request_context(None)
+            # Store tensor
+            self._tensor_buffer[ipc_data.tensor_id] = (self._counter, ipc_data.tensor)
+            self._counter += 1

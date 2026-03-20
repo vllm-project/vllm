@@ -237,11 +237,11 @@ def test_decoder_buffer_management():
     }
 
     for tensor_id, tensor in tensors.items():
-        ipc_data = TensorIpcData(request_id=None, tensor_id=tensor_id, tensor=tensor)
+        ipc_data = TensorIpcData(tensor_id=tensor_id, tensor=tensor)
         tensor_queue.put(ipc_data)
 
     # Create receiver directly
-    receiver = TensorIpcReceiver(tensor_queue)
+    receiver = TensorIpcReceiver(tensor_queue, max_senders=3)
 
     # Request tensor_3 (should buffer tensor_1 and tensor_2)
     handle = {"tensor_id": "tensor_3", "device": "cpu"}
@@ -250,8 +250,8 @@ def test_decoder_buffer_management():
     assert result.shape == (6, 7)
 
     # Verify buffer has tensor_1 and tensor_2 using tuple keys
-    assert (None, "tensor_1") in receiver._tensor_buffer
-    assert (None, "tensor_2") in receiver._tensor_buffer
+    assert "tensor_1" in receiver._tensor_buffer
+    assert "tensor_2" in receiver._tensor_buffer
 
     # Request buffered tensor
     handle2 = {"tensor_id": "tensor_1", "device": "cpu"}
@@ -279,7 +279,7 @@ def api_server_worker(
         barrier.wait()
 
         # Send tensor using TensorIpcData
-        ipc_data = TensorIpcData(request_id=None, tensor_id=tensor_id, tensor=tensor)
+        ipc_data = TensorIpcData(tensor_id=tensor_id, tensor=tensor)
         tensor_queue.put(ipc_data)
 
         result_queue.put({"server_id": server_id, "success": True})
@@ -373,9 +373,7 @@ def mixed_tensor_encoder_process(
         tensor_id = "test_cuda_tensor"
         cuda_tensor_shared = cuda_tensor.share_memory_()
 
-        ipc_data = TensorIpcData(
-            request_id=None, tensor_id=tensor_id, tensor=cuda_tensor_shared
-        )
+        ipc_data = TensorIpcData(tensor_id=tensor_id, tensor=cuda_tensor_shared)
         tensor_queue.put(ipc_data, timeout=10.0)
 
         ready_event.set()
@@ -659,65 +657,6 @@ def test_mixed_cpu_cuda_with_ipc_enabled():
     # This test just verifies the configuration is correct
 
 
-def test_tensor_cleanup_on_abort():
-    """Test that orphaned tensors are cleaned up when requests are aborted."""
-    # Create a tensor queue (not actually used in this simplified test)
-    tensor_queue = torch_mp.Queue()
-
-    # Create receiver directly
-    receiver = TensorIpcReceiver(tensor_queue)
-
-    # Simulate tensors in the buffer for multiple requests
-    request_ids = ["req1", "req2", "req3"]
-
-    for request_id in request_ids:
-        # Simulate 2 tensors per request using tuple keys
-        for i in range(2):
-            tensor_id = f"encoder_{i}"
-            tensor_key = (request_id, tensor_id)
-            tensor = torch.randn(10, 10)
-
-            # Manually add to buffer and tracking (simulating decode behavior)
-            receiver._tensor_buffer[tensor_key] = tensor
-
-            if request_id not in receiver._request_to_tensors:
-                receiver._request_to_tensors[request_id] = []
-            receiver._request_to_tensors[request_id].append(tensor_key)
-
-    # Verify tensors are in the buffer
-    initial_buffer_size = len(receiver._tensor_buffer)
-    assert initial_buffer_size == 6, "Buffer should contain 6 tensors (2 per request)"
-
-    # Verify request tracking
-    assert len(receiver._request_to_tensors) == 3, "Should track 3 requests"
-    assert len(receiver._request_to_tensors["req1"]) == 2, "req1 should have 2 tensors"
-
-    # Cleanup tensors for req1
-    removed_count_1 = receiver.cleanup_request_tensors("req1")
-    assert removed_count_1 == 2, "Should have removed 2 tensors for req1"
-    assert len(receiver._tensor_buffer) == 4, "Buffer should have 4 tensors left"
-    assert "req1" not in receiver._request_to_tensors, (
-        "req1 should be removed from tracking"
-    )
-
-    # Cleanup tensors for req2
-    removed_count_2 = receiver.cleanup_request_tensors("req2")
-    assert removed_count_2 == 2, "Should have removed 2 tensors for req2"
-    assert len(receiver._tensor_buffer) == 2, "Buffer should have 2 tensors left"
-
-    # Cleanup req3
-    removed_count_3 = receiver.cleanup_request_tensors("req3")
-    assert removed_count_3 == 2, "Should have removed 2 tensors for req3"
-
-    # Verify all tensors are cleaned up
-    assert len(receiver._tensor_buffer) == 0, "Buffer should be empty"
-    assert len(receiver._request_to_tensors) == 0, "Request tracking should be empty"
-
-    # Cleanup for non-existent request should return 0
-    removed_count_4 = receiver.cleanup_request_tensors("nonexistent")
-    assert removed_count_4 == 0, "Should return 0 for non-existent request"
-
-
 def test_tensor_cleanup_after_decode():
     """Test that tensors are removed from tracking after successful decode."""
     # Create a tensor queue
@@ -730,20 +669,15 @@ def test_tensor_cleanup_after_decode():
         tensor.share_memory_()
 
     # Manually create a TensorIpcData and put it in the queue
-    request_id = "test_req"
     tensor_id = "encoder_0"
-    ipc_data = TensorIpcData(request_id=request_id, tensor_id=tensor_id, tensor=tensor)
+    ipc_data = TensorIpcData(tensor_id=tensor_id, tensor=tensor)
     tensor_queue.put(ipc_data)
 
     # Create receiver directly
     receiver = TensorIpcReceiver(tensor_queue)
 
     # Mirror the actual msgpack decode shape used in vLLM: a 5-element list.
-    handle = {
-        "request_id": request_id,
-        "tensor_id": tensor_id,
-        "device": str(tensor.device),
-    }
+    handle = {"tensor_id": tensor_id, "device": str(tensor.device)}
 
     # Receive the tensor - this should retrieve it from the queue
     decoded_tensor = receiver.recv_tensor(
@@ -754,26 +688,6 @@ def test_tensor_cleanup_after_decode():
     assert decoded_tensor.shape == tensor.shape, "Decoded tensor should match shape"
 
     # Verify the tensor was removed from buffer after decode
-    tensor_key = (request_id, tensor_id)
-    assert tensor_key not in receiver._tensor_buffer, (
+    assert tensor_id not in receiver._tensor_buffer, (
         "Tensor should be removed from buffer"
     )
-
-    # Verify the request tracking was cleaned up
-    assert request_id not in receiver._request_to_tensors, (
-        "Request tracking should be cleaned up"
-    )
-
-
-def test_request_context_in_sender():
-    """Test that request context is owned by the tensor IPC sender."""
-    tensor_queue = torch_mp.Queue()
-    sender = TensorIpcSender(tensor_queue)
-
-    assert sender.current_request_id is None
-
-    sender.set_request_context("req123")
-    assert sender.current_request_id == "req123"
-
-    sender.set_request_context(None)
-    assert sender.current_request_id is None

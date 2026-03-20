@@ -406,18 +406,7 @@ class EngineCore:
             scheduler_output, model_output
         )
 
-        # Cleanup tensors for finished requests
-        self._cleanup_finished_request_tensors(scheduler_output.finished_req_ids)
-
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
-
-    def _cleanup_finished_request_tensors(self, finished_req_ids: set[str]) -> None:
-        """Cleanup any orphaned tensors for finished requests.
-
-        This is a no-op in the base class but can be overridden in subclasses
-        to perform actual cleanup (e.g., for IPC tensor queues).
-        """
-        pass
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -520,9 +509,6 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
-
-        # Cleanup tensors for finished requests
-        self._cleanup_finished_request_tensors(scheduler_output.finished_req_ids)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -858,6 +844,9 @@ class EngineCoreProc(EngineCore):
                     vllm_config=vllm_config,
                 )
             self._init_data_parallel(vllm_config)
+
+            if self.tensor_ipc_receiver is not None:
+                self.tensor_ipc_receiver.max_senders = len(addresses.inputs)
 
             super().__init__(
                 vllm_config,
@@ -1208,20 +1197,6 @@ class EngineCoreProc(EngineCore):
 
         return model_executed
 
-    def abort_requests(self, request_ids: list[str]):
-        """Abort requests and cleanup any orphaned tensors."""
-        # First, abort the requests in the scheduler
-        super().abort_requests(request_ids)
-
-        # Then cleanup any orphaned tensors for these requests
-        if self.tensor_ipc_receiver is not None:
-            self.tensor_ipc_receiver.cleanup_request_tensors(request_ids)
-
-    def _cleanup_finished_request_tensors(self, finished_req_ids: set[str]) -> None:
-        """Cleanup any orphaned tensors for finished requests."""
-        if self.tensor_ipc_receiver is not None:
-            self.tensor_ipc_receiver.cleanup_request_tensors(finished_req_ids)
-
     def _notify_idle_state_callbacks(self) -> None:
         while self._idle_state_callbacks:
             callback = self._idle_state_callbacks.pop()
@@ -1461,10 +1436,7 @@ class EngineCoreProc(EngineCore):
                     self.input_queue.put_nowait((request_type, request))
 
     def process_output_sockets(
-        self,
-        output_paths: list[str],
-        coord_output_path: str | None,
-        engine_index: int,
+        self, output_paths: list[str], coord_output_path: str | None, engine_index: int
     ):
         """Output socket IO thread."""
 

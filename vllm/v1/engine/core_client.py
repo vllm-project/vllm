@@ -47,7 +47,7 @@ from vllm.v1.engine import (
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
-from vllm.v1.engine.tensor_ipc import TensorIpcSender, encoder_request_context
+from vllm.v1.engine.tensor_ipc import TensorIpcSender
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
@@ -799,8 +799,7 @@ class SyncMPClient(MPClient):
         self.ensure_alive()
         self.free_pending_messages()
         # (Identity, RequestType, SerializedRequest)
-        with encoder_request_context(self.tensor_ipc_sender, request_type, request):
-            msg = (self.core_engine, request_type.value, *self.encoder.encode(request))
+        msg = (self.core_engine, request_type.value, *self.encoder.encode(request))
 
         if len(msg) <= 3:
             # No auxiliary buffers => no tensor backing buffers in request.
@@ -1008,9 +1007,7 @@ class AsyncMPClient(MPClient):
         if engine is None:
             engine = self.core_engine
 
-        with encoder_request_context(self.tensor_ipc_sender, request_type, request):
-            message = (request_type.value, *self.encoder.encode(request))
-
+        message = (request_type.value, *self.encoder.encode(request))
         return self._send_input_message(message, engine, request)
 
     def _send_input_message(
