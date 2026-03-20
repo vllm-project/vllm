@@ -269,9 +269,16 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        """Monolithic kernels need to express router support."""
+        """Monolithic kernels need to express router support.
+        Renormalize/RenormalizeNaive are excluded: the monolithic kernel's
+        internal routing for these methods produces output uncorrelated
+        with the modular kernel's output and with Triton kernel's output
+        for Qwen3.5-35B-A3B-FP8.
+        See: https://github.com/vllm-project/vllm/issues/37591
+        """
         # NOTE(dbari): TopK routing could also be enabled, but need to validate models
         # NOTE(dbari): Default is not implemented and should not be enabled until it is
+
         if (weight_key, activation_key) in [
             (kFp8Static128BlockSym, kFp8Dynamic128Sym),
             (kMxfp8Static, kMxfp8Dynamic),
@@ -279,16 +286,12 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             # NOTE(rob): potentially allow others here. This is a conservative list.
             return routing_method in [
                 RoutingMethodType.DeepSeekV3,
-                RoutingMethodType.Renormalize,
-                RoutingMethodType.RenormalizeNaive,
             ]
         elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
             # NOTE(dbari): as above, potentially allow others here.
             return routing_method in [
                 RoutingMethodType.DeepSeekV3,
                 RoutingMethodType.Llama4,
-                RoutingMethodType.Renormalize,
-                RoutingMethodType.RenormalizeNaive,
             ]
         else:
             raise ValueError("Unsupported quantization scheme.")
