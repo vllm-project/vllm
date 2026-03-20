@@ -110,12 +110,10 @@ class Step3VLProcessingInfo(BaseProcessingInfo):
         return {"image": None}
 
     def get_max_image_tokens(self) -> int:
-        hf_processor = self.get_hf_processor()
+        image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
 
-        return hf_processor.image_processor.get_num_image_tokens(
-            target_width, target_height
-        )
+        return image_processor.get_num_image_tokens(target_width, target_height)
 
     def get_mm_max_tokens_per_item(
         self,
@@ -167,13 +165,10 @@ class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo])
         def get_replacement_step1o(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
             num_patches = int(out_item["num_patches"].data)
-            if num_patches > 0:
-                patch_newline_mask = out_item["patch_newline_mask"].data
-                image_repl_ids = hf_processor.get_image_repl_feature_ids(
-                    1, num_patches, patch_newline_mask.tolist()
-                )
-            else:
-                image_repl_ids = hf_processor.get_image_repl_feature_ids(1, 0, None)
+            patch_newline_mask = out_item["patch_newline_mask"].data
+            image_repl_ids = hf_processor.get_image_repl_feature_ids(
+                1, num_patches, patch_newline_mask.tolist()
+            )
 
             return PromptUpdateDetails.select_token_id(
                 seq=image_repl_ids,

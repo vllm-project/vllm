@@ -14,7 +14,7 @@ from vllm.tokenizers import TokenizerLike
 
 MAX_IMAGE_SIZE: int = 3024
 
-ImageWithPatches = tuple[Image.Image, list[Image.Image], list[bool] | None]
+ImageWithPatches = tuple[Image.Image, list[Image.Image], list[bool]]
 
 
 class Step3VisionProcessor:
@@ -185,7 +185,7 @@ class ImagePatcher:
 
     def __call__(
         self, img: Image.Image
-    ) -> tuple[Image.Image, list[Image.Image], list[bool] | None]:
+    ) -> tuple[Image.Image, list[Image.Image], list[bool]]:
         img_width, img_height = img.size
         new_img_width, new_img_height = self.get_image_size_for_padding(
             img_width, img_height
@@ -203,7 +203,7 @@ class ImagePatcher:
         )
 
         if window_size == 0 or not self.enable_patch:
-            return img, [], None
+            return img, [], []
         else:
             new_img_width, new_img_height = self.get_image_size_for_crop(
                 new_img_width, new_img_height, window_size
@@ -236,9 +236,7 @@ class ImagePatcher:
             return (
                 img,
                 patches,
-                [i in newlines for i in range(len(patches))]
-                if len(patches) > 0
-                else None,
+                [i in newlines for i in range(len(patches))],
             )
 
 
@@ -303,15 +301,11 @@ class Step3VLImageProcessor:
         num_patches = []
         for raw_img, img_patches, patch_newline_mask in split_images_data:
             pixel_values_lst.extend(self._convert_images_to_pixel_values([raw_img]))
-
-            if len(img_patches) > 0:
-                patch_pixel_values_lst.extend(
-                    self._convert_images_to_pixel_values(img_patches, is_patch=True)
-                )
             num_patches.append(len(img_patches))
-
-            if patch_newline_mask is not None:
-                patch_newline_mask_lst.extend(patch_newline_mask)
+            patch_pixel_values_lst.extend(
+                self._convert_images_to_pixel_values(img_patches, is_patch=True)
+            )
+            patch_newline_mask_lst.extend(patch_newline_mask)
 
         pixel_values = torch.cat(pixel_values_lst)
         patch_size = self.patch_size
@@ -338,8 +332,6 @@ class Step3VLProcessor(ProcessorMixin):
         image_processor: Step3VLImageProcessor,
         tokenizer: TokenizerLike,
     ) -> None:
-        super().__init__()
-
         self.image_processor = image_processor
         self.tokenizer = tokenizer
 
@@ -373,14 +365,12 @@ class Step3VLProcessor(ProcessorMixin):
     def _get_patch_repl_text(
         self,
         num_patches: int,
-        patch_newline_mask: list[bool] | None,
+        patch_newline_mask: list[bool],
     ) -> str:
+        assert len(patch_newline_mask) == num_patches
+
         parts = []
         for i in range(num_patches):
-            assert (
-                patch_newline_mask is not None
-                and len(patch_newline_mask) == num_patches
-            )
             parts.extend(
                 [
                     self.patch_start_token,
@@ -396,14 +386,12 @@ class Step3VLProcessor(ProcessorMixin):
     def _get_patch_repl_ids(
         self,
         num_patches: int,
-        patch_newline_mask: list[bool] | None,
+        patch_newline_mask: list[bool],
     ) -> list[int]:
+        assert len(patch_newline_mask) == num_patches
+
         parts = []
         for i in range(num_patches):
-            assert (
-                patch_newline_mask is not None
-                and len(patch_newline_mask) == num_patches
-            )
             parts.extend(
                 [
                     self.patch_start_token_id,
@@ -443,7 +431,7 @@ class Step3VLProcessor(ProcessorMixin):
         self,
         num_images: int,
         num_patches: int,
-        patch_new_line_idx: list[bool] | None,
+        patch_new_line_idx: list[bool],
     ) -> str:
         patch_repl = self._get_patch_repl_text(num_patches, patch_new_line_idx)
         image_repl = self._get_image_repl_text(num_images)
@@ -453,7 +441,7 @@ class Step3VLProcessor(ProcessorMixin):
         self,
         num_images: int,
         num_patches: int,
-        patch_new_line_idx: list[bool] | None,
+        patch_new_line_idx: list[bool],
     ) -> list[int]:
         patch_repl = self._get_patch_repl_ids(num_patches, patch_new_line_idx)
         image_repl = self._get_image_repl_ids(num_images)
@@ -498,11 +486,14 @@ class Step3VLProcessor(ProcessorMixin):
 
             if image_inputs:
                 image_repl_str_lst = []
-                for n_patches, mask in zip(num_patches, patch_newline_mask):
+                start = 0
+                for n_patches in num_patches:
                     image_repl_str = self.get_image_repl_feature_text(
-                        1, n_patches, mask
+                        1, n_patches, patch_newline_mask[start : start + num_patches]
                     )
                     image_repl_str_lst.append(image_repl_str)
+
+                    start += n_patches
 
                 text = [
                     self.replace_placeholder(t, self.image_token, image_repl_str_lst)
