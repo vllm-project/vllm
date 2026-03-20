@@ -150,7 +150,6 @@ async def test_shutdown_on_engine_failure():
             "0.05",
             "--max-num-seqs",
             "2",
-            "--disable-frontend-multiprocessing",
         ],
         # ROCm: Disable stdout/stderr pipe capture. Subprocess hangs when
         # stdout/stderr pipes are enabled during ROCm GPU initialization.

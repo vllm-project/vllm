@@ -823,7 +823,6 @@ async def main(args: Namespace):
     async with build_async_engine_client(
         args,
         usage_context=UsageContext.OPENAI_BATCH_RUNNER,
-        disable_frontend_multiprocessing=False,
     ) as engine_client:
         await run_batch(engine_client, args)
 
