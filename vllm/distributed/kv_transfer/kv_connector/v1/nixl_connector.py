@@ -41,6 +41,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.conv_decomp_utils import (
+    ConvDecomp,
+    compute_mamba_phys_ratio,
+    derive_conv_decomp,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
@@ -53,6 +58,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
@@ -1065,6 +1071,17 @@ class NixlConnectorWorker:
                 ssm_shape.numel() * ssm_nbytes,
             )
         self._mamba_ssm_size = mamba_ssm_size
+        # Conv state sub-projection decomposition (None when no Mamba).
+        # The 3-read transfer requires DS (dim, state_len) conv layout so
+        # that x/B/C sub-projections are contiguous in memory.
+        self._conv_decomp: ConvDecomp | None = None
+        if self._has_mamba:
+            assert is_conv_state_dim_first(), (
+                "3-read Mamba conv transfer requires DS conv state layout. "
+                "Set VLLM_SSM_CONV_STATE_LAYOUT=DS"
+            )
+            local_tp = vllm_config.parallel_config.tensor_parallel_size
+            self._conv_decomp = derive_conv_decomp(mamba_spec, local_tp)
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -1173,6 +1190,11 @@ class NixlConnectorWorker:
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
         self.dst_num_blocks: dict[EngineId, int] = {}
+        # P and D may pad mamba blocks differently (HMA), so we track each
+        # engine's phys-blocks-per-logical-block to compute correct offsets.
+        self._mamba_phys_ratio: dict[EngineId, int] = {}
+        # 4 regions per mamba layer: x, B, C (conv sub-projections) + ssm.
+        self._mamba_num_regions: int = 0
         self._registered_descs: list[Any] = []
 
         # In progress transfers.
@@ -1701,6 +1723,9 @@ class NixlConnectorWorker:
             # then duplicate it logically to be able to index SSM/Conv separately.
             self.num_regions *= 2
 
+        # 3-read: mamba blocks have 4 regions (x, B, C, ssm) per layer.
+        self._mamba_num_regions = self.num_regions * 2 if self._has_mamba else 0
+
         # TODO (NickLucche) Adapt to different descs views (engine_id->tp_rank) to
         # support heterogeneous TP.
         self.num_descs = self.num_regions * self.num_blocks
@@ -1713,6 +1738,9 @@ class NixlConnectorWorker:
 
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks
+        self._mamba_phys_ratio[self.engine_id] = (
+            self._physical_blocks_per_logical_kv_block
+        )
 
         if self._has_mamba:
             logger.info(
@@ -1754,6 +1782,82 @@ class NixlConnectorWorker:
             compatibility_hash=self.compat_hash,
             agent_metadata_bytes=encoder.encode(agent_metadata),
         )
+
+    def _register_mamba_3read_local(
+        self,
+        blocks_data: list[tuple[int, int, int]],
+        base_addresses: list[int],
+        block_size_ratio: int,
+    ):
+        """Register 4 desc regions (x, B, C, ssm) per layer for local mamba
+        blocks, enabling the 3-read transfer with DS conv layout."""
+        assert self._conv_decomp is not None
+        conv_offsets = self._conv_decomp.local_conv_offsets()
+        conv_size = self._mamba_ssm_size[0]
+        ssm_size = self._mamba_ssm_size[1]
+        num_blocks = self._logical_num_blocks * block_size_ratio
+        phys_ratio = self._physical_blocks_per_logical_kv_block
+
+        for i, base_addr in enumerate(base_addresses):
+            page_stride = self.block_len_per_layer[i] // block_size_ratio * phys_ratio
+            for off, sz in conv_offsets:
+                for blk in range(num_blocks):
+                    blocks_data.append(
+                        (base_addr + blk * page_stride + off, sz, self.device_id)
+                    )
+            # SSM temporal state follows the conv state.
+            for blk in range(num_blocks):
+                blocks_data.append(
+                    (
+                        base_addr + blk * page_stride + conv_size,
+                        ssm_size,
+                        self.device_id,
+                    )
+                )
+
+    def _register_mamba_3read_remote(
+        self,
+        blocks_data: list[tuple[int, int, int]],
+        nixl_agent_meta: NixlAgentMetadata,
+        tp_ratio: int,
+    ):
+        """Register 4 remote desc regions (x, B, C, ssm) per layer for
+        the 3-read transfer.  For hetero-TP, each D rank reads only its
+        sub-projection slice from the P rank."""
+        assert self._conv_decomp is not None
+        effective_ratio = max(tp_ratio, 1)
+        # Mamba conv state is always TP-sharded, even when attention KV
+        # is replicated (num_kv_heads < tp_size).
+        local_offset = self.tp_rank % effective_ratio
+        conv_offsets = self._conv_decomp.remote_conv_offsets(
+            local_offset, effective_ratio
+        )
+        conv_size_remote = nixl_agent_meta.ssm_sizes[0]
+        ssm_local = self._mamba_ssm_size[1]
+
+        remote_ratio = self._mamba_phys_ratio.get(
+            nixl_agent_meta.engine_id,
+            self._physical_blocks_per_logical_kv_block,
+        )
+        num_blocks = nixl_agent_meta.num_blocks // remote_ratio
+        device_id = nixl_agent_meta.device_id
+
+        for base_addr in nixl_agent_meta.kv_caches_base_addr:
+            page_stride = nixl_agent_meta.block_lens[0] * remote_ratio
+            for off, sz in conv_offsets:
+                for blk in range(num_blocks):
+                    blocks_data.append(
+                        (base_addr + blk * page_stride + off, sz, device_id)
+                    )
+            # SSM temporal state is also TP-sharded on the heads dimension.
+            for blk in range(num_blocks):
+                ssm_addr = (
+                    base_addr
+                    + blk * page_stride
+                    + conv_size_remote
+                    + local_offset * ssm_local
+                )
+                blocks_data.append((ssm_addr, ssm_local, device_id))
 
     def register_local_xfer_handler(
         self,
@@ -1826,10 +1930,16 @@ class NixlConnectorWorker:
         register_blocks(blocks_data, mamba=False)
         if self._has_mamba:
             assert self.num_descs == len(blocks_data)
-            logger.debug(
-                "Registering additional %s local Mamba blocks", len(blocks_data)
+            # TODO: For homogeneous TP (tp_ratio == 1), the 3-read split is
+            # unnecessary — a single conv desc per block suffices.  Consider
+            # adding a fast path that falls back to the standard 2-region
+            # registration (register_blocks mamba=True) when no hetero-TP
+            # remote has been seen.  Currently we always register 4 regions
+            # because local descs are created before knowing the remote TP.
+            logger.debug("Registering additional local Mamba 3-read blocks")
+            self._register_mamba_3read_local(
+                blocks_data, local_base_addresses, block_size_ratio
             )
-            register_blocks(blocks_data, mamba=True)
 
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
         # NIXL_INIT_AGENT to be used for preparations of local descs.
@@ -1915,6 +2025,11 @@ class NixlConnectorWorker:
 
         if engine_id not in self.dst_num_blocks:
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
+        if engine_id not in self._mamba_phys_ratio and self._has_mamba:
+            remote_block_len = nixl_agent_meta.block_lens[0]
+            self._mamba_phys_ratio[engine_id] = compute_mamba_phys_ratio(
+                nixl_agent_meta.ssm_sizes, remote_block_len
+            )
 
         # Keep track of remote agent kv caches base addresses.
         self.kv_caches_base_addr[engine_id][remote_tp_rank] = (
@@ -2046,11 +2161,12 @@ class NixlConnectorWorker:
 
         register_remote_blocks(blocks_data, mamba=False)
         if self._has_mamba:
-            # Create extra descs for the Mamba "view" of the same KV cache tensors.
-            logger.debug(
-                "Registering additional %s remote Mamba blocks", len(blocks_data)
+            logger.debug("Registering remote Mamba 3-read blocks")
+            self._register_mamba_3read_remote(
+                blocks_data,
+                nixl_agent_meta,
+                tp_ratio,
             )
-            register_remote_blocks(blocks_data, mamba=True)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
@@ -2090,10 +2206,12 @@ class NixlConnectorWorker:
             assert block_size_ratio == 1, (
                 "HMA does not support different remote block size yet"
             )
-        # Mamba additional constraints
-        if self._has_mamba:
-            assert tp_ratio == 1, "Mamba does not support heterogeneous TP yet"
-
+        # Mamba hetero-TP constraints (3-read approach)
+        if self._has_mamba and tp_ratio < 0:
+            raise NotImplementedError(
+                "Mamba hetero-TP with P_TP > D_TP (tp_ratio < 0) is not yet "
+                "supported by the 3-read transfer."
+            )
         kv_cache_layout = (
             self.kv_cache_layout
             if not self.use_host_buffer
@@ -2150,25 +2268,31 @@ class NixlConnectorWorker:
                     "All remote layers must have the same block size"
                 )
 
-            if tp_ratio > 0:
-                # Remote tp is smaller: remote block_len size is bigger
-                assert (
-                    remote_block_len
-                    == (self.block_len_per_layer[0] * tp_ratio) // block_size_ratio
-                ), (
-                    "Remote P worker KV layer cache must be of shape [2, N, "
-                    "local_kv_heads*tp_ratio, page_size, head_dim] and same dtype."
-                )  # noqa: E501
-            else:
-                assert block_size_ratio == 1, (
-                    "Different local/remote block sizes are not supported when"
-                    " P TP > D TP."
-                )
-                # Remote tp is bigger: remote block_len size is smaller
-                assert remote_block_len == self.block_len_per_layer[0] // (-tp_ratio), (
-                    "Remote P worker KV layer cache must be of shape [2, N, "
-                    "local_kv_heads/tp_ratio, page_size, head_dim] and same dtype."
-                )  # noqa: E501
+            # HMA hybrid models (mamba+attention) pad block_len to
+            # max(attn_page, mamba_page), so the linear tp_ratio scaling
+            # assumption only holds for pure-attention models.
+            if not self._has_mamba:
+                if tp_ratio > 0:
+                    assert (
+                        remote_block_len
+                        == (self.block_len_per_layer[0] * tp_ratio) // block_size_ratio
+                    ), (
+                        "Remote P worker KV layer cache must be of shape [2, N,"
+                        " local_kv_heads*tp_ratio, page_size, head_dim] and "
+                        "same dtype."
+                    )
+                else:
+                    assert block_size_ratio == 1, (
+                        "Different local/remote block sizes are not supported"
+                        " when P TP > D TP."
+                    )
+                    assert remote_block_len == self.block_len_per_layer[0] // (
+                        -tp_ratio
+                    ), (
+                        "Remote P worker KV layer cache must be of shape [2, N,"
+                        " local_kv_heads/tp_ratio, page_size, head_dim] and "
+                        "same dtype."
+                    )
 
         # TP workers that handhshake with same remote have same #blocks.
         assert self.dst_num_blocks[remote_engine_id] == nixl_agent_meta.num_blocks
@@ -2471,9 +2595,8 @@ class NixlConnectorWorker:
                 meta.local_block_ids
             )
             assert meta.remote is not None
-            meta.remote.block_ids = self._logical_to_kernel_block_ids(
-                meta.remote.block_ids
-            )
+            # Remote block IDs are kept logical here; expanded in
+            # _read_blocks_for_req using the remote engine's phys ratio.
             remote_engine_id = meta.remote.engine_id
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
@@ -2525,6 +2648,16 @@ class NixlConnectorWorker:
             meta.remote.engine_id
         )
         tp_ratio = self.kv_topo.tp_ratio_from_engine_id(meta.remote.engine_id)
+
+        # Expand remote logical → kernel block IDs using REMOTE phys ratio,
+        # which may differ from local under HMA padding.
+        remote_ratio = self._mamba_phys_ratio.get(
+            meta.remote.engine_id,
+            self._physical_blocks_per_logical_kv_block,
+        )
+        meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
+            meta.remote.block_ids, remote_ratio
+        )
         # D may have to perform multiple reads from different remote ranks.
         for i, remote_rank in enumerate(remote_ranks):
             if self.use_mla and tp_ratio < 0 and i > 0:
@@ -2663,9 +2796,13 @@ class NixlConnectorWorker:
         for i, remote_group in enumerate(remote_block_ids):
             num_remote_blocks = len(remote_group)
             num_local_blocks = len(local_block_ids[i])
-            assert num_local_blocks <= num_remote_blocks
+            is_mamba = self._has_mamba and self._is_mamba_group[i]
+            if not is_mamba:
+                assert num_local_blocks <= num_remote_blocks
             # Partial prefix cache hit: just read uncomputed blocks.
-            if num_local_blocks < num_remote_blocks:
+            # Skip mamba groups — their blocks represent full state (conv+ssm),
+            # not per-token data, so trimming would corrupt the transfer.
+            if num_local_blocks < num_remote_blocks and not is_mamba:
                 remote_block_ids[i] = remote_group[-num_local_blocks:]
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
@@ -2781,16 +2918,24 @@ class NixlConnectorWorker:
             # This is like having two "low-level views" of the same storage.
             # `num_fa_descs` offset must be computed per-engine since P and D can
             # have different num_blocks (and thus different FA descs counts).
-            ratio = self._physical_blocks_per_logical_kv_block
-            # SSM may register fewer num_blocks than FA
+            ratio = self._mamba_phys_ratio.get(
+                engine_id, self._physical_blocks_per_logical_kv_block
+            )
             logical_blocks = num_blocks // ratio
             num_fa_descs = self.num_regions * num_blocks
+            # 3-read mamba: 4 regions per layer (x, B, C, ssm).
+            mamba_region_ids = np.arange(self._mamba_num_regions)[:, None]
             all_descs = []
             for i, group in enumerate(block_ids):
-                stride = logical_blocks if self._is_mamba_group[i] else num_blocks
                 group_arr = np.asarray(group)[None, :]
-                offset = num_fa_descs if self._is_mamba_group[i] else 0
-                all_descs.append((region_ids * stride + group_arr + offset).flatten())
+                if self._is_mamba_group[i]:
+                    all_descs.append(
+                        (
+                            mamba_region_ids * logical_blocks + group_arr + num_fa_descs
+                        ).flatten()
+                    )
+                else:
+                    all_descs.append((region_ids * num_blocks + group_arr).flatten())
             return np.concatenate(all_descs)
 
     def _logical_to_kernel_block_ids(self, block_ids: BlockIds) -> BlockIds:
@@ -2817,6 +2962,36 @@ class NixlConnectorWorker:
             else group
             for i, group in enumerate(block_ids)
         ]
+
+    def _logical_to_remote_kernel_block_ids(
+        self, block_ids: BlockIds, remote_ratio: int
+    ) -> BlockIds:
+        """Map logical block IDs to physical kernel block IDs on the remote.
+
+        Args:
+            block_ids: per-group lists of logical block IDs.
+            remote_ratio: remote engine's physical blocks per logical block.
+
+        Returns:
+            Same structure with FA groups expanded (each logical block L
+            becomes kernel blocks [L*remote_ratio .. L*remote_ratio +
+            local_ratio - 1]).  Mamba groups are passed through unchanged.
+        """
+        local_ratio = self._physical_blocks_per_logical_kv_block
+        if local_ratio == 1:
+            return block_ids
+        local_arange = np.arange(local_ratio).reshape(1, -1)
+        group_specs = self.kv_cache_config.kv_cache_groups
+        result: list[list[int]] = []
+        for i, group in enumerate(block_ids):
+            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec):
+                arr = np.array(group).reshape(-1, 1)
+                expanded = (arr * remote_ratio + local_arange).flatten()
+                result.append(expanded.tolist())
+            else:
+                # Mamba blocks are 1:1 logical-to-physical (no expansion).
+                result.append(group)
+        return result
 
     def get_backend_aware_kv_block_len(
         self, layer_idx: int, first_split: bool = True, mamba_view: bool = False
