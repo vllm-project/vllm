@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib.util
 import logging
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -433,3 +435,62 @@ def test_bad_impl_registrations():
             return x @ y + 40
 
     assert set(_custom_mm.impls.keys()) == {"impl_mm", "native"}
+
+
+IMPL_OOT_SRC = """
+import torch
+
+@_custom_mm.register_impl("impl_mm_oot")
+def impl_mm_oot(
+    x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    return x @ y - 99
+"""
+
+
+def load_custom_mm_module(file_path: Path):
+    spec = importlib.util.spec_from_file_location("_custom_mm_oot", file_path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+
+    # Inject the variable into the module's global namespace
+    # This allows the @_custom_mm.register_impl decorator to work
+    module._custom_mm = _custom_mm  # type: ignore[attr-defined]
+
+    # Execute the file; this triggers the decorator
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_uuid_and_oot(tmp_path: Path):
+    file_path = tmp_path / "_custom_mm_oot.py"
+    file_path.write_text(IMPL_OOT_SRC)
+
+    assert "impl_mm_oot" not in _custom_mm.impls
+    _ = load_custom_mm_module(file_path)
+    assert "impl_mm_oot" in _custom_mm.impls
+
+    uuid = _custom_mm.impls["impl_mm_oot"].uuid()
+    del _custom_mm.impls["impl_mm_oot"]
+
+    # Replace file source
+    file_path.write_text(IMPL_OOT_SRC + " # added file source")
+    assert "impl_mm_oot" not in _custom_mm.impls
+    _ = load_custom_mm_module(file_path)
+    assert "impl_mm_oot" in _custom_mm.impls
+
+    uuid1 = _custom_mm.impls["impl_mm_oot"].uuid()
+    assert uuid1 != uuid
+    del _custom_mm.impls["impl_mm_oot"]
+
+    # Back to original
+    file_path.write_text(IMPL_OOT_SRC)
+    assert "impl_mm_oot" not in _custom_mm.impls
+    _ = load_custom_mm_module(file_path)
+    assert "impl_mm_oot" in _custom_mm.impls
+
+    uuid2 = _custom_mm.impls["impl_mm_oot"].uuid()
+    assert uuid2 == uuid
+    assert uuid2 != uuid1
+    del _custom_mm.impls["impl_mm_oot"]

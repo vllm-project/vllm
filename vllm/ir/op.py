@@ -3,6 +3,7 @@
 import contextlib
 import inspect
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, ClassVar, overload
 
 import torch
@@ -406,6 +407,8 @@ class IrOpImpl:
         Used by vllm-compile hash mechanism and torch.compile lowering pass uuid to
         control the vLLM compile cache and AOTAutograd/Inductor caches respectively.
 
-        impl_fn and _supports_args should not change after construction, so we cache it.
+        Source file contents do not change so we cache uuid.
+        TODO(luka): Cache the file hash as multiple impls are likely in the same file.
         """
-        return hash_source(self.impl_fn, self._supports_args)
+        sources = [Path(inspect.getfile(self.impl_fn))]
+        return hash_source(*sources)
