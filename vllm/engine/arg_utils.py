@@ -645,6 +645,9 @@ class EngineArgs:
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
             )
+        if isinstance(self.ir_op_priority, dict):
+            self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
+
         # Setup plugins
         from vllm.plugins import load_general_plugins
 
