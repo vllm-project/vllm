@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import patch
+
 import pytest
 from openai_harmony import Author, Message, Role
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
+    get_developer_message,
     get_encoding,
     get_streamable_parser_for_assistant,
     get_system_message,
     has_custom_tools,
+    inject_response_formats,
     parse_chat_input_to_harmony_message,
     parse_chat_output,
     render_for_completion,
@@ -1258,3 +1262,99 @@ class TestResilientStreamableParser:
         for tok in message_tok:
             parser.process(tok)
         assert parser.last_consumed_token != last_consumed_after_first
+
+
+class TestInjectResponseFormats:
+    def test_appends_to_existing_instructions(self):
+        result = inject_response_formats("You are helpful.", {"type": "object"})
+        assert result.startswith("You are helpful.")
+        assert "# Response Formats" in result
+        assert '{"type":"object"}' in result
+
+    def test_none_instructions_creates_section(self):
+        result = inject_response_formats(None, {"type": "object"})
+        assert result.startswith("# Response Formats")
+        assert '{"type":"object"}' in result
+
+    def test_custom_format_name(self):
+        result = inject_response_formats(None, {"type": "object"}, format_name="order")
+        assert "## order" in result
+
+    def test_compact_json_no_spaces(self):
+        schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+        result = inject_response_formats(None, schema)
+        assert '{"type":"object","properties":{"name":{"type":"string"}}}' in result
+
+    def test_section_separated_by_blank_lines(self):
+        result = inject_response_formats("Instructions here.", {"type": "object"})
+        assert "\n\n# Response Formats\n\n## structured_output\n\n" in result
+
+
+class TestGetDeveloperMessageResponseFormats:
+    """Tests for response_format_section parameter in get_developer_message."""
+
+    ENV_VAR = (
+        "vllm.entrypoints.openai.parser.harmony_utils"
+        ".envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS"
+    )
+
+    def _extract_instructions_text(self, dev_msg: Message) -> str | None:
+        """Extract the raw text from a developer message's instructions."""
+        for content_item in dev_msg.content:
+            instructions = getattr(content_item, "instructions", None)
+            if instructions is not None:
+                return instructions
+        return None
+
+    def test_response_format_preserved_with_system_instructions(self):
+        """When VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS is True,
+        user instructions should be dropped but response format schema
+        should still appear in the developer message."""
+        schema_section = "# Response Formats\n\n## structured_output\n\n{}"
+        with patch(self.ENV_VAR, True):
+            dev_msg = get_developer_message(
+                instructions="Be concise.",
+                response_format_section=schema_section,
+            )
+        text = self._extract_instructions_text(dev_msg)
+        assert text is not None
+        assert "# Response Formats" in text
+        # User instructions should NOT be present
+        assert "Be concise." not in text
+
+    def test_response_format_and_instructions_without_system_instructions(self):
+        """When VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS is False,
+        both instructions and response format schema should appear."""
+        schema_section = "# Response Formats\n\n## structured_output\n\n{}"
+        with patch(self.ENV_VAR, False):
+            dev_msg = get_developer_message(
+                instructions="Be concise.",
+                response_format_section=schema_section,
+            )
+        text = self._extract_instructions_text(dev_msg)
+        assert text is not None
+        assert "Be concise." in text
+        assert "# Response Formats" in text
+
+    def test_response_format_only_no_instructions(self):
+        """With instructions=None, only the response format section appears."""
+        schema_section = "# Response Formats\n\n## structured_output\n\n{}"
+        with patch(self.ENV_VAR, False):
+            dev_msg = get_developer_message(
+                instructions=None,
+                response_format_section=schema_section,
+            )
+        text = self._extract_instructions_text(dev_msg)
+        assert text is not None
+        assert "# Response Formats" in text
+
+    def test_backward_compat_no_response_format(self):
+        """Without response_format_section, behavior matches the original."""
+        with patch(self.ENV_VAR, False):
+            dev_msg = get_developer_message(
+                instructions="Be concise.",
+            )
+        text = self._extract_instructions_text(dev_msg)
+        assert text is not None
+        assert "Be concise." in text
+        assert "# Response Formats" not in text

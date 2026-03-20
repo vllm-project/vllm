@@ -353,6 +353,10 @@ class ResponsesRequest(OpenAIBaseModel):
                     # --follow-imports skip hides the class definition but also hides
                     # multiple third party conflicts, so best of both evils
                 )
+            elif response_format.type == "json_object":
+                structured_outputs = StructuredOutputsParams(
+                    json_object=True  # type: ignore[call-arg]
+                )
 
         stop = self.stop if self.stop else []
         if isinstance(stop, str):

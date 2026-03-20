@@ -132,6 +132,25 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.structured_outputs is not None
         assert sampling_params.structured_outputs.grammar == "root ::= 'hello'"
 
+    def test_json_object_format_produces_structured_outputs(self):
+        """Test that text.format.type=json_object creates StructuredOutputsParams."""
+        from openai.types.shared.response_format_json_object import (
+            ResponseFormatJSONObject,
+        )
+
+        text_config = ResponseTextConfig()
+        text_config.format = ResponseFormatJSONObject(type="json_object")
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            text=text_config,
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert sampling_params.structured_outputs is not None
+        assert sampling_params.structured_outputs.json_object is True
+
     def test_structured_outputs_and_json_schema_conflict(self):
         """Test that specifying both structured_outputs and json_schema raises."""
         structured_outputs = StructuredOutputsParams(grammar="root ::= 'hello'")

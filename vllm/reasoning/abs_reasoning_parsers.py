@@ -154,10 +154,18 @@ class ReasoningParser:
         self,
         original_tag: str | None,
         tool_server: ToolServer | None,
+        final_content_format: dict | None = None,
     ) -> str | None:
         """
-        Instance method that is implemented for preparing the structured tag
-        Otherwise, None is returned
+        Instance method that is implemented for preparing the structured tag.
+        Otherwise, None is returned.
+
+        Args:
+            original_tag: An existing structural tag string, if any.
+            tool_server: The tool server for builtin tool support.
+            final_content_format: Optional xgrammar content format dict
+                (e.g. json_schema, regex) to embed in the <|channel|>final
+                tag for constraining the model's final output region.
         """
         return None
 
@@ -298,7 +306,8 @@ class ReasoningParserManager:
             if isinstance(name, str):
                 names = [name]
             elif is_list_of(name, str):
-                names = name
+                assert name is not None
+                names = list(name)
             else:
                 names = [class_name]
 
