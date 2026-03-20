@@ -443,4 +443,13 @@ CMD ["/bin/bash"]
 
 #Set entrypoint for vllm-openai official images
 FROM final AS vllm-openai
+
+# OCI Image Annotations (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
+LABEL org.opencontainers.image.title="vLLM ROCm" \
+      org.opencontainers.image.description="vLLM inference engine for AMD ROCm platforms" \
+      org.opencontainers.image.url="https://vllm.ai" \
+      org.opencontainers.image.source="https://github.com/vllm-project/vllm" \
+      org.opencontainers.image.vendor="vLLM Project" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 ENTRYPOINT ["vllm", "serve"]

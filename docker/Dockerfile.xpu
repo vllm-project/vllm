@@ -111,6 +111,14 @@ CMD ["/bin/bash"]
 
 FROM vllm-base AS vllm-openai
 
+# OCI Image Annotations (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
+LABEL org.opencontainers.image.title="vLLM XPU" \
+      org.opencontainers.image.description="vLLM inference engine for Intel XPU platforms" \
+      org.opencontainers.image.url="https://vllm.ai" \
+      org.opencontainers.image.source="https://github.com/vllm-project/vllm" \
+      org.opencontainers.image.vendor="vLLM Project" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install accelerate hf_transfer pytest pytest_asyncio lm_eval[api] modelscope

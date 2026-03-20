@@ -205,11 +205,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
     uv pip install dist/*.whl
 
-# Add labels to document build configuration
-LABEL org.opencontainers.image.title="vLLM CPU"
-LABEL org.opencontainers.image.description="vLLM inference engine for CPU platforms"
-LABEL org.opencontainers.image.vendor="vLLM Project"
-LABEL org.opencontainers.image.source="https://github.com/vllm-project/vllm"
+# OCI Image Annotations (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
+LABEL org.opencontainers.image.title="vLLM CPU" \
+      org.opencontainers.image.description="vLLM inference engine for CPU platforms (x86_64 and aarch64)" \
+      org.opencontainers.image.url="https://vllm.ai" \
+      org.opencontainers.image.source="https://github.com/vllm-project/vllm" \
+      org.opencontainers.image.vendor="vLLM Project" \
+      org.opencontainers.image.licenses="Apache-2.0"
 
 # Build configuration labels
 ARG TARGETARCH
