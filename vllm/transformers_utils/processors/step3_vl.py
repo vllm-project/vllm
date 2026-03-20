@@ -485,6 +485,7 @@ class Step3VLProcessor(ProcessorMixin):
                 text = [text]
 
             if image_inputs:
+                image_token = self.image_token
                 image_repl_str_lst = []
                 start = 0
                 for n_patches in num_patches:
@@ -496,7 +497,7 @@ class Step3VLProcessor(ProcessorMixin):
                     start += n_patches
 
                 text = [
-                    self.replace_placeholder(t, self.image_token, image_repl_str_lst)
+                    self.replace_placeholder(t, image_token, image_repl_str_lst)
                     for t in text
                 ]
 
