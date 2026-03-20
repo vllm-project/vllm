@@ -152,18 +152,16 @@ _fi_ar_workspace_lock = threading.Lock()
 
 
 def destroy_fi_ar_workspace():
-    global _fi_ar_workspace
-    global _fi_ar_quant_workspace
+    global _fi_ar_workspace, _fi_ar_quant_workspace
     with _fi_ar_workspace_lock:
-        if (
-            _fi_ar_quant_workspace is not None
-            and _fi_ar_quant_workspace is not _fi_ar_workspace
-        ):
-            _fi_ar_quant_workspace.destroy()
-        _fi_ar_quant_workspace = None
+        is_alias = _fi_ar_workspace is _fi_ar_quant_workspace
+
         if _fi_ar_workspace is not None:
             _fi_ar_workspace.destroy()
-            _fi_ar_workspace = None
+        if _fi_ar_quant_workspace is not None and not is_alias:
+            _fi_ar_quant_workspace.destroy()
+
+        _fi_ar_workspace = _fi_ar_quant_workspace = None
 
 
 atexit.register(destroy_fi_ar_workspace)
