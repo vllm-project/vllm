@@ -182,7 +182,7 @@ class DefaultMoERunner(MoERunner):
         router: FusedMoERouter,
         routed_input_transform: torch.nn.Module | None,
         gate: torch.nn.Module | None,
-        shared_experts: SharedExperts | None,
+        shared_experts: torch.nn.Module | None,
         quant_method: FusedMoEMethodBase,
         reduce_results: bool,
         enable_dbo: bool,
@@ -192,7 +192,21 @@ class DefaultMoERunner(MoERunner):
         self.router = router
         self.routed_input_transform = routed_input_transform
         self.gate = gate
-        self.shared_experts = shared_experts
+
+        self.shared_experts: SharedExperts | None = None
+        if shared_experts is not None:
+            self.shared_experts = SharedExperts(
+                shared_experts,
+                moe_config=moe_config,
+                # Note: For now we must pass quant_method along to SharedExperts so it
+                # can property determine where the shared experts are supposed to be
+                # called, i.e. by a MK or by the MoERunner.
+                # Once the MK can be created upfront, we can just pass in the proper
+                # flags derived from the quant_method's MK.
+                reduce_results=reduce_results,
+                quant_method=quant_method,
+            )
+
         self.quant_method = quant_method
         self.reduce_results = reduce_results
         self.enable_dbo = enable_dbo
@@ -232,6 +246,9 @@ class DefaultMoERunner(MoERunner):
             else torch.ops.vllm.moe_forward_shared,
             forward_impl_fn,
         )
+
+    def is_internal_router(self) -> bool:
+        return self.gate is not None
 
     def _maybe_init_dp_chunking(self):
         if not self.use_dp_chunking:
@@ -547,7 +564,6 @@ class DefaultMoERunner(MoERunner):
                 hidden_states,
                 dim=0,
             )
-            # need RS for shared_output?
 
         if self.shared_experts is not None:
             assert shared_output is not None

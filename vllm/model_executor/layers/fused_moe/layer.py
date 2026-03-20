@@ -42,9 +42,6 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
 from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import (
     DefaultMoERunner,
 )
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -339,7 +336,6 @@ class FusedMoE(CustomOp):
     ):
         super().__init__()
 
-        self._gate = gate
         self._routed_input_transform = routed_input_transform
 
         if params_dtype is None:
@@ -632,29 +628,17 @@ class FusedMoE(CustomOp):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
+
+        # TODO(bnell): Why is this needed? Can probably be removed.
         self.base_quant_method = self.quant_method
 
-        self._shared_experts = shared_experts
-        self.shared_experts = self._init_shared_experts()
-        self.runner = self._init_runner()
+        self.runner = self._init_runner(gate, shared_experts)
 
-    def _init_shared_experts(self) -> SharedExperts | None:
-        if self._shared_experts is None:
-            return None
-
-        return SharedExperts(
-            self._shared_experts,
-            moe_config=self.moe_config,
-            # Note: For now we must pass quant_method along to SharedExperts so it
-            # can property determine where the shared experts are supposed to be
-            # called, i.e. by a MK or by the MoERunner.
-            # Once the MK can be created upfront, we can just pass in the proper
-            # flags derived from the quant_method's MK.
-            reduce_results=self.reduce_results,
-            quant_method=self.quant_method,
-        )
-
-    def _init_runner(self) -> DefaultMoERunner:
+    def _init_runner(
+        self,
+        gate: torch.nn.Module | None,
+        shared_experts: torch.nn.Module | None,
+    ) -> DefaultMoERunner:
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
@@ -663,8 +647,8 @@ class FusedMoE(CustomOp):
             moe_config=self.moe_config,
             router=self.router,
             routed_input_transform=self._routed_input_transform,
-            gate=self._gate,
-            shared_experts=self.shared_experts,
+            gate=gate,
+            shared_experts=shared_experts,
             quant_method=self.quant_method,
             reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
@@ -678,7 +662,10 @@ class FusedMoE(CustomOp):
         # We need to force reconstruction of runner because we're swapping out
         # the quant_method with a FusedMoEModularMethod. This logic can go
         # away once the FusedMoEModularMethod is eliminated.
-        self.runner = self._init_runner()
+        self.runner = self._init_runner(
+            self.runner.gate,
+            self.runner.shared_experts,
+        )
 
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
@@ -706,7 +693,7 @@ class FusedMoE(CustomOp):
                     self,
                     self.base_quant_method,
                     prepare_finalize,
-                    self.shared_experts,
+                    self.runner.shared_experts,
                     inplace=not self.moe_config.disable_inplace,
                 )
             )
@@ -741,7 +728,7 @@ class FusedMoE(CustomOp):
     @property
     def is_internal_router(self) -> bool:
         # By default, router/gate is called before FusedMoE forward pass
-        return self._gate is not None
+        return self.runner.is_internal_router()
 
     def _maybe_init_expert_routing_tables(
         self,

@@ -39,9 +39,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def mk_owns_shared_expert(self) -> bool:
         # NOTE(rob): temporary attribute to indicate support for
         # completed migration to the new internal MK interface.
-        return (
-            self.moe_kernel is not None and self.moe_kernel.shared_experts is not None
-        )
+        return self.moe_kernel is not None and self.moe_kernel.owns_shared_experts
 
     @abstractmethod
     def create_weights(

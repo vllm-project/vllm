@@ -1000,7 +1000,10 @@ class FusedMoEKernelModularImpl:
     ):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
-        self.shared_experts = shared_experts
+        # Only accept shared experts if they can be run w/async.
+        self.shared_experts = (
+            shared_experts if prepare_finalize.supports_async() else None
+        )
         self.inplace = inplace
         moe_parallel_config = fused_experts.moe_config.moe_parallel_config
         self.moe_parallel_config = moe_parallel_config
@@ -1277,7 +1280,8 @@ class FusedMoEKernelModularImpl:
                 apply_router_weight_on_input,
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
-            self._maybe_apply_shared_experts(shared_experts_input)
+            # TODO: remove
+            # self._maybe_apply_shared_experts(shared_experts_input)
 
             # TODO(lucas): refactor this in the alternative schedules followup
             # currently unpack if we have hook + receiver pair or just
@@ -1461,7 +1465,6 @@ class FusedMoEKernel:
         inplace: bool = False,
     ):
         super().__init__()
-        self.shared_experts = shared_experts  # NOTE: check if we can remove
 
         # Initialize the implementation (monolithic or modular).
         self.impl: FusedMoEKernelModularImpl | FusedMoEKernelMonolithicImpl
@@ -1478,7 +1481,6 @@ class FusedMoEKernel:
         elif isinstance(
             prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic
         ) and isinstance(fused_experts, FusedMoEExpertsMonolithic):
-            assert shared_experts is None
             assert not inplace
             self.impl = FusedMoEKernelMonolithicImpl(
                 prepare_finalize,
@@ -1493,6 +1495,13 @@ class FusedMoEKernel:
             )
 
         self._post_init_setup()
+
+    @property
+    def owns_shared_experts(self) -> bool:
+        if isinstance(self.impl, FusedMoEKernelModularImpl):
+            return self.impl.shared_experts is not None
+        else:
+            return False
 
     @property
     def is_monolithic(self) -> bool:

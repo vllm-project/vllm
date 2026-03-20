@@ -89,17 +89,13 @@ class SharedExperts:
         #   - we are using eplb with non-default backend, because of correctness issues
         #   - we are using flashinfer with DP, since there nothing to gain
         backend = self._moe_config.moe_parallel_config.all2all_backend
-        return self._layer is not None and not (
+        return not (
             (
                 self._moe_config.moe_parallel_config.enable_eplb
                 and backend != "allgather_reducescatter"
             )
             or self._moe_config.moe_parallel_config.use_fi_nvl_two_sided_kernels
         )
-
-    @property
-    def _has_mk_owned_shared_experts(self) -> bool:
-        return not self._quant_method.mk_owns_shared_expert and self._layer is not None
 
     @property
     def _must_reduce_shared_expert_outputs(self) -> bool:
@@ -113,37 +109,24 @@ class SharedExperts:
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[SharedExpertsOrder, bool]:
-        if self._layer is None:
-            return SharedExpertsOrder.NONE, False
-
         if self._has_external_experts and not self._use_dp_chunking:
             return SharedExpertsOrder.EXTERNAL, False
 
-        if (
-            not self._has_mk_owned_shared_experts
-            or not self._moe_config.moe_parallel_config.use_all2all_kernels
-        ):
+        if self._quant_method.mk_owns_shared_expert:
             return SharedExpertsOrder.INTERNAL, False
 
         allow_shared_experts_stream = (
             current_platform.is_cuda()
-            and self._has_mk_owned_shared_experts
             and not self._use_dp_chunking
             and self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
         )
 
-        # Check if we need to run shared experts before matrix multiply because
-        # matrix multiply may modify the hidden_states.
-        run_shared_experts_before = (
-            self._has_mk_owned_shared_experts and not allow_shared_experts_stream
-        )
-
-        if run_shared_experts_before:
-            return SharedExpertsOrder.BEFORE_QUANT_METHOD, False
+        if allow_shared_experts_stream:
+            return SharedExpertsOrder.AFTER_QUANT_METHOD, True
         else:
-            return SharedExpertsOrder.AFTER_QUANT_METHOD, allow_shared_experts_stream
+            return SharedExpertsOrder.BEFORE_QUANT_METHOD, False
 
     def maybe_setup_shared_experts_stream(
         self,
@@ -202,8 +185,8 @@ class SharedExperts:
         return shared_out
 
     @property
-    def output(self) -> torch.Tensor | None:
-        assert (self._layer is None) == (self._output is None)
+    def output(self) -> torch.Tensor:
+        assert self._output is not None
         output = self._output
         self._output = None
         return output
@@ -220,7 +203,6 @@ class SharedExperts:
         if order != experts_order:
             return None
 
-        assert self._layer is not None
         assert self._output is None
 
         if order == SharedExpertsOrder.AFTER_QUANT_METHOD and use_shared_experts_stream:
