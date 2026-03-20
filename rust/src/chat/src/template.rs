@@ -240,7 +240,7 @@ mod tests {
     use super::ChatTemplate;
     use crate::request::{
         ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
-        UserSamplingParams,
+        SamplingParams,
     };
     use crate::{AssistantContentBlock, Error, Result};
 
@@ -250,7 +250,7 @@ mod tests {
         ChatRequest {
             request_id: "render-test".to_string(),
             messages,
-            sampling_params: UserSamplingParams::default(),
+            sampling_params: SamplingParams::default(),
             chat_options: ChatOptions::default(),
             tools: Vec::new(),
             tool_choice: ChatToolChoice::None,

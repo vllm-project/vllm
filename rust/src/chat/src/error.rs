@@ -1,5 +1,4 @@
 use thiserror::Error;
-use vllm_llm::Error as LlmError;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -30,8 +29,6 @@ pub enum Error {
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
-    #[error("llm request failed: {0}")]
-    Llm(#[from] LlmError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

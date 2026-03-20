@@ -14,7 +14,7 @@ pub enum Error {
     PromptTooLong { max_model_len: u32, prompt_len: u32 },
     #[error("text request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
-    #[error("llm request failed: {0}")]
+    #[error(transparent)]
     Llm(#[from] LlmError),
 }
 

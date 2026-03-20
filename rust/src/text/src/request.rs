@@ -16,16 +16,16 @@ pub enum Prompt {
     TokenIds(Vec<u32>),
 }
 
-/// User-facing sampling parameters accepted by `vllm-chat`.
+/// User-facing sampling parameters accepted by `vllm-text`.
 ///
-/// This intentionally keeps only the subset that the current Rust chat layer
+/// This intentionally keeps only the subset that the current Rust text layer
 /// supports as northbound request semantics. Engine-core-specific normalized
 /// fields are derived later during lowering.
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L155-L291>
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UserSamplingParams {
+pub struct SamplingParams {
     /// Controls randomness. Lower values are more deterministic; zero means
     /// greedy sampling. `None` means no explicit user override.
     pub temperature: Option<f32>,
@@ -54,7 +54,7 @@ pub struct UserSamplingParams {
 }
 
 #[allow(clippy::derivable_impls)] // more explicit
-impl Default for UserSamplingParams {
+impl Default for SamplingParams {
     fn default() -> Self {
         Self {
             temperature: None,
@@ -81,7 +81,7 @@ pub struct TextRequest {
     /// Prompt text or prompt token IDs for this request.
     pub prompt: Prompt,
     /// User-facing sampling parameters accepted by `vllm-text`.
-    pub sampling_params: UserSamplingParams,
+    pub sampling_params: SamplingParams,
     /// Incremental detokenization options for the response path.
     pub decode_options: TextDecodeOptions,
 }

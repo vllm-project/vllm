@@ -11,7 +11,7 @@ use serde_json::json;
 use tower::util::ServiceExt as _;
 use vllm_chat::{
     ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatRequest, ChatRole, ChatTextBackend,
-    ChatToolChoice, UserSamplingParams,
+    ChatToolChoice, SamplingParams,
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
@@ -639,7 +639,7 @@ async fn chat_harness_streams_text_events() {
         .chat(ChatRequest {
             request_id: "chat-harness".to_string(),
             messages: vec![ChatMessage::text(ChatRole::User, "hello")],
-            sampling_params: UserSamplingParams {
+            sampling_params: SamplingParams {
                 max_tokens: Some(8),
                 ..Default::default()
             },

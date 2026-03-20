@@ -5,7 +5,7 @@ use vllm_llm::GenerateRequest;
 
 use crate::backend::SamplingHints;
 use crate::error::{Error, Result};
-use crate::request::{TextRequest, UserSamplingParams};
+use crate::request::{SamplingParams, TextRequest};
 
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
@@ -48,10 +48,10 @@ pub fn lower_text_request(
     })
 }
 
-/// Convert [`UserSamplingParams`] into engine-core sampling params, enriching omitted user values
-/// with tokenizer/model-derived hints when available.
+/// Convert [`SamplingParams`] into [`EngineCoreSamplingParams`], enriching omitted user values with
+/// tokenizer/model-derived hints when available.
 pub fn lower_sampling_params(
-    sampling_params: UserSamplingParams,
+    sampling_params: SamplingParams,
     SamplingHints {
         primary_eos_token_id,
         extra_eos_token_ids,
@@ -65,7 +65,7 @@ pub fn lower_sampling_params(
     }: SamplingHints,
     prompt_len: u32,
 ) -> Result<EngineCoreSamplingParams> {
-    let UserSamplingParams {
+    let SamplingParams {
         temperature,
         top_p,
         top_k,
@@ -179,7 +179,7 @@ mod tests {
         TextRequest {
             request_id: "text-1".to_string(),
             prompt: Prompt::TokenIds(vec![1, 2, 3]),
-            sampling_params: UserSamplingParams::default(),
+            sampling_params: SamplingParams::default(),
             decode_options: Default::default(),
         }
     }
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn lower_sampling_params_preserves_explicit_stop_token_ids_in_all_stop_set() {
-        let mut sampling_params = UserSamplingParams::default();
+        let mut sampling_params = SamplingParams::default();
         sampling_params.stop_token_ids = Some(vec![11, 77]);
 
         let params = lower_sampling_params(
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn lower_sampling_params_prefers_user_values_over_generation_defaults() {
-        let sampling_params = UserSamplingParams {
+        let sampling_params = SamplingParams {
             temperature: Some(0.2),
             top_p: Some(0.3),
             top_k: Some(4),
@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn lower_sampling_params_uses_generation_defaults_when_user_omits_values() {
         let params = lower_sampling_params(
-            UserSamplingParams::default(),
+            SamplingParams::default(),
             SamplingHints {
                 primary_eos_token_id: None,
                 extra_eos_token_ids: BTreeSet::new(),

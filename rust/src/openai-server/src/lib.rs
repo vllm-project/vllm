@@ -9,6 +9,7 @@ mod error;
 mod routes;
 mod state;
 
+use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -27,10 +28,6 @@ use crate::state::AppState;
 
 /// Build the shared application state for one configured model and one engine client.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
-    let text_backend = Arc::new(HfTextBackend::from_model(&config.model).await?);
-    // Build chat on top of the already loaded text backend so tokenizer/model metadata stay
-    // shared between raw completions and chat requests.
-    let backend = Arc::new(HfChatBackend::from_text_backend((*text_backend).clone())?);
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address: config.handshake_address.clone(),
         local_host: config.engine_local_host.clone(),
@@ -39,12 +36,17 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     })
     .await?;
 
+    // Build chat on top of the already loaded text backend so tokenizer/model metadata stay
+    // shared between raw completions and chat requests.
+    let text_backend = Arc::new(HfTextBackend::from_model(&config.model).await?);
+    let chat_backend = Arc::new(HfChatBackend::from_text_backend(&text_backend)?);
+
     let mut text = TextLlm::new(Llm::new(client), text_backend);
     if let Some(max_model_len) = config.max_model_len {
         text = text.with_max_model_len(max_model_len);
     }
 
-    let mut chat = ChatLlm::new(text, backend);
+    let mut chat = ChatLlm::new(text, chat_backend);
     if let Some(ref name) = config.tool_call_parser {
         chat = chat.with_tool_call_parser(name);
     }
@@ -61,7 +63,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
 /// `vllm-llm` layers, and shuts them down before returning.
 pub async fn serve<F>(config: Config, shutdown: F) -> Result<()>
 where
-    F: std::future::Future<Output = ()> + Send + 'static,
+    F: Future<Output = ()> + Send + 'static,
 {
     let state = build_state(&config).await?;
     let listener = TcpListener::bind(config.bind_address()).await?;

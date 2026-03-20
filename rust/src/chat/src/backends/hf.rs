@@ -30,14 +30,14 @@ impl HfChatBackend {
     /// Load one Hugging Face model plus its chat template and wrap the text backend.
     pub async fn from_model(model_id: &str) -> Result<Self> {
         let text_backend = HfTextBackend::from_model(model_id).await?;
-        Self::from_text_backend(text_backend)
+        Self::from_text_backend(&text_backend)
     }
 
     /// Build the chat wrapper around an already loaded text backend.
     ///
     /// The text backend stays responsible for tokenizer/model loading; this wrapper only adds
     /// chat-template rendering and chat-specific request semantics.
-    pub fn from_text_backend(text_backend: HfTextBackend) -> Result<Self> {
+    pub fn from_text_backend(text_backend: &HfTextBackend) -> Result<Self> {
         let files = text_backend.resolved_model_files();
         let chat_template = ChatTemplate::load(
             files.tokenizer_config_path.as_deref(),

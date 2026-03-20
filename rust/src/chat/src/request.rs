@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use openai_protocol::common::{Function as OpenAiFunction, Tool as OpenAiTool};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub use vllm_text::SamplingParams;
 use vllm_text::TextDecodeOptions;
-pub use vllm_text::UserSamplingParams;
 
 use crate::AssistantMessageExt;
 use crate::error::{Error, Result};
@@ -262,7 +262,7 @@ pub struct ChatRequest {
     /// Ordered chat history to render.
     pub messages: Vec<ChatMessage>,
     /// User-facing sampling parameters accepted by `vllm-chat`.
-    pub sampling_params: UserSamplingParams,
+    pub sampling_params: SamplingParams,
     /// Chat-specific rendering options.
     pub chat_options: ChatOptions,
     /// Function tools made available to the model for this request.

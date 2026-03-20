@@ -267,7 +267,7 @@ mod tests {
     use super::super::structured::structured_chat_event_stream;
     use super::super::{AssistantEvent, ContentEvent};
     use super::tool_event_stream;
-    use crate::UserSamplingParams;
+    use crate::SamplingParams;
     use crate::event::{AssistantBlockKind, AssistantMessageExt as _};
     use crate::request::{
         ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
@@ -310,7 +310,7 @@ mod tests {
         ChatRequest {
             request_id: request_id.to_string(),
             messages: vec![ChatMessage::text(ChatRole::User, "Call the tool.")],
-            sampling_params: UserSamplingParams::default(),
+            sampling_params: SamplingParams::default(),
             chat_options: ChatOptions::default(),
             tools: vec![ChatTool {
                 name: "get_weather".to_string(),

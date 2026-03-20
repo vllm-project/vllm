@@ -1,7 +1,7 @@
 #![feature(coroutines)]
 #![feature(trait_alias)]
 
-//! Minimal chat facade above [`vllm_llm`].
+//! Minimal chat facade above [`vllm_text`].
 //!
 //! This crate keeps the northbound boundary intentionally small:
 //! `messages -> rendered prompt -> tokenized prompt -> engine request -> streamed structured
@@ -20,7 +20,7 @@ pub use event::{
 use futures::{StreamExt, TryStreamExt as _};
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
-    ChatToolChoice, UserSamplingParams,
+    ChatToolChoice, SamplingParams,
 };
 pub use stream::ChatEventStream;
 
@@ -38,11 +38,10 @@ use tool_parser::ParserFactory as ToolParserFactory;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
 
-/// Chat facade with a text-first request model layered above [`vllm_llm::Llm`].
+/// Structured chat facade above [`TextLlm`].
 ///
-/// This mirrors the useful shape of vLLM's frontend pipeline:
-/// `messages -> rendered prompt -> tokenized prompt -> engine request -> streamed structured
-/// assistant events`.
+/// This layer stays above raw text semantics: it takes care of chat-template rendering, exposes
+/// structured assistant events, and adds chat-specific request semantics such as tool calls.
 pub struct ChatLlm {
     text: TextLlm,
     backend: DynChatBackend,

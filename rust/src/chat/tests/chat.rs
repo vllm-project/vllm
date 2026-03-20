@@ -10,7 +10,7 @@ use tokio::time::timeout;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
     ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTextBackend, ChatTool,
-    ChatToolChoice, UserSamplingParams,
+    ChatToolChoice, SamplingParams,
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
@@ -236,7 +236,7 @@ fn sample_request(request_id: &str) -> ChatRequest {
             ChatMessage::text(ChatRole::System, "You are terse."),
             ChatMessage::text(ChatRole::User, "Say hi"),
         ],
-        sampling_params: UserSamplingParams {
+        sampling_params: SamplingParams {
             max_tokens: Some(8),
             ..Default::default()
         },

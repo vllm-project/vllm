@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -7,7 +8,7 @@ use tracing_subscriber::EnvFilter;
 use vllm_chat::backends::hf::HfChatBackend;
 use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatLlm, ChatMessage, ChatOptions,
-    ChatRequest, ChatRole, ChatToolChoice, UserSamplingParams,
+    ChatRequest, ChatRole, ChatToolChoice, SamplingParams,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
@@ -46,13 +47,13 @@ fn init_tracing() {
 async fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
-    let text_backend = std::sync::Arc::new(
+    let text_backend = Arc::new(
         HfTextBackend::from_model(&args.model)
             .await
             .with_context(|| format!("failed to load text backend for {}", args.model))?,
     );
-    let backend = std::sync::Arc::new(
-        HfChatBackend::from_text_backend((*text_backend).clone())
+    let chat_backend = Arc::new(
+        HfChatBackend::from_text_backend(&text_backend)
             .with_context(|| format!("failed to load chat backend for {}", args.model))?,
     );
 
@@ -78,12 +79,12 @@ async fn main() -> Result<()> {
     println!("ready_message={:?}", client.ready_message);
 
     let llm = Llm::new(client);
-    let chat = ChatLlm::new(TextLlm::new(llm, text_backend), backend);
+    let chat = ChatLlm::new(TextLlm::new(llm, text_backend), chat_backend);
 
     let request = ChatRequest {
         request_id: request_id.clone(),
         messages: vec![ChatMessage::text(ChatRole::User, args.prompt.clone())],
-        sampling_params: UserSamplingParams {
+        sampling_params: SamplingParams {
             temperature: Some(0.0),
             ..Default::default()
         },

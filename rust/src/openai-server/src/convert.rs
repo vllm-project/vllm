@@ -6,7 +6,7 @@ use uuid::Uuid;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
     ChatMessage as VllmChatMessage, ChatOptions, ChatRequest, ChatTool, ChatToolChoice,
-    UserSamplingParams,
+    SamplingParams,
 };
 
 use crate::error::{ApiError, bail_invalid_request};
@@ -42,7 +42,7 @@ pub fn prepare_chat_request(
     let chat_request = ChatRequest {
         request_id: response_id.clone(),
         messages,
-        sampling_params: UserSamplingParams {
+        sampling_params: SamplingParams {
             temperature: request.temperature,
             top_p: request.top_p,
             top_k: request.top_k,

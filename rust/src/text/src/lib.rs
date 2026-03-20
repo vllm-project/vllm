@@ -14,7 +14,7 @@ pub use lower::{
     PreparedTextRequest, lower_sampling_params, lower_text_request, resolve_max_tokens,
 };
 pub use output::{DecodedTextEvent, TextDecodeOptions};
-pub use request::{Prompt, TextRequest, UserSamplingParams};
+pub use request::{Prompt, SamplingParams, TextRequest};
 use vllm_llm::Llm;
 
 mod backend;
@@ -27,7 +27,7 @@ mod request;
 /// Shared streamed text output type used by raw completions and other text-only northbound paths.
 pub trait TextOutputStream = Stream<Item = Result<DecodedTextEvent>> + Send + 'static;
 
-/// Minimal raw text facade above [`vllm_llm::Llm`].
+/// Raw text facade above [`Llm`].
 ///
 /// This layer stays below chat semantics: prompt text or prompt token IDs flow in, decoded text
 /// deltas and terminal metadata flow out.
