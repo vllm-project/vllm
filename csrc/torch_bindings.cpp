@@ -237,6 +237,50 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                 Tensor cos_sin_cache, bool is_neox) -> ()");
   ops.impl("rotary_embedding", torch::kCUDA, &rotary_embedding);
 
+  // CUTLASS FP8×FP8→FP8 batched GEMM for MLA absorption BMM.
+  // Writes strided output directly into q_out[:, :, :N].
+  ops.def(
+      "mla_absorption_bmm(Tensor! out, Tensor a, Tensor b,"
+      "                   Tensor scale_a, Tensor scale_b) -> ()");
+  ops.impl("mla_absorption_bmm", torch::kCUDA, &mla_absorption_bmm);
+
+  // CUTLASS BF16×FP8→FP8 batched GEMM for MLA absorption BMM.
+  // Takes BF16 q_nope directly (no FP8 quantization needed).
+  ops.def(
+      "mla_absorption_bmm_bf16(Tensor! out, Tensor a, Tensor b,"
+      "                        Tensor scale_a, Tensor scale_b) -> ()");
+  ops.impl("mla_absorption_bmm_bf16", torch::kCUDA, &mla_absorption_bmm_bf16);
+
+  // Split RoPE + nope kernels for dual-stream execution.
+  ops.def(
+      "mla_fused_cache_rope(Tensor! q_rope_in, Tensor! q_rope_out,"
+      "                     Tensor! k_rope_in, Tensor! kv_cache,"
+      "                     Tensor! slot_mapping, Tensor! inv_freq,"
+      "                     Tensor! pos_ids, int num_kv_heads,"
+      "                     int no_rope_dim, float quant_scale_q,"
+      "                     float quant_scale_kv, bool interleave) -> ()");
+  ops.impl("mla_fused_cache_rope", torch::kCUDA, &mla_fused_cache_rope);
+
+  ops.def(
+      "mla_fused_cache_nope(Tensor! q_nope_in, Tensor! q_nope_out,"
+      "                     Tensor! k_nope_in, Tensor! kv_cache,"
+      "                     Tensor! slot_mapping, int num_kv_heads,"
+      "                     float quant_scale_q,"
+      "                     float quant_scale_kv) -> ()");
+  ops.impl("mla_fused_cache_nope", torch::kCUDA, &mla_fused_cache_nope);
+
+  // Fused RoPE + FP8 quantization for MLA decode.
+  // Computes cos/sin on-the-fly from inv_freq via __sincosf.
+  ops.def(
+      "mla_rope_quantize_fp8(Tensor! q_rope_in, Tensor! k_rope_in,"
+      "                      Tensor! q_nope_in, Tensor! k_nope_in,"
+      "                      Tensor! q_rope_out, Tensor! k_rope_out,"
+      "                      Tensor! q_nope_out, Tensor! k_nope_out,"
+      "                      Tensor inv_freq, Tensor pos_ids,"
+      "                      float quant_scale_q, float quant_scale_kv,"
+      "                      bool interleave, bool enable_pdl) -> ()");
+  ops.impl("mla_rope_quantize_fp8", torch::kCUDA, &mla_rope_quantize_fp8);
+
   // Quantization ops
 #ifndef USE_ROCM
   // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).

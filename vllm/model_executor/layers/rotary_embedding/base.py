@@ -61,6 +61,11 @@ class RotaryEmbeddingBase(CustomOp):
                 cache = cache.to(dtype)
             self.cos_sin_cache: torch.Tensor
             self.register_buffer("cos_sin_cache", cache, persistent=False)
+            self.register_buffer(
+                "inv_freq",
+                self._dynamic_inv_freq.to(torch.float32),
+                persistent=False,
+            )
 
         self.apply_rotary_emb = ApplyRotaryEmb(
             is_neox_style=self.is_neox_style,
@@ -83,6 +88,7 @@ class RotaryEmbeddingBase(CustomOp):
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         """Compute the cos and sin cache."""
         inv_freq = self._compute_inv_freq(self.base)
+        self._dynamic_inv_freq = inv_freq
         t = torch.arange(self.max_position_embeddings, dtype=torch.float)
 
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
