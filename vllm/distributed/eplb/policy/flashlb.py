@@ -894,7 +894,7 @@ class FlashlbEplbPolicy(AbstractEplbPolicy):
         num_groups: int,
         num_nodes: int,
         num_ranks: int,
-        old_global_expert_indices: torch.Tensor,
+        old_global_expert_indices: torch.Tensor | None,
     ) -> torch.Tensor:
         """
         Entry point for expert-parallelism load balancer.
