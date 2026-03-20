@@ -488,14 +488,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
-    "Qwen3_5ForCausalLM": _HfExamplesInfo(
-        "local/qwen3_5_text_config_example",
-        is_available_online=False,
-    ),
-    "Qwen3_5MoeForCausalLM": _HfExamplesInfo(
-        "local/qwen3_5_moe_text_config_example",
-        is_available_online=False,
-    ),
     "Qwen3NextForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
         extras={"tiny-random": "tiny-random/qwen3-next-moe"},

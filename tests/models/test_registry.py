@@ -26,16 +26,19 @@ from vllm.platforms import current_platform
 from ..utils import create_new_process_for_each_test
 from .registry import HF_EXAMPLE_MODELS
 
+_INTERNAL_QWEN3_5_TEXT_ARCHS = {"Qwen3_5ForCausalLM", "Qwen3_5MoeForCausalLM"}
+
 
 @pytest.mark.parametrize("model_arch", ModelRegistry.get_supported_archs())
 def test_registry_imports(model_arch):
-    # Skip if transformers version is incompatible
-    model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
-    model_info.check_transformers_version(
-        on_fail="skip",
-        check_max_version=False,
-        check_version_reason="vllm",
-    )
+    if model_arch not in _INTERNAL_QWEN3_5_TEXT_ARCHS:
+        # Skip if transformers version is incompatible
+        model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
+        model_info.check_transformers_version(
+            on_fail="skip",
+            check_max_version=False,
+            check_version_reason="vllm",
+        )
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
     assert model_cls is not None
@@ -129,7 +132,9 @@ def test_registry_is_pp(model_arch, is_pp, init_cuda):
 
 def test_hf_registry_coverage():
     untested_archs = (
-        ModelRegistry.get_supported_archs() - HF_EXAMPLE_MODELS.get_supported_archs()
+        ModelRegistry.get_supported_archs()
+        - _INTERNAL_QWEN3_5_TEXT_ARCHS
+        - HF_EXAMPLE_MODELS.get_supported_archs()
     )
 
     assert not untested_archs, (
