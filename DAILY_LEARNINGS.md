@@ -132,4 +132,110 @@
 
 ---
 
-*Last updated: 2026-03-20 18:35 HKT*
+---
+
+## 📊 2026-03-20 19:40 晚间检查
+
+### PR 状态确认
+
+| PR # | 标题 | 状态 | 评论 | 行动 |
+|------|------|------|------|------|
+| #37621 | [Bugfix] JAIS: Only apply ALiBi when position_embedding_type is alibi | open, blocked | 0 | 等待 CI |
+| #37578 | [Bugfix] Fix unclean shutdown from Ctrl-C with AR Fusion | open, blocked | 1 (bot) | 等待 CI |
+
+**Bot 评论检查**: PR #37578 只有 gemini-code-assist[bot] 的评论，表示无法 review 文件类型，无需行动。
+
+### 今日总结
+
+- ✅ 完成 2 个 PR 提交（达到每日上限）
+- ✅ 作者身份正确 (`simpx <simpxx@gmail.com>`)
+- ✅ 学习社区 merge 的 PRs
+- ✅ 跟踪 izhuhaoran 动态（今天 5 个新 PR）
+- ⏸️ 工作区干净，无未提交更改
+
+### 明日计划
+
+1. **优先**: 检查 PR #37621 和 #37578 的 CI 结果
+2. **如有维护者评论**: 准备回复（等 10-30 分钟，不秒回）
+3. **如 CI 通过**: 考虑开新 PR（good first issue 或 KVCache 相关）
+4. **继续学习**: izhuhaoran 的 PR 风格，社区 merge 的 PR 模式
+
+### 注意事项
+
+- ⏰ 当前时间 19:40，已过工作时段（9:00-18:00）
+- 🛑 今日不再提交新 PR（已达上限 2 个）
+- 📈 保持耐心，等待 CI 和维护者 review
+
+---
+
+---
+
+## 📊 2026-03-20 20:44 晚间检查（Cron 任务）
+
+### PR 状态确认
+
+| PR # | 标题 | 状态 | 评论 | 行动 |
+|------|------|------|------|------|
+| #37621 | [Bugfix] JAIS: Only apply ALiBi when position_embedding_type is alibi | open | 0 | 等待 CI/review |
+| #37578 | [Bugfix] Fix unclean shutdown from Ctrl-C with AR Fusion | open | 1 (bot) | 等待 CI/review |
+
+**Bot 评论检查**: PR #37578 只有 gemini-code-assist[bot] 的评论（无法 review 文件类型），无需行动。
+
+### izhuhaoran 动态（2026-03-20 全天）
+
+今天共创建 **5 个新 PR**，全部 open 状态：
+
+| PR # | 标题 | 时间 |
+|------|------|------|
+| #37681 | Fix various config related issues for Transformers v5 | 12:40 UTC |
+| #37679 | fix: remove ambiguous KV cache layout assertion for Mamba hybrid models | 12:28 UTC |
+| #37678 | [Feature] Add OCI Image Annotations to container images | 12:28 UTC |
+| #37677 | [Bugfix] Allow tensorizer load format for S3/GCS/Azure object storage | 12:18 UTC |
+| #37676 | [Bugfix] Fix SamplingParams bad_words tokenizer conversion for space-prefixed tokens | 12:12 UTC |
+
+**观察：**
+- 集中在中午时段（12:12-12:40 UTC，即 20:12-20:40 HKT）
+- 领域分散：Transformers config、KV cache、OCI、tensorizer、tokenizer
+- 标题格式：多用 `[Bugfix]` / `[Feature]` 前缀，小写 `fix:` 也有
+- **学习点**：izhuhaoran 一次提交多个 PR 但领域不同，说明在系统性清理问题
+
+### 社区学习（今日 merged PRs）
+
+| PR # | 标题 | 作者 | 学习点 |
+|------|------|------|--------|
+| #37661 | [Misc] Use logger.info_once for auto tool choice log message | chaunceyjiang | 小改动，日志优化 |
+| #37641 | [XPU] bump vllm-xpu-kernels to v0.1.4 | jikunshang | 依赖版本更新 |
+| #37639 | [Model Runner V2] Fix draft logits not populated during cudagraph replay | TheEpicDolphin | 核心 bugfix |
+| #37634 | [XPU] Automatically detect target platform as XPU in build. | ccrhx4 | 构建优化 |
+| #37619 | [ROCm][CI] Update GSM8K eval config to use fp8-and-mixed models list | AndreasKaratzas | CI 配置 |
+
+**模式总结：**
+- 标题格式统一：`[标签] 描述` 或 `[标签][子标签] 描述`
+- 改动专注：一个 PR 解决一个问题
+- CI 相关 PR 多来自核心贡献者（AndreasKaratzas 等）
+
+### 今日总结
+
+- ✅ 提交 2 个 PR（达到每日上限）
+- ✅ 作者身份正确 (`simpx <simpxx@gmail.com>`)
+- ✅ 无维护者评论，等待 CI 结果
+- ✅ 学习社区 merge 模式
+- ✅ 跟踪 izhuhaoran 动态
+
+### 明日计划
+
+1. **优先**: 检查 PR #37621 和 #37578 的 CI 结果和维护者评论
+2. **如有 review 评论**: 准备回复（等 10-30 分钟，不秒回）
+3. **如 CI 通过且无 blocking**: 考虑开新 PR（good first issue 或 KVCache 相关）
+4. **继续学习**: izhuhaoran 的 PR 风格，社区 merge 的 PR 模式
+
+### 注意事项
+
+- ⏰ 当前时间 20:44 HKT，已过工作时段（9:00-18:00）
+- 🛑 今日不再提交新 PR（已达上限 2 个）
+- 📈 保持耐心，等待 CI 和维护者 review
+- 🎯 质量 > 数量：一个 merge 胜过十个 close
+
+---
+
+*Last updated: 2026-03-20 20:44 HKT*
