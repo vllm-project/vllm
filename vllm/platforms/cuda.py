@@ -522,9 +522,7 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
-    def get_default_ir_op_priority(
-        cls, vllm_config: "VllmConfig"
-    ) -> "IrOpPriorityConfig":
+    def get_default_ir_op_priority(cls, vllm_config: VllmConfig) -> IrOpPriorityConfig:
         from vllm.config.compilation import CompilationMode
         from vllm.config.kernel import IrOpPriorityConfig
 
