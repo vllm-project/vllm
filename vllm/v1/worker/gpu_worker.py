@@ -419,7 +419,7 @@ class Worker(WorkerBase):
         self.non_torch_memory = profile_result.non_torch_increase
         self.peak_activation_memory = (
             profile_result.torch_peak_increase + cudagraph_memory_estimate_applied
-        )
+self.peak_activation_memory = profile_result.torch_peak_increase
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         free_gpu_memory = profile_result.after_profile.free_memory
