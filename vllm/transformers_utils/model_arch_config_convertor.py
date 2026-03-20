@@ -228,7 +228,7 @@ class ModelArchConfigConvertorBase:
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
         ):
-            return self.hf_text_config.kv_lora_rank is not None
+            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
         elif self.hf_text_config.model_type == "eagle":
             # if the model is an EAGLE module, check for the
             # underlying architecture
@@ -241,7 +241,7 @@ class ModelArchConfigConvertorBase:
                     "deepseek_v32",
                     "deepseek_mtp",
                 )
-                and self.hf_text_config.kv_lora_rank is not None
+                and getattr(self.hf_text_config, "kv_lora_rank", None) is not None
             )
         return False
 
