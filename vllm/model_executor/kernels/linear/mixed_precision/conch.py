@@ -124,6 +124,14 @@ class ConchLinearKernel(MPLinearKernel):
 
         w_q, w_s, w_zp, _ = self._get_weight_params(layer)
 
+        # Map channelwise group_size=-1 to the actual input dimension K.
+        # The conch kernel computes stride_mul = block_k / group_size;
+        # passing -1 produces a negative stride that reads out-of-bounds
+        # scale values for all K-blocks after the first.
+        group_size = self.config.group_size
+        if group_size == -1:
+            group_size = x.shape[-1]
+
         output = mixed_precision_gemm(
             x=x,
             w_q_packed=w_q.data,
@@ -131,7 +139,7 @@ class ConchLinearKernel(MPLinearKernel):
             w_zp=w_zp.data if w_zp is not None else None,
             weight_size_bits=self.config.weight_type.size_bits,
             weight_bias=self.config.weight_type.bias,
-            group_size=self.config.group_size,
+            group_size=group_size,
         )
 
         if bias is not None:

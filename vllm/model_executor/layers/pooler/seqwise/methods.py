@@ -17,7 +17,7 @@ SequencePoolingMethodOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 
 class SequencePoolingMethod(nn.Module, ABC):
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"token_embed", "token_classify", "embed", "classify", "score"}
+        return {"token_embed", "token_classify", "embed", "classify"}
 
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return PoolingParamsUpdate()
