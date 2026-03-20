@@ -515,6 +515,28 @@ class FusedMoE(CustomOp):
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
+        # Wire RIY stats as registered buffers (graph-compatible).
+        # register_buffer makes tensors known to torch.compile,
+        # so scatter_add_ on them survives CUDA Graph capture.
+        if _layer_idx >= 0:
+            _riy = get_riy_state()
+            if _riy.enabled:
+                if not _riy._tensors_initialized:
+                    _riy.initialize_tensors(torch.device("cuda"))
+                fv = _riy.get_freq_view(_layer_idx)
+                wv = _riy.get_weight_view(_layer_idx)
+                if fv is not None:
+                    self.register_buffer(
+                        "_riy_freq", fv, persistent=False)
+                    self.register_buffer(
+                        "_riy_weight", wv, persistent=False)
+                    self.register_buffer(
+                        "_riy_collecting", _riy._collecting_flag,
+                        persistent=False)
+                    self.router.riy_freq_view = self._riy_freq
+                    self.router.riy_weight_view = self._riy_weight
+                    self.router.riy_collecting_flag = self._riy_collecting
+
         # Round up hidden size before creating moe_config.
         # This way moe_config is created with the correct hidden_size from the start.
         unpadded_hidden_size = hidden_size

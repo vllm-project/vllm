@@ -1,0 +1,115 @@
+#!/bin/bash
+# RIY: Qwen3.5-397B-A17B INT4 AutoRound — TP=2 DGX+PGX
+# Based on start.ng17e.serve.qwen35-397b (tested, working)
+# Changes: vllm-ng17e-riy image, --enforce-eager for stats
+
+set -euo pipefail
+
+HEAD_CONTAINER="ng17e-head"
+WORKER_CONTAINER="ng17e-worker"
+HEAD_IP="192.168.0.117"
+WORKER_IP="192.168.0.116"
+ETH_IF="enp1s0f0np0"
+IMAGE="localhost/vllm-ng17e-riy:latest"
+
+MODEL_PATH="/data/tensordata/Qwen3.5-397B-A17B-int4-AutoRound"
+MODEL_NAME="qwen3.5-397b-vl"
+PORT=8011
+RIY_PORT=8019
+
+echo "=== RIY: Qwen3.5-397B TP=2 + enforce-eager ==="
+echo "Image: $IMAGE"
+echo "Head: $HEAD_IP, Worker: $WORKER_IP"
+echo "RIY:  http://localhost:${RIY_PORT}/riy/health"
+echo ""
+
+# Recreate containers (UMA env vars baked in image + overrides)
+echo "Creating containers..."
+podman stop "$HEAD_CONTAINER" 2>/dev/null || true; podman rm "$HEAD_CONTAINER" 2>/dev/null || true
+podman run -d --name "$HEAD_CONTAINER" \
+  --device nvidia.com/gpu=all --security-opt=label=disable \
+  --hooks-dir=/usr/share/containers/oci/hooks.d \
+  --network host --ipc host \
+  -v /data/tensordata:/data/tensordata \
+  -v /dev/infiniband:/dev/infiniband \
+  -v /home/flash/.cache/huggingface:/root/.cache/huggingface \
+  -e VLLM_HOST_IP=$HEAD_IP \
+  -e RAY_NODE_IP_ADDRESS=$HEAD_IP \
+  -e VLLM_UF_EAGER_ALLREDUCE=1 \
+  -e NCCL_SOCKET_IFNAME=$ETH_IF \
+  -e GLOO_SOCKET_IFNAME=$ETH_IF \
+  -e NCCL_IB_DISABLE=0 \
+  -e NCCL_IGNORE_CPU_AFFINITY=1 \
+  -e VLLM_MARLIN_USE_ATOMIC_ADD=1 \
+  "$IMAGE" sleep infinity
+
+ssh flash@192.168.1.116 "podman stop $WORKER_CONTAINER 2>/dev/null || true; podman rm $WORKER_CONTAINER 2>/dev/null || true; \
+podman run -d --name $WORKER_CONTAINER \
+  --device nvidia.com/gpu=all --security-opt=label=disable \
+  --hooks-dir=/usr/share/containers/oci/hooks.d \
+  --network host --ipc host \
+  -v /data/tensordata:/data/tensordata \
+  -v /dev/infiniband:/dev/infiniband \
+  -v /home/flash/.cache/huggingface:/root/.cache/huggingface \
+  -e VLLM_HOST_IP=$WORKER_IP \
+  -e RAY_NODE_IP_ADDRESS=$WORKER_IP \
+  -e VLLM_UF_EAGER_ALLREDUCE=1 \
+  -e NCCL_SOCKET_IFNAME=$ETH_IF \
+  -e GLOO_SOCKET_IFNAME=$ETH_IF \
+  -e NCCL_IB_DISABLE=0 \
+  -e NCCL_IGNORE_CPU_AFFINITY=1 \
+  -e VLLM_MARLIN_USE_ATOMIC_ADD=1 \
+  $IMAGE sleep infinity"
+sleep 3
+
+# Start Ray Worker on PGX
+echo "Starting Ray worker on PGX..."
+ssh flash@192.168.1.116 "podman exec -d $WORKER_CONTAINER bash -c '
+  ray start --block --object-store-memory 1073741824 --num-cpus 2 \
+    --disable-usage-stats --address=\"$HEAD_IP:6379\" \
+    --node-ip-address $WORKER_IP \
+  > /tmp/ray-worker.log 2>&1
+'"
+
+# Start Ray Head on DGX
+echo "Starting Ray head on DGX..."
+podman exec -d "$HEAD_CONTAINER" bash -c "
+  ray start --head --port 6379 --object-store-memory 1073741824 --num-cpus 2 \
+    --node-ip-address $HEAD_IP --include-dashboard=false --disable-usage-stats
+"
+sleep 5
+
+# Wait for Ray cluster
+echo "Waiting for Ray cluster..."
+for i in $(seq 1 30); do
+  NODES=$(podman exec "$HEAD_CONTAINER" bash -c "ray status 2>/dev/null | grep -c 'node_' || echo 0" | tail -1)
+  if [ "$NODES" -ge 2 ]; then
+    echo "Ray cluster: $NODES nodes ready"
+    break
+  fi
+  sleep 2
+done
+
+# Launch vllm serve — enforce-eager for RIY stats collection
+echo "Starting vllm serve (enforce-eager for RIY stats)..."
+podman exec "$HEAD_CONTAINER" \
+  vllm serve "$MODEL_PATH" \
+    --served-model-name "$MODEL_NAME" \
+    --host 0.0.0.0 \
+    --port "$PORT" \
+    --max-model-len 262144 \
+    --gpu-memory-utilization 0.05 \
+    --kv-cache-memory-bytes 8G \
+    --kv-cache-dtype fp8 \
+    --max-num-seqs 3 \
+    --max-num-batched-tokens 8192 \
+    --load-format fastsafetensors \
+    --enable-prefix-caching \
+    --enforce-eager \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser qwen3 \
+    --trust-remote-code \
+    --tensor-parallel-size 2 \
+    --distributed-executor-backend ray \
+  2>&1 | tee /tmp/riy-qwen35-397b.log
