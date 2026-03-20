@@ -30,7 +30,10 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
 
 def init_attn_backend(
-    kv_cache_config: KVCacheConfig, vllm_config: VllmConfig, device: torch.device
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    device: torch.device,
+    active_layer_names: set[str] | None = None,
 ):
     attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_groups: list[list[AttentionGroup]] = []
@@ -39,6 +42,8 @@ def init_attn_backend(
         kv_cache_config.kv_cache_groups
     ):
         layer_names = kv_cache_group_spec.layer_names
+        if active_layer_names is not None:
+            layer_names = list(active_layer_names.intersection(layer_names))
 
         layer_type = cast(type[Any], AttentionLayerBase)
         attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
