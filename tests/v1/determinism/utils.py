@@ -7,6 +7,10 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import get_config
+from vllm.transformers_utils.model_arch_config_convertor import (
+    ModelArchConfigConvertorBase,
+)
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 
 skip_unsupported = pytest.mark.skipif(
@@ -32,6 +36,16 @@ if flash_attn_supports_mla():
 
 DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
 MLA_MODEL = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+
+if model := os.getenv("VLLM_TEST_MODEL"):
+    try:
+        config = get_config(model, trust_remote_code=False)
+        if not ModelArchConfigConvertorBase(
+            config, config.get_text_config()
+        ).is_deepseek_mla():
+            BACKENDS = [backend for backend in BACKENDS if not backend.endswith("MLA")]
+    except Exception:
+        pass
 
 
 def resolve_model_name(backend: str) -> str:
