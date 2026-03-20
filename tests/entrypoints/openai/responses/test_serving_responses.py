@@ -463,6 +463,7 @@ class TestHarmonyPreambleStreaming:
         """Build a lightweight mock StreamingHarmonyContext."""
         ctx = MagicMock()
         ctx.last_content_delta = delta
+        ctx.channel_deltas = [(channel, recipient, delta)]
         ctx.parser.current_channel = channel
         ctx.parser.current_recipient = recipient
         return ctx
