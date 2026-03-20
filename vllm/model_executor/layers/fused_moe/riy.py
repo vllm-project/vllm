@@ -74,6 +74,8 @@ class RiyState:
         self._layer_stats: list[RiyLayerStats] = []
         # Mask: set of (layer, expert) tuples to deactivate
         self._mask: set[tuple[int, int]] = set()
+        # Profile mask: experts loaded from --riy-expert-profile (persistent)
+        self._profile_mask: set[tuple[int, int]] = set()
         # Pre-computed per-layer mask tensors on device (for hot path)
         self._mask_tensors: dict[int, torch.Tensor] = {}
         self._profile_loaded = False
@@ -264,9 +266,16 @@ class RiyState:
         with open(p) as f:
             profile = json.load(f)
         experts = [tuple(x) for x in profile["pruned_experts"]]
+        with self._lock:
+            self._profile_mask = set(experts)
         self.set_mask(experts)
         logger.info("RIY profile loaded: %s (%s, %d experts)",
                      path, profile.get("workload", "unknown"), len(experts))
+
+    def get_profile_mask(self) -> list[list[int]]:
+        """Get the profile-loaded mask (persistent, from --riy-expert-profile)."""
+        with self._lock:
+            return sorted([list(t) for t in self._profile_mask])
 
     def _rebuild_mask_tensors(self):
         """Rebuild per-layer boolean mask tensors from the mask set."""
@@ -421,6 +430,8 @@ def _start_riy_server(port: int = 8019):
                 self._json_response({
                     "pruned_experts": riy.get_mask(),
                     "count": len(riy.get_mask()),
+                    "profile_experts": riy.get_profile_mask(),
+                    "profile_count": len(riy._profile_mask),
                 })
             elif self.path == "/riy/health":
                 self._json_response({
