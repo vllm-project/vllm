@@ -1729,7 +1729,37 @@ def scaled_fp4_quant(
         f"input.dtype needs to be fp16 or bf16 but got {input.dtype}."
     )
 
+    # Check if we're on SM121 (Blackwell GB10) which has a bug in
+    # torch.ops._C.scaled_fp4_quant that causes sticky CUDA errors.
+    # In that case, fall back to FlashInfer's nvfp4_quantize.
+    use_flashinfer_fallback = False
+    if "flashinfer" in backend.lower():
+        try:
+            compute_capability = torch.cuda.get_device_capability(input.device)
+            if compute_capability == (12, 1):
+                use_flashinfer_fallback = True
+        except Exception:
+            pass
+
     use_8x4_sf_layout = True if "trtllm" in backend and m <= 32 else False  # noqa: SIM210
+
+    if use_flashinfer_fallback:
+        # On SM121, use FlashInfer's nvfp4_quantize which works correctly
+        from flashinfer import nvfp4_quantize, SfLayout
+
+        _fp4, _sf = nvfp4_quantize(
+            input,
+            input_global_scale,
+            sfLayout=SfLayout.layout_128x4,
+            do_shuffle=False,
+        )
+        if is_sf_swizzled_layout:
+            from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+                swizzle_blockscale,
+            )
+
+            _sf = swizzle_blockscale(_sf.to(torch.float8_e4m3fn))
+        return _fp4, _sf.view(torch.float8_e4m3fn).reshape(m, -1)
 
     if use_8x4_sf_layout:
         output, output_scale = flashinfer_quant_nvfp4_8x4_sf_layout(
