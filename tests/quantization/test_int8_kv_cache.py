@@ -53,9 +53,7 @@ def _quantize_per_token_ref(
     absmax = data.float().abs().amax(dim=(1, 2))  # [num_tokens]
     scales = (absmax / 127.0).clamp(min=1e-6)
     # scales[:, None, None] broadcasts to [num_tokens, num_heads, head_size]
-    q = (data.float() / scales[:, None, None]).round().clamp(-128, 127).to(
-        torch.int8
-    )
+    q = (data.float() / scales[:, None, None]).round().clamp(-128, 127).to(torch.int8)
     return q, scales
 
 
@@ -262,12 +260,7 @@ def test_int8_per_token_round_trip_accuracy(
             ref_scale = (absmax / 127.0).clamp(min=1e-6)
 
             # Triton truncates on float→int8 store
-            ref_q = (
-                (orig / ref_scale)
-                .clamp(-128.0, 127.0)
-                .trunc()
-                .to(torch.int8)
-            )
+            ref_q = (orig / ref_scale).clamp(-128.0, 127.0).trunc().to(torch.int8)
             ref_deq = ref_q.float() * ref_scale
 
             actual_q = cache[blk, off]
@@ -652,9 +645,7 @@ def test_triton_unified_attention_int8_per_token_scale(
 
     # Dequantized reference
     key_cache_deq = key_cache_int8.float() * k_scale_cache[:, :, None, None]
-    value_cache_deq = (
-        value_cache_int8.float() * v_scale_cache[:, :, None, None]
-    )
+    value_cache_deq = value_cache_int8.float() * v_scale_cache[:, :, None, None]
 
     cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
         dim=0, dtype=torch.int32

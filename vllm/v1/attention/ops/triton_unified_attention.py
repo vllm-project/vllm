@@ -275,10 +275,7 @@ def kernel_unified_attention_2d(
                 K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
         elif KV_QUANT_MODE == 2:  # per-token quant
             K = K_load.to(Q.dtype)
-            k_scale_idx = (
-                physical_block_idx * stride_ks_blk
-                + (seq_offset % BLOCK_SIZE)
-            )
+            k_scale_idx = physical_block_idx * stride_ks_blk + (seq_offset % BLOCK_SIZE)
             k_token_scales = tl.load(
                 k_scale_cache_ptr + k_scale_idx, mask=tile_mask, other=1.0
             )
@@ -299,10 +296,7 @@ def kernel_unified_attention_2d(
                 V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
         elif KV_QUANT_MODE == 2:  # per-token quant
             V = V_load.to(Q.dtype)
-            v_scale_idx = (
-                physical_block_idx * stride_vs_blk
-                + (seq_offset % BLOCK_SIZE)
-            )
+            v_scale_idx = physical_block_idx * stride_vs_blk + (seq_offset % BLOCK_SIZE)
             v_token_scales = tl.load(
                 v_scale_cache_ptr + v_scale_idx, mask=tile_mask, other=1.0
             )
@@ -664,10 +658,7 @@ def kernel_unified_attention_3d(
                 K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
         elif KV_QUANT_MODE == 2:  # per-token quant
             K = K_load.to(Q.dtype)
-            k_scale_idx = (
-                physical_block_idx * stride_ks_blk
-                + (seq_offset % BLOCK_SIZE)
-            )
+            k_scale_idx = physical_block_idx * stride_ks_blk + (seq_offset % BLOCK_SIZE)
             k_token_scales = tl.load(
                 k_scale_cache_ptr + k_scale_idx, mask=tile_mask, other=1.0
             )
@@ -688,10 +679,7 @@ def kernel_unified_attention_3d(
                 V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
         elif KV_QUANT_MODE == 2:  # per-token quant
             V = V_load.to(Q.dtype)
-            v_scale_idx = (
-                physical_block_idx * stride_vs_blk
-                + (seq_offset % BLOCK_SIZE)
-            )
+            v_scale_idx = physical_block_idx * stride_vs_blk + (seq_offset % BLOCK_SIZE)
             v_token_scales = tl.load(
                 v_scale_cache_ptr + v_scale_idx, mask=tile_mask, other=1.0
             )

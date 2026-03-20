@@ -757,9 +757,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """Return the KV cache quantization mode for this layer."""
         return get_kv_quant_mode(self.kv_cache_dtype)
 
-    def bind_auxiliary_buffers(
-        self, buffers: dict[str, torch.Tensor]
-    ) -> None:
+    def bind_auxiliary_buffers(self, buffers: dict[str, torch.Tensor]) -> None:
         """Bind pre-allocated auxiliary buffers (e.g. scale caches).
 
         Called by the model runner after KV cache allocation.  The
@@ -987,8 +985,6 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
 from vllm.v1.kv_cache_interface import (  # noqa: E402, F811
     KVQuantMode,
     get_kv_quant_mode,
-    is_quantized_kv_cache,
-    kv_cache_uses_per_token_scales,
 )
 
 

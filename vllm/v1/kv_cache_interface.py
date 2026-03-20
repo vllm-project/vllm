@@ -21,6 +21,7 @@ logger = init_logger(__name__)
 # KV cache quantization mode
 # ---------------------------------------------------------------------------
 
+
 class KVQuantMode(IntEnum):
     """KV cache quantization mode.
 
@@ -207,18 +208,13 @@ class AttentionSpec(KVCacheSpec):
             # + fp8 blockscales (1×16 groups) + per-token global scale.
             gs = NVFP4_BLOCKSCALE_GROUP_SIZE
             num_groups = (self.head_size + gs - 1) // gs
-            blockscale_shape = (
-                self.block_size, self.num_kv_heads, num_groups)
+            blockscale_shape = (self.block_size, self.num_kv_heads, num_groups)
             global_scale_shape = (self.block_size,)
             return [
-                AuxBufferSpec(
-                    "k_blockscale", torch.float8_e4m3fn, blockscale_shape),
-                AuxBufferSpec(
-                    "v_blockscale", torch.float8_e4m3fn, blockscale_shape),
-                AuxBufferSpec(
-                    "k_global_scale", torch.float32, global_scale_shape),
-                AuxBufferSpec(
-                    "v_global_scale", torch.float32, global_scale_shape),
+                AuxBufferSpec("k_blockscale", torch.float8_e4m3fn, blockscale_shape),
+                AuxBufferSpec("v_blockscale", torch.float8_e4m3fn, blockscale_shape),
+                AuxBufferSpec("k_global_scale", torch.float32, global_scale_shape),
+                AuxBufferSpec("v_global_scale", torch.float32, global_scale_shape),
             ]
 
         return []

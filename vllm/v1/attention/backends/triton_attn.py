@@ -363,9 +363,7 @@ class TritonAttentionImpl(AttentionImpl):
     _k_scale_cache: torch.Tensor | None = None
     _v_scale_cache: torch.Tensor | None = None
 
-    def bind_auxiliary_buffers(
-        self, buffers: dict[str, torch.Tensor]
-    ) -> None:
+    def bind_auxiliary_buffers(self, buffers: dict[str, torch.Tensor]) -> None:
         self._k_scale_cache = buffers.get("k_scale_cache")
         self._v_scale_cache = buffers.get("v_scale_cache")
 
