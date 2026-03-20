@@ -36,10 +36,6 @@ logger = init_logger(__name__)
 
 T = TypeVar("T", bound=AttentionMetadata)
 
-# Kernel MMA tile size (fixed by hardware).
-_M_BLOCK_SIZE = 128
-_N_BLOCK_SIZE = 128
-
 
 @triton.jit
 def _scatter_topk_kernel(
@@ -172,15 +168,6 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         # FA4 is required for mask_mod in forward_mha.
         fa_version = get_flash_attn_version(head_size=qk_head_dim)
         self._fa4_available = fa_version is not None and fa_version >= 4
-
-        # Block-sparse tile sizes.  SM100 (Blackwell) has q_stage=2, so the
-        # block-sparse tile_m must be >= 2 * m_block_size = 256.
-        from vllm.platforms import current_platform
-
-        cap = current_platform.get_device_capability()
-        q_stage = 2 if (cap is not None and cap.major >= 10) else 1
-        self._bs_tile_m = q_stage * _M_BLOCK_SIZE
-        self._bs_tile_n = _N_BLOCK_SIZE
 
         # DCP (context parallelism) — lazily initialized by the caller.
         self.dcp_world_size: int = -1
@@ -358,26 +345,13 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             k_scale,
         )
 
-        # Build topk mask + block sparsity
+        # Build topk mask
         dense_mask = _build_topk_mask(
             topk_per_req,
             q_lens,
             max_q_len,
             max_kv_len,
             device,
-        )
-
-        from vllm.vllm_flash_attn.cute.topk_mask import (
-            dense_mask_to_block_sparse,
-            topk_mask_mod,
-        )
-
-        block_sparse = dense_mask_to_block_sparse(
-            dense_mask,
-            max_q_len,
-            max_kv_len,
-            self._bs_tile_m,
-            self._bs_tile_n,
         )
 
         attn_out, _ = flash_attn_varlen_func(
@@ -392,11 +366,7 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             causal=False,
             return_softmax_lse=True,
             fa_version=4,
-            mask_mod=topk_mask_mod,
-            aux_tensors=[dense_mask],
-            block_sparse_tensors=block_sparse,
-            m_block_size=_M_BLOCK_SIZE,
-            n_block_size=_N_BLOCK_SIZE,
+            dense_mask=dense_mask,
         )
 
         attn_out = attn_out[..., : self.v_head_dim]

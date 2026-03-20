@@ -206,12 +206,8 @@ def flash_attn_varlen_func(
     cp_world_size=1,
     cp_rank=0,
     cp_tot_seqused_k=None,
-    # FA4 mask_mod / block_sparse
-    mask_mod=None,
-    aux_tensors=None,
-    block_sparse_tensors=None,
-    m_block_size=None,
-    n_block_size=None,
+    # FA4 sparse attention
+    dense_mask=None,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -288,11 +284,7 @@ def flash_attn_varlen_func(
 
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
 
-    _has_mask_mod = (
-        mask_mod is not None
-        or aux_tensors is not None
-        or block_sparse_tensors is not None
-    )
+    _has_mask_mod = dense_mask is not None
 
     if fa_version == 2:
         if (
@@ -337,9 +329,7 @@ def flash_attn_varlen_func(
         )
     elif fa_version == 3:
         if _has_mask_mod:
-            raise NotImplementedError(
-                "mask_mod/aux_tensors/block_sparse_tensors require FA4"
-            )
+            raise NotImplementedError("dense_mask requires FA4")
         assert alibi_slopes is None, "Alibi is not supported in FA3"
         out, softmax_lse, _, _ = torch.ops._vllm_fa3_C.fwd(
             q,
@@ -410,11 +400,7 @@ def flash_attn_varlen_func(
             num_splits=num_splits,
             return_lse=return_softmax_lse,
             out=out,
-            mask_mod=mask_mod,
-            aux_tensors=aux_tensors,
-            block_sparse_tensors=block_sparse_tensors,
-            **({"m_block_size": m_block_size} if m_block_size is not None else {}),
-            **({"n_block_size": n_block_size} if n_block_size is not None else {}),
+            dense_mask=dense_mask,
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")
