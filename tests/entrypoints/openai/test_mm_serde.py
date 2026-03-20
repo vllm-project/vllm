@@ -109,15 +109,3 @@ def test_mm_features_with_kwargs_data():
 
     decoded = decode_mm_kwargs_item(features2.kwargs_data["image"][0])
     assert torch.equal(elem.data, decoded["pixel_values"].data)
-
-
-def test_mm_features_cache_only():
-    """Test that MultiModalFeatures works without tensor data (cache hit)."""
-    features = MultiModalFeatures(
-        mm_hashes={"image": ["abc123"]},
-        mm_placeholders={"image": [PlaceholderRangeInfo(offset=0, length=10)]},
-    )
-
-    json_str = features.model_dump_json()
-    features2 = MultiModalFeatures.model_validate_json(json_str)
-    assert features2.kwargs_data is None

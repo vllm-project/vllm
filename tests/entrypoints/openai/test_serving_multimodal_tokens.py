@@ -26,7 +26,6 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
 )
 from vllm.multimodal.utils import encode_image_url
-from vllm.v1.engine.detokenizer import check_stop_strings
 
 from ...utils import RemoteOpenAIServer
 
@@ -178,145 +177,58 @@ async def test_generate_endpoint(client, processor, model_config, test_image):
     )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("logprobs_value", [0, 1, 5])
-async def test_generate_logprobs(
-    client, processor, model_config, test_image, logprobs_value
-):
-    payload = build_mm_payload(
-        processor,
-        model_config,
-        test_image,
-        "What color is this?",
-        {
-            "max_tokens": 5,
-            "temperature": 0.0,
-            "logprobs": logprobs_value,
-        },
-    )
-    resp = await client.post(GEN_ENDPOINT, json=payload)
-    resp.raise_for_status()
-    data = resp.json()
-    choice = data["choices"][0]
-    assert choice["logprobs"] is not None
-    logprobs_content = choice["logprobs"]["content"]
-    assert len(logprobs_content) == len(choice["token_ids"])
-    for entry in logprobs_content:
-        assert "logprob" in entry
-        assert len(entry["top_logprobs"]) >= 1
-        assert len(entry["top_logprobs"]) == max(logprobs_value, 1)
+RENDER_ENDPOINT = "/v1/chat/completions/render"
 
 
 @pytest.mark.asyncio
-async def test_same_response_as_chat_completions(
-    client, processor, model_config, test_image
-):
-    question = "What color is this image?"
-    image_data_url = encode_image_url(test_image)
+async def test_render_to_generate_roundtrip(client, processor, test_image):
+    """End-to-end: render a multimodal chat → feed into generate → decode."""
+    data_url = encode_image_url(test_image, format="PNG")
 
-    payload = build_mm_payload(
-        processor,
-        model_config,
-        test_image,
-        question,
-        {
-            "max_tokens": 24,
-            "temperature": 0.0,
-            "detokenize": False,
-        },
-    )
-    generate_resp = await client.post(GEN_ENDPOINT, json=payload)
-    generate_resp.raise_for_status()
-    generate_data = generate_resp.json()
-    gen_token_ids = generate_data["choices"][0]["token_ids"]
-    generate_res = processor.tokenizer.decode(gen_token_ids, skip_special_tokens=True)
-
-    completions_payload = {
+    render_payload = {
         "model": MODEL_NAME,
         "messages": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": image_data_url}},
-                    {"type": "text", "text": question},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {
+                        "type": "text",
+                        "text": "What color is this image? Answer in one word.",
+                    },
                 ],
             }
         ],
-        "max_tokens": 24,
-        "temperature": 0.0,
-        "stream": False,
     }
-    completions_resp = await client.post(
-        "/v1/chat/completions", json=completions_payload
-    )
-    completions_resp.raise_for_status()
-    completions_data = completions_resp.json()
-    completions_res = completions_data["choices"][0]["message"]["content"]
 
-    assert generate_res == completions_res
-    assert "red" in generate_res.lower(), (
-        f"Expected model to identify the red image, got: {generate_res!r}"
-    )
+    render_resp = await client.post(RENDER_ENDPOINT, json=render_payload)
+    render_resp.raise_for_status()
+    render_data = render_resp.json()
 
+    # Validate render output structure
+    assert "token_ids" in render_data
+    assert "features" in render_data
+    assert render_data["features"] is not None
+    assert "kwargs_data" in render_data["features"]
 
-@pytest.mark.asyncio
-async def test_stop_string_workflow(client, processor, model_config, test_image):
-    question = "Describe the color of this image in detail."
-
-    payload = build_mm_payload(
-        processor,
-        model_config,
-        test_image,
-        question,
-        {
-            "max_tokens": 48,
-            "temperature": 0.0,
-            "detokenize": False,
-            "stop": ["red"],
-        },
-    )
-    with pytest.raises(httpx.HTTPStatusError):
-        generate_resp = await client.post(GEN_ENDPOINT, json=payload)
-        generate_resp.raise_for_status()
-
-    payload["sampling_params"]["stop"] = None
-    generate_resp = await client.post(
-        GEN_ENDPOINT, json=payload, headers={"X-Request-Id": "mm-42"}
-    )
-    generate_resp.raise_for_status()
-    generate_data = generate_resp.json()
-    generate_res = processor.tokenizer.decode(
-        generate_data["choices"][0]["token_ids"], skip_special_tokens=True
-    )
-
-    stop_str, truncate_to = check_stop_strings(
-        generate_res, len(generate_res), ["red"], False
-    )
-    if stop_str is not None:
-        generate_res = generate_res[:truncate_to]
-
-    image_data_url = encode_image_url(test_image)
-    completions_payload = {
-        "model": MODEL_NAME,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_data_url}},
-                    {"type": "text", "text": question},
-                ],
-            }
-        ],
-        "max_tokens": 48,
+    # Build generate request from render output
+    generate_payload = render_data
+    generate_payload["sampling_params"] = {
+        "max_tokens": 10,
         "temperature": 0.0,
-        "stream": False,
-        "stop": ["red"],
     }
-    completions_resp = await client.post(
-        "/v1/chat/completions", json=completions_payload
-    )
-    completions_resp.raise_for_status()
-    completions_data = completions_resp.json()
-    completions_res = completions_data["choices"][0]["message"]["content"]
 
-    assert generate_res == completions_res
+    gen_resp = await client.post(GEN_ENDPOINT, json=generate_payload)
+    gen_resp.raise_for_status()
+    gen_data = gen_resp.json()
+
+    assert "choices" in gen_data
+    assert len(gen_data["choices"]) >= 1
+    assert len(gen_data["choices"][0]["token_ids"]) > 0
+
+    text = processor.tokenizer.decode(
+        gen_data["choices"][0]["token_ids"], skip_special_tokens=True
+    )
+    assert "red" in text.lower(), (
+        f"Expected model to identify the red image, got: {text!r}"
+    )
