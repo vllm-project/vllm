@@ -20,7 +20,7 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import log_quant_method_call, QuantizationConfig
 from vllm.model_executor.layers.quantization.qutlass_utils import to_blocked
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -88,6 +88,7 @@ class FPQuantConfig(QuantizationConfig):
             modules_to_not_convert,
         )
 
+    @log_quant_method_call
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> LinearMethodBase | None:

@@ -158,6 +158,7 @@ class QuantizationConfig(ABC):
         except ValueError:
             return default
 
+    @log_quant_method_call
     @abstractmethod
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
