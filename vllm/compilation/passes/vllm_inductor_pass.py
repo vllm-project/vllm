@@ -196,7 +196,7 @@ class VllmPatternReplacement(ABC, Generic[P, R]):
 
     @property
     @abstractmethod
-    def inputs(self) -> list[torch.Tensor]: ...
+    def get_inputs(self) -> list[torch.Tensor]: ...
 
     empty: ClassVar = staticmethod(functools.partial(torch.empty, device="cuda"))
     empty_bf16: ClassVar = staticmethod(
@@ -247,7 +247,7 @@ class VllmFusionPatternMatcherPass(VllmPatternMatcherPass, ABC):
             pm.register_replacement(
                 pr.pattern,
                 pr.replacement,
-                pr.inputs,
+                pr.get_inputs,
                 self._trace_fn,
                 self.pm_pass,
             )
