@@ -13,7 +13,7 @@ import json
 import pytest
 import requests
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen2.5-VL-3B-Instruct"
 
