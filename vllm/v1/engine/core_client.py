@@ -56,7 +56,12 @@ from vllm.v1.engine.utils import (
 )
 from vllm.v1.executor import Executor
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
+from vllm.v1.serial_utils import (
+    MsgpackDecoder,
+    MsgpackEncoder,
+    OOBTensorConsumer,
+    bytestr,
+)
 
 logger = init_logger(__name__)
 
@@ -535,10 +540,7 @@ class MPClient(EngineCoreClient):
                 )
 
                 with launch_core_engines(
-                    vllm_config,
-                    executor_class,
-                    log_stats,
-                    addresses,
+                    vllm_config, executor_class, log_stats, addresses
                 ) as (engine_manager, coordinator, addresses, tensor_queue):
                     self.resources.coordinator = coordinator
                     self.resources.engine_manager = engine_manager
@@ -557,10 +559,12 @@ class MPClient(EngineCoreClient):
 
             # Create TensorIpcSender when IPC is enabled and queues available
             self.tensor_ipc_sender: TensorIpcSender | None = None
+            oob_tensor_consumer: OOBTensorConsumer | None = None
             if mm_tensor_ipc == "torch_shm" and tensor_queue:
                 self.tensor_ipc_sender = TensorIpcSender(tensor_queue)
+                oob_tensor_consumer = self.tensor_ipc_sender.send_tensor
 
-            self.encoder = MsgpackEncoder(tensor_ipc_sender=self.tensor_ipc_sender)
+            self.encoder = MsgpackEncoder(oob_tensor_consumer=oob_tensor_consumer)
             self.decoder = MsgpackDecoder(EngineCoreOutputs)
             # Store tensor queues for routing
             self.resources.tensor_queue = tensor_queue

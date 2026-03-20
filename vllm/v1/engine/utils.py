@@ -105,13 +105,12 @@ class CoreEngineProcManager:
             "handshake_address": handshake_address,
             "executor_class": executor_class,
             "log_stats": log_stats,
+            "tensor_queue": tensor_queue,
         }
 
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
-        # Store tensor_queue for passing to engine process
-        self.tensor_queue = tensor_queue
         is_dp = vllm_config.parallel_config.data_parallel_size > 1
 
         from vllm.v1.engine.core import EngineCoreProc
@@ -129,11 +128,7 @@ class CoreEngineProcManager:
                     target=EngineCoreProc.run_engine_core,
                     name=f"EngineCore_DP{global_index}" if is_dp else "EngineCore",
                     kwargs=common_kwargs
-                    | {
-                        "dp_rank": global_index,
-                        "local_dp_rank": local_index,
-                        "tensor_queue": self.tensor_queue,
-                    },
+                    | {"dp_rank": global_index, "local_dp_rank": local_index},
                 )
             )
 
@@ -891,12 +886,9 @@ def launch_core_engines(
     # API servers and engine core. Returns a single queue since we only support
     # DP=1 for this data flow.
     tensor_queue: Queue | None = None
-    if (
-        vllm_config.model_config.multimodal_config is not None
-        and vllm_config.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"
-    ):
-        mp_ctx = get_mp_context()
-        tensor_queue = mp_ctx.Queue()
+    multimodal_config = vllm_config.model_config.multimodal_config
+    if multimodal_config is not None and multimodal_config.mm_tensor_ipc == "torch_shm":
+        tensor_queue = get_mp_context().Queue()
 
     # Run the DP Coordinator process with rank 0 when in online DP mode.
     # The coordinator is needed for:

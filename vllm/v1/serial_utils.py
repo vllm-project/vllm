@@ -8,15 +8,7 @@ from collections.abc import Callable, Sequence
 from functools import partial
 from inspect import isclass
 from types import FunctionType
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    ClassVar,
-    NamedTuple,
-    TypeAlias,
-    cast,
-    get_type_hints,
-)
+from typing import Any, ClassVar, TypeAlias, cast, get_type_hints
 
 import cloudpickle
 import msgspec
@@ -43,31 +35,11 @@ from vllm.multimodal.inputs import (
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.utils import tensor_data
 
-if TYPE_CHECKING:
-    from vllm.v1.engine.tensor_ipc import TensorIpcReceiver, TensorIpcSender
-
 logger = init_logger(__name__)
 
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
 CUSTOM_TYPE_RAW_VIEW = 3
-
-
-class TensorIpcHandle(NamedTuple):
-    """Handle for a tensor sent via IPC queue (zero-copy transfer).
-
-    Contains only metadata about the tensor. This is serialized via msgpack
-    and used by the decoder to retrieve the actual tensor from the queue.
-    The actual tensor is sent separately via torch.multiprocessing.Queue.
-    Works for both CUDA and CPU tensors.
-    """
-
-    request_id: str | None
-    tensor_id: str
-    shape: tuple[int, ...]
-    dtype: str
-    device: str
-
 
 # MultiModalField class serialization type map.
 # These need to list all possible field types and match them
@@ -79,6 +51,13 @@ MMF_CLASS_TO_FACTORY: dict[type[BaseMultiModalField], str] = {
 }
 
 bytestr: TypeAlias = bytes | bytearray | memoryview | zmq.Frame
+
+# tensor ->  metadata
+# returns None to reject the tensor (falls back to regular serialization)
+OOBTensorConsumer = Callable[[torch.Tensor], dict | None]
+
+# dtype, shape, metadata -> tensor
+OOBTensorProvider = Callable[[str, tuple[int, ...], dict], torch.Tensor]
 
 
 def _log_insecure_serialization_warning():
@@ -148,15 +127,14 @@ class MsgpackEncoder:
     By default, arrays below 256B are serialized inline Larger will get sent
     via dedicated messages. Note that this is a per-tensor limit.
 
-    When a ``tensor_ipc_sender`` is provided, tensors (CUDA and CPU) will be
-    sent via torch.multiprocessing.Queue for zero-copy IPC instead of
-    serialization.
+    When a ``oob_tensor_consumer`` is provided, tensors (CUDA and CPU) will be
+    offered to it for out-of-band handling.
     """
 
     def __init__(
         self,
         size_threshold: int | None = None,
-        tensor_ipc_sender: "TensorIpcSender | None" = None,
+        oob_tensor_consumer: OOBTensorConsumer | None = None,
     ):
         if size_threshold is None:
             size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
@@ -166,7 +144,7 @@ class MsgpackEncoder:
         # pass custom data to the hook otherwise.
         self.aux_buffers: list[bytestr] | None = None
         self.size_threshold = size_threshold
-        self.tensor_ipc_sender = tensor_ipc_sender
+        self.oob_tensor_consumer = oob_tensor_consumer
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
@@ -259,23 +237,19 @@ class MsgpackEncoder:
 
     def _encode_tensor(
         self, obj: torch.Tensor
-    ) -> (
-        tuple[str, tuple[int, ...], int | memoryview] | dict[str, Any] | TensorIpcHandle
-    ):
-        sender = self.tensor_ipc_sender
-        if sender and (tensor_handle := sender.send_tensor(obj)) is not None:
-            return tensor_handle
-
+    ) -> tuple[str, tuple[int, ...], int | dict | memoryview]:
+        oob_consumer = self.oob_tensor_consumer
         # view the tensor as a contiguous 1D array of bytes
-        assert self.aux_buffers is not None
-        arr_data = tensor_data(obj)
-        if obj.nbytes < self.size_threshold:
+        if obj.nbytes < self.size_threshold and obj.is_cpu:
             # Smaller tensors are encoded inline, just like ndarrays.
-            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr_data)
+            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, tensor_data(obj))
+        elif oob_consumer is not None and (data := oob_consumer(obj)) is not None:
+            assert isinstance(data, dict)
         else:
             # Otherwise encode index of backing buffer to avoid copy.
+            assert self.aux_buffers is not None
             data = len(self.aux_buffers)
-            self.aux_buffers.append(arr_data)
+            self.aux_buffers.append(tensor_data(obj))
         dtype = str(obj.dtype).removeprefix("torch.")
         return dtype, obj.shape, data
 
@@ -324,15 +298,15 @@ class MsgpackDecoder:
     not thread-safe when encoding tensors / numpy arrays.
 
     For multimodal tensors sent via torch.multiprocessing.Queue (when IPC
-    is enabled), they will be retrieved via the ``tensor_ipc_receiver``
-    during decoding.  Works for both CUDA and CPU tensors.
+    is enabled), they will be retrieved via the ``oob_tensor_provider``
+    during decoding. Works for both CUDA and CPU tensors.
     """
 
     def __init__(
         self,
         t: Any | None = None,
         share_mem: bool = True,
-        tensor_ipc_receiver: "TensorIpcReceiver | None" = None,
+        oob_tensor_provider: OOBTensorProvider | None = None,
     ):
         self.share_mem = share_mem
         self.pin_tensors = is_pin_memory_available()
@@ -341,7 +315,7 @@ class MsgpackDecoder:
             *args, ext_hook=self.ext_hook, dec_hook=self.dec_hook
         )
         self.aux_buffers: Sequence[bytestr] = ()
-        self.tensor_ipc_receiver = tensor_ipc_receiver
+        self.oob_tensor_provider = oob_tensor_provider
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
@@ -360,8 +334,6 @@ class MsgpackDecoder:
         if isclass(t):
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
-            if issubclass(t, TensorIpcHandle):
-                return self._decode_ipc_queue_tensor(obj)
             if issubclass(t, torch.Tensor):
                 return self._decode_tensor(obj)
             if t is slice:
@@ -408,6 +380,12 @@ class MsgpackDecoder:
 
     def _decode_tensor(self, arr: Any) -> torch.Tensor:
         dtype, shape, data = arr
+        if isinstance(data, dict):
+            assert self.oob_tensor_provider, (
+                "Received OOB tensor but tensor provider is not set"
+            )
+            return self.oob_tensor_provider(dtype, shape, data)
+
         is_aux = isinstance(data, int)
         buffer = self.aux_buffers[data] if is_aux else data
         buffer = buffer if isinstance(buffer, memoryview) else memoryview(buffer)
@@ -427,14 +405,6 @@ class MsgpackDecoder:
             arr = arr.pin_memory() if self.pin_tensors else arr.clone()
         # Convert back to proper shape & type
         return arr.view(torch_dtype).view(shape)
-
-    def _decode_ipc_queue_tensor(self, handle: TensorIpcHandle) -> torch.Tensor:
-        """Retrieve a tensor from torch.multiprocessing.Queue.
-
-        Delegates to the TensorIpcReceiver. Works for CUDA and CPU.
-        """
-        assert self.tensor_ipc_receiver, "Tensor IPC receiver is not set"
-        return self.tensor_ipc_receiver.recv_tensor(handle)
 
     def _decode_mm_items(self, obj: dict[str, Any]) -> MultiModalKwargsItems:
         return MultiModalKwargsItems(
@@ -470,9 +440,6 @@ class MsgpackDecoder:
             # Although it violates NestedTensors type, MultiModalKwargs
             # values are sometimes floats.
             return obj
-        receiver = self.tensor_ipc_receiver
-        if receiver is not None and receiver.is_handle_like(obj):
-            return receiver.recv_tensor(obj)
         if not isinstance(obj, list):
             raise TypeError(f"Unexpected NestedTensors contents: {type(obj)}")
         if obj and isinstance(obj[0], str):
