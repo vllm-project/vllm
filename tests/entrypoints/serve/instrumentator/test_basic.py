@@ -11,10 +11,9 @@ import pytest_asyncio
 import requests
 from fastapi import Request
 
+from tests.utils import RemoteOpenAIServer
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.version import __version__ as VLLM_VERSION
-
-from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 

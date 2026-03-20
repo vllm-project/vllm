@@ -5,7 +5,7 @@ import openai
 import pytest
 import pytest_asyncio
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "Qwen/Qwen3-0.6B"
