@@ -15,7 +15,10 @@ from PIL import Image
 from transformers import AutoConfig, AutoProcessor
 
 from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
-from vllm.entrypoints.serve.disagg.protocol import GenerateMultiModalFeature
+from vllm.entrypoints.serve.disagg.protocol import (
+    MultiModalFeatures,
+    PlaceholderRangeInfo,
+)
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFieldElem,
@@ -130,20 +133,21 @@ def build_mm_payload(
         }
     )
 
-    kwargs_data = encode_mm_kwargs_item(mm_item)
+    encoded = encode_mm_kwargs_item(mm_item)
+    mm_hash = f"test_mm_hash_{id(image)}"
 
-    feature = GenerateMultiModalFeature(
-        modality="image",
-        mm_hash=f"test_mm_hash_{id(image)}",
-        offset=first_idx,
-        length=length,
-        kwargs_data=kwargs_data,
+    features = MultiModalFeatures(
+        mm_hashes={"image": [mm_hash]},
+        mm_placeholders={
+            "image": [PlaceholderRangeInfo(offset=first_idx, length=length)]
+        },
+        kwargs_data={"image": [encoded]},
     )
 
     return {
         "model": model_name,
         "token_ids": token_ids,
-        "features": [feature.model_dump()],
+        "features": features.model_dump(),
         "sampling_params": sampling_params,
         "stream": False,
     }

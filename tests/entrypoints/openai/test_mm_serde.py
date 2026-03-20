@@ -8,7 +8,10 @@ from vllm.entrypoints.serve.disagg.mm_serde import (
     decode_mm_kwargs_item,
     encode_mm_kwargs_item,
 )
-from vllm.entrypoints.serve.disagg.protocol import GenerateMultiModalFeature
+from vllm.entrypoints.serve.disagg.protocol import (
+    MultiModalFeatures,
+    PlaceholderRangeInfo,
+)
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFieldElem,
@@ -81,43 +84,40 @@ def test_mm_kwargs_item_nested_tensors():
     assert torch.equal(nested[1], decoded_data[1])
 
 
-def test_generate_feature_with_kwargs_data():
-    """Test that GenerateMultiModalFeature can carry tensor data."""
+def test_mm_features_with_kwargs_data():
+    """Test that MultiModalFeatures can carry serialized tensor data."""
     elem = MultiModalFieldElem(
         data=torch.randn(5, 3, dtype=torch.float32),
         field=MultiModalBatchedField(),
     )
     item = MultiModalKwargsItem({"pixel_values": elem})
-    kwargs_data = encode_mm_kwargs_item(item)
+    encoded = encode_mm_kwargs_item(item)
 
-    feat = GenerateMultiModalFeature(
-        modality="image",
-        mm_hash="abc123",
-        offset=0,
-        length=10,
-        kwargs_data=kwargs_data,
+    features = MultiModalFeatures(
+        mm_hashes={"image": ["abc123"]},
+        mm_placeholders={"image": [PlaceholderRangeInfo(offset=0, length=10)]},
+        kwargs_data={"image": [encoded]},
     )
 
-    # Roundtrip via JSON
-    json_str = feat.model_dump_json()
-    feat2 = GenerateMultiModalFeature.model_validate_json(json_str)
+    # JSON roundtrip
+    json_str = features.model_dump_json()
+    features2 = MultiModalFeatures.model_validate_json(json_str)
 
-    assert feat2.modality == "image"
-    assert feat2.mm_hash == "abc123"
-    assert feat2.kwargs_data is not None
+    assert features2.mm_hashes == {"image": ["abc123"]}
+    assert features2.kwargs_data is not None
+    assert len(features2.kwargs_data["image"]) == 1
 
-    decoded = decode_mm_kwargs_item(feat2.kwargs_data)
+    decoded = decode_mm_kwargs_item(features2.kwargs_data["image"][0])
     assert torch.equal(elem.data, decoded["pixel_values"].data)
 
 
-def test_generate_feature_cache_only():
-    """Test that GenerateMultiModalFeature works without tensor data."""
-    feat = GenerateMultiModalFeature(
-        modality="image",
-        mm_hash="abc123",
-        offset=0,
-        length=10,
+def test_mm_features_cache_only():
+    """Test that MultiModalFeatures works without tensor data (cache hit)."""
+    features = MultiModalFeatures(
+        mm_hashes={"image": ["abc123"]},
+        mm_placeholders={"image": [PlaceholderRangeInfo(offset=0, length=10)]},
     )
-    json_str = feat.model_dump_json()
-    feat2 = GenerateMultiModalFeature.model_validate_json(json_str)
-    assert feat2.kwargs_data is None
+
+    json_str = features.model_dump_json()
+    features2 = MultiModalFeatures.model_validate_json(json_str)
+    assert features2.kwargs_data is None

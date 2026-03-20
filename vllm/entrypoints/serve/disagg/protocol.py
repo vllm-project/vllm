@@ -50,8 +50,15 @@ class MultiModalFeatures(BaseModel):
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]]
     """Per-modality placeholder ranges in the token sequence."""
 
-    kwargs_data: dict[str, list[str] | None] # TODO (nithinc): not sure what the correct type should be here
-    """Serialized tensor data for multi-modal items, e.g. ``{"image": [pixel_values_base64]}``."""
+    kwargs_data: dict[str, list[str | None]] | None = None
+    """Per-modality serialized tensor data.
+
+    Each value is a list parallel to ``mm_hashes[modality]``.  A ``str``
+    entry is a base64-encoded ``MultiModalKwargsItem``; ``None`` means
+    the item should be resolved from cache.  The entire field is
+    ``None`` for metadata-only (cache-hit) responses.
+    """
+
 
 class GenerateRequest(BaseModel):
     request_id: str = Field(

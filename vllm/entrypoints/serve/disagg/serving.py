@@ -4,7 +4,6 @@
 
 import asyncio
 import time
-from collections import defaultdict
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
 
@@ -109,29 +108,33 @@ class ServingTokens(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         engine_prompt: ProcessorInputs
-        if request.features is not None and len(request.features) > 0:
-            # Multimodal: build MultiModalInputs directly from metadata.
-            # When kwargs_data is present, tensors are deserialized directly.
-            # When kwargs_data is None, data is looked up from cache.
-            mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = defaultdict(list)
-            mm_hashes: dict[str, list[str]] = defaultdict(list)
-            mm_placeholders: dict[str, list[PlaceholderRange]] = defaultdict(list)
+        if request.features is not None:
+            features = request.features
 
-            for feat in request.features:
-                if feat.kwargs_data is not None:
-                    item = decode_mm_kwargs_item(feat.kwargs_data)
-                    mm_kwargs[feat.modality].append(item)
-                else:
-                    mm_kwargs[feat.modality].append(None)
-                mm_hashes[feat.modality].append(feat.mm_hash)
-                mm_placeholders[feat.modality].append(
-                    PlaceholderRange(offset=feat.offset, length=feat.length)
-                )
+            # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
+            mm_placeholders: dict[str, list[PlaceholderRange]] = {
+                modality: [
+                    PlaceholderRange(offset=p.offset, length=p.length) for p in ranges
+                ]
+                for modality, ranges in features.mm_placeholders.items()
+            }
+
+            # Deserialize tensor data when present; None → cache hit.
+            mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
+            if features.kwargs_data is not None:
+                for modality, items in features.kwargs_data.items():
+                    mm_kwargs[modality] = [
+                        decode_mm_kwargs_item(item) if item is not None else None
+                        for item in items
+                    ]
+            else:
+                for modality, hashes in features.mm_hashes.items():
+                    mm_kwargs[modality] = [None] * len(hashes)
 
             engine_prompt = mm_inputs(
                 prompt_token_ids=request.token_ids,
                 mm_kwargs=MultiModalKwargsItems(mm_kwargs),
-                mm_hashes=mm_hashes,
+                mm_hashes=features.mm_hashes,
                 mm_placeholders=mm_placeholders,
                 cache_salt=request.cache_salt,
             )

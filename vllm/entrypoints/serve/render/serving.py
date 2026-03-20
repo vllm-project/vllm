@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     MultiModalFeatures,
@@ -359,9 +360,21 @@ class OpenAIServingRender:
             for modality, ranges in raw_placeholders.items()
         }
 
+        # Serialize tensor data per modality.
+        raw_mm_kwargs = engine_prompt.get("mm_kwargs")  # type: ignore[attr-defined]
+        kwargs_data: dict[str, list[str | None]] | None = None
+        if raw_mm_kwargs is not None:
+            kwargs_data = {}
+            for modality, items in raw_mm_kwargs.items():
+                kwargs_data[modality] = [
+                    encode_mm_kwargs_item(item) if item is not None else None
+                    for item in items
+                ]
+
         return MultiModalFeatures(
             mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholders,
+            kwargs_data=kwargs_data,
         )
 
     def _make_request_with_harmony(
