@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -19,7 +18,7 @@ use tracing::{debug, error, info};
 use vllm_chat::{AssistantBlockKind, ChatEvent, ChatEventStream};
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
-use crate::convert::prepare_chat_request;
+use crate::convert::{prepare_chat_request, unix_timestamp};
 use crate::error::{ApiError, bail_server_error, server_error};
 use crate::state::AppState;
 
@@ -36,11 +35,6 @@ pub(super) async fn chat_completions(
     let response_id = prepared.response_id.clone();
     let response_model = prepared.response_model.clone();
     let created = unix_timestamp();
-    let include_usage = body
-        .stream_options
-        .as_ref()
-        .and_then(|options| options.include_usage)
-        .unwrap_or(false);
     info!(request_id = %response_id, model = %response_model, "streaming chat completion");
 
     let chat_stream = match state.chat.chat(prepared.chat_request).await {
@@ -58,21 +52,13 @@ pub(super) async fn chat_completions(
         response_id,
         response_model,
         created,
-        include_usage,
+        prepared.include_usage,
     );
     let sse_stream = chat_completion_sse_stream(chunk_stream);
 
     Sse::new(sse_stream)
         .keep_alive(KeepAlive::default())
         .into_response()
-}
-
-/// Return the current Unix timestamp in seconds for OpenAI response objects.
-fn unix_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default()
 }
 
 /// Convert one internal chat event stream into OpenAI chat-completion chunks.
@@ -229,7 +215,7 @@ async fn chat_completion_sse_stream(
 }
 
 /// Serialize one OpenAI chunk payload into one SSE `data:` event.
-fn to_sse_event(chunk: &openai_protocol::chat::ChatCompletionStreamResponse) -> Event {
+fn to_sse_event(chunk: &ChatCompletionStreamResponse) -> Event {
     let payload =
         serde_json::to_string(chunk).expect("ChatCompletionStreamResponse must serialize to JSON");
     Event::default().data(payload)

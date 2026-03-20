@@ -1,4 +1,5 @@
 mod chat_completions;
+mod completions;
 mod models;
 
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use crate::state::AppState;
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/models", get(models::list_models))
+        .route("/v1/completions", post(completions::completions))
         .route(
             "/v1/chat/completions",
             post(chat_completions::chat_completions),
