@@ -486,11 +486,34 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
+
+            # PCP: All-gather KV from all ranks before cache write
+            kv_for_cache = kv_c_normed
+            kpe_for_cache = k_pe
+            layer_slot_mapping = slot_mapping.get(self.layer_name)
+            if self.impl.pcp_world_size > 1 and attn_metadata is not None:
+                from vllm.distributed.parallel_state import get_pcp_group
+
+                pcp_group = get_pcp_group()
+                pcp_kv_restore_idx = getattr(attn_metadata, "pcp_kv_restore_idx", None)
+                if pcp_kv_restore_idx is not None:
+                    # Batch all-gather k_c_normed and k_pe for efficiency
+                    kv_combined = torch.cat(
+                        [kv_c_normed, k_pe.view(k_pe.shape[0], -1)], dim=-1
+                    )
+                    kv_combined = pcp_group.all_gather(kv_combined.contiguous(), dim=0)
+                    kv_combined = kv_combined[pcp_kv_restore_idx]
+                    kv_lora_rank = kv_c_normed.shape[-1]
+                    kv_for_cache = kv_combined[..., :kv_lora_rank]
+                    kpe_for_cache = kv_combined[..., kv_lora_rank:].view(
+                        -1, k_pe.shape[1], k_pe.shape[2]
+                    )
+
             self.impl.do_kv_cache_update(
-                kv_c_normed,
-                k_pe,
+                kv_for_cache,
+                kpe_for_cache,
                 self_kv_cache,
-                slot_mapping.get(self.layer_name),
+                layer_slot_mapping,
                 self.kv_cache_dtype,
                 self._k_scale,
             )
@@ -948,9 +971,37 @@ def unified_mla_kv_cache_update(
     )
     layer_slot_mapping = slot_mapping.get(layer_name)
     if layer_slot_mapping is not None:
+        # PCP: All-gather KV from all ranks before cache write
+        kv_for_cache = kv_c_normed
+        kpe_for_cache = k_pe
+        if attn_layer.impl.pcp_world_size > 1:
+            attn_metadata = forward_context.attn_metadata
+            if isinstance(attn_metadata, dict):
+                attn_metadata = attn_metadata.get(layer_name)
+            pcp_kv_restore_idx = (
+                getattr(attn_metadata, "pcp_kv_restore_idx", None)
+                if attn_metadata
+                else None
+            )
+            if pcp_kv_restore_idx is not None:
+                from vllm.distributed.parallel_state import get_pcp_group
+
+                pcp_group = get_pcp_group()
+                # Batch all-gather k_c_normed and k_pe for efficiency
+                kv_combined = torch.cat(
+                    [kv_c_normed, k_pe.view(k_pe.shape[0], -1)], dim=-1
+                )
+                kv_combined = pcp_group.all_gather(kv_combined.contiguous(), dim=0)
+                kv_combined = kv_combined[pcp_kv_restore_idx]
+                kv_lora_rank = kv_c_normed.shape[-1]
+                kv_for_cache = kv_combined[..., :kv_lora_rank]
+                kpe_for_cache = kv_combined[..., kv_lora_rank:].view(
+                    -1, k_pe.shape[1], k_pe.shape[2]
+                )
+
         attn_layer.impl.do_kv_cache_update(
-            kv_c_normed,
-            k_pe,
+            kv_for_cache,
+            kpe_for_cache,
             kv_cache,
             layer_slot_mapping,
             kv_cache_dtype,
@@ -2056,6 +2107,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    supports_pcp: bool = True
 
     def __init__(
         self,
