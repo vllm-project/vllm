@@ -37,10 +37,10 @@ def register_pooling_api_routers(
 
         app.include_router(embed_router)
 
-    # Score/rerank endpoints are available for:
-    # - "score" task (cross-encoder models)
-    # - "embed" task (bi-encoder models)
-    # - "token_embed" task (late interaction models like ColBERT)
+    # Score API handles score/rerank for:
+    # - "score" task (score_type: cross-encoder models)
+    # - "embed" task (score_type: bi-encoder models)
+    # - "token_embed" task (score_type: late interaction models)
     if any(t in supported_tasks for t in ("score", "embed", "token_embed")):
         from vllm.entrypoints.pooling.score.api_router import router as score_router
 
@@ -68,6 +68,7 @@ def init_pooling_state(
             OpenAIServingPooling(
                 engine_client,
                 state.openai_serving_models,
+                state.openai_serving_render,
                 request_logger=request_logger,
                 chat_template=resolved_chat_template,
                 chat_template_content_format=args.chat_template_content_format,
@@ -101,17 +102,17 @@ def init_pooling_state(
         if "classify" in supported_tasks
         else None
     )
-    # ServingScores handles score/rerank for:
-    # - "score" task (cross-encoder models)
-    # - "embed" task (bi-encoder models)
-    # - "token_embed" task (late interaction models like ColBERT)
+    # Score API handles score/rerank for:
+    # - "score" task (score_type: cross-encoder models)
+    # - "embed" task (score_type: bi-encoder models)
+    # - "token_embed" task (score_type: late interaction models)
     state.serving_scores = (
         ServingScores(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
             score_template=resolved_chat_template,
-            use_gpu_for_pooling_score=getattr(args, "use_gpu_for_pooling_score", False),
+            log_error_stack=args.log_error_stack,
         )
         if any(t in supported_tasks for t in ("embed", "score", "token_embed"))
         else None

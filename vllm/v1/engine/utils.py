@@ -86,7 +86,6 @@ class CoreEngineProcManager:
 
     def __init__(
         self,
-        target_fn: Callable,
         local_engine_count: int,
         start_index: int,
         local_start_index: int,
@@ -109,6 +108,10 @@ class CoreEngineProcManager:
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
+        is_dp = vllm_config.parallel_config.data_parallel_size > 1
+
+        from vllm.v1.engine.core import EngineCoreProc
+
         self.processes: list[BaseProcess] = []
         local_dp_ranks = []
         for index in range(local_engine_count):
@@ -119,35 +122,27 @@ class CoreEngineProcManager:
             local_dp_ranks.append(local_index)
             self.processes.append(
                 context.Process(
-                    target=target_fn,
-                    name=f"EngineCore_DP{global_index}",
+                    target=EngineCoreProc.run_engine_core,
+                    name=f"EngineCore_DP{global_index}" if is_dp else "EngineCore",
                     kwargs=common_kwargs
-                    | {
-                        "dp_rank": global_index,
-                        "local_dp_rank": local_index,
-                    },
+                    | {"dp_rank": global_index, "local_dp_rank": local_index},
                 )
             )
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
-        data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
                 # Adjust device control in DP for non-CUDA platforms
                 # as well as external and ray launchers
-                # For CUDA platforms, we use torch.cuda.set_device()
-                with (
-                    set_device_control_env_var(vllm_config, local_dp_rank)
-                    if (
-                        data_parallel
-                        and (
-                            not current_platform.is_cuda_alike()
-                            or vllm_config.parallel_config.use_ray
-                        )
-                    )
-                    else contextlib.nullcontext()
+                # For CUDA platforms, we use torch.accelerator.set_device_index()()
+                if is_dp and (
+                    not current_platform.is_cuda_alike()
+                    or vllm_config.parallel_config.use_ray
                 ):
+                    with set_device_control_env_var(vllm_config, local_dp_rank):
+                        proc.start()
+                else:
                     proc.start()
         finally:
             # Kill other procs if not all are running.
@@ -306,7 +301,20 @@ class CoreEngineActorManager:
         else:
             ray.init()
 
-        vllm_config.parallel_config.allocate_elastic_ep_ports()
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.enable_elastic_ep:
+            from vllm.distributed.utils import create_tcp_store
+
+            ip = parallel_config.data_parallel_master_ip
+            store = create_tcp_store(
+                ip,
+                0,
+                is_master=True,
+                world_size=-1,
+                wait_for_workers=False,
+            )
+            parallel_config._coord_store_port = store.port
+            self._coord_store = store
 
         if placement_groups is not None:
             assert local_dp_ranks is not None, (
@@ -458,9 +466,9 @@ class CoreEngineActorManager:
             )
 
             # if we need multiple nodes per dp group, we require for now that
-            # available nodes are homogenous
+            # available nodes are homogeneous
             assert set(n_node_devices) == {max_device_per_node}, (
-                f"Nodes are not homogenous, {nodes}"
+                f"Nodes are not homogeneous, {nodes}"
             )
             assert world_size % max_device_per_node == 0, (
                 f"For multi-node data parallel groups, world_size ({world_size}) must "
@@ -955,12 +963,9 @@ def launch_core_engines(
     with zmq_socket_ctx(
         local_handshake_address, zmq.ROUTER, bind=True
     ) as handshake_socket:
-        from vllm.v1.engine.core import EngineCoreProc
-
         # Start local engines.
         if local_engine_count:
             local_engine_manager = CoreEngineProcManager(
-                EngineCoreProc.run_engine_core,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
                 log_stats=log_stats,
