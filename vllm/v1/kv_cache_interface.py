@@ -35,7 +35,7 @@ class KVQuantMode(IntEnum):
 
     NONE = 0
     FP8 = 1  # per-tensor scales (current fp8 path)
-    PER_TOKEN = 2  # per-(token, head) dynamic scales (e.g. int8, fp8)
+    PER_TOKEN = 2  # per-token dynamic scales (e.g. int8, fp8)
     PER_TOKEN_GROUP = 3  # per-(token, head, group) scales (e.g. fp8 1×128)
     NVFP4 = 4  # packed 4-bit KV + fp8 blockscales + per-token global scale
 
@@ -197,10 +197,10 @@ class AttentionSpec(KVCacheSpec):
             # (e.g. deepseek-style fp8 with 1×128 groups).
             gs = self.quant_group_size or DEFAULT_QUANT_GROUP_SIZE
             num_groups = (self.head_size + gs - 1) // gs
-            shape = (self.block_size, self.num_kv_heads, num_groups)
+            group_shape = (self.block_size, self.num_kv_heads, num_groups)
             return [
-                AuxBufferSpec("k_scale_cache", torch.float32, shape),
-                AuxBufferSpec("v_scale_cache", torch.float32, shape),
+                AuxBufferSpec("k_scale_cache", torch.float32, group_shape),
+                AuxBufferSpec("v_scale_cache", torch.float32, group_shape),
             ]
 
         if mode == KVQuantMode.NVFP4:

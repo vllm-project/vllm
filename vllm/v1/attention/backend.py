@@ -731,7 +731,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
     **Write path** (``do_kv_cache_update``):
       * Per-token quant (``kv_quant_mode == KVQuantMode.PER_TOKEN``):
         use auxiliary scale caches bound via
-        ``bind_auxiliary_buffers()`` to write dynamic per-(token, head)
+        ``bind_auxiliary_buffers()`` to write dynamic per-token
         scales alongside quantized data.
       * FP8: use ``layer._k_scale`` / ``layer._v_scale`` (per-tensor).
 
