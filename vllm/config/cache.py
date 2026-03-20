@@ -113,6 +113,11 @@ class CacheConfig:
     - "align": only cache the mamba state of the last token of each scheduler step and
            when the token is at position i * block_size.
     """
+    mamba_alignment_kernel_block_size: int = Field(default=16, gt=0)
+    """The block size for full attention or mla attention to align with in hybrid mamba
+    models. `mamba_alignment_kernel_block_size` usually refers to the minimum block_size
+    among the supported kernel block sizes of the specified attention backend.
+    """
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)
