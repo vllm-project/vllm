@@ -7,8 +7,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-import torch
-
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
@@ -589,6 +587,10 @@ class SimpleCPUOffloadScheduler:
             self._gpu_block_pool.free_blocks(
                 self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids
             )
+
+    def has_pending_stores(self) -> bool:
+        """Return True if there are in-flight store transfers."""
+        return bool(self._store_event_to_blocks)
 
     def request_finished(
         self,

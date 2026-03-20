@@ -210,6 +210,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return False, None
 
+    def has_pending_transfers(self) -> bool:
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.has_pending_stores()
+        return False
+
     def take_events(self) -> Iterable[KVCacheEvent]:
         if self.scheduler_manager is not None:
             return self.scheduler_manager.take_events()
