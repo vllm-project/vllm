@@ -200,6 +200,20 @@ class VllmPatternReplacement(ABC, Generic[P, R]):
     @abstractmethod
     def inputs(self) -> list[torch.Tensor]: ...
 
+    empty: ClassVar = staticmethod(functools.partial(torch.empty, device="cuda"))
+    empty_bf16: ClassVar = staticmethod(
+        functools.partial(torch.empty, dtype=torch.bfloat16, device="cuda")
+    )
+    empty_fp16: ClassVar = staticmethod(
+        functools.partial(torch.empty, dtype=torch.float16, device="cuda")
+    )
+    empty_fp32: ClassVar = staticmethod(
+        functools.partial(torch.empty, dtype=torch.float32, device="cuda")
+    )
+    empty_i32: ClassVar = staticmethod(
+        functools.partial(torch.empty, dtype=torch.int32, device="cuda")
+    )
+
 
 def _fx_view_to_reshape(gm: fx.GraphModule) -> None:
     from torch._inductor.fx_passes.post_grad import view_to_reshape

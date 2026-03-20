@@ -18,7 +18,7 @@ from vllm.utils.math_utils import round_up
 
 from ..vllm_inductor_pass import VllmFusionPatternMatcherPass, VllmPatternReplacement
 from .matcher_utils import MatcherQuantFP8
-from .rms_quant_fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
+from .rms_quant_fusion import QUANT_OPS
 
 logger = init_logger(__name__)
 
@@ -118,14 +118,12 @@ class AttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
         num_heads = self._num_heads
         head_size = self._head_size
         return [
-            torch.empty(5, num_heads, head_size, dtype=dtype, device="cuda"),  # q
-            torch.empty(5, num_heads, head_size, dtype=dtype, device="cuda"),  # k
-            torch.empty(5, num_heads, head_size, dtype=dtype, device="cuda"),  # v
-            torch.empty(
-                5, num_heads, head_size, dtype=dtype, device="cuda"
-            ),  # attn_output
-            empty_fp32(1, 1),  # scale
-            torch.empty(0, dtype=dtype, device="cuda"),  # kv_cache_dummy_dep
+            self.empty(5, num_heads, head_size, dtype=dtype),  # q
+            self.empty(5, num_heads, head_size, dtype=dtype),  # k
+            self.empty(5, num_heads, head_size, dtype=dtype),  # v
+            self.empty(5, num_heads, head_size, dtype=dtype),  # attn_output
+            self.empty_fp32(1, 1),  # scale
+            self.empty(0, dtype=dtype),  # kv_cache_dummy_dep
         ]
 
 
@@ -234,16 +232,16 @@ class AttnNvfp4QuantPattern(
         num_heads = self._num_heads
         head_size = self._head_size
         return [
-            empty_bf16(5, num_heads, head_size),  # q
-            empty_bf16(5, num_heads, head_size),  # k
-            empty_bf16(5, num_heads, head_size),  # v
-            empty_bf16(5, num_heads, head_size),  # output_attn
-            torch.empty(
-                5, num_heads * head_size // 2, dtype=FP4_DTYPE, device="cuda"
-            ),  # output_quant
-            empty_i32(128, round_up(num_heads * head_size // 16, 4)),  # output_scale
-            empty_fp32(1, 1),  # input_scale
-            torch.empty(0, dtype=dtype, device="cuda"),  # kv_cache_dummy_dep
+            self.empty_bf16(5, num_heads, head_size),  # q
+            self.empty_bf16(5, num_heads, head_size),  # k
+            self.empty_bf16(5, num_heads, head_size),  # v
+            self.empty_bf16(5, num_heads, head_size),  # output_attn
+            self.empty(5, num_heads * head_size // 2, dtype=FP4_DTYPE),  # output_quant
+            self.empty_i32(
+                128, round_up(num_heads * head_size // 16, 4)
+            ),  # output_scale
+            self.empty_fp32(1, 1),  # input_scale
+            self.empty(0, dtype=dtype),  # kv_cache_dummy_dep
         ]
 
 
