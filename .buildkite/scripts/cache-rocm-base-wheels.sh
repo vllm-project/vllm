@@ -39,7 +39,7 @@ generate_cache_key() {
     # Include key build args that affect the output
     # These should match the ARGs in Dockerfile.rocm_base that change the build output
     # Note: ROCm version is determined by BASE_IMAGE in the Dockerfile, so it's captured by dockerfile_hash
-    local args_string="${PYTHON_VERSION:-3.12}|${PYTORCH_ROCM_ARCH:-gfx90a\;gfx942\;gfx950\;gfx1100\;gfx1101\;gfx1200\;gfx1201\;gfx1150\;gfx1151}"
+    local args_string="${PYTHON_VERSION:-3.12}|${PYTORCH_ROCM_ARCH:-"gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"}"
     local args_hash=$(echo "$args_string" | sha256sum | cut -c1-8)
 
     echo "${dockerfile_hash}-${args_hash}"
