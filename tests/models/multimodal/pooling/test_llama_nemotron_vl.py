@@ -17,6 +17,7 @@ import pytest
 import torch
 from transformers import AutoModel, AutoModelForSequenceClassification, AutoProcessor
 
+from tests.models.multimodal.conftest import patch_hf_vision_attn_for_rocm
 from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
@@ -26,7 +27,6 @@ from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import ROCM_ENGINE_KWARGS
-from ...conftest import patch_hf_vision_attn_for_rocm
 from ...utils import check_embeddings_close
 
 # Prefixes used by the model API
