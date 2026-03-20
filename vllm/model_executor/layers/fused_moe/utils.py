@@ -317,27 +317,6 @@ def normalize_batched_scales_shape(
     return scales
 
 
-def _validate_scale_shape(
-    a: torch.Tensor,
-    a_scale: torch.Tensor | None,
-    per_act_token_quant: bool,
-    block_shape: list[int] | None,
-) -> None:
-    if a_scale is None:
-        return
-
-    if not per_act_token_quant and block_shape is None:
-        assert a_scale.numel() == 1, f"{a_scale.shape}"
-    elif per_act_token_quant:
-        assert a_scale.shape[0] == a.shape[0] and a_scale.shape[1] == 1, (
-            f"{a_scale.shape[0]} == {a.shape[0]} and {a_scale.shape[1]} == 1"
-        )
-    else:
-        assert block_shape is not None
-        expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
-        assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"
-
-
 # Torch custom ops can't deal with outputs aliasing inputs so we need to
 # disable inplace for torch >= 2.9.
 # See https://github.com/vllm-project/vllm/issues/26378
