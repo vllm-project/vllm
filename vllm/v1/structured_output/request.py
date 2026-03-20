@@ -43,6 +43,10 @@ class StructuredOutputRequest:
                 self.status = RequestStatus.WAITING
             except TimeoutError:
                 return False
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to compile structured output grammar: {e}"
+                ) from e                
         return True
 
     @property
