@@ -251,7 +251,12 @@ def test_fp32_fallback(device: str):
         elif device == "hip":
             if RocmPlatform is None:
                 pytest.skip("RocmPlatform not available")
-            with patch("vllm.platforms.current_platform", RocmPlatform()):
+            attention_config = AttentionConfig(use_prefill_decode_attention=True)
+            hip_vllm_config = VllmConfig(attention_config=attention_config)
+            with (
+                set_current_vllm_config(hip_vllm_config),
+                patch("vllm.platforms.current_platform", RocmPlatform()),
+            ):
                 backend = get_attn_backend(16, torch.float32, None)
             assert backend.get_name() == "ROCM_ATTN"
 
