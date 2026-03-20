@@ -427,6 +427,8 @@ class FlatClassifyPooler(nn.Module):
         head_dtype: torch.dtype | None,
     ):
         super().__init__()
+        if classifier is not None and head_dtype is not None:
+            classifier = classifier.to(head_dtype)
         self.classifier = classifier
         self.has_logit_bias = logit_bias is not None
         if logit_bias is not None:

@@ -320,7 +320,9 @@ class TestPoolerCUDAGraphRunnerGPU:
         assert torch.allclose(graph_out, eager_out, atol=1e-6)
         # bias=1.0 is subtracted, so second row should be all zeros
         assert torch.allclose(
-            graph_out[1], torch.zeros(hidden_size, device="cuda"), atol=1e-6
+            graph_out[1],
+            torch.zeros(hidden_size, device="cuda", dtype=graph_out.dtype),
+            atol=1e-6,
         )
 
 
