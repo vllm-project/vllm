@@ -10,10 +10,9 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.lora.ops.triton_ops.utils import supports_pdl_moe
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
-
-from .utils import supports_pdl_moe
 
 
 @triton.jit
