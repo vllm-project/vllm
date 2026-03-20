@@ -90,7 +90,7 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
         """Monolithic kernel so only use with naive DP/EP and TP."""
         return (
             not moe_parallel_config.use_all2all_kernels
-            or moe_parallel_config.use_naive_all2all_kernels
+            or moe_parallel_config.use_ag_rs_all2all_kernels
         ) and not moe_parallel_config.enable_eplb
 
     @staticmethod
