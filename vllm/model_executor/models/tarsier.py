@@ -25,7 +25,6 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelL
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.llava import LlavaDummyInputsBuilder
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -34,10 +33,8 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
-    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
 )
@@ -329,25 +326,6 @@ class TarsierMultiModalProcessor(BaseMultiModalProcessor[_I_Tarsier]):
         ]
 
 
-def _build_tarsier_hf_info(ctx: InputProcessingContext) -> TarsierProcessingInfo:
-    return TarsierProcessingInfo(ctx)
-
-
-def _build_tarsier_hf_processor(
-    info: _I_Tarsier,
-    dummy_inputs: BaseDummyInputsBuilder[_I_Tarsier],
-    *,
-    cache: BaseMultiModalProcessorCache | None = None,
-) -> BaseMultiModalProcessor:
-    if isinstance(info, TarsierProcessingInfo):
-        return TarsierMultiModalProcessor(
-            info,
-            dummy_inputs,
-            cache=cache,
-        )
-    raise NotImplementedError(type(info))
-
-
 def init_vision_tower_for_tarsier(
     hf_config: TarsierHfConfig,  # Use the Tarsier specific config protocol
     quant_config: QuantizationConfig | None,
@@ -395,8 +373,8 @@ def init_vision_tower_for_tarsier(
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    _build_tarsier_hf_processor,
-    info=_build_tarsier_hf_info,
+    TarsierMultiModalProcessor,
+    info=TarsierProcessingInfo,
     dummy_inputs=TarsierDummyInputsBuilder,
 )
 class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
