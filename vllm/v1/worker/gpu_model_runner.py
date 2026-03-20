@@ -1281,7 +1281,8 @@ class GPUModelRunner(
                         )
             elif num_output_tokens < len(req_state.output_token_ids):
                 # Some output tokens were discarded due to a sync-KV-load
-                # failure. Align the cached state.
+                # failure, or output_token_ids was inflated by the optimistic
+                # extend above (async spec decode). Align the cached state.
                 del req_state.output_token_ids[num_output_tokens:]
                 if req_index is not None:
                     end_idx = (
@@ -1289,6 +1290,18 @@ class GPUModelRunner(
                         + num_output_tokens
                     )
                     self.input_batch.num_tokens_no_spec[req_index] = end_idx
+                    # The reset above undoes the optimistic increment
+                    # applied earlier for async spec decode. Re-add it
+                    # so the deferred correction callback can subtract
+                    # the right delta later.
+                    if (
+                        is_ngram_gpu
+                        and self.use_async_scheduling
+                        and req_state.prev_num_draft_len
+                    ):
+                        self.input_batch.num_tokens_no_spec[req_index] += (
+                            req_state.prev_num_draft_len
+                        )
 
             # Update the block IDs.
             if not resumed_from_preemption:
