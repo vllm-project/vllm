@@ -155,9 +155,9 @@ async def build_async_engine_client_from_engine_args(
 
 
 def build_app(
+    vllm_config: VllmConfig,
     args: Namespace,
     supported_tasks: tuple["SupportedTask", ...] | None = None,
-    model_config: ModelConfig | None = None,
 ) -> FastAPI:
     if supported_tasks is None:
         warnings.warn(
@@ -193,7 +193,7 @@ def build_app(
         attach_router as register_sagemaker_api_router,
     )
 
-    register_sagemaker_api_router(app, supported_tasks, model_config)
+    register_sagemaker_api_router(app, supported_tasks, vllm_config.model_config)
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.openai.generate.api_router import (
@@ -214,11 +214,16 @@ def build_app(
 
         attach_rlhf_router(app)
 
-        from vllm.entrypoints.serve.elastic_ep.api_router import (
-            attach_router as elastic_ep_attach_router,
-        )
+        if args.api_server_count <= 1 and vllm_config.parallel_config.enable_elastic_ep:
+            from vllm.entrypoints.serve.elastic_ep.api_router import (
+                attach_router as elastic_ep_attach_router,
+            )
 
-        elastic_ep_attach_router(app)
+            elastic_ep_attach_router(app)
+        else:
+            logger.warning(
+                "scale elastic ep related api cannot be used with api_server_count > 1"
+            )
 
     if "generate" in supported_tasks or "render" in supported_tasks:
         from vllm.entrypoints.serve.render.api_router import (
@@ -244,7 +249,7 @@ def build_app(
     if any(task in POOLING_TASKS for task in supported_tasks):
         from vllm.entrypoints.pooling import register_pooling_api_routers
 
-        register_pooling_api_routers(app, supported_tasks, model_config)
+        register_pooling_api_routers(app, supported_tasks, vllm_config.model_config)
 
     app.root_path = args.root_path
     app.add_middleware(
@@ -273,8 +278,13 @@ def build_app(
 
         app.add_middleware(XRequestIdMiddleware)
 
-    # Add scaling middleware to check for scaling state
-    app.add_middleware(ScalingMiddleware)
+    if args.api_server_count <= 1 and vllm_config.parallel_config.enable_elastic_ep:
+        # Add scaling middleware to check for scaling state
+        app.add_middleware(ScalingMiddleware)
+    else:
+        logger.warning(
+            "scale elastic ep middleware cannot be used with api_server_count > 1"
+        )
 
     if "realtime" in supported_tasks:
         # Add WebSocket metrics middleware
@@ -585,10 +595,9 @@ async def build_and_serve(
         uvicorn_kwargs["log_config"] = log_config
 
     supported_tasks = await engine_client.get_supported_tasks()
-    model_config = engine_client.model_config
 
     logger.info("Supported tasks: %s", supported_tasks)
-    app = build_app(args, supported_tasks, model_config)
+    app = build_app(engine_client.vllm_config, args, supported_tasks)
     await init_app_state(engine_client, app.state, args, supported_tasks)
 
     logger.info("Starting vLLM server on %s", listen_address)
@@ -633,7 +642,7 @@ async def build_and_serve_renderer(
     if log_config is not None:
         uvicorn_kwargs["log_config"] = log_config
 
-    app = build_app(args, ("render",))
+    app = build_app(vllm_config, args, ("render",))
     await init_render_app_state(vllm_config, app.state, args)
 
     logger.info("Starting vLLM server on %s", listen_address)
