@@ -148,9 +148,12 @@ is_amd = device_platform == "amd"
 is_intel = device_platform == "intel"
 is_nvidia = device_platform == "nvidia"
 is_intel_alchemist = is_intel and "Intel(R) Arc(TM) A" in torch.xpu.get_device_name(0)
+# SM12x (desktop Blackwell: RTX 5090/5080, DGX Spark GB10) has capability
+# major=12, which trips the >= 9 checks below. But SM12x is NOT Hopper —
+# it lacks TMA and needs different NUM_WARPS tuning. Restrict to SM9x-SM11x.
 is_nvidia_hopper = is_nvidia and (
     "NVIDIA H" in torch.cuda.get_device_name(0)
-    or torch.cuda.get_device_capability()[0] >= 9
+    or 9 <= torch.cuda.get_device_capability()[0] < 12
 )
 use_cuda_graph = is_nvidia and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
 is_gather_supported = hasattr(triton.language, "gather")
