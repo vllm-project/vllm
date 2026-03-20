@@ -1,12 +1,10 @@
 # IPC Engine
 
-The IPC weight transfer engine uses **CUDA IPC** (Inter-Process Communication) handles to share GPU memory directly between the trainer and inference workers on the **same GPU**. This avoids any data copying, making it the most efficient option when colocating training and inference. Multi-GPU setups are supported — each GPU's weights are transferred independently via its own IPC handle.
+The IPC weight transfer engine uses **CUDA IPC** (Inter-Process Communication) handles to share GPU memory directly between the trainer and inference workers on the **same GPU**. This avoids any data copying, making it the most efficient option when colocating training and inference. Multi-GPU setups are supported — weights are all gathered by each GPU and are extracted by the correct colocated process.
 
 ## When to Use IPC
 
 - Training and inference share the **same GPU(s)** (colocated)
-- You want to minimize memory overhead by sharing tensors in-place
-- Single-GPU or multi-GPU (tensor parallel) setups where each GPU is shared between a trainer rank and an inference worker
 
 ## How It Works
 
@@ -85,9 +83,10 @@ In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `
 
 ### Custom Callable Mode
 
-For custom transport mechanisms, pass a callable as `send_mode`. The callable receives an `IPCWeightTransferUpdateInfo` object and is responsible for delivering it to the inference engine:
+For custom transport mechanisms, pass a callable as `send_mode`. The callable receives an `IPCWeightTransferUpdateInfo` object and is responsible for delivering it to the inference engine. Both sync and async callables are supported — use `async_trainer_send_weights` for async callables:
 
 ```python
+# Sync callable — use trainer_send_weights
 def my_custom_sender(update_info: IPCWeightTransferUpdateInfo):
     # Custom logic to deliver update_info to vLLM
     ...
@@ -97,6 +96,20 @@ trainer_args = IPCTrainerSendWeightsArgs(
 )
 
 IPCWeightTransferEngine.trainer_send_weights(
+    iterator=model.named_parameters(),
+    trainer_args=trainer_args,
+)
+
+# Async callable — use async_trainer_send_weights
+async def my_async_sender(update_info: IPCWeightTransferUpdateInfo):
+    # Custom async logic to deliver update_info to vLLM
+    ...
+
+trainer_args = IPCTrainerSendWeightsArgs(
+    send_mode=my_async_sender,
+)
+
+await IPCWeightTransferEngine.async_trainer_send_weights(
     iterator=model.named_parameters(),
     trainer_args=trainer_args,
 )

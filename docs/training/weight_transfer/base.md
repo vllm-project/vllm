@@ -60,7 +60,7 @@ class WeightTransferUpdateInfo(ABC):
 For a single-shot weight transfer (all weights in one call), both flags default to `True` and the behavior is unchanged. For chunked/streaming transfers, the first call sets `run_finalize_layerwise_reload=False`, intermediate calls set both to `False`, and the last call sets `run_initialize_layerwise_reload=False`.
 
 !!! note "Layerwise Reloading"
-    By default, vLLM uses [layerwise reloading](https://docs.vllm.ai/en/stable/api/vllm/model_executor/model_loader/reload/layerwise/) to process received weights. This defers weight processing (quantization, repacking, renaming) until all weights for a given layer have been loaded, then materializes and processes the layer in one pass. This avoids holding the full model in memory twice.
+    By default, vLLM uses [layerwise reloading](https://docs.vllm.ai/en/stable/api/vllm/model_executor/model_loader/reload/layerwise/) to process received weights. This defers weight processing (quantization, repacking, renaming) until all weights for a given layer have been loaded, then materializes and processes the layer in one pass.
 
 ## Implementing a Custom Engine
 
