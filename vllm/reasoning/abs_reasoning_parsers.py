@@ -155,6 +155,8 @@ class ReasoningParser:
         original_tag: str | None,
         tool_server: ToolServer | None,
         final_content_format: dict | None = None,
+        tool_choice: str | dict | None = None,
+        function_tools: list[dict] | None = None,
     ) -> str | None:
         """
         Instance method that is implemented for preparing the structured tag.
@@ -166,6 +168,10 @@ class ReasoningParser:
             final_content_format: Optional xgrammar content format dict
                 (e.g. json_schema, regex) to embed in the <|channel|>final
                 tag for constraining the model's final output region.
+            tool_choice: The tool_choice setting from the request
+                ("auto", "required", "none", or a named tool dict).
+            function_tools: List of function tool dicts with "name" and
+                optional "parameters" keys.
         """
         return None
 

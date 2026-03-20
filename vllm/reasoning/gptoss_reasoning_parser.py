@@ -53,13 +53,46 @@ def from_builtin_tool_to_tag(tool: str) -> list[dict]:
 
 
 def tag_with_builtin_funcs(no_func_reasoning_tag, builtin_tool_list: list[str]) -> dict:
-    import copy
-
     new_tag = copy.deepcopy(no_func_reasoning_tag)
     new_tag["format"]["triggers"].append("<|channel|>commentary to=")
 
     for tool in builtin_tool_list:
         new_tag["format"]["tags"].extend(from_builtin_tool_to_tag(tool))
+    return new_tag
+
+
+def from_function_tool_to_tag(name: str, parameters: dict | None) -> list[dict]:
+    content = (
+        {"type": "json_schema", "json_schema": parameters}
+        if parameters
+        else {"type": "any_text"}
+    )
+    return [
+        {
+            "begin": f"<|channel|>commentary to=functions.{name}<|message|>",
+            "content": content,
+            "end": "<|end|>",
+        },
+        {
+            "begin": f"<|channel|>analysis to=functions.{name}<|message|>",
+            "content": content,
+            "end": "<|end|>",
+        },
+    ]
+
+
+def tag_with_function_tools(base_tag: dict, function_tools: list[dict]) -> dict:
+    new_tag = copy.deepcopy(base_tag)
+
+    # Add commentary trigger for function tools if not already covered
+    # by the general commentary trigger (added by builtin tools).
+    if "<|channel|>commentary to=" not in new_tag["format"]["triggers"]:
+        new_tag["format"]["triggers"].append("<|channel|>commentary to=functions.")
+
+    for tool in function_tools:
+        new_tag["format"]["tags"].extend(
+            from_function_tool_to_tag(tool["name"], tool.get("parameters"))
+        )
     return new_tag
 
 
@@ -163,15 +196,24 @@ class GptOssReasoningParser(ReasoningParser):
         original_tag: str | None,
         tool_server: ToolServer | None,
         final_content_format: dict | None = None,
+        tool_choice: str | dict | None = None,
+        function_tools: list[dict] | None = None,
     ) -> str | None:
         if original_tag is not None:
             # There is potential risk for appending the tag to the original tag
             return original_tag
 
-        tag: dict[str, Any]
-        if tool_server is None:
-            tag = copy.deepcopy(no_func_reasoning_tag)
-        else:
+        base_tag: dict[str, Any] = copy.deepcopy(no_func_reasoning_tag)
+
+        # Add builtin tool tags unless tool_choice is "none" or a named
+        # function dict — named forcing should only allow the specific
+        # function, not builtin channels that could satisfy at_least_one.
+        is_named_function_choice = isinstance(tool_choice, dict)
+        if (
+            tool_choice != "none"
+            and not is_named_function_choice
+            and tool_server is not None
+        ):
             builtin_tool_list: list[str] = []
             if tool_server.has_tool("browser"):
                 builtin_tool_list.append("browser")
@@ -180,25 +222,58 @@ class GptOssReasoningParser(ReasoningParser):
             if tool_server.has_tool("container"):
                 builtin_tool_list.append("container")
 
-            if len(builtin_tool_list) > 0:
+            if builtin_tool_list:
                 logger.info("Builtin_tool_list: %s", builtin_tool_list)
-                tag = tag_with_builtin_funcs(no_func_reasoning_tag, builtin_tool_list)
+                base_tag = tag_with_builtin_funcs(base_tag, builtin_tool_list)
             else:
                 logger.info("Builtin_tool_list is empty")
-                tag = copy.deepcopy(no_func_reasoning_tag)
 
-        # If a content constraint is requested for the final channel,
-        # add a triggered tag for <|channel|>final with that constraint.
-        # This ensures grammar enforcement only applies within the final
-        # output region, not during reasoning.
-        if final_content_format is not None:
-            tag["format"]["triggers"].append("<|channel|>final")
-            tag["format"]["tags"].append(
-                {
-                    "begin": "<|channel|>final<|message|>",
-                    "content": final_content_format,
-                    "end": "<|end|>",
-                }
-            )
+        # Add function tool tags (unless tool_choice is "none")
+        effective_function_tools = None
+        if tool_choice != "none" and function_tools:
+            effective_function_tools = function_tools
+            # If named tool choice, filter to only the named tool
+            if isinstance(tool_choice, dict):
+                named = tool_choice.get("name")
+                effective_function_tools = [
+                    t for t in function_tools if t["name"] == named
+                ]
+            if effective_function_tools:
+                base_tag = tag_with_function_tools(base_tag, effective_function_tools)
 
-        return json.dumps(tag)
+        # Add final channel tag unless tool_choice blocks it
+        if tool_choice != "required" and not isinstance(tool_choice, dict):
+            has_function_tools = bool(effective_function_tools)
+            if has_function_tools or final_content_format:
+                final_content = (
+                    final_content_format
+                    if final_content_format
+                    else {"type": "any_text"}
+                )
+                base_tag["format"]["tags"].append(
+                    {
+                        "begin": "<|channel|>final<|message|>",
+                        "content": final_content,
+                        "end": "<|end|>",
+                    }
+                )
+                base_tag["format"]["triggers"].append("<|channel|>final")
+
+        # For tool_choice=required or named tool, force at least one triggered
+        # tag. This blocks <|channel|>final and EOS at the grammar level until
+        # the model has emitted at least one tool-call channel.
+        if tool_choice == "required" or isinstance(tool_choice, dict):
+            # Remove the pure analysis tag (no recipient) from the tag list so
+            # that triggered_tags_first only contains function-call tags.  The
+            # analysis trigger is kept so analysis-to-functions tags remain
+            # reachable in triggered_tags_sub.  This prevents the model from
+            # satisfying at_least_one with a pure reasoning channel instead of
+            # an actual tool call.
+            base_tag["format"]["tags"] = [
+                t
+                for t in base_tag["format"]["tags"]
+                if t.get("begin") != "<|channel|>analysis<|message|>"
+            ]
+            base_tag["format"]["at_least_one"] = True
+
+        return json.dumps(base_tag)

@@ -96,8 +96,53 @@ class TestConstraintToContentFormat:
 
         assert result == {"type": "json_schema", "json_schema": schema}
 
+    def test_json_schema_dict(self):
+        """JSON schema passed as a dict is used directly."""
+        schema = {"type": "object", "properties": {"age": {"type": "integer"}}}
+        params = StructuredOutputsParams(json=schema)
+        result = _constraint_to_content_format(params)
+
+        assert result == {"type": "json_schema", "json_schema": schema}
+
+    def test_json_object(self):
+        """json_object maps to minimal JSON schema."""
+        params = StructuredOutputsParams(json_object=True)
+        result = _constraint_to_content_format(params)
+
+        assert result == {
+            "type": "json_schema",
+            "json_schema": {"type": "object"},
+        }
+
+    def test_regex(self):
+        """Regex constraint is converted correctly."""
+        params = StructuredOutputsParams(regex=r"\d+")
+        result = _constraint_to_content_format(params)
+
+        assert result == {"type": "regex", "pattern": r"\d+"}
+
+    def test_grammar(self):
+        """Grammar constraint is converted correctly."""
+        params = StructuredOutputsParams(grammar="root ::= 'hello'")
+        result = _constraint_to_content_format(params)
+
+        assert result == {"type": "grammar", "grammar": "root ::= 'hello'"}
+
+    def test_choice(self):
+        """Choice constraint is converted correctly."""
+        params = StructuredOutputsParams(choice=["yes", "no"])
+        result = _constraint_to_content_format(params)
+
+        assert result == {
+            "type": "or",
+            "elements": [
+                {"type": "const_string", "value": "yes"},
+                {"type": "const_string", "value": "no"},
+            ],
+        }
+
     def test_structural_tag_only_returns_none(self):
-        """structural_tag is not a content constraint — should return None."""
+        """structural_tag is not a content constraint -- should return None."""
         params = StructuredOutputsParams(structural_tag='{"type": "structural_tag"}')
         result = _constraint_to_content_format(params)
 

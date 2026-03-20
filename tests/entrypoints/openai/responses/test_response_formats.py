@@ -34,7 +34,10 @@ def _make_json_schema_text_config(schema: dict) -> ResponseTextConfig:
 
 class TestExtractResponseFormatSchema:
     def test_extracts_from_text_format_json_schema(self):
-        schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+        schema = {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        }
         request = ResponsesRequest(
             model="test-model",
             input="test",
@@ -44,7 +47,10 @@ class TestExtractResponseFormatSchema:
         assert result == schema
 
     def test_extracts_from_structured_outputs_json(self):
-        schema = {"type": "object", "properties": {"id": {"type": "integer"}}}
+        schema = {
+            "type": "object",
+            "properties": {"id": {"type": "integer"}},
+        }
         request = ResponsesRequest(
             model="test-model",
             input="test",

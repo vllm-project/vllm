@@ -1281,7 +1281,10 @@ class TestInjectResponseFormats:
         assert "## order" in result
 
     def test_compact_json_no_spaces(self):
-        schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+        schema = {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        }
         result = inject_response_formats(None, schema)
         assert '{"type":"object","properties":{"name":{"type":"string"}}}' in result
 
