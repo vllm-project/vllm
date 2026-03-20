@@ -44,15 +44,14 @@ from vllm.model_executor.layers.linear import (
 from vllm.v1.attention.backend import (
     AttentionType,
 )
-# from vllm.attention.layer import Attention
+
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from .utils import make_layers
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.utils.jsontree import json_map_leaves
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.model_executor.models.fireredasr import Conv2dSubsampling, RelPositionalEncoding, RelPosEmbConformerBlock
-
+from .utils import make_layers
 
 class FireRedASRAudioInputs(TensorSchema):
     """
@@ -68,7 +67,7 @@ class FireRedASRAudioInputs(TensorSchema):
     ]
 
 
-class ConformerEncoder(nn.Module):
+class FireRedAsrAedConformerEncoder(nn.Module):
     def __init__(
         self, *, vllm_config: VllmConfig, prefix: str = ""
     ):
@@ -495,7 +494,7 @@ class PositionalEncoding(nn.Module):
 class FireRedASRModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.encoder = ConformerEncoder(
+        self.encoder = FireRedAsrAedConformerEncoder(
             vllm_config=vllm_config, prefix=f"{prefix}.encoder"
         )
         self.decoder = TransformerDecoder(
