@@ -21,6 +21,16 @@ from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
 
+_QWEN3_5_TEXT_ARCHITECTURES = {
+    "Qwen3_5ForConditionalGeneration": "Qwen3_5ForCausalLM",
+    "Qwen3_5MoeForConditionalGeneration": "Qwen3_5MoeForCausalLM",
+}
+
+_QWEN3_5_TEXT_DEFAULT_ARCHITECTURES = {
+    "qwen3_5_text": "Qwen3_5ForCausalLM",
+    "qwen3_5_moe_text": "Qwen3_5MoeForCausalLM",
+}
+
 
 class ModelArchConfigConvertorBase:
     def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
@@ -346,6 +356,22 @@ class MedusaModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return 0
 
 
+class Qwen3_5TextModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_architectures(self) -> list[str]:
+        architectures = super().get_architectures()
+
+        if not architectures:
+            if (
+                default_arch := _QWEN3_5_TEXT_DEFAULT_ARCHITECTURES.get(
+                    self.hf_config.model_type
+                )
+            ) is not None:
+                return [default_arch]
+            return architectures
+
+        return [_QWEN3_5_TEXT_ARCHITECTURES.get(arch, arch) for arch in architectures]
+
+
 class Zamba2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_head_size(self) -> int:
         return getattr(self.hf_text_config, "attention_head_dim", 0)
@@ -452,6 +478,8 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "falcon_mamba": MambaModelArchConfigConvertor,
     "timm_wrapper": TerratorchModelArchConfigConvertor,
     "medusa": MedusaModelArchConfigConvertor,
+    "qwen3_5_text": Qwen3_5TextModelArchConfigConvertor,
+    "qwen3_5_moe_text": Qwen3_5TextModelArchConfigConvertor,
     "zamba2": Zamba2ModelArchConfigConvertor,
     "mpt": MPTModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,

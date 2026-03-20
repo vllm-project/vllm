@@ -154,3 +154,60 @@ def test_draft_model_arch_config(
     _assert_model_config_methods(
         model_config, expected, check_head_size=check_head_size
     )
+
+
+@pytest.mark.parametrize(
+    ("model_type", "architectures", "expected_architecture"),
+    [
+        (
+            "qwen3_5_text",
+            ["Qwen3_5ForConditionalGeneration"],
+            "Qwen3_5ForCausalLM",
+        ),
+        (
+            "qwen3_5_moe_text",
+            ["Qwen3_5MoeForConditionalGeneration"],
+            "Qwen3_5MoeForCausalLM",
+        ),
+    ],
+)
+def test_qwen3_5_text_model_arch_config(
+    tmp_path: Path,
+    model_type: str,
+    architectures: list[str],
+    expected_architecture: str,
+) -> None:
+    model_dir = tmp_path / model_type
+    model_dir.mkdir()
+
+    config = {
+        "architectures": architectures,
+        "head_dim": 4,
+        "hidden_size": 16,
+        "intermediate_size": 32,
+        "model_type": model_type,
+        "num_attention_heads": 4,
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 4,
+        "torch_dtype": "float16",
+        "vocab_size": 128,
+    }
+    if model_type == "qwen3_5_moe_text":
+        config.update(
+            {
+                "moe_intermediate_size": 8,
+                "num_experts": 4,
+                "num_experts_per_tok": 2,
+                "shared_expert_intermediate_size": 8,
+            }
+        )
+
+    with open(model_dir / "config.json", "w") as f:
+        json.dump(config, f)
+
+    model_config = ModelConfig(str(model_dir), tokenizer=str(model_dir))
+
+    assert model_config.hf_config.model_type == model_type
+    assert model_config.architectures == [expected_architecture]
+    assert model_config.architecture == expected_architecture
+    assert not model_config.is_multimodal_model
