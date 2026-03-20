@@ -77,8 +77,7 @@ def _make_runner(**overrides: Any) -> Any:
     runner.max_num_tokens = 16
     runner.decode_query_len = 1
     runner.kv_connector = SimpleNamespace(set_disabled=lambda *_: None)
-    runner.eep_eplb_suppressed = False
-    runner.eplb_state = None
+    runner.eplb = eplb.EPLBController(runner.parallel_config, runner.device)
     runner.pooling_runner = None
     runner.execute_model_state = None
     for key, value in overrides.items():
@@ -173,7 +172,7 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         num_tokens_across_dp=None,
     )
     runner.postprocess = lambda *args, **kwargs: events.append("postprocess")
-    runner.eplb_step = lambda *args, **kwargs: events.append("eplb")
+    runner.eplb.step = lambda *args, **kwargs: events.append("eplb")
     monkeypatch.setattr(
         mrv2,
         "pp_receive",

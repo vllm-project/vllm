@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Protocol
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -13,125 +13,110 @@ from vllm.model_executor.models.interfaces import is_mixture_of_experts
 logger = init_logger(__name__)
 
 
-class _EPLBGPUModelRunnerProto(Protocol):
-    parallel_config: Any
-    device: torch.device
-    load_config: Any
-    speculator: Any | None
-    speculative_config: Any | None
-    model_config: Any
-    eplb_state: EplbState | None
-    eep_eplb_suppressed: bool
+class EPLBController:
+    def __init__(self, parallel_config: Any, device: torch.device):
+        self.parallel_config = parallel_config
+        self.device = device
+        self.state: EplbState | None = None
+        self.suppressed = False
+        self._has_registered_models = False
 
-    def get_model(self) -> nn.Module: ...
-    def eplb_step(self, is_dummy: bool = False, is_profile: bool = False) -> None: ...
-
-
-class EPLBGPUModelRunnerMixin:
-    def _init_eplb_support(self: _EPLBGPUModelRunnerProto) -> None:
-        self.eplb_state: EplbState | None = None
-        self.eep_eplb_suppressed = False
-
-    def _prepare_eplb_load(
-        self: _EPLBGPUModelRunnerProto, load_dummy_weights: bool
-    ) -> None:
-        self.eplb_state = None
+    def prepare_load(self) -> None:
+        self.state = None
+        self._has_registered_models = False
         if self.parallel_config.enable_eplb:
-            self.eplb_state = EplbState(self.parallel_config, self.device)
-        if load_dummy_weights:
-            self.load_config.load_format = "dummy"
+            self.state = EplbState(self.parallel_config, self.device)
 
-    def _maybe_register_speculator_for_eplb(
-        self: _EPLBGPUModelRunnerProto, load_dummy_weights: bool
+    def maybe_register_speculator(
+        self,
+        speculator: Any | None,
+        speculative_config: Any | None,
+        load_dummy_weights: bool,
     ) -> bool:
         # if speculator is a moe model, add it to eplb
         if (
-            self.speculator is None
-            or not hasattr(self.speculator, "model")
+            speculator is None
+            or not hasattr(speculator, "model")
             or not self.parallel_config.enable_eplb
             or load_dummy_weights
         ):
             return False
 
-        draft_model = self.speculator.model
+        draft_model = speculator.model
         if not is_mixture_of_experts(draft_model):
             return False
 
         assert not self.parallel_config.enable_elastic_ep, (
             "Elastic EP is not supported with draft model."
         )
-        assert self.speculative_config is not None
-        assert self.speculative_config.draft_model_config is not None
-        assert self.eplb_state is not None
-        self.eplb_state.add_model(
+        assert speculative_config is not None
+        assert speculative_config.draft_model_config is not None
+        assert self.state is not None
+        self.state.add_model(
             draft_model,
-            self.speculative_config.draft_model_config,
+            speculative_config.draft_model_config,
         )
+        self._has_registered_models = True
         return True
 
-    def _maybe_register_model_for_eplb(
-        self: _EPLBGPUModelRunnerProto, load_dummy_weights: bool
+    def maybe_register_model(
+        self,
+        model: nn.Module,
+        model_config: Any,
+        load_dummy_weights: bool,
     ) -> bool:
         if not self.parallel_config.enable_eplb or load_dummy_weights:
             return False
 
-        model = self.get_model()
         if not is_mixture_of_experts(model):
             return False
 
         logger.info_once(
-            "EPLB is enabled for model %s.", self.model_config.model, scope="local"
+            "EPLB is enabled for model %s.", model_config.model, scope="local"
         )
-        assert self.eplb_state is not None
-        self.eplb_state.add_model(model, self.model_config)
+        assert self.state is not None
+        self.state.add_model(model, model_config)
+        self._has_registered_models = True
         return True
 
-    def _maybe_start_eplb_async_loop(
-        self: _EPLBGPUModelRunnerProto, eplb_models_added: bool
-    ) -> None:
-        if (
-            eplb_models_added
-            and self.eplb_state is not None
-            and self.eplb_state.is_async
-        ):
-            self.eplb_state.start_async_loop()
+    def maybe_start_async_loop(self, eplb_models_added: bool) -> None:
+        if eplb_models_added and self.state is not None and self.state.is_async:
+            self.state.start_async_loop()
 
-    def _maybe_step_eplb_for_dummy_run(
-        self: _EPLBGPUModelRunnerProto, *, skip_eplb: bool, is_profile: bool
-    ) -> None:
-        if not skip_eplb:
-            self.eplb_step(is_dummy=True, is_profile=is_profile)
-
-    def eplb_step(
-        self: _EPLBGPUModelRunnerProto,
+    def step(
+        self,
         is_dummy: bool = False,
         is_profile: bool = False,
     ) -> None:
-        if not self.parallel_config.enable_eplb or self.eep_eplb_suppressed:
+        if (
+            not self.parallel_config.enable_eplb
+            or self.suppressed
+            or self.state is None
+            or not self._has_registered_models
+        ):
             return
 
-        assert self.eplb_state is not None
-        model = self.get_model()
-        assert is_mixture_of_experts(model)
-        self.eplb_state.step(
+        self.state.step(
             is_dummy,
             is_profile,
             log_stats=self.parallel_config.eplb_config.log_balancedness,
         )
 
-    def setup_eplb_from_mapping(
-        self: _EPLBGPUModelRunnerProto,
+    def setup_from_mapping(
+        self,
+        model: nn.Module,
+        model_config: Any,
         expanded_physical_to_logical: torch.Tensor,
         old_num_physical_experts: int,
     ) -> None:
-        model = self.get_model()
         assert is_mixture_of_experts(model)
 
-        self.eplb_state = EplbState.from_mapping(
+        self.state = EplbState.from_mapping(
             model=model,
-            model_config=self.model_config,
+            model_config=model_config,
             device=self.device,
             parallel_config=self.parallel_config,
             expanded_physical_to_logical=expanded_physical_to_logical,
             num_valid_physical_experts=old_num_physical_experts,
         )
+        self._has_registered_models = True
