@@ -1159,7 +1159,7 @@ class OpenAIServingResponses(OpenAIServing):
                 len(output),
                 status,
                 getattr(context, "finish_reason", None),
-                context.num_output_tokens,
+                getattr(context, "num_output_tokens", -1),
             )
             return "incomplete"
         return status
