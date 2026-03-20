@@ -97,7 +97,7 @@ __global__ void moe_align_block_size_kernel(
     // Initialize sorted_token_ids with numel
     for (size_t it = threadIdx.x; it < max_num_tokens_padded;
          it += blockDim.x) {
-      sorted_token_ids[it] = numel;
+      sorted_token_ids[it] = (int32_t)numel;
     }
     return;
   }
@@ -190,7 +190,7 @@ __global__ void moe_align_block_size_small_batch_expert_kernel(
     // Initialize sorted_token_ids with numel
     for (size_t it = threadIdx.x; it < max_num_tokens_padded;
          it += fill_threads) {
-      sorted_token_ids[it] = numel;
+      sorted_token_ids[it] = (int32_t)numel;
     }
     // Three __syncthreads() corresponding to the other threads
     __syncthreads();
@@ -212,6 +212,7 @@ __global__ void moe_align_block_size_small_batch_expert_kernel(
 
   for (size_t i = tid; i < numel; i += stride) {
     int32_t expert_id = topk_ids[i];
+    if (expert_id >= num_experts) continue;
     if (has_expert_map) {
       expert_id = expert_map[expert_id];
       // filter invalid expert
@@ -251,7 +252,7 @@ __global__ void moe_align_block_size_small_batch_expert_kernel(
     }
   }
 
-  // Fill remaining expert_ids with -1
+  // Fill remaining expert_ids with 0
   const size_t fill_start_idx = cumsum[num_experts] / block_size + tid;
   for (size_t i = fill_start_idx; i < max_num_m_blocks; i += stride) {
     expert_ids[i] = 0;
@@ -259,6 +260,7 @@ __global__ void moe_align_block_size_small_batch_expert_kernel(
 
   for (size_t i = tid; i < numel; i += stride) {
     int32_t expert_id = topk_ids[i];
+    if (expert_id >= num_experts) continue;
     if (has_expert_map) {
       expert_id = expert_map[expert_id];
       // filter invalid expert
@@ -528,7 +530,7 @@ __global__ void moe_lora_align_block_size_small_batch_expert_kernel(
     // Initialize sorted_token_ids with numel
     for (size_t it = threadIdx.x; it < max_num_tokens_padded;
          it += fill_threads) {
-      sorted_token_ids[it] = numel;
+      sorted_token_ids[it] = (int32_t)numel;
     }
     // Three __syncthreads() corresponding to the other threads
     __syncthreads();
@@ -628,7 +630,7 @@ __global__ void moe_lora_align_block_size_small_batch_expert_kernel(
     int32_t token_idx = (int32_t)(i / topk_num);
     int32_t lora = token_lora_mapping[token_idx];
 
-    if (lora < 0 || lora >= num_loras || adapter_enabled[lora] == 0) continue;
+    if (lora < 0 || lora >= max_loras || adapter_enabled[lora] == 0) continue;
 
     // Convert lora_id to lora_slot using inverse map
     int32_t lora_slot = lora_id_to_slot[lora];
