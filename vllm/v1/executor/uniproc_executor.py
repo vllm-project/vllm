@@ -136,6 +136,10 @@ class UniProcExecutor(Executor):
         if worker := self.driver_worker:
             worker.shutdown()
 
+    @classmethod
+    def supports_async_scheduling(cls) -> bool:
+        return True
+
 
 class ExecutorWithExternalLauncher(UniProcExecutor):
     """An executor that uses external launchers to launch engines,

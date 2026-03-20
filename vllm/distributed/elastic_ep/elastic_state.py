@@ -585,15 +585,4 @@ class ElasticEPScalingState:
         parallel_config._data_parallel_master_port_list = (
             reconfig_request.new_data_parallel_master_port_list
         )
-        parallel_config._stateless_world_group_port_list = (
-            reconfig_request.new_stateless_world_group_port_list
-        )
-        parallel_config._stateless_dp_group_port_list = (
-            reconfig_request.new_stateless_dp_group_port_list
-        )
-        parallel_config._stateless_ep_group_port_list = (
-            reconfig_request.new_stateless_ep_group_port_list
-        )
-        parallel_config._stateless_eplb_group_port_list = (
-            reconfig_request.new_stateless_eplb_group_port_list
-        )
+        parallel_config._coord_store_port = reconfig_request.coord_store_port

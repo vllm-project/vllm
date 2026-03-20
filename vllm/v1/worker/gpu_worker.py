@@ -374,8 +374,10 @@ class Worker(WorkerBase):
             )
 
             # Profile CUDA graph memory if graphs will be captured.
+            # Skip on ROCm/HIP as graph pool handles and mem_get_info behave
+            # differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
-            if not self.model_config.enforce_eager:
+            if not self.model_config.enforce_eager and not current_platform.is_rocm():
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Use the pre-cudagraph torch peak to avoid double-counting.
@@ -388,6 +390,8 @@ class Worker(WorkerBase):
             + profile_result.weights_memory
         )
 
+        # On ROCm, cudagraph_memory_estimate is always 0 so this is a no-op.
+        # On CUDA, respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
             cudagraph_memory_estimate
             if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
@@ -395,9 +399,7 @@ class Worker(WorkerBase):
         )
 
         self.non_torch_memory = profile_result.non_torch_increase
-        self.peak_activation_memory = (
-            profile_result.torch_peak_increase + cudagraph_memory_estimate_applied
-        )
+        self.peak_activation_memory = profile_result.torch_peak_increase
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         free_gpu_memory = profile_result.after_profile.free_memory
@@ -499,7 +501,6 @@ class Worker(WorkerBase):
 
     def update_max_model_len(self, max_model_len: int) -> None:
         """Update max_model_len after auto-fit to GPU memory.
-
         This is called when max_model_len=-1 is used and the engine
         automatically determines the maximum context length that fits
         in GPU memory. Workers need to update their cached max_model_len
@@ -617,6 +618,7 @@ class Worker(WorkerBase):
             # slightly underestimate the memory consumption.
             # So leave a small buffer (=150MiB) to avoid OOM.
             redundancy_buffer_memory = 150 * (1 << 20)
+
             non_kv_cache_memory = (
                 self.model_runner.model_memory_usage
                 + self.peak_activation_memory
@@ -885,7 +887,8 @@ class Worker(WorkerBase):
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1, uniform_decode=True)
+        num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
+        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
