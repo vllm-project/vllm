@@ -64,6 +64,8 @@ class OffloadingEvent:
     medium: str
     # True if blocks are removed, False if stored
     removed: bool
+    # If blocks are removed, otherwise None
+    evicted_groups: list[int] | None = None
 
 
 class OffloadingManager(ABC):

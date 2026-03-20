@@ -84,9 +84,16 @@ class BlockStored(KVCacheEvent):
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
     medium: str | None
+    evicted_groups: list[int] | None = None
 
     def __hash__(self) -> int:
-        return hash((tuple(self.block_hashes), self.medium))
+        return hash(
+            (
+                tuple(self.block_hashes),
+                self.medium,
+                tuple(self.evicted_groups) if self.evicted_groups else None,
+            )
+        )
 
 
 class AllBlocksCleared(KVCacheEvent):

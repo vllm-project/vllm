@@ -340,7 +340,11 @@ class OffloadingConnectorScheduler:
         """
         for event in self.manager.take_events():
             if event.removed:
-                yield BlockRemoved(block_hashes=event.block_hashes, medium=event.medium)
+                yield BlockRemoved(
+                    block_hashes=event.block_hashes,
+                    medium=event.medium,
+                    evicted_groups=event.evicted_groups,
+                )
             else:
                 yield BlockStored(
                     block_hashes=event.block_hashes,
