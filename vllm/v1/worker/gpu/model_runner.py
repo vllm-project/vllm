@@ -195,7 +195,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
-            model_dtype=self.dtype,
             cache_draft_logits=not use_strict_rejection_sampling,
         )
         self.input_buffers = InputBuffers(

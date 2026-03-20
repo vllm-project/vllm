@@ -240,7 +240,7 @@ def _try_download_from_hf_hub(
         EntryNotFoundError,
         LocalEntryNotFoundError,
     ) as e:
-        logger.debug("File or repository not found in hf_hub_download:", exc_info=e)
+        logger.debug("File or repository not found in hf_hub_download: %s", e)
         return None
     except HfHubHTTPError as e:
         logger.warning(
