@@ -982,7 +982,7 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
 
 
 # Re-exported from kv_cache_interface for backward compatibility.
-from vllm.v1.kv_cache_interface import (  # noqa: E402, F811
+from vllm.v1.kv_cache_interface import (  # noqa: E402, F401, F811
     KVQuantMode,
     get_kv_quant_mode,
     is_quantized_kv_cache,
