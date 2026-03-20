@@ -90,8 +90,6 @@ class MlpProjectorConfig(PretrainedConfig):
 class DeepseekVLV2Config(PretrainedConfig):
     model_type = "deepseek_vl_v2"
     architectures: list[str] | None = None
-    vision_config: VisionEncoderConfig
-    projector_config: MlpProjectorConfig
 
     tile_tag: str = "2D"
     global_view_pos: str = "head"
