@@ -1394,6 +1394,11 @@ class GPUModelRunner(
                         self.input_batch.num_computed_tokens_cpu[cur_req_index] -= (
                             correction
                         )
+                        if is_ngram_gpu and correction > 0:
+                            self.input_batch.num_tokens_no_spec[cur_req_index] -= (
+                                correction
+                            )
+                            self.num_tokens_no_spec_gpu[cur_req_index] -= correction
 
             return correct_spec_decode_token_counts
         else:
