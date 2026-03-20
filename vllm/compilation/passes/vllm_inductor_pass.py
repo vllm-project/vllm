@@ -3,8 +3,9 @@
 import functools
 import operator
 import time
+from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, ClassVar, Generic, ParamSpec, TypeVar
 
@@ -18,6 +19,7 @@ from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPri
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
+from .fx_utils import is_func
 from .inductor_pass import InductorPass, enable_fake_mode
 
 logger = init_logger(__name__)
@@ -185,53 +187,83 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
-@dataclass(eq=False)
-class PatternReplacement(Generic[P, R]):
-    pattern: Callable[P, R]
-    replacement: Callable[P, R]
-    inputs: list[torch.Tensor]
+class VllmPatternReplacement(ABC, Generic[P, R]):
+    @property
+    @abstractmethod
+    def pattern(self) -> Callable[P, R]: ...
+
+    @property
+    @abstractmethod
+    def replacement(self) -> Callable[P, R]: ...
+
+    @property
+    @abstractmethod
+    def inputs(self) -> list[torch.Tensor]: ...
 
 
-def make_fusion_pass(
-    pass_name: str,
-    builder: Callable[[VllmConfig], Sequence[PatternReplacement]],
-    preprocessors: list[Callable[[fx.GraphModule], None]] | None = None,
-    extra_sources: Sequence[Any] = (),
-) -> type[InductorPass]:
+def _fx_view_to_reshape(gm: fx.GraphModule) -> None:
+    from torch._inductor.fx_passes.post_grad import view_to_reshape
+
+    view_to_reshape(gm)
+
+
+def _remove_noop_permutes(gm: fx.GraphModule) -> None:
+    for node in gm.graph.nodes:
+        if not is_func(node, torch.ops.aten.permute.default):
+            continue
+        dims = node.args[1]
+        if any(dim != i for i, dim in enumerate(dims)):
+            continue
+        node.replace_all_uses_with(node.args[0])
+        gm.graph.erase_node(node)
+
+
+class VllmFusionPatternMatcherPass(VllmPatternMatcherPass, ABC):
+    """
+    A VllmPatternMatcherPass for passes that use VllmPatternReplacement objects.
+    Subclasses implement get_pattern_replacements() and pass pass_name to __init__.
+    """
+
+    @enable_fake_mode
+    def __init__(self, config: VllmConfig, pass_name: str) -> None:
+        super().__init__(config)
+        self.pass_name = pass_name
+        self.pm_pass = PatternMatcherPass(pass_name=pass_name)
+
+        self._pattern_replacements = self.get_pattern_replacements(config)
+        for pr in self._pattern_replacements:
+            pm.register_replacement(
+                pr.pattern,
+                pr.replacement,
+                pr.inputs,
+                self._trace_fn,
+                self.pm_pass,
+            )
+
+        self.dump_patterns(config, self.pm_pass)
+
+    @abstractmethod
+    def get_pattern_replacements(
+        self, config: VllmConfig
+    ) -> list[VllmPatternReplacement]: ...
+
+    def uuid(self) -> str:
+        return VllmInductorPass.hash_source(
+            type(self),
+            *[type(pr) for pr in self._pattern_replacements],
+        )
+
+    @staticmethod
     def _trace_fn(*args: Any, **kwargs: Any) -> fx.GraphModule:
         gm = pm.fwd_only(*args, **kwargs)
-        for pre in preprocessors or []:
-            pre(gm)
+        _fx_view_to_reshape(gm)
+        _remove_noop_permutes(gm)
         return gm
 
-    class _FusionPass(VllmPatternMatcherPass):
-        @enable_fake_mode
-        def __init__(self, config: VllmConfig) -> None:
-            super().__init__(config)
-            self.pm_pass = PatternMatcherPass(pass_name=pass_name)
-
-            for pattern_replacement in builder(config):
-                pm.register_replacement(
-                    pattern_replacement.pattern,
-                    pattern_replacement.replacement,
-                    pattern_replacement.inputs,
-                    _trace_fn,
-                    self.pm_pass,
-                )
-
-            self.dump_patterns(config, self.pm_pass)
-
-        @VllmInductorPass.time_and_log
-        def __call__(self, graph: torch.fx.Graph) -> None:
-            self.matched_count = self.pm_pass.apply(graph)
-            VllmPatternMatcherPass.match_table[pass_name] += self.matched_count
-
-        def uuid(self) -> str:
-            return InductorPass.hash_source(builder, *extra_sources)
-
-    _FusionPass.__name__ = pass_name
-    _FusionPass.__qualname__ = pass_name
-    return _FusionPass
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: torch.fx.Graph) -> None:
+        self.matched_count = self.pm_pass.apply(graph)
+        VllmPatternMatcherPass.match_table[self.pass_name] += self.matched_count
 
 
 class PrinterInductorPass(VllmInductorPass):
