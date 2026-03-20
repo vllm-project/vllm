@@ -135,10 +135,9 @@ for output in outputs:
     print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
     print("-" * 50)
 
-# --- Demonstrate chunked (packed) IPC weight transfer ---
 ray.get(llm.sleep.remote(level=0))
 
-ray.get(train_model.broadcast_weights.remote(llm, packed=True))
+ray.get(train_model.broadcast_weights.remote(llm, packed=False))
 
 ray.get(llm.wake_up.remote(tags=["scheduling"]))
 

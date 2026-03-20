@@ -346,10 +346,7 @@ def test_nccl_weight_transfer_between_processes():
     This test verifies that the NCCLWeightTransferEngine can receive
     tensors broadcast by a trainer process via NCCL.
     """
-    ray.init(
-        ignore_reinit_error=True,
-        runtime_env={"env_vars": {"PYTHONPATH": "/home/ray/default/personal/vllm"}},
-    )
+    ray.init(ignore_reinit_error=True)
 
     master_address = "127.0.0.1"
     master_port = get_open_port()
@@ -725,10 +722,7 @@ def test_ipc_weight_transfer_between_processes(mode: str):
     from ray.util.placement_group import placement_group
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-    ray.init(
-        ignore_reinit_error=True,
-        runtime_env={"env_vars": {"PYTHONPATH": "/home/ray/default/personal/vllm"}},
-    )
+    ray.init(ignore_reinit_error=True)
 
     # Create a placement group to ensure both processes are on the same GPU
     # Use fractional GPUs so both tasks can share the same GPU bundle
