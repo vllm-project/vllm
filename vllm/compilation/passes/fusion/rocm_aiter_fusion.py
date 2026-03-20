@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import operator
+
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
@@ -271,11 +273,39 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
     This pass fuses aiter rms_norm & vllm/aiter quant custom ops
     into a fused rms_norm_quant op.
     It also supports fused_add_rms_norm.
+
+    When fused_allreduce_rmsnorm custom ops are present in the graph
+    (auto-enabled on MI355X with AITER for DeepSeek-family models),
+    two paths are taken depending on the quantization type:
+
+    FP8 path: fused_allreduce_rmsnorm is decomposed into
+      all_reduce + rms_norm_with_add, then rms_norm_with_add + fp8_quant
+      are fused into a single AITER kernel by the pattern matcher.
+
+    FP4/BF16 path: fused_allreduce_rmsnorm is preserved as-is because
+      no FP8 quantization op consumes the normed output. At runtime,
+      AITER's fused AR+RMSNorm kernel handles the combined operation.
     """
 
     @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
+
+        self._fp8_quant_ops: set[OpOverload] = set()
+        try:
+            self._fp8_quant_ops.add(
+                torch.ops.vllm.triton_per_token_group_quant_fp8.default
+            )
+        except AttributeError:
+            pass
+        try:
+            self._fp8_quant_ops.add(rocm_aiter_ops.get_group_quant_op())
+        except Exception:
+            pass
+        try:
+            self._fp8_quant_ops.add(rocm_aiter_ops.get_per_token_quant_op())
+        except Exception:
+            pass
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="rocm_aiter_rms_norm_quant_fusion_pass"
@@ -309,8 +339,101 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
 
         self.dump_patterns(config, self.patterns)
 
+    def _decompose_fused_allreduce_rmsnorm(self, graph: fx.Graph) -> int:
+        """
+        Decompose fused_allreduce_rmsnorm into all_reduce + rmsnorm_with_add
+        when the normed output feeds into an FP8 quantization op.
+
+        The AITER fused allreduce+rmsnorm kernel wraps both operations into a
+        single opaque custom op, which prevents torch.compile from recognizing
+        the rmsnorm for rms_norm + fp8_quant fusion. By decomposing the op
+        into visible all_reduce and rms_norm_with_add ops, the existing fusion
+        patterns can match.
+
+        Only decomposes when an FP8 quant op consumes the normed output,
+        preserving the AITER fused kernel for non-FP8 models (e.g. FP4).
+        """
+        try:
+            fused_ar_rms_op = torch.ops.vllm.fused_allreduce_rmsnorm.default
+        except AttributeError:
+            return 0
+
+        all_reduce_op = torch.ops.vllm.all_reduce.default
+        rmsnorm_with_add_op = rocm_aiter_ops.get_rmsnorm_fused_add_op()
+
+        count = 0
+        for node in list(graph.nodes):
+            if node.target != fused_ar_rms_op:
+                continue
+
+            has_fp8_consumer = False
+            for user in node.users:
+                if user.target == operator.getitem and user.args[1] == 0:
+                    for quant_user in user.users:
+                        if (
+                            quant_user.op == "call_function"
+                            and quant_user.target in self._fp8_quant_ops
+                        ):
+                            has_fp8_consumer = True
+                            break
+                if has_fp8_consumer:
+                    break
+
+            if not has_fp8_consumer:
+                continue
+
+            input_ = node.args[0]
+            residual = node.args[1]
+            weight = node.args[2]
+            eps = node.kwargs.get(
+                "eps", node.args[3] if len(node.args) > 3 else None
+            )
+            group_name = node.kwargs.get(
+                "group_name", node.args[4] if len(node.args) > 4 else None
+            )
+
+            with graph.inserting_before(node):
+                # All args must be positional to match the schema-normalized
+                # representation that torch.compile uses for torch.ops.* nodes.
+                # graph.call_function bypasses schema normalization, so kwargs
+                # would create a node representation that the pattern matcher
+                # cannot match against the traced pattern.
+                ar_args: tuple = (input_,)
+                if group_name is not None:
+                    ar_args = (input_, group_name)
+
+                ar_node = graph.call_function(
+                    all_reduce_op,
+                    args=ar_args,
+                )
+
+                rmsnorm_node = graph.call_function(
+                    rmsnorm_with_add_op,
+                    args=(ar_node, residual, weight, eps),
+                )
+
+            # Propagate FakeTensor metadata so downstream passes
+            # (codegen, shape inference) have correct type info.
+            if "val" in node.meta:
+                rmsnorm_node.meta["val"] = node.meta["val"]
+            if hasattr(input_, "meta") and "val" in input_.meta:
+                ar_node.meta["val"] = input_.meta["val"]
+
+            node.replace_all_uses_with(rmsnorm_node)
+            graph.erase_node(node)
+            count += 1
+
+        return count
+
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
+        decomposed = self._decompose_fused_allreduce_rmsnorm(graph)
+        if decomposed:
+            logger.debug(
+                "Decomposed %s fused_allreduce_rmsnorm nodes for "
+                "FP8 quant fusion compatibility",
+                decomposed,
+            )
         self.matched_count = self.patterns.apply(graph)
         logger.debug(
             "%s Replaced %s patterns", self.__class__.__name__, self.matched_count

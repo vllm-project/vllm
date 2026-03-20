@@ -14,6 +14,24 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     return get_tp_group().all_reduce(input_)
 
 
+def tensor_model_parallel_fused_allreduce_rmsnorm(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused allreduce + residual-add + RMSNorm across model parallel group.
+
+    Instead of allreduce inside o_proj/MoE followed by a separate RMSNorm,
+    this fuses both operations: allreduce(input_) + residual → RMSNorm.
+
+    Returns (normed_output, updated_residual).
+    """
+    return get_tp_group().fused_allreduce_rmsnorm(
+        input_, residual, weight, eps
+    )
+
+
 def tensor_model_parallel_all_gather(
     input_: torch.Tensor, dim: int = -1
 ) -> torch.Tensor:

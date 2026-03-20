@@ -259,10 +259,42 @@ def patched_fused_scaled_matmul_reduce_scatter(
     )
 
 
+def fused_allreduce_rmsnorm(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    group_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    return group._fused_allreduce_rmsnorm_out_place(
+        input_, residual, weight, eps
+    )
+
+
+def fused_allreduce_rmsnorm_fake(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    group_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(residual), torch.empty_like(residual)
+
+
 direct_register_custom_op(
     op_name="all_reduce",
     op_func=all_reduce,
     fake_impl=all_reduce_fake,
+)
+
+direct_register_custom_op(
+    op_name="fused_allreduce_rmsnorm",
+    op_func=fused_allreduce_rmsnorm,
+    fake_impl=fused_allreduce_rmsnorm_fake,
 )
 
 direct_register_custom_op(
@@ -470,6 +502,7 @@ class GroupCoordinator:
         # only cuda uses this function,
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
+        maybe_aiter_ca_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
         )
@@ -479,6 +512,9 @@ class GroupCoordinator:
             ca_comm = self.device_communicator.ca_comm
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
+            aiter_ca_comm = self.device_communicator.aiter_ca_comm
+            if aiter_ca_comm is not None:
+                maybe_aiter_ca_context = aiter_ca_comm.capture()
 
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
@@ -486,7 +522,11 @@ class GroupCoordinator:
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
-        with torch.cuda.stream(stream), maybe_ca_context:
+        with (
+            torch.cuda.stream(stream),
+            maybe_ca_context,
+            maybe_aiter_ca_context,
+        ):
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
@@ -517,6 +557,45 @@ class GroupCoordinator:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
         return self.device_communicator.all_reduce(input_)
+
+    def _fused_allreduce_rmsnorm_out_place(
+        self,
+        input_: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.device_communicator is None:
+            raise ValueError("No device communicator found")
+        return self.device_communicator.fused_allreduce_rmsnorm(
+            input_, residual, weight, eps
+        )
+
+    def fused_allreduce_rmsnorm(
+        self,
+        input_: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused allreduce + residual-add + RMSNorm.
+
+        When world_size == 1, falls back to plain add + rmsnorm (no allreduce).
+        """
+        if self.world_size == 1:
+            from vllm.model_executor.layers.layernorm import fused_add_rms_norm
+
+            return fused_add_rms_norm(input_, residual, weight, eps)
+
+        if self.use_custom_op_call:
+            return torch.ops.vllm.fused_allreduce_rmsnorm(
+                input_, residual, weight, eps,
+                group_name=self.unique_name,
+            )
+        else:
+            return self._fused_allreduce_rmsnorm_out_place(
+                input_, residual, weight, eps
+            )
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size

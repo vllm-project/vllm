@@ -114,6 +114,43 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 # currently be an MI300 series.
                 self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
+        self.aiter_ca_comm = None
+        if current_platform.is_rocm() and self.world_size > 1:
+            from vllm._aiter_ops import rocm_aiter_ops
+            _fused_ar_supported = (
+                rocm_aiter_ops.is_fused_allreduce_rmsnorm_supported()
+            )
+        else:
+            _fused_ar_supported = False
+        if _fused_ar_supported:
+            try:
+                from aiter.dist.device_communicators.custom_all_reduce import (
+                    CustomAllreduce as AiterCustomAllreduce,
+                )
+
+                self.aiter_ca_comm = AiterCustomAllreduce(
+                    group=self.cpu_group,
+                    device=self.device,
+                )
+                if self.aiter_ca_comm.disabled:
+                    logger.warning(
+                        "AITER CustomAllreduce disabled; "
+                        "fused AR+RMSNorm will use split kernels"
+                    )
+                    self.aiter_ca_comm = None
+                else:
+                    logger.info(
+                        "AITER CustomAllreduce initialized for "
+                        "fused AR+RMSNorm kernel"
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Failed to init AITER CustomAllreduce for "
+                    "fused AR+RMSNorm: %s",
+                    e,
+                )
+                self.aiter_ca_comm = None
+
         if self.use_all2all:
             if self.all2all_backend == "naive":
                 from .all2all import NaiveAll2AllManager
@@ -235,6 +272,61 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = input_.clone()
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
+
+    def fused_allreduce_rmsnorm(
+        self,
+        input_: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused allreduce + residual-add + RMSNorm.
+
+        Uses AITER's fused kernel (reduce_scatter + local_load_rmsnorm)
+        when available. Falls back to split allreduce + rmsnorm otherwise.
+        """
+        aiter_ca = self.aiter_ca_comm
+        if aiter_ca is not None:
+            n = input_.shape[-1]
+            total_bytes = input_.numel() * input_.element_size()
+            can_use_fused = (
+                n <= 16384
+                and total_bytes < 8 * 1024 * 8192
+                and self.world_size != 6
+            )
+            if (
+                can_use_fused
+                and not aiter_ca.disabled
+                and aiter_ca.should_custom_ar(input_)
+            ):
+                use_1stage = total_bytes <= 128 * 1024
+                result = aiter_ca.custom_fused_ar_rms(
+                    input_, residual, weight, eps, use_1stage
+                )
+                if result is not None:
+                    logger.debug(
+                        "fused_allreduce_rmsnorm: AITER fused kernel "
+                        "shape=%s dtype=%s 1stage=%s",
+                        input_.shape,
+                        input_.dtype,
+                        use_1stage,
+                    )
+                    return result
+
+        ar_out = self.all_reduce(input_)
+
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        out, residual_out = rocm_aiter_ops.rms_norm2d_with_add(
+            ar_out, residual, weight, eps
+        )
+        logger.debug(
+            "fused_allreduce_rmsnorm: split kernels "
+            "shape=%s dtype=%s",
+            input_.shape,
+            input_.dtype,
+        )
+        return out, residual_out
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size

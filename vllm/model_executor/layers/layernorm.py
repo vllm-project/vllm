@@ -143,6 +143,7 @@ class RMSNorm(CustomOp):
         var_hidden_size: int | None = None,
         has_weight: bool = True,
         dtype: torch.dtype | None = None,
+        fused_allreduce: bool = False,
     ) -> None:
         super().__init__()
 
@@ -151,6 +152,7 @@ class RMSNorm(CustomOp):
         self.variance_size_override = (
             None if var_hidden_size == hidden_size else var_hidden_size
         )
+        self.fused_allreduce = fused_allreduce
         weight_dtype = dtype or torch.get_default_dtype()
         self.has_weight = has_weight
         self.weight = torch.ones(hidden_size, dtype=weight_dtype)
@@ -372,6 +374,15 @@ class RMSNorm(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
+
+        if self.fused_allreduce and residual is not None:
+            from vllm.distributed.communication_op import (
+                tensor_model_parallel_fused_allreduce_rmsnorm,
+            )
+
+            return tensor_model_parallel_fused_allreduce_rmsnorm(
+                x, residual, self.weight.data, self.variance_epsilon
+            )
 
         add_residual = residual is not None
         if add_residual:

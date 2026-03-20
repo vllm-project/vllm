@@ -1204,6 +1204,35 @@ class rocm_aiter_ops:
     def is_triton_gemm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_UNQUANT_GEMM
 
+    @classmethod
+    @if_aiter_supported
+    def is_fused_allreduce_rmsnorm_supported(cls) -> bool:
+        """Check if fused allreduce+RMSNorm is supported on this platform.
+
+        Requires gfx950 (MI355X), AITER enabled, RMSNorm kernels available,
+        and AITER's CustomAllreduce communicator importable.
+
+        Currently only wired in deepseek_v2.py (DeepSeek V2/V3/R1 family).
+        Other models are unaffected because they do not set
+        ``fused_allreduce=True`` on their RMSNorm layers. Models that
+        inherit DeepseekV2DecoderLayer (Eagle, MTP, Mistral Large 3)
+        automatically benefit when running on MI355X with TP > 1.
+
+        Returns None (falsy) on non-ROCm platforms via @if_aiter_supported.
+        """
+        from vllm.platforms.rocm import on_gfx950
+
+        if not (cls._AITER_ENABLED and cls._RMSNORM_ENABLED and on_gfx950()):
+            return False
+        try:
+            from aiter.dist.device_communicators.custom_all_reduce import (
+                CustomAllreduce as _,  # noqa: F401
+            )
+
+            return True
+        except ImportError:
+            return False
+
     @staticmethod
     @if_aiter_supported
     def register_ops_once() -> None:

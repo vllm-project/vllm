@@ -243,6 +243,7 @@ class DeepseekV2MoE(nn.Module):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
+        self.skip_moe_allreduce = False
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
@@ -391,9 +392,26 @@ class DeepseekV2MoE(nn.Module):
             )
             final_hidden_states = final_hidden_states[:num_tokens]
         elif self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states
-            )
+            if self.skip_moe_allreduce:
+                if self.experts.must_reduce_shared_expert_outputs():
+                    logger.warning_once(
+                        "Fused AR+RMSNorm: combine kernel already reduces "
+                        "MoE output. This is unexpected with standard TP. "
+                        "Falling back to normal allreduce for this layer."
+                    )
+                    final_hidden_states = (
+                        self.experts
+                        .maybe_all_reduce_tensor_model_parallel(
+                            final_hidden_states
+                        )
+                    )
+            else:
+                final_hidden_states = (
+                    self.experts
+                    .maybe_all_reduce_tensor_model_parallel(
+                        final_hidden_states
+                    )
+                )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -1064,6 +1082,25 @@ class DeepseekV2DecoderLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
         )
 
+        # MI355X optimization: move allreduce from projections into
+        # RMSNorm layers, enabling AITER's fused AR+RMSNorm kernel.
+        # - FP4/BF16: the fused op is preserved at compile time, executed
+        #   as a single AITER kernel (custom_fused_ar_rms).
+        # - FP8: the fused op is decomposed at compile time into
+        #   all_reduce + rmsnorm_with_add, then rmsnorm_with_add + fp8_quant
+        #   are fused into one AITER op by RocmAiterRMSNormQuantFusionPass.
+        self.fuse_ar_rmsnorm = (
+            rocm_aiter_ops.is_fused_allreduce_rmsnorm_supported()
+            and get_tensor_model_parallel_world_size() > 1
+        )
+        if self.fuse_ar_rmsnorm:
+            self.self_attn.o_proj.reduce_results = False
+            logger.debug(
+                "Layer %d: fused AR+RMSNorm enabled, "
+                "o_proj.reduce_results=False",
+                layer_idx,
+            )
+
         if (
             config.n_routed_experts is not None
             and layer_idx >= config.first_k_dense_replace
@@ -1075,17 +1112,27 @@ class DeepseekV2DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
+            if self.fuse_ar_rmsnorm:
+                self.mlp.skip_moe_allreduce = True
         else:
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                reduce_results=not self.fuse_ar_rmsnorm,
                 prefix=f"{prefix}.mlp",
             )
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        self.input_layernorm = RMSNorm(
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            fused_allreduce=self.fuse_ar_rmsnorm and layer_idx > 0,
+        )
         self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            fused_allreduce=self.fuse_ar_rmsnorm,
         )
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
@@ -1181,8 +1228,21 @@ class DeepseekV2Model(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
+        fuse_final_norm = (
+            rocm_aiter_ops.is_fused_allreduce_rmsnorm_supported()
+            and get_tensor_model_parallel_world_size() > 1
+        )
+        if fuse_final_norm:
+            logger.info(
+                "Fused AllReduce+RMSNorm enabled for MI355X. "
+                "AllReduce moved from o_proj/MoE into RMSNorm layers."
+            )
         if get_pp_group().is_last_rank:
-            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.norm = RMSNorm(
+                config.hidden_size,
+                eps=config.rms_norm_eps,
+                fused_allreduce=fuse_final_norm,
+            )
         else:
             self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
