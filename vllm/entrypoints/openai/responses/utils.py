@@ -199,18 +199,16 @@ def _construct_single_message_from_response_item(
             # This is a vLLM state-carrier item: it carries serialized Harmony
             # history in encrypted_content and must not be forwarded to the LLM.
             return None
-        reasoning_content = ""
+        reasoning = ""
         if item.encrypted_content:
             raise ValueError(
                 "Encrypted content from external providers is not supported. "
                 "vLLM-generated state carriers are handled transparently."
             )
-        if len(item.summary) == 1:
-            reasoning_content = item.summary[0].text
-        elif item.content and len(item.content) == 1:
-            reasoning_content = item.content[0].text
+        elif item.content and len(item.content) >= 1:
+            reasoning = item.content[0].text
         elif len(item.summary) >= 1:
-            reasoning_content = item.summary[0].text
+            reasoning = item.summary[0].text
             logger.warning(
                 "Using summary text as reasoning content for item %s. "
                 "Please use content instead of summary for "
@@ -219,7 +217,7 @@ def _construct_single_message_from_response_item(
             )
         return {
             "role": "assistant",
-            "reasoning": reasoning_content,
+            "reasoning": reasoning,
         }
     elif isinstance(item, ResponseOutputMessage):
         return {
