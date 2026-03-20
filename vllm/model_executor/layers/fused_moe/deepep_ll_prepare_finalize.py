@@ -158,11 +158,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             return topk_ids
         return self.global_to_physical[topk_ids]
 
-    def _map_local_to_global_ids(self, expert_topk_ids: torch.Tensor) -> torch.Tensor:
-        if self.local_expert_global_ids is None:
-            return expert_topk_ids
-        return self.local_expert_global_ids[expert_topk_ids]
-
     def _do_quant(
         self,
         x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
