@@ -174,7 +174,7 @@ class RMSNorm(CustomOp):
                 # external Oink initialization work in this case.
             else:
                 try:
-                    device_index = torch.cuda.current_device()
+                    device_index = torch.accelerator.current_device_index()
                     if _oink_ops.is_oink_available_for_device(device_index):
                         self._use_oink_fused_add_rmsnorm = (
                             _oink_ops.has_fused_add_rms_norm()

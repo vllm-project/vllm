@@ -64,6 +64,47 @@ def test_postprocess_scores_and_releases_query_cache():
         )
 
 
+def test_postprocess_scores_docs_in_batch():
+    runner = LateInteractionRunner()
+    query_key = "query-batch"
+    query_emb = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
+    doc_emb_1 = torch.tensor([[1.0, 0.0], [0.5, 0.5]], dtype=torch.float32)
+    doc_emb_2 = torch.tensor([[0.0, 1.0], [0.3, 0.7], [1.0, 0.0]], dtype=torch.float32)
+
+    query_params = _make_pooling_params(
+        build_late_interaction_query_params(query_key=query_key, query_uses=2)
+    )
+    runner.postprocess_pooler_output(
+        raw_pooler_output=[query_emb],
+        pooling_params=[query_params],
+        req_ids=["query-req"],
+        finished_mask=[True],
+    )
+
+    doc_params = _make_pooling_params(
+        build_late_interaction_doc_params(query_key=query_key)
+    )
+    doc_output = runner.postprocess_pooler_output(
+        raw_pooler_output=[doc_emb_1, doc_emb_2],
+        pooling_params=[doc_params, doc_params],
+        req_ids=["doc-req-1", "doc-req-2"],
+        finished_mask=[True, True],
+    )
+    assert isinstance(doc_output, list)
+    assert doc_output[0] is not None
+    assert doc_output[1] is not None
+    assert torch.allclose(doc_output[0], compute_maxsim_score(query_emb, doc_emb_1))
+    assert torch.allclose(doc_output[1], compute_maxsim_score(query_emb, doc_emb_2))
+
+    with pytest.raises(ValueError, match="query cache miss"):
+        runner.postprocess_pooler_output(
+            raw_pooler_output=[doc_emb_1],
+            pooling_params=[doc_params],
+            req_ids=["doc-req-3"],
+            finished_mask=[True],
+        )
+
+
 def test_finished_request_releases_unscored_doc_use():
     runner = LateInteractionRunner()
     query_key = "query-cancel"

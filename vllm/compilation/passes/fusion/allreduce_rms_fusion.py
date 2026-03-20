@@ -49,7 +49,7 @@ if find_spec("flashinfer"):
         pass
 
 if hasattr(torch.ops._C, "scaled_fp4_quant"):
-    STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.default
+    STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
 # Max size of the input tensor per world size per device capability
 # to use flashinfer fused allreduce
@@ -564,11 +564,11 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
             rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
             quant_out_tuple = auto_functionalized(
                 STATIC_FP4_QUANT_OP,
-                output=quant_result,
                 input=rms,
-                output_scale=output_scale,
                 input_scale=input_global_scale,
                 is_sf_swizzled_layout=True,
+                output=quant_result,
+                output_scale=output_scale,
             )
 
             # quant_out, allreduce_output, output_scale
@@ -662,11 +662,11 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
             rms, residual = self.rmsnorm_matcher(allreduce_output, weight, residual)
             quant_out_tuple = auto_functionalized(
                 STATIC_FP4_QUANT_OP,
-                output=quant_result,
                 input=rms,
-                output_scale=output_scale,
                 input_scale=input_global_scale,
                 is_sf_swizzled_layout=True,
+                output=quant_result,
+                output_scale=output_scale,
             )
 
             # quant_out, allreduce_output, output_scale

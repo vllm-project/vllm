@@ -168,6 +168,9 @@ class Platform:
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
 
+    def is_zen_cpu(self) -> bool:
+        return False
+
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
 

@@ -666,7 +666,6 @@ class RocmPlatform(Platform):
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         from vllm.config.compilation import CUDAGraphMode
 
-        cache_config = vllm_config.cache_config
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
 
@@ -688,31 +687,8 @@ class RocmPlatform(Platform):
                 )
                 compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        if cache_config and not cache_config.user_specified_block_size:
-            if (
-                envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION and envs.VLLM_ROCM_USE_AITER
-                # NOTE: This block has been deprecated
-                # or get_env_variable_attn_backend()
-                # == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
-                # TODO: monitor https://github.com/vllm-project/vllm/pull/30396
-                # to see how we can transition to the new way of selecting
-                # attention backends
-            ):
-                cache_config.block_size = 64
-                logger.warning(
-                    "[ROCM_AITER_UNIFIED_ATTN]: Setting kv cache block size to 64."
-                )
-            else:
-                cache_config.block_size = 16
-
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
-
-    @classmethod
-    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        # TODO: ROCm still sets block_size in check_and_update_config.
-        # Move that logic here so block_size is chosen by the backend.
-        pass
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
@@ -849,6 +825,30 @@ class RocmPlatform(Platform):
                     "You can use float16 instead by explicitly setting the "
                     "`dtype` flag in CLI, for example: --dtype=half."
                 )
+
+    @classmethod
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from src_cache to dst_cache on GPU."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+
+    @classmethod
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from GPU to host (CPU)."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.cpu()
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:

@@ -168,7 +168,7 @@ class XPUPlatform(Platform):
             cache_config.block_size = 64
 
         # lazy import to avoid circular import
-        from vllm.config import CompilationMode, CUDAGraphMode
+        from vllm.config import CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
         if compilation_config.compile_sizes is None:
@@ -201,8 +201,6 @@ class XPUPlatform(Platform):
                     "falling back to PIECEWISE graph mode on XPU platform."
                 )
 
-        if vllm_config.lora_config is not None:
-            compilation_config.mode = CompilationMode.NONE
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         # Only override worker_cls if it's still the default "auto"
