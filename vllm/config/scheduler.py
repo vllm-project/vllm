@@ -65,7 +65,9 @@ class SchedulerConfig:
     The default value here is mainly for convenience when testing.
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
-
+    max_num_batched_logprobs: int = 0
+    """Maximum number of logprobs to return per batch across all sequences.
+    Set to 0 to disable the limit."""
     max_num_partial_prefills: int = Field(default=1, ge=1)
     """For chunked prefill, the maximum number of sequences that can be
     partially prefilled concurrently."""
@@ -214,6 +216,9 @@ class SchedulerConfig:
         return None if value is None else handler(value)
 
     def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
+        # Set the maximum number of logprobs per batch.
+        # Default to 1000 if not explicitly set (or if set to 0).
+        self.max_num_batched_logprobs = self.max_num_batched_logprobs or 1000
         if is_encoder_decoder:
             # Chunked prefill should be disabled for encoder-decoder models.
             self.disable_chunked_mm_input = True

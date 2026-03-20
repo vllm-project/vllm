@@ -335,6 +335,32 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
+    def _get_request_logprobs_cost(self, request: Request) -> int:
+        """
+        Calculate the compute cost of sampling logprobs for a given request.
+
+        The cost is defined as the number of parallel sequences (n) multiplied
+        by the number of logprobs requested. This helps the scheduler prevent
+        compute-intensive sampling tasks from blocking the entire batch.
+        """
+        logprobs = request.sampling_params.logprobs
+
+        # If no logprobs are requested (None or 0), the compute overhead is negligible.
+        if logprobs is None or logprobs == 0:
+            return 0
+
+        # Handle the special case where logprobs is -1
+        # (requesting the entire vocabulary).
+        # We use the actual vocabulary size to prevent negative cost values and
+        # accurately represent the massive compute/memory overhead.
+        if logprobs == -1:
+            # Dynamically fetch vocab size from the model config to stay model-agnostic.
+            vocab_size = self.vllm_config.model_config.get_vocab_size()
+            return request.sampling_params.n * vocab_size
+
+        # Standard case: cost = (number of completions) * (logprobs per token).
+        return request.sampling_params.n * logprobs
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -355,6 +381,8 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
+        max_logprobs_budget = self.scheduler_config.max_num_batched_logprobs
+        current_logprobs_sum = 0
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
@@ -374,6 +402,17 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            max_logprobs_budget = self.scheduler_config.max_num_batched_logprobs
+            req_logprobs_cost = self._get_request_logprobs_cost(request)
+
+            # If adding another request would exceed the logprobs budget,
+            # stop and defer the remaining requests to the next step.
+            if (
+                max_logprobs_budget > 0
+                and current_logprobs_sum + req_logprobs_cost > max_logprobs_budget
+                and current_logprobs_sum > 0
+            ):
+                break
 
             if (
                 request.num_output_placeholders > 0
@@ -396,6 +435,7 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
+
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
@@ -405,7 +445,9 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = min(
                 num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens
             )
-
+            # Accumulate the cost after successful scheduling
+            current_logprobs_sum += req_logprobs_cost
+            req_index += 1
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
             external_load_encoder_input: list[int] = []
@@ -563,7 +605,14 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
-
+                max_logprobs_budget = self.scheduler_config.max_num_batched_logprobs
+                req_logprobs_cost = self._get_request_logprobs_cost(request)
+                if (
+                    max_logprobs_budget > 0
+                    and current_logprobs_sum + req_logprobs_cost > max_logprobs_budget
+                    and current_logprobs_sum > 0
+                ):
+                    break
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
                     request.status
@@ -760,6 +809,7 @@ class Scheduler(SchedulerInterface):
                         )
 
                 request = request_queue.pop_request()
+                current_logprobs_sum += req_logprobs_cost
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
