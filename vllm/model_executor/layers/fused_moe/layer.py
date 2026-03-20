@@ -448,27 +448,7 @@ class FusedMoE(CustomOp):
                 None,
             )
 
-        # RIY sparse loading — orthogonal to EP/TP/PP
-        # Logit mask: -inf for pruned experts → router never selects them
-        # Weight zeroing: pruned expert weights set to zero after load
-        import os
-        _riy_profile = os.environ.get("RIY_EXPERT_PROFILE", "")
-        self._riy_logit_mask = None
-        self._riy_pruned_ids: set[int] = set()
-        if _riy_profile and os.path.exists(_riy_profile):
-            from vllm.model_executor.layers.fused_moe.riy import (
-                build_riy_expert_map,
-            )
-            _num_kept, _riy_emap, _lmask = build_riy_expert_map(
-                self.global_num_experts, _riy_profile)
-            self._riy_logit_mask = _lmask
-            self._riy_pruned_ids = set(
-                i for i in range(self.global_num_experts)
-                if _riy_emap[i] == -1)
-            logger.info_once(
-                "RIY: %d/%d experts pruned — weights will be zeroed, "
-                "router logits masked",
-                len(self._riy_pruned_ids), self.global_num_experts)
+        self._prune_logit_mask = None  # set below after _layer_idx is known
 
         self.top_k = top_k
 
@@ -514,6 +494,36 @@ class FusedMoE(CustomOp):
                 intermediate_size=intermediate_size,
                 quantization=_quant_name)
 
+        # RIY sparse loading — per-layer expert pruning
+        # Must be before create_weights (which uses local_num_experts)
+        import os as _os
+        _riy_profile = _os.environ.get("RIY_EXPERT_PROFILE", "")
+        if _riy_profile and _os.path.exists(_riy_profile) and _layer_idx >= 0:
+            from vllm.model_executor.layers.fused_moe.riy import (
+                build_riy_prune_map,
+            )
+            _num_kept, _prune_map, _lmask = build_riy_prune_map(
+                _layer_idx, self.global_num_experts, _riy_profile)
+            self._prune_logit_mask = _lmask
+            if self._expert_map is not None:
+                # EP active: merge prune into EP map
+                for i in range(self.global_num_experts):
+                    if _prune_map[i] == -1:
+                        self._expert_map[i] = -1
+                compact = 0
+                for i in range(self.global_num_experts):
+                    if self._expert_map[i] >= 0:
+                        self._expert_map[i] = compact
+                        compact += 1
+                self.local_num_experts = compact
+            else:
+                # No EP: set prune map as expert_map
+                self.local_num_experts = _num_kept
+                # Must delete the plain attribute before register_buffer
+                if hasattr(self, '_expert_map'):
+                    delattr(self, '_expert_map')
+                self.register_buffer("_expert_map", _prune_map)
+
         # TODO(bnell): we should not have to create a router if the kernel is
         # monolithic.
         self.router = create_fused_moe_router(
@@ -538,11 +548,11 @@ class FusedMoE(CustomOp):
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
         # Set RIY logit mask on router (registered buffer for graph compat)
-        if self._riy_logit_mask is not None:
+        if self._prune_logit_mask is not None:
             self.register_buffer(
-                "_riy_logit_mask_buf", self._riy_logit_mask,
+                "_prune_logit_mask_buf", self._prune_logit_mask,
                 persistent=False)
-            self.router.riy_logit_mask = self._riy_logit_mask_buf
+            self.router.prune_logit_mask = self._prune_logit_mask_buf
 
         # Wire RIY stats as registered buffers (graph-compatible).
         self._riy_layer_idx = _layer_idx

@@ -195,7 +195,7 @@ class BaseRouter(FusedMoERouter):
         self.riy_weight_view: torch.Tensor | None = None
         self.riy_collecting_flag: torch.Tensor | None = None
         # RIY logit mask: -inf for pruned experts (set by FusedMoE.__init__)
-        self.riy_logit_mask: torch.Tensor | None = None
+        self.prune_logit_mask: torch.Tensor | None = None
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
@@ -300,8 +300,8 @@ class BaseRouter(FusedMoERouter):
         indices_type = self._get_indices_type()
 
         # Step 2b: RIY — mask pruned expert logits before routing
-        if self.riy_logit_mask is not None:
-            router_logits = router_logits + self.riy_logit_mask
+        if self.prune_logit_mask is not None:
+            router_logits = router_logits + self.prune_logit_mask
 
         # Step 3: Compute routing (delegated to subclass)
         topk_weights, topk_ids = self._compute_routing(

@@ -324,40 +324,45 @@ class RiyState:
             0, ids_flat, topk_weights.flatten().float())
 
 
-def build_riy_expert_map(
+def _load_riy_profile(profile_path: str) -> dict:
+    """Load and cache RIY profile."""
+    if not hasattr(_load_riy_profile, '_cache'):
+        _load_riy_profile._cache = {}
+    if profile_path not in _load_riy_profile._cache:
+        with open(profile_path) as f:
+            _load_riy_profile._cache[profile_path] = json.load(f)
+    return _load_riy_profile._cache[profile_path]
+
+
+def build_riy_prune_map(
+    layer_idx: int,
     original_num_experts: int,
     profile_path: str,
 ) -> tuple[int, torch.Tensor, torch.Tensor]:
-    """Build expert map from RIY profile for sparse loading.
+    """Build per-layer expert map from RIY profile.
 
-    Reuses vLLM's Expert Parallel machinery: pruned experts get -1
-    in the map, kept experts get compact sequential indices.
+    Each MoE layer gets its own map — different experts can be pruned
+    in different layers. This is the correct approach because each
+    expert in each layer is a unique FFN with unique weights.
 
     Args:
+        layer_idx: The layer index in the model
         original_num_experts: Total experts in the original model
         profile_path: Path to RIY profile JSON
 
     Returns:
         (num_kept, expert_map, logit_mask)
-        - num_kept: number of kept experts
+        - num_kept: number of kept experts for this layer
         - expert_map: (original_num_experts,) int32, -1 for pruned
         - logit_mask: (original_num_experts,) float32, 0.0 kept / -inf pruned
     """
-    with open(profile_path) as f:
-        profile = json.load(f)
+    profile = _load_riy_profile(profile_path)
 
-    # Collect expert IDs pruned in ALL MoE layers
-    # An expert is only globally pruned if it appears in every layer
-    from collections import Counter
-    pruned_per_expert: Counter = Counter()
-    all_layers: set[int] = set()
-    for layer_idx, expert_idx in profile["pruned_experts"]:
-        pruned_per_expert[expert_idx] += 1
-        all_layers.add(layer_idx)
-    num_moe_layers = len(all_layers) if all_layers else 1
-    pruned_ids: set[int] = set(
-        eid for eid, count in pruned_per_expert.items()
-        if count >= num_moe_layers)
+    # Collect pruned expert IDs for THIS layer
+    pruned_ids: set[int] = set()
+    for l, e in profile["pruned_experts"]:
+        if l == layer_idx:
+            pruned_ids.add(e)
 
     expert_map = torch.full((original_num_experts,), -1, dtype=torch.int32)
     logit_mask = torch.zeros(original_num_experts, dtype=torch.float32)
@@ -369,8 +374,8 @@ def build_riy_expert_map(
         else:
             logit_mask[i] = float("-inf")
 
-    logger.info("RIY expert map: %d/%d experts kept (%d pruned)",
-                compact_idx, original_num_experts, len(pruned_ids))
+    logger.info("RIY layer %d: %d/%d experts kept (%d pruned)",
+                layer_idx, compact_idx, original_num_experts, len(pruned_ids))
     return compact_idx, expert_map, logit_mask
 
 
