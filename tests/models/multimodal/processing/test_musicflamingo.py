@@ -74,7 +74,7 @@ def check_transformers_version():
     model_info.check_transformers_version(on_fail="skip")
 
 
-def test_musicflamingo_chunk_counting_uses_rote_timestamps(mock_ctx):
+def test_musicflamingo_chunk_counting_uses_rote_timestamps(mock_ctx, monkeypatch):
     from vllm.model_executor.models.musicflamingo import (
         MusicFlamingoDummyInputsBuilder,
         MusicFlamingoMultiModalProcessor,
@@ -103,15 +103,14 @@ def test_musicflamingo_chunk_counting_uses_rote_timestamps(mock_ctx):
             "rote_timestamps": torch.randn(3, 750),
         }
 
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(BaseMultiModalProcessor, "_call_hf_processor", mock_base_call)
+    monkeypatch.setattr(BaseMultiModalProcessor, "_call_hf_processor", mock_base_call)
 
-        processed = processor._call_hf_processor(prompt, mm_data, {}, {})
+    processed = processor._call_hf_processor(prompt, mm_data, {}, {})
 
-        chunk_counts = processed["chunk_counts"]
+    chunk_counts = processed["chunk_counts"]
 
-        assert chunk_counts.tolist() == [1, 2]
-        assert "rote_timestamps" in processed
+    assert chunk_counts.tolist() == [1, 2]
+    assert "rote_timestamps" in processed
 
 
 def test_musicflamingo_dummy_text_uses_plain_audio_tokens(mock_ctx):
