@@ -578,12 +578,12 @@ class Dashboard:
         # Estimate VRAM savings
         expert_bytes = self._estimate_expert_bytes()
         if expert_bytes > 0:
-            savings_gb = len(pruned) * expert_bytes / (1024**3)
+            savings_gb = len(runtime_pruned) * expert_bytes / (1024**3)
             self.set_status(
-                f"Pruned {len(pruned)} experts ({pct}%) "
-                f"~{savings_gb:.1f} GB savings — mask active")
+                f"Pruned +{len(runtime_pruned)} experts ({pct}% of remaining) "
+                f"~{savings_gb:.1f} GB — mask active")
         else:
-            self.set_status(f"Pruned {len(pruned)} experts ({pct}%) — mask active")
+            self.set_status(f"Pruned +{len(runtime_pruned)} experts ({pct}% of remaining)")
 
     def _send_mask(self, pruned):
         """POST mask to RIY API."""
