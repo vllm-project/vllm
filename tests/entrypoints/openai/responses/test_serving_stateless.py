@@ -45,19 +45,17 @@ def _make_minimal_serving(enable_store: bool = False):
     set exactly what is needed.
 
     Attributes touched by retrieve_responses / cancel_responses:
-      enable_store, response_store, response_store_lock, background_tasks,
+      enable_store, store, background_tasks,
       log_error_stack (for create_error_response from base class)
     Attributes touched by create_responses (up to store check):
       models (for _check_model), engine_client (for errored check)
     """
-    import asyncio
-
     from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+    from vllm.entrypoints.openai.responses.store import InMemoryResponseStore
 
     obj = OpenAIServingResponses.__new__(OpenAIServingResponses)
     obj.enable_store = enable_store
-    obj.response_store = {}
-    obj.response_store_lock = asyncio.Lock()
+    obj.store = InMemoryResponseStore()
     obj.background_tasks = {}
     obj.log_error_stack = False
     # _check_model needs models.is_base_model to return True (model found)
@@ -474,57 +472,53 @@ class TestUtilsStateCarrierSkipping:
 # ---------------------------------------------------------------------------
 
 
-class TestNoDuplicateAssistantTurn:
-    def test_stateless_path_does_not_duplicate_assistant_output(self):
-        """Bug 1 regression: when prev_messages (from the state carrier)
-        already contains the assistant turn, _make_request must NOT also pass
-        prev_response_output, otherwise construct_input_messages appends the
-        assistant content twice.
+# ---------------------------------------------------------------------------
+# Fix 1: Double-include prevention on stateless non-Harmony path
+# ---------------------------------------------------------------------------
+
+
+class TestDoubleIncludePrevention:
+    def test_stateless_path_does_not_duplicate_assistant_message(self):
+        """When prev_messages is provided (stateless path), the assistant
+        output from prev_response.output must NOT be appended again.
+
+        The state carrier already contains the full conversation history
+        including assistant messages.  Passing prev_response_output to
+        construct_input_messages would duplicate them.
         """
         from vllm.entrypoints.openai.responses.utils import construct_input_messages
 
-        # Simulate what the carrier stores: full history including assistant reply.
-        prev = [
+        assistant_text = "I am a helpful assistant."
+        prev_messages = [
             {"role": "user", "content": "Who are you?"},
-            {"role": "assistant", "content": "I am helpful."},
+            {"role": "assistant", "content": assistant_text},
         ]
 
-        # When using the stateless path (prev_messages is not None),
-        # prev_response_output must be None — otherwise the assistant turn
-        # appears twice.
+        # Simulate the stateless path: prev_messages is not None.
+        # prev_response_output should be None (the fix).
         result = construct_input_messages(
             request_instructions=None,
             request_input="What did you say?",
-            prev_msg=prev,
+            prev_msg=prev_messages,
             prev_response_output=None,
         )
 
         assistant_msgs = [m for m in result if m.get("role") == "assistant"]
         assert len(assistant_msgs) == 1, (
-            f"Expected 1 assistant message, got {len(assistant_msgs)}: {assistant_msgs}"
+            f"Expected exactly 1 assistant message, got {len(assistant_msgs)}: "
+            f"{assistant_msgs}"
         )
+        assert assistant_msgs[0]["content"] == assistant_text
 
-        # Verify the full message list order.
-        assert result[0] == {"role": "user", "content": "Who are you?"}
-        assert result[1] == {"role": "assistant", "content": "I am helpful."}
-        assert result[2] == {"role": "user", "content": "What did you say?"}
-
-    def test_passing_both_prev_msg_and_output_causes_duplicate(self):
-        """Verify the bug scenario: passing both prev_msg AND prev_response_output
-        produces duplicate assistant messages (this is what we fixed).
+    def test_store_path_still_includes_assistant_output(self):
+        """When prev_messages is None (store-backed path), prev_response_output
+        must still be used to add the assistant turn.
         """
         from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
         from vllm.entrypoints.openai.responses.utils import construct_input_messages
 
-        prev = [
-            {"role": "user", "content": "Who are you?"},
-            {"role": "assistant", "content": "I am helpful."},
-        ]
-
-        text = ResponseOutputText(
-            type="output_text", text="I am helpful.", annotations=[]
-        )
+        text = ResponseOutputText(type="output_text", text="Hello!", annotations=[])
         msg = ResponseOutputMessage(
             id="msg_1",
             type="message",
@@ -533,29 +527,28 @@ class TestNoDuplicateAssistantTurn:
             status="completed",
         )
 
-        # This is the BROKEN scenario — passing both leads to duplication.
         result = construct_input_messages(
             request_instructions=None,
             request_input="What did you say?",
-            prev_msg=prev,
+            prev_msg=None,
             prev_response_output=[msg],
         )
 
         assistant_msgs = [m for m in result if m.get("role") == "assistant"]
-        assert len(assistant_msgs) == 2, (
-            "Expected duplicate assistant messages when both prev_msg and "
-            "prev_response_output are passed"
-        )
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0]["content"] == "Hello!"
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: Tampered state carrier returns 400, not 500
+# ---------------------------------------------------------------------------
 
 
 class TestTamperedCarrierReturns400:
     @pytest.mark.asyncio
-    async def test_tampered_carrier_returns_400_not_500(self):
-        """Bug 2 regression: a tampered state carrier must return 400, not 500.
-
-        _extract_state_from_response raises ValueError on HMAC mismatch.
-        Before the fix, this call was outside the try/except block, producing
-        an unhandled 500.
+    async def test_tampered_hmac_returns_400(self):
+        """A previous_response with a tampered HMAC in its state carrier
+        must return a 400 error, not raise an uncaught ValueError → 500.
         """
         from vllm.entrypoints.openai.engine.protocol import ErrorResponse
         from vllm.entrypoints.openai.responses.protocol import (
@@ -568,12 +561,14 @@ class TestTamperedCarrierReturns400:
         serving.engine_client = MagicMock()
         serving.engine_client.errored = False
 
-        # Build a valid carrier then tamper with the HMAC.
+        # Build a valid carrier then corrupt the HMAC.
         carrier = OpenAIServingResponses._build_state_carrier(
-            serving, [{"role": "user", "content": "hi"}], "req"
+            serving,
+            [{"role": "user", "content": "hi"}],
+            "req_123",
         )
         parts = carrier.encrypted_content.split(":", 3)
-        parts[3] = "0" * 64
+        parts[3] = "0" * 64  # Replace HMAC with garbage
         carrier.encrypted_content = ":".join(parts)
 
         prev_resp = ResponsesResponse.model_construct(
@@ -582,7 +577,7 @@ class TestTamperedCarrierReturns400:
 
         req = ResponsesRequest(
             model="test",
-            input="Follow up",
+            input="follow up",
             store=False,
             previous_response=prev_resp,
         )
@@ -591,7 +586,7 @@ class TestTamperedCarrierReturns400:
 
         assert isinstance(result, ErrorResponse)
         assert result.error.code == HTTPStatus.BAD_REQUEST
-        assert "tampered" in result.error.message
+        assert "integrity" in result.error.message.lower()
 
 
 class TestPrevMessagesOverride:

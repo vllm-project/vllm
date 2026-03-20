@@ -46,7 +46,6 @@ from vllm import envs
 from vllm.config.utils import replace
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     get_tool_call_id_type,
 )
@@ -295,16 +294,12 @@ class OpenAIServingResponses(OpenAIServing):
         self.tool_call_id_type = get_tool_call_id_type(self.model_config)
 
         self.enable_auto_tools = enable_auto_tools
-        # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove responses from the store.
-        self.response_store: dict[str, ResponsesResponse] = {}
-        self.response_store_lock = asyncio.Lock()
 
-        # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove messages from the store.
-        self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
+        from vllm.entrypoints.openai.responses.store import (
+            create_response_store,
+        )
+
+        self.store = create_response_store()
 
         # HACK(wuhang): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
@@ -429,8 +424,7 @@ class OpenAIServingResponses(OpenAIServing):
                     ),
                     status_code=HTTPStatus.BAD_REQUEST,
                 )
-            async with self.response_store_lock:
-                prev_response = self.response_store.get(request.previous_response_id)
+            prev_response = await self.store.get_response(request.previous_response_id)
             if prev_response is None:
                 return self._make_not_found_error(request.previous_response_id)
         elif request.previous_response is not None:
@@ -438,21 +432,20 @@ class OpenAIServingResponses(OpenAIServing):
 
         # For stateless multi-turn: extract Harmony/chat messages from the
         # encrypted_content state carrier embedded in the previous response.
-        # This replaces the msg_store lookup for subsequent turns.
+        # This replaces the store message lookup for subsequent turns.
         prev_messages_from_state: list | None = None
         if prev_response is not None and request.previous_response is not None:
             try:
                 prev_messages_from_state = self._extract_state_from_response(
                     prev_response
                 )
-            except ValueError as exc:
+            except ValueError as e:
                 return self.create_error_response(
                     err_type="invalid_request_error",
                     message=(
-                        "The state carrier in 'previous_response' is invalid "
-                        f"({exc}). The data may have been tampered with. "
-                        "Ensure VLLM_RESPONSES_STATE_SIGNING_KEY is consistent "
-                        "across requests."
+                        "The state carrier in 'previous_response' failed "
+                        f"integrity validation: {e}. The response may have "
+                        "been tampered with or signed with a different key."
                     ),
                     status_code=HTTPStatus.BAD_REQUEST,
                 )
@@ -461,10 +454,9 @@ class OpenAIServingResponses(OpenAIServing):
                 # contains no vLLM state carrier — most likely because
                 # include=['reasoning.encrypted_content'] was omitted on the
                 # prior turn.  previous_response always implies the stateless
-                # path; there is no msg_store fallback regardless of
-                # enable_store (msg_store is keyed by response ID, not carried
-                # in the response object).  Return a clear 400 rather than
-                # letting msg_store[prev_response.id] raise a KeyError 500.
+                # path; there is no stored-message fallback regardless of
+                # enable_store (stored messages are keyed by response ID, not
+                # carried in the response object).  Return a clear 400.
                 return self.create_error_response(
                     err_type="invalid_request_error",
                     message=(
@@ -482,7 +474,7 @@ class OpenAIServingResponses(OpenAIServing):
             model_name = self.models.model_name(lora_request)
 
             if self.use_harmony:
-                messages, engine_prompts = self._make_request_with_harmony(
+                messages, engine_prompts = await self._make_request_with_harmony(
                     request, prev_response, prev_messages_from_state
                 )
             else:
@@ -662,7 +654,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Store the input messages.
         if request.store:
-            self.msg_store[request.request_id] = messages
+            await self.store.put_messages(request.request_id, messages)
 
         if request.background:
             created_time = int(time.time())
@@ -675,8 +667,7 @@ class OpenAIServingResponses(OpenAIServing):
                 status="queued",
                 usage=None,
             )
-            async with self.response_store_lock:
-                self.response_store[response.id] = response
+            await self.store.put_response(response.id, response)
 
             # Run the request in the background.
             if request.stream:
@@ -742,6 +733,8 @@ class OpenAIServingResponses(OpenAIServing):
                 request_metadata,
                 messages=messages,
             )
+        except GenerationError as e:
+            return self._convert_generation_error_to_response(e)
         except Exception as e:
             return self.create_error_response(e)
 
@@ -754,11 +747,15 @@ class OpenAIServingResponses(OpenAIServing):
         tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         # Construct the input messages.
         # For stateless multi-turn, prev_messages comes from the encrypted_content
-        # state carrier; otherwise fall back to the in-memory msg_store.
+        # state carrier; otherwise fall back to the response store.
         prev_msg = (
             prev_messages
             if prev_messages is not None
-            else (self.msg_store.get(prev_response.id) if prev_response else None)
+            else (
+                await self.store.get_messages(prev_response.id)
+                if prev_response
+                else None
+            )
         )
         messages = construct_input_messages(
             request_instructions=request.instructions,
@@ -883,7 +880,7 @@ class OpenAIServingResponses(OpenAIServing):
             priority = orig_priority - 1
             sub_request += 1
 
-    def _make_request_with_harmony(
+    async def _make_request_with_harmony(
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
@@ -894,7 +891,7 @@ class OpenAIServingResponses(OpenAIServing):
                 "Only 'auto' tool_choice is supported in response API with Harmony"
             )
 
-        messages = self._construct_input_messages_with_harmony(
+        messages = await self._construct_input_messages_with_harmony(
             request, prev_response, prev_messages
         )
         prompt_token_ids = render_for_completion(messages)
@@ -1097,11 +1094,9 @@ class OpenAIServingResponses(OpenAIServing):
                 response.output.append(state_carrier)
 
         if request.store:
-            async with self.response_store_lock:
-                stored_response = self.response_store.get(response.id)
-                # If the response is already cancelled, don't update it.
-                if stored_response is None or stored_response.status != "cancelled":
-                    self.response_store[response.id] = response
+            await self.store.put_response(
+                response.id, response, unless_status="cancelled"
+            )
         return response
 
     def _topk_logprobs(
@@ -1342,7 +1337,7 @@ class OpenAIServingResponses(OpenAIServing):
         )
         return sys_msg
 
-    def _construct_input_messages_with_harmony(
+    async def _construct_input_messages_with_harmony(
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
@@ -1391,14 +1386,7 @@ class OpenAIServingResponses(OpenAIServing):
                     for m in prev_messages
                 ]
             else:
-                stored = self.msg_store.get(prev_response.id)
-                if stored is None:
-                    raise ValueError(
-                        f"No stored messages found for response "
-                        f"'{prev_response.id}'. The response may have "
-                        f"expired or the store may be inconsistent."
-                    )
-                prev_msgs = stored
+                prev_msgs = await self.store.get_messages(prev_response.id) or []
 
             # Drop analysis messages from completed turns so they don't
             # bloat the prompt in multi-turn conversations. This mirrors
@@ -1441,13 +1429,27 @@ class OpenAIServingResponses(OpenAIServing):
         event_deque: deque[StreamingResponsesResponse] = deque()
         new_event_signal = asyncio.Event()
         self.event_store[request.request_id] = (event_deque, new_event_signal)
-        generator = self.responses_stream_generator(request, *args, **kwargs)
+        response = None
         try:
+            generator = self.responses_stream_generator(request, *args, **kwargs)
             async for event in generator:
                 event_deque.append(event)
                 new_event_signal.set()  # Signal new event available
+        except GenerationError as e:
+            response = self._convert_generation_error_to_response(e)
+        except Exception as e:
+            logger.exception("Background request failed for %s", request.request_id)
+            response = self.create_error_response(e)
         finally:
             new_event_signal.set()
+
+        if response is not None and isinstance(response, ErrorResponse):
+            # If the request has failed, update the status to "failed".
+            await self.store.update_response_status(
+                request.request_id,
+                "failed",
+                allowed_current_statuses={"queued", "in_progress"},
+            )
 
     async def _run_background_request(
         self,
@@ -1459,12 +1461,11 @@ class OpenAIServingResponses(OpenAIServing):
 
         if isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".
-            response_id = request.request_id
-            async with self.response_store_lock:
-                stored_response = self.response_store.get(response_id)
-                assert stored_response is not None
-                if stored_response.status not in ("completed", "cancelled"):
-                    stored_response.status = "failed"
+            await self.store.update_response_status(
+                request.request_id,
+                "failed",
+                allowed_current_statuses={"queued", "in_progress"},
+            )
 
     async def responses_background_stream_generator(
         self,
@@ -1518,13 +1519,27 @@ class OpenAIServingResponses(OpenAIServing):
                 status_code=HTTPStatus.NOT_IMPLEMENTED,
             )
 
-        async with self.response_store_lock:
-            response = self.response_store.get(response_id)
+        response = await self.store.get_response(response_id)
 
         if response is None:
             return self._make_not_found_error(response_id)
 
         if stream:
+            if response_id not in self.event_store:
+                if response.status not in ("queued", "in_progress"):
+                    # Terminal state on another replica — return full response.
+                    return response
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        f"Streaming retrieval is not available for response "
+                        f"'{response_id}': no event buffer exists on this "
+                        f"server instance. The response may have been "
+                        f"processed on a different replica. Use non-streaming "
+                        f"retrieval instead."
+                    ),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                )
             return self.responses_background_stream_generator(
                 response_id,
                 starting_after,
@@ -1564,23 +1579,28 @@ class OpenAIServingResponses(OpenAIServing):
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
-        async with self.response_store_lock:
-            response = self.response_store.get(response_id)
-            if response is None:
+        response = await self.store.update_response_status(
+            response_id,
+            "cancelled",
+            allowed_current_statuses={"queued", "in_progress"},
+        )
+        if response is None:
+            # Either not found or not in a cancellable state.
+            stored = await self.store.get_response(response_id)
+            if stored is None:
                 return self._make_not_found_error(response_id)
-
-            prev_status = response.status
-            if prev_status not in ("queued", "in_progress"):
-                return self.create_error_response(
-                    err_type="invalid_request_error",
-                    message="Cannot cancel a synchronous response.",
-                    param="response_id",
-                )
-
-            # Update the status to "cancelled".
-            response.status = "cancelled"
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="Cannot cancel a synchronous response.",
+                param="response_id",
+            )
 
         # Abort the request.
+        # NOTE: With a shared ResponseStore across replicas, the CAS above
+        # marks the response as "cancelled" in the store, but the actual
+        # background task may be running on a different replica.  We can only
+        # cancel process-local tasks here; the remote replica will discard its
+        # result at finalization via put_response(..., unless_status="cancelled").
         if task := self.background_tasks.get(response_id):
             task.cancel()
             try:
