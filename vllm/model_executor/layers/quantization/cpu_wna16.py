@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
+from transformers import PretrainedConfig
 
 from vllm._custom_ops import (
     cpu_gemm_wna16,
@@ -134,7 +135,10 @@ class CPUAWQConfig(QuantizationConfig):
             )
 
     def maybe_update_config(
-        self, model_name: str, revision: str | None = None, **kwargs: Any
+        self,
+        model_name: str,
+        hf_config: PretrainedConfig | None = None,
+        revision: str | None = None,
     ):
         if self.modules_to_not_convert:
             return

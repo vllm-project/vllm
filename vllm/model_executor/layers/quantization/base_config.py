@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -171,15 +172,19 @@ class QuantizationConfig(ABC):
     def maybe_update_config(  # noqa: B027
         self,
         model_name: str,
+        hf_config: PretrainedConfig | None = None,
         revision: str | None = None,
-        **kwargs: Any,
     ):
         """
         Interface to update values after config initialization.
 
-        Keyword args (optional, implementation-specific; e.g. Quark passes
-        ``hf_config`` and ``trust_remote_code`` from :class:`ModelConfig`).
+        Args:
+            model_name: The name of the model
+            hf_config: The Hugging Face config of the model
+            revision: The revision of the model
+        Returns:
         """
+        # TODO: revision is never passed currently but is used in subclasses
         pass
 
     def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:

@@ -522,9 +522,7 @@ class VllmConfig:
                 )
             quant_config.maybe_update_config(
                 model_config.model,
-                model_config.revision,
                 hf_config=model_config.hf_config,
-                trust_remote_code=model_config.trust_remote_code,
             )
             return quant_config
         return None
