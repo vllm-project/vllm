@@ -50,7 +50,7 @@ def encoder_process(
     """Process that msgpack-encodes and sends tensors via IPC."""
     try:
         sender = TensorIpcSender(tensor_queue)
-        encoder = MsgpackEncoder(tensor_ipc_sender=sender)
+        encoder = MsgpackEncoder(oob_tensor_consumer=sender.send_tensor)
 
         if torch.cuda.is_available():
             device = "cuda:0"
@@ -102,7 +102,9 @@ def decoder_process(
 
         encoded = payload_queue.get(timeout=5.0)
         receiver = TensorIpcReceiver(tensor_queue)
-        decoder = MsgpackDecoder(TensorEnvelope, tensor_ipc_receiver=receiver)
+        decoder = MsgpackDecoder(
+            TensorEnvelope, oob_tensor_provider=receiver.recv_tensor
+        )
         decoded = decoder.decode(encoded)
 
         result_queue.put(
@@ -205,9 +207,9 @@ def test_msgpack_encoder_decoder_with_ipc():
     """Test the full msgpack + tensor IPC path in one process."""
     tensor_queue = torch_mp.Queue()
     sender = TensorIpcSender(tensor_queue)
-    encoder = MsgpackEncoder(tensor_ipc_sender=sender)
+    encoder = MsgpackEncoder(oob_tensor_consumer=sender.send_tensor)
     receiver = TensorIpcReceiver(tensor_queue)
-    decoder = MsgpackDecoder(TensorEnvelope, tensor_ipc_receiver=receiver)
+    decoder = MsgpackDecoder(TensorEnvelope, oob_tensor_provider=receiver.recv_tensor)
 
     # Use CPU here to exercise the msgpack + sender/receiver integration
     # without relying on same-process CUDA IPC behavior.
@@ -242,9 +244,9 @@ def test_decoder_buffer_management():
     receiver = TensorIpcReceiver(tensor_queue)
 
     # Request tensor_3 (should buffer tensor_1 and tensor_2)
-    handle = [None, "tensor_3", [6, 7], "float32", "cpu"]
+    handle = {"tensor_id": "tensor_3", "device": "cpu"}
 
-    result = receiver.recv_tensor(handle)
+    result = receiver.recv_tensor("float32", (6, 7), handle)
     assert result.shape == (6, 7)
 
     # Verify buffer has tensor_1 and tensor_2 using tuple keys
@@ -252,9 +254,9 @@ def test_decoder_buffer_management():
     assert (None, "tensor_2") in receiver._tensor_buffer
 
     # Request buffered tensor
-    handle2 = [None, "tensor_1", [2, 3], "float32", "cpu"]
+    handle2 = {"tensor_id": "tensor_1", "device": "cpu"}
 
-    result2 = receiver.recv_tensor(handle2)
+    result2 = receiver.recv_tensor("float32", (2, 3), handle2)
     assert result2.shape == (2, 3)
     # tensor_1 should be removed from buffer
     assert (None, "tensor_1") not in receiver._tensor_buffer
@@ -361,7 +363,7 @@ def mixed_tensor_encoder_process(
     """Process that encodes mixed CPU/CUDA tensors."""
     try:
         sender = TensorIpcSender(tensor_queue)
-        _encoder = MsgpackEncoder(tensor_ipc_sender=sender)
+        _encoder = MsgpackEncoder(oob_tensor_consumer=sender.send_tensor)
 
         # Create only CUDA tensor for IPC (CPU will be serialized)
         # But actually, let's just send CUDA tensor directly
@@ -378,12 +380,7 @@ def mixed_tensor_encoder_process(
 
         ready_event.set()
 
-        result_queue.put(
-            {
-                "success": True,
-                "sent_cuda": True,
-            }
-        )
+        result_queue.put({"success": True, "sent_cuda": True})
 
         # Keep process alive until decoder has retrieved the tensor
         retrieval_done.wait(timeout=30.0)
@@ -487,7 +484,7 @@ def cpu_tensor_ipc_encoder_process(
     try:
         # Create encoder with IPC enabled for all tensors
         sender = TensorIpcSender(tensor_queue)
-        encoder = MsgpackEncoder(tensor_ipc_sender=sender)
+        encoder = MsgpackEncoder(oob_tensor_consumer=sender.send_tensor)
 
         # Create a CPU tensor
         tensor = torch.randn(*tensor_shape, dtype=torch.float32)
@@ -652,10 +649,10 @@ def test_mixed_cpu_cuda_with_ipc_enabled():
 
     # Create sender and encoder with IPC enabled
     sender = TensorIpcSender(tensor_queue)
-    encoder = MsgpackEncoder(tensor_ipc_sender=sender)
+    encoder = MsgpackEncoder(oob_tensor_consumer=sender.send_tensor)
 
     # Verify sender configuration
-    assert encoder.tensor_ipc_sender is not None, "Sender should be set"
+    assert encoder.oob_tensor_consumer is not None, "Consumer should be set"
 
     # Note: Actual IPC transfer only works across processes
     # (tested in test_cpu_tensor_ipc)
@@ -742,16 +739,16 @@ def test_tensor_cleanup_after_decode():
     receiver = TensorIpcReceiver(tensor_queue)
 
     # Mirror the actual msgpack decode shape used in vLLM: a 5-element list.
-    handle = [
-        request_id,
-        tensor_id,
-        list(tensor.shape),
-        str(tensor.dtype).removeprefix("torch."),
-        str(tensor.device),
-    ]
+    handle = {
+        "request_id": request_id,
+        "tensor_id": tensor_id,
+        "device": str(tensor.device),
+    }
 
     # Receive the tensor - this should retrieve it from the queue
-    decoded_tensor = receiver.recv_tensor(handle)
+    decoded_tensor = receiver.recv_tensor(
+        str(tensor.dtype).removeprefix("torch."), tensor.shape, handle
+    )
 
     # Verify the tensor was decoded
     assert decoded_tensor.shape == tensor.shape, "Decoded tensor should match shape"
@@ -768,26 +765,15 @@ def test_tensor_cleanup_after_decode():
     )
 
 
-def test_request_context_in_encoder():
+def test_request_context_in_sender():
     """Test that request context is owned by the tensor IPC sender."""
-    encoder = MsgpackEncoder()
-
-    # Without a sender, request context is a no-op.
-    assert encoder._current_request_id is None
-    encoder.set_request_context("req123")
-    assert encoder._current_request_id is None
-
     tensor_queue = torch_mp.Queue()
     sender = TensorIpcSender(tensor_queue)
-    encoder = MsgpackEncoder(tensor_ipc_sender=sender)
 
     assert sender.current_request_id is None
-    assert encoder._current_request_id is None
 
-    encoder.set_request_context("req123")
+    sender.set_request_context("req123")
     assert sender.current_request_id == "req123"
-    assert encoder._current_request_id == "req123"
 
-    encoder.set_request_context(None)
+    sender.set_request_context(None)
     assert sender.current_request_id is None
-    assert encoder._current_request_id is None
