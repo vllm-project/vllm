@@ -633,7 +633,7 @@ class GPUModelRunner(
         self.prepare_inputs_event: torch.Event | None = None
         if self.use_async_scheduling:
             self.async_output_copy_stream = torch.cuda.Stream()
-            self.prepare_inputs_event = torch.Event()
+            self.prepare_inputs_event = torch.Event(device=self.device)
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
