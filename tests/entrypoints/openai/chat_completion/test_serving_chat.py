@@ -484,7 +484,7 @@ class TestGPTOSSSpeculativeChat:
         )
 
         content = ""
-        reasoning_content = ""
+        reasoning = ""
         async for chunk in stream:
             delta = chunk.choices[0].delta
             if delta.content:
@@ -492,9 +492,9 @@ class TestGPTOSSSpeculativeChat:
 
             chunk_reasoning = getattr(delta, "reasoning", None)
             if chunk_reasoning:
-                reasoning_content += delta.reasoning
+                reasoning += delta.reasoning
 
-        assert len(reasoning_content) > 0, "No reasoning was generated."
+        assert len(reasoning) > 0, "No reasoning was generated."
         assert content.strip() == "4"
 
 
