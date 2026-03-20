@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 import requests
-from openai import InternalServerError, NotFoundError, OpenAI
+from openai import NotFoundError, OpenAI
 from openai_harmony import Message
 
 from tests.utils import RemoteOpenAIServer
@@ -697,15 +697,22 @@ async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_function_calling_required(client: OpenAI, model_name: str):
+    """tool_choice='required' must force at least one function call."""
     tools = [GET_WEATHER_SCHEMA]
 
-    with pytest.raises(InternalServerError):
-        await client.responses.create(
-            model=model_name,
-            input="What's the weather like in Paris today?",
-            tools=tools,
-            tool_choice="required",
-        )
+    response = await retry_for_tool_call(
+        client,
+        model=model_name,
+        expected_tool_type="function_call",
+        input="What's the weather like in Paris today?",
+        tools=tools,
+        tool_choice="required",
+    )
+    tool_calls = [item for item in response.output if item.type == "function_call"]
+    assert tool_calls, (
+        f"tool_choice='required' should force a function call, "
+        f"got: {[item.type for item in response.output]}"
+    )
 
 
 @pytest.mark.asyncio
