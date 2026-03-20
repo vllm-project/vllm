@@ -262,22 +262,6 @@ def FusedMoE(
 
     max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
-    # Create ExpertMapManager to handle expert mapping and placement for EP.
-    # See ExpertMapManager for a detailed description of what it does and when
-    # it is required.
-    expert_map_manager = ExpertMapManager(
-        max_num_batched_tokens=max_num_batched_tokens,
-        top_k=top_k,
-        global_num_experts=global_num_experts,
-        num_redundant_experts=num_redundant_experts,
-        num_expert_group=num_expert_group,
-        moe_parallel_config=moe_parallel_config,
-        placement_strategy=vllm_config.parallel_config.expert_placement_strategy,
-        enable_eplb=eplb_state is not None,
-        num_fused_shared_experts=num_fused_shared_experts,
-        rocm_aiter_enabled=rocm_aiter_ops.is_fused_moe_enabled() and is_act_and_mul,
-    )
-
     # Extract layer index from prefix (e.g. "model.layers.5.mlp" → 5)
     import re
 
@@ -298,12 +282,34 @@ def FusedMoE(
             quantization=quantization,
         )
 
+    riy_expert_filter = None
     riy_logit_mask = None
     riy_profile = os.environ.get("RIY_EXPERT_PROFILE", "")
     if riy_profile and os.path.exists(riy_profile) and layer_idx >= 0:
-        _, _, riy_logit_mask = build_riy_prune_map(
+        num_kept, riy_prune_map, riy_logit_mask = build_riy_prune_map(
             layer_idx, global_num_experts, riy_profile
         )
+        if num_kept < top_k:
+            raise ValueError(
+                f"RIY profile keeps {num_kept} experts in layer {layer_idx}, "
+                f"but top_k is {top_k}"
+            )
+        riy_expert_filter = riy_prune_map >= 0
+
+    # Create ExpertMapManager to compose profile pruning with EP placement.
+    expert_map_manager = ExpertMapManager(
+        max_num_batched_tokens=max_num_batched_tokens,
+        top_k=top_k,
+        global_num_experts=global_num_experts,
+        num_redundant_experts=num_redundant_experts,
+        num_expert_group=num_expert_group,
+        moe_parallel_config=moe_parallel_config,
+        placement_strategy=vllm_config.parallel_config.expert_placement_strategy,
+        enable_eplb=eplb_state is not None,
+        num_fused_shared_experts=num_fused_shared_experts,
+        rocm_aiter_enabled=rocm_aiter_ops.is_fused_moe_enabled() and is_act_and_mul,
+        expert_filter=riy_expert_filter,
+    )
 
     # TODO(bnell): we should not have to create a router if the kernel is
     # monolithic.

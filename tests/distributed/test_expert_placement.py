@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
 
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     determine_expert_map,
@@ -134,6 +135,40 @@ def test_expert_placement_edge_cases(expert_placement_strategy, world_size):
             ep_rank=0,
             global_num_experts=8,
             expert_placement_strategy=expert_placement_strategy,
+        )
+
+
+def test_expert_filter_compacts_kept_experts_without_ep():
+    local_num_experts, expert_map, _ = determine_expert_map(
+        ep_size=1,
+        ep_rank=0,
+        global_num_experts=4,
+        expert_filter=torch.tensor([True, False, True, True]),
+    )
+
+    assert local_num_experts == 3
+    assert expert_map.tolist() == [0, -1, 1, 2]
+
+
+def test_expert_filter_intersects_with_ep_placement():
+    local_num_experts, expert_map, _ = determine_expert_map(
+        ep_size=2,
+        ep_rank=0,
+        global_num_experts=5,
+        expert_filter=torch.tensor([True, False, True, True, True]),
+    )
+
+    assert local_num_experts == 2
+    assert expert_map.tolist() == [0, -1, 1, -1, -1]
+
+
+def test_expert_filter_rejects_pruning_every_expert():
+    with pytest.raises(ValueError, match="at least one expert"):
+        determine_expert_map(
+            ep_size=1,
+            ep_rank=0,
+            global_num_experts=4,
+            expert_filter=torch.zeros(4, dtype=torch.bool),
         )
 
 

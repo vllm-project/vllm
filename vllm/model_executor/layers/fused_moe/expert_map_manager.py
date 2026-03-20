@@ -26,6 +26,7 @@ def determine_expert_map(
     expert_placement_strategy: ExpertPlacementStrategy = "linear",
     num_fused_shared_experts: int = 0,
     return_expert_mask: bool = False,
+    expert_filter: torch.Tensor | None = None,
 ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
     """
     Calculates how many experts should be assigned to each rank for EP and
@@ -40,7 +41,8 @@ def determine_expert_map(
         global_num_experts: The total number of experts in the model.
         expert_placement_strategy: The expert placement strategy.
         num_fused_shared_experts: Number of fused shared experts (for AITER)
-        return_expert_mask: Whether to return expert mask for AITER
+        return_expert_mask: Whether to return expert mask for AITER.
+        expert_filter: Boolean tensor selecting experts that may be allocated.
 
     Returns:
         tuple[int, Optional[torch.Tensor], Optional[torch.Tensor]]: A tuple containing:
@@ -60,37 +62,64 @@ def determine_expert_map(
     from typing import get_args
 
     assert ep_size > 0
+
+    if expert_filter is not None:
+        expert_filter = torch.as_tensor(expert_filter, dtype=torch.bool, device="cpu")
+        if expert_filter.shape != (global_num_experts,):
+            raise ValueError(
+                "expert_filter must have shape "
+                f"({global_num_experts},), got {tuple(expert_filter.shape)}"
+            )
+        if not torch.any(expert_filter):
+            raise ValueError("expert_filter must keep at least one expert")
+
     if ep_size == 1:
-        return (global_num_experts, None, None)
-
-    # Distribute experts as evenly as possible to each rank.
-    base_experts = global_num_experts // ep_size
-    remainder = global_num_experts % ep_size
-    local_num_experts = base_experts + 1 if ep_rank < remainder else base_experts
-
-    # Create a tensor of size num_experts filled with -1
-    expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
-
-    # Create an expert map for the local experts
-    if expert_placement_strategy == "linear":
-        start_idx = ep_rank * base_experts + min(ep_rank, remainder)
-        expert_map[start_idx : start_idx + local_num_experts] = torch.arange(
-            0, local_num_experts, dtype=torch.int32
-        )
-    elif expert_placement_strategy == "round_robin":
-        local_log_experts = torch.arange(
-            ep_rank, global_num_experts, ep_size, dtype=torch.int32
-        )
-
-        expert_map[local_log_experts] = torch.arange(
-            0, local_num_experts, dtype=torch.int32
+        if expert_filter is None:
+            return (global_num_experts, None, None)
+        local_experts = torch.where(expert_filter)[0]
+        local_num_experts = local_experts.numel()
+        expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
+        expert_map[local_experts] = torch.arange(
+            local_num_experts, dtype=torch.int32
         )
     else:
-        raise ValueError(
-            "Unsupported expert placement strategy "
-            f"'{expert_placement_strategy}', expected one of "
-            f"{get_args(ExpertPlacementStrategy)}"
+        base_experts = global_num_experts // ep_size
+        remainder = global_num_experts % ep_size
+        local_num_experts = (
+            base_experts + 1 if ep_rank < remainder else base_experts
         )
+        expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
+
+        if expert_placement_strategy == "linear":
+            start_idx = ep_rank * base_experts + min(ep_rank, remainder)
+            expert_map[start_idx : start_idx + local_num_experts] = torch.arange(
+                local_num_experts, dtype=torch.int32
+            )
+        elif expert_placement_strategy == "round_robin":
+            local_log_experts = torch.arange(
+                ep_rank, global_num_experts, ep_size, dtype=torch.int32
+            )
+            expert_map[local_log_experts] = torch.arange(
+                local_num_experts, dtype=torch.int32
+            )
+        else:
+            raise ValueError(
+                "Unsupported expert placement strategy "
+                f"'{expert_placement_strategy}', expected one of "
+                f"{get_args(ExpertPlacementStrategy)}"
+            )
+
+        if expert_filter is not None:
+            local_experts = torch.where((expert_map >= 0) & expert_filter)[0]
+            local_num_experts = local_experts.numel()
+            if local_num_experts == 0:
+                raise ValueError(
+                    f"expert_filter removes every expert from EP rank {ep_rank}"
+                )
+            expert_map.fill_(-1)
+            expert_map[local_experts] = torch.arange(
+                local_num_experts, dtype=torch.int32
+            )
 
     expert_mask = None
     if return_expert_mask:
@@ -192,6 +221,7 @@ class ExpertMapManager:
         enable_eplb: bool,
         num_fused_shared_experts: int = 0,
         rocm_aiter_enabled: bool = False,
+        expert_filter: torch.Tensor | None = None,
     ):
         """
         Initialize expert map manager.
@@ -208,6 +238,7 @@ class ExpertMapManager:
         self.moe_parallel_config = moe_parallel_config
         self.num_fused_shared_experts = num_fused_shared_experts
         self.rocm_aiter_enabled = rocm_aiter_enabled
+        self.expert_filter = expert_filter
         self.top_k = top_k
         self.max_num_batched_tokens = max_num_batched_tokens
 
@@ -450,6 +481,7 @@ class ExpertMapManager:
             expert_placement_strategy=self._placement_strategy,
             num_fused_shared_experts=self.num_fused_shared_experts,
             return_expert_mask=self.rocm_aiter_enabled,
+            expert_filter=self.expert_filter,
         )
 
         self._local_num_experts += self.num_fused_shared_experts
