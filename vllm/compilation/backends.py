@@ -371,13 +371,15 @@ class CompilerManager:
                 logger.info_once(
                     "Cache the graph of compile range %s for later use",
                     str(compile_range),
+                    scope="local",
                 )
-            logger.debug(
+            logger.debug_once(
                 "Store the %s-th graph for compile range%s from %s via handle %s",
                 graph_index,
                 str(compile_range),
                 self.compiler.name,
                 handle,
+                scope="local",
             )
 
         # after compiling the last graph, record the end time
@@ -471,9 +473,65 @@ def _merge_empty_only_subgraphs(
             prev_non_splitting_subgraph_id = subgraph_id
 
 
+def _decompose_size_nodes(graph: fx.GraphModule) -> None:
+    """Decompose x.size() into per-dim sym_size.int calls.
+
+    torch.Size objects cannot cross split boundaries because aot_autograd
+    cannot handle them as submodule outputs. This replaces each size() call
+    with individual sym_size.int(x, dim) nodes:
+      - Dynamic dims (SymInt) → new sym_size.int node
+      - Static dims (plain int) → inlined as literal constant
+    """
+    # Dynamo captures x.size()/x.shape as call_method target="size".
+    size_nodes = list(graph.graph.find_nodes(op="call_method", target="size"))
+
+    for node in size_nodes:
+        tensor_node = node.args[0]
+        ev = tensor_node.meta.get("example_value")
+        assert ev is not None, (
+            f"Tensor node '{tensor_node.name}' has no example_value metadata. "
+            f"Cannot decompose size node '{node.name}'."
+        )
+
+        # Build per-dim replacements: sym_size.int node or literal int.
+        dims: list[fx.Node | int] = []
+        with graph.graph.inserting_after(tensor_node):
+            for i in range(ev.dim()):
+                dim_val = ev.shape[i]
+                if isinstance(dim_val, torch.SymInt):
+                    dn = graph.graph.call_function(
+                        torch.ops.aten.sym_size.int, args=(tensor_node, i)
+                    )
+                    dn.meta["example_value"] = dim_val
+                    dims.append(dn)
+                elif isinstance(dim_val, int):
+                    dims.append(dim_val)
+                else:
+                    raise AssertionError(
+                        f"dim_val is either torch.SymInt or int, "
+                        f"got {type(dim_val)} for dim {i} of "
+                        f"'{node.name}'"
+                    )
+
+        # Replace size node in each user's args.
+        # Dynamo always passes size as a direct arg: view(clone, size)
+        # → view(clone, d0, d1, ...)
+        for user in list(node.users):
+            new_args = []
+            for arg in user.args:
+                if arg is node:
+                    new_args.extend(dims)
+                else:
+                    new_args.append(arg)
+            user.args = tuple(new_args)
+        graph.graph.erase_node(node)
+
+
 def split_graph(
     graph: fx.GraphModule, splitting_ops: list[str]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
+    _decompose_size_nodes(graph)
+
     # split graph by ops
     subgraph_id = 0
     node_to_subgraph_id: dict[fx.Node, int] = {}
@@ -778,8 +836,18 @@ class VllmBackend:
         # in future we need PostGradPassManager.uuid() to be executed
         # only at compile time.
         self.inductor_config = deepcopy(self.compilation_config.inductor_compile_config)
-        # `torch.compile` is JIT compiled, so we don't need to
-        # do anything here
+
+        # Configure post-grad passes (including AllReduceFusionPass) during
+        # backend init rather than at torch.compile time, so that expensive
+        # one-time setup (e.g. FlashInfer workspace allocation) is not
+        # attributed to compilation latency.
+        start = time.time()
+        self.configure_post_pass()
+        logger.info_once(
+            "Post-grad pass configuration time: %.2f s",
+            time.time() - start,
+            scope="local",
+        )
 
     def collect_standalone_compile_artifacts(
         self,
@@ -1060,7 +1128,6 @@ class VllmBackend:
         assert not self._called, "VllmBackend can only be called once"
 
         self.graph = graph
-        self.configure_post_pass()
 
         if self.compilation_config.use_inductor_graph_partition:
             # Let Inductor decide partitioning; avoid FX-level pre-splitting.

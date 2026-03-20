@@ -168,8 +168,7 @@ class StaticSinkAttention(Attention, CustomOp):
             "sink_key and sink_value have not been prepared"
         )
         if not self.sink_populated:
-            forward_context: ForwardContext = get_forward_context()
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            self_kv_cache = self.kv_cache[0]
             torch.ops.vllm.maybe_populate_sink(self_kv_cache, self.layer_name)
 
         return super().forward(query, key, value, output_shape)
@@ -190,7 +189,7 @@ class StaticSinkAttention(Attention, CustomOp):
         sink_kv_slot_mapping = torch.arange(
             self.block_size,
             self.sink_len + self.block_size,
-            device=torch.cuda.current_device(),
+            device=torch.accelerator.current_device_index(),
             dtype=torch.long,
         )
         triton_reshape_and_cache_flash_diffkv(

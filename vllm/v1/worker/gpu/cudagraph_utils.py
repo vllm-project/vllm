@@ -320,6 +320,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                     model_inputs = {
                         "input_ids": input_buffers.input_ids[:num_tokens],
                         "positions": input_buffers.positions[:num_tokens],
+                        # TODO: Pass intermediate_tensors for PP CUDA graph
+                        # support (https://github.com/vllm-project/vllm/pull/35162).
+                        "intermediate_tensors": None,
                         **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
                     }
                     model_output = model(**model_inputs)
@@ -389,5 +392,6 @@ def prepare_inputs_to_capture(
         slot_mappings,
         attn_groups,
         kv_cache_config,
+        for_capture=True,
     )
     return attn_metadata, slot_mappings_by_layer

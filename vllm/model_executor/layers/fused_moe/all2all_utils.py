@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
 )
@@ -14,8 +15,11 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import (
-    FlashInferA2APrepareAndFinalize,
+from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_one_sided_prepare_finalize import (  # noqa: E501
+    FlashInferNVLinkOneSidedPrepareAndFinalize,
+)
+from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_two_sided_prepare_finalize import (  # noqa: E501
+    FlashInferNVLinkTwoSidedPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
@@ -25,7 +29,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     make_moe_prepare_and_finalize_no_dp_ep,
 )
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_deep_ep, has_mori
+from vllm.utils.import_utils import has_deep_ep, has_mori, has_nixl_ep
 
 logger = init_logger(__name__)
 
@@ -38,6 +42,11 @@ if current_platform.is_cuda_alike():
         )
     if has_mori():
         from .mori_prepare_finalize import MoriPrepareAndFinalize
+    if has_nixl_ep():
+        from .nixl_ep_prepare_finalize import (
+            NIXL_EP_QUANT_BLOCK_SHAPE,
+            NixlEPPrepareAndFinalize,
+        )
 
 
 def maybe_roundup_layer_hidden_size(
@@ -66,6 +75,11 @@ def maybe_roundup_layer_hidden_size(
 
     if moe_parallel_config.use_deepep_ll_kernels:
         hidden_size = DeepEPLLPrepareAndFinalize.maybe_roundup_layer_hidden_size(
+            hidden_size
+        )
+
+    if moe_parallel_config.use_nixl_ep_kernels:
+        hidden_size = NixlEPPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size
         )
 
@@ -196,17 +210,65 @@ def maybe_make_prepare_finalize(
             use_fp8_dispatch=use_fp8_dispatch,
         )
 
-    elif moe.use_fi_all2allv_kernels:
+    elif moe.use_fi_nvl_two_sided_kernels:
         assert quant_config is not None
-        prepare_finalize = FlashInferA2APrepareAndFinalize(
+        prepare_finalize = FlashInferNVLinkTwoSidedPrepareAndFinalize(
             num_dispatchers=all2all_manager.world_size,
         )
 
-    elif moe.use_naive_all2all_kernels and allow_new_interface:
+    elif moe.use_fi_nvl_one_sided_kernels:
+        assert quant_config is not None
+        max_num_tokens = (
+            get_current_vllm_config().scheduler_config.max_num_batched_tokens
+        )
+        prepare_finalize = FlashInferNVLinkOneSidedPrepareAndFinalize(
+            max_num_tokens=max_num_tokens,
+            top_k=moe.experts_per_token,
+            num_experts=moe.num_experts,
+            hidden_size=moe.hidden_dim,
+            num_dispatchers=all2all_manager.world_size,
+        )
+
+    elif moe.use_ag_rs_all2all_kernels and allow_new_interface:
         prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
             use_monolithic=use_monolithic,
             is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
             num_dispatchers=all2all_manager.world_size,
+        )
+
+    elif moe.use_nixl_ep_kernels:
+        assert quant_config is not None
+        global_to_physical = physical_to_global = local_expert_global_ids = None
+        if routing_tables is not None:
+            (
+                global_to_physical,
+                physical_to_global,
+                local_expert_global_ids,
+            ) = routing_tables
+        all_to_all_args = dict(
+            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            token_hidden_size=moe.hidden_dim,
+            num_ep_ranks=all2all_manager.world_size,
+            num_global_experts=moe.num_experts,
+            num_local_experts=moe.num_experts // all2all_manager.world_size,
+        )
+        handle = all2all_manager.get_handle(all_to_all_args)
+
+        # Note: We may want to use FP8 dispatch just to reduce
+        # data movement.
+        use_fp8_dispatch = (
+            quant_config.quant_dtype == current_platform.fp8_dtype()
+            and quant_config.block_shape == NIXL_EP_QUANT_BLOCK_SHAPE
+        )
+
+        prepare_finalize = NixlEPPrepareAndFinalize(
+            handle,
+            max_tokens_per_rank=moe.max_num_tokens,
+            num_dispatchers=all2all_manager.world_size,
+            use_fp8_dispatch=use_fp8_dispatch,
+            global_to_physical=global_to_physical,
+            physical_to_global=physical_to_global,
+            local_expert_global_ids=local_expert_global_ids,
         )
 
     return prepare_finalize

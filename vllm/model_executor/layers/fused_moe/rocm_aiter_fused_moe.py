@@ -295,7 +295,12 @@ def rocm_aiter_fused_experts(
 class AiterExperts(mk.FusedMoEExpertsModular):
     @property
     def expects_unquantized_inputs(self) -> bool:
-        return True
+        # When paired with MoRI, the prepare/finalize handles FP8
+        # quantization during dispatch to reduce network traffic,
+        # so we should not defer input quantization.
+        # Otherwise, AITER fused MoE kernels handle input quantization
+        # internally via a single fused kernel.
+        return not self.moe_config.use_mori_kernels
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -332,13 +337,13 @@ class AiterExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not moe_parallel_config.use_fi_all2allv_kernels
+        return not (
+            moe_parallel_config.use_fi_nvl_two_sided_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
+        )
 
     def supports_expert_map(self):
         return True
-
-    def supports_chunking(self):
-        return False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()

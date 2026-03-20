@@ -177,10 +177,11 @@ def determine_expert_placement_strategy(
         if (
             moe_parallel_config.use_all2all_kernels
             and not moe_parallel_config.use_deepep_ll_kernels
+            and not moe_parallel_config.use_nixl_ep_kernels
         ):
             logger.warning(
                 "Round-robin expert placement currently only supports "
-                "the DeepEP low-latency backend, but '%s' was configured. "
+                "the DeepEP low-latency or NIXL EP backend, but '%s' was configured. "
                 "Falling back to linear expert placement.",
                 moe_parallel_config.all2all_backend,
             )
@@ -503,6 +504,8 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = MoEActivation.from_str(activation)
 
+        # TODO(bnell): we should not have to create a router if the kernel is
+        # monolithic.
         self.router = create_fused_moe_router(
             top_k=top_k,
             global_num_experts=self.global_num_experts,
@@ -637,7 +640,7 @@ class FusedMoE(CustomOp):
         self.use_overlapped = (
             not (
                 (self.enable_eplb and backend != "allgather_reducescatter")
-                or self.moe_parallel_config.use_fi_all2allv_kernels
+                or self.moe_parallel_config.use_fi_nvl_two_sided_kernels
             )
             and self._shared_experts is not None
         )
@@ -745,10 +748,10 @@ class FusedMoE(CustomOp):
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         # Currently routing_tables only needed for round-robin expert placement
-        # with DeepEP-ll all2all backend.
-        if (
-            self.expert_placement_strategy != "round_robin"
-            or not self.moe_parallel_config.use_deepep_ll_kernels
+        # with DeepEP-ll or NIXL EP all2all backends.
+        if self.expert_placement_strategy != "round_robin" or (
+            not self.moe_parallel_config.use_deepep_ll_kernels
+            and not self.moe_parallel_config.use_nixl_ep_kernels
         ):
             return None
 
@@ -1341,22 +1344,41 @@ class FusedMoE(CustomOp):
                 weight_name = qual_name.replace(weight_name, param_name)
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 param = getattr(self, param_name)
-                success = self.weight_loader(
-                    param=param,
-                    loaded_weight=loaded_weight,
-                    weight_name=weight_name,
-                    shard_id=shard_id,
-                    expert_id=expert_id,
-                    return_success=True,
-                )
-                if success:
-                    logger.debug(
-                        "Loaded %s for expert %d into %s",
-                        param_name,
-                        expert_id,
-                        self.layer_name,
+                # Fused expert weights can be identified by their 3D tensors
+                if loaded_weight.dim() == 3:
+                    # Repurpose expert_id as shard_idx for deconcatenating w1 and w3
+                    if shard_id in {"w1", "w3"}:
+                        shard_idx = expert_id
+                        experts_shard = loaded_weight.chunk(2, dim=1)[shard_idx]
+                    else:
+                        experts_shard = loaded_weight
+                    start = 0
+                else:
+                    # loaded_weight is a single expert weight, so we add a dummy expert
+                    # dimension to unify the loading logic with the fused case
+                    experts_shard = loaded_weight.unsqueeze(0)
+                    start = expert_id
+
+                # Unified loading logic for fused and non-fused experts
+                loaded_experts = experts_shard.unbind()
+                for expert_id, loaded_expert in enumerate(loaded_experts, start=start):
+                    success = self.weight_loader(
+                        param=param,
+                        loaded_weight=loaded_expert,
+                        weight_name=weight_name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=True,
                     )
-                    yield param_name
+                    if success:
+                        logger.debug(
+                            "Loaded expert %d of shard %s into %s for layer %s",
+                            expert_id,
+                            shard_id,
+                            param_name,
+                            self.layer_name,
+                        )
+                        yield param_name
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         def _maybe_make_contiguous(
@@ -1401,18 +1423,22 @@ class FusedMoE(CustomOp):
         weights = list(self.named_parameters())
         weights = [(name, _maybe_make_contiguous(name, p)) for name, p in weights]
 
+        # `w13_input_scale` and `w2_input_scale` are global per-tensor
+        # activation scales shared across all experts (e.g. NVFP4).
+        # They are broadcast views (stride 0) from .expand() and are
+        # not actual expert weights, so exclude them from EPLB.
+        NON_EXPERT_WEIGHTS = {
+            "e_score_correction_bias",
+            "w13_input_scale",
+            "w2_input_scale",
+        }
+
         assert all(
             weight.is_contiguous()
             for name, weight in weights
             if not (name.startswith("_shared_experts.") or name.startswith("_gate."))
+            and name not in NON_EXPERT_WEIGHTS
         )
-
-        # Filter out the non-expert weights.
-        # `e_score_correction_bias` is a bias for each logical expert,
-        # with shape (num_logical_experts,), not an expert weight.
-        NON_EXPERT_WEIGHTS = {
-            "e_score_correction_bias",
-        }
 
         return [
             weight.view(self.local_num_experts, -1)
