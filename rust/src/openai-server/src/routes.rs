@@ -1,6 +1,7 @@
 mod chat_completions;
 mod completions;
 mod models;
+mod utils;
 
 use std::sync::Arc;
 

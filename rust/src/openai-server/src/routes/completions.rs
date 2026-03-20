@@ -1,3 +1,5 @@
+mod convert;
+
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -15,8 +17,9 @@ use tracing::{debug, error, info};
 use vllm_engine_core_client::protocol::FinishReason;
 use vllm_text::{DecodedTextEvent, TextOutputStream};
 
-use crate::convert::{CompletionRequest, prepare_completion_request, unix_timestamp};
+use super::utils::unix_timestamp;
 use crate::error::{ApiError, bail_server_error, server_error};
+use crate::routes::completions::convert::{CompletionRequest, prepare_completion_request};
 use crate::state::AppState;
 
 /// Validate one completions request and proxy it into the shared `vllm-text` stack.

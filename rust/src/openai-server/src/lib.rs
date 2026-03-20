@@ -4,7 +4,6 @@
 //! Minimal OpenAI-compatible HTTP server above [`vllm_chat`].
 
 mod config;
-mod convert;
 mod error;
 mod routes;
 mod state;

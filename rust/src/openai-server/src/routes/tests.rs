@@ -25,7 +25,7 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
 
 use super::build_router;
-use crate::convert::prepare_chat_request;
+use crate::routes::chat_completions::convert::prepare_chat_request;
 use crate::state::AppState;
 
 fn unique_tcp_endpoint() -> String {

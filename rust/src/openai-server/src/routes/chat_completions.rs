@@ -1,3 +1,6 @@
+pub mod convert;
+mod validate;
+
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -18,8 +21,9 @@ use tracing::{debug, error, info};
 use vllm_chat::{AssistantBlockKind, ChatEvent, ChatEventStream};
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
-use crate::convert::{prepare_chat_request, unix_timestamp};
 use crate::error::{ApiError, bail_server_error, server_error};
+use crate::routes::chat_completions::convert::prepare_chat_request;
+use crate::routes::utils::unix_timestamp;
 use crate::state::AppState;
 
 /// Validate one chat completion request and proxy it into the shared `vllm-chat` stack.
