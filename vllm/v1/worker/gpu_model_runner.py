@@ -1387,8 +1387,6 @@ class GPUModelRunner(
                         continue
                     num_accepted = valid_sampled_token_count[prev_req_index] - 1
                     correction = optimistic_num_accepted - num_accepted
-                    if correction <= 0:
-                        continue
                     req_state.num_computed_tokens -= correction
                     cur_req_index = self.input_batch.req_id_to_index.get(req_id)
                     if cur_req_index is not None:
