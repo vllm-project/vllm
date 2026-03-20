@@ -24,7 +24,7 @@ CacheDType = Literal[
 MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
-KVOffloadingBackend = Literal["simple", "native", "lmcache"]
+KVOffloadingBackend = Literal["native", "lmcache"]
 
 
 @config
@@ -74,7 +74,7 @@ class CacheConfig:
     serializes objects using canonical CBOR and hashes them with SHA-256.\n
     - "xxhash" uses Pickle serialization with xxHash (128-bit) for faster,
     non-cryptographic hashing. Requires the optional ``xxhash`` package.
-    IMPORTANT: Use of a hashing algorithm that is not considered
+    IMPORTANT: Use of a hashing algorithm that is not considered 
     cryptographically secure theoretically increases the risk of hash collisions,
     which can cause undefined behavior or even leak private information in
     multi-tenant environments. Even if collisions are still very unlikely, it is
@@ -107,7 +107,7 @@ class CacheConfig:
     mamba_cache_mode: MambaCacheMode = "none"
     """The cache strategy for Mamba layers.
     - "none": set when prefix caching is disabled.
-    - "all": cache the mamba state of all tokens at position i * block_size. This is
+    - "all": cache the mamba state of all tokens at position i * block_size. This is 
            the default behavior (for models that support it) when prefix caching is
            enabled.
     - "align": only cache the mamba state of the last token of each scheduler step and
