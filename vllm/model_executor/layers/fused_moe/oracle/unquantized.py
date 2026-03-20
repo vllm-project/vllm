@@ -41,38 +41,30 @@ class UnquantizedMoeBackend(Enum):
     OOT = "OOT"
 
 
-def _get_priority_backends(
-    moe_config: FusedMoEConfig,
-    activation_format: mk.FusedMoEActivationFormat,
-) -> list[UnquantizedMoeBackend]:
+def _get_priority_backends() -> list[UnquantizedMoeBackend]:
     """
     Get available backends in priority order based on platform and config.
 
     This function can be extended to become more complex as needed.
     """
 
-    _AVAILABLE_BACKENDS = []
-    if activation_format == mk.FusedMoEActivationFormat.Standard:
-        if current_platform.is_rocm():
-            _AVAILABLE_BACKENDS = [
-                UnquantizedMoeBackend.AITER,
-                UnquantizedMoeBackend.TRITON,
-            ]
-        elif current_platform.is_cuda():
-            _AVAILABLE_BACKENDS = [
-                UnquantizedMoeBackend.FLASHINFER_TRTLLM,
-                UnquantizedMoeBackend.FLASHINFER_CUTLASS,
-                UnquantizedMoeBackend.TRITON,
-            ]
-        elif current_platform.is_xpu():
-            _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.XPU]
-        elif current_platform.is_cpu():
-            _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.CPU]
-    else:
-        if current_platform.is_cuda_alike():
-            _AVAILABLE_BACKENDS = [
-                UnquantizedMoeBackend.BATCHED_TRITON,
-            ]
+    if current_platform.is_rocm():
+        _AVAILABLE_BACKENDS = [
+            UnquantizedMoeBackend.AITER,
+            UnquantizedMoeBackend.TRITON,
+            UnquantizedMoeBackend.BATCHED_TRITON,
+        ]
+    elif current_platform.is_cuda():
+        _AVAILABLE_BACKENDS = [
+            UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+            UnquantizedMoeBackend.FLASHINFER_CUTLASS,
+            UnquantizedMoeBackend.TRITON,
+            UnquantizedMoeBackend.BATCHED_TRITON,
+        ]
+    elif current_platform.is_xpu():
+        _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.XPU]
+    elif current_platform.is_cpu():
+        _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.CPU]
     return _AVAILABLE_BACKENDS
 
 
@@ -121,21 +113,14 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown unquantized MoE backend: {backend.value}")
 
 
-def map_unquantized_backend(
-    runner_backend: MoEBackend, activation_format: mk.FusedMoEActivationFormat
-) -> UnquantizedMoeBackend:
+def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend:
     """Map user's MoEBackend to UnquantizedMoeBackend."""
-    if activation_format == mk.FusedMoEActivationFormat.Standard:
-        mapping = {
-            "triton": UnquantizedMoeBackend.TRITON,
-            "flashinfer_trtllm": UnquantizedMoeBackend.FLASHINFER_TRTLLM,
-            "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
-            "aiter": UnquantizedMoeBackend.AITER,
-        }
-    else:
-        mapping = {
-            "triton": UnquantizedMoeBackend.BATCHED_TRITON,
-        }
+    mapping = {
+        "triton": UnquantizedMoeBackend.TRITON,
+        "flashinfer_trtllm": UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+        "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
+        "aiter": UnquantizedMoeBackend.AITER,
+    }
     if backend := mapping.get(runner_backend):
         return backend
     raise ValueError(
@@ -153,8 +138,7 @@ def select_unquantized_moe_backend(
     """
 
     if current_platform.is_cpu():
-        # Escape hatch for CPU backend, which is not yet supported by the oracle
-        # TODO(yzong): migrate CPU backend to FusedMoEExpertsMonolithic
+        # TODO: migrate to MK structure.
         return UnquantizedMoeBackend.CPU, None
 
     if current_platform.is_tpu():
@@ -163,13 +147,17 @@ def select_unquantized_moe_backend(
     if current_platform.is_out_of_tree():
         return UnquantizedMoeBackend.OOT, None
 
+    # NOTE: the kernels are selected in the following order.
+    AVAILABLE_BACKENDS = _get_priority_backends()
+
+    # NOTE(rob): We need to peak into the P/F selection to determine
+    # if we are using the batched or standard expert format, which
+    # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if moe_config.moe_parallel_config.use_batched_activation_format
         else mk.FusedMoEActivationFormat.Standard
     )
-
-    AVAILABLE_BACKENDS = _get_priority_backends(moe_config, activation_format)
 
     def _make_log_backend(backend: UnquantizedMoeBackend) -> str:
         available_strs = [b.value for b in AVAILABLE_BACKENDS]
@@ -207,7 +195,13 @@ def select_unquantized_moe_backend(
 
     runner_backend = moe_config.moe_backend
     if runner_backend != "auto":
-        requested_backend = map_unquantized_backend(runner_backend, activation_format)
+        requested_backend = map_unquantized_backend(runner_backend)
+        if (
+            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+            and requested_backend == UnquantizedMoeBackend.TRITON
+        ):
+            requested_backend = UnquantizedMoeBackend.BATCHED_TRITON
+
         return _return_or_raise(requested_backend, moe_config, activation_format)
 
     # Handle explicit FlashInfer FP16 configuration.
