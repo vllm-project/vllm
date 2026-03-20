@@ -154,9 +154,6 @@ def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
     # Output
     output = torch.empty((expert_offset, n_g), device=device, dtype=out_dtype)
 
-    # Per-expert alphas = 1.0
-    alphas = torch.ones(num_experts, device=device, dtype=torch.float32)
-
     _problem_sizes = torch.tensor(problem_sizes, device=device, dtype=torch.int32)
     _expert_offsets = torch.tensor(
         expert_offsets_input, device=device, dtype=torch.int32
@@ -170,7 +167,6 @@ def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
         weight_quant,
         input_sf,
         weight_sf_3d,
-        alphas,
         _problem_sizes,
         _expert_offsets,
         _input_bs,

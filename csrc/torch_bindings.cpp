@@ -429,7 +429,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // cutlass mxfp4 block scaled group GEMM (MXFP4 x MXFP4 MoE)
   ops.def(
       "cutlass_mxfp4_group_mm(Tensor! out, Tensor a, Tensor b,"
-      " Tensor a_blockscale, Tensor b_blockscales, Tensor alphas,"
+      " Tensor a_blockscale, Tensor b_blockscales,"
       " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()");
   // conditionally compiled so impl registration is in source file
 

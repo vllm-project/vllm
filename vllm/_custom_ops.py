@@ -1187,7 +1187,6 @@ def cutlass_mxfp4_moe_mm(
     b_tensors: torch.Tensor,
     a_scales: torch.Tensor,
     b_scales: torch.Tensor,
-    alphas: torch.Tensor,
     problem_sizes: torch.Tensor,
     expert_offsets: torch.Tensor,
     sf_offsets: torch.Tensor,
@@ -1198,7 +1197,7 @@ def cutlass_mxfp4_moe_mm(
     Uses mx_float4_t types with E8M0 scale factors and 32-element blocks.
     - a/b_tensors: MXFP4 packed activations/weights (uint8, 2 E2M1 per byte)
     - a_/b_scales: E8M0 blockscales (uint8, stored in swizzled layout)
-    - alphas: per-expert output scaling factors (float32)
+    - Epilogue uses scalar alpha=1, beta=0 inside the CUDA op (no global scales).
     - expert_offsets/sf_offsets: expert boundary indices
     - problem_sizes: (num_experts, 3) with (M, N, K) per expert
     """
@@ -1208,7 +1207,6 @@ def cutlass_mxfp4_moe_mm(
         b_tensors,
         a_scales,
         b_scales,
-        alphas,
         problem_sizes,
         expert_offsets,
         sf_offsets,

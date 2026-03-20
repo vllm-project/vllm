@@ -34,16 +34,14 @@ using namespace cute;
 
 // Offset-computation kernel for MXFP4 grouped GEMM (group size 32).
 template <typename ElementAB, typename ElementC, typename ElementSF,
-          typename ElementAccumulator, typename LayoutSFA, typename LayoutSFB,
-          typename ScaleConfig>
+          typename LayoutSFA, typename LayoutSFB, typename ScaleConfig>
 __global__ void __mxfp4_get_group_gemm_starts(
     ElementAB** a_offsets, ElementAB** b_offsets, ElementC** out_offsets,
     ElementSF** a_scales_offsets, ElementSF** b_scales_offsets,
-    ElementAccumulator** alpha_offsets, LayoutSFA* layout_sfa_base_as_int,
-    LayoutSFB* layout_sfb_base_as_int, ElementAB* a_base_as_int,
-    ElementAB* b_base_as_int, ElementC* out_base_as_int,
-    ElementSF* a_scales_base_as_int, ElementSF* b_scales_base_as_int,
-    ElementAccumulator* alphas_base_as_int, const int32_t* expert_offsets,
+    LayoutSFA* layout_sfa_base_as_int, LayoutSFB* layout_sfb_base_as_int,
+    ElementAB* a_base_as_int, ElementAB* b_base_as_int,
+    ElementC* out_base_as_int, ElementSF* a_scales_base_as_int,
+    ElementSF* b_scales_base_as_int, const int32_t* expert_offsets,
     const int32_t* sf_offsets, const int32_t* problem_sizes_as_shapes,
     int64_t* a_strides, int64_t* b_strides, int64_t* c_strides,
     const int64_t a_stride_val, const int64_t b_stride_val,
@@ -81,8 +79,6 @@ __global__ void __mxfp4_get_group_gemm_starts(
   assert((reinterpret_cast<uintptr_t>(b_scales_offsets[expert_id]) % 128) ==
              0 &&
          "TMA requires 128-byte alignment");
-  // Shape of alpha = [E]
-  alpha_offsets[expert_id] = alphas_base_as_int + expert_id;
 
   // Initialize strides
   a_strides[expert_id] = a_stride_val;
@@ -98,48 +94,45 @@ __global__ void __mxfp4_get_group_gemm_starts(
       static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), 1));
 }
 
-#define __CALL_MXFP4_GET_STARTS_KERNEL(ELEMENT_AB_TYPE, SF_TYPE,           \
-                                       TENSOR_C_TYPE, C_TYPE, LayoutSFA,   \
-                                       LayoutSFB, ScaleConfig)             \
-  else if (out_tensors.dtype() == TENSOR_C_TYPE) {                         \
-    __mxfp4_get_group_gemm_starts<ELEMENT_AB_TYPE, C_TYPE, SF_TYPE, float, \
-                                  LayoutSFA, LayoutSFB, ScaleConfig>       \
-        <<<1, num_experts, 0, stream>>>(                                   \
-            static_cast<ELEMENT_AB_TYPE**>(a_starts.data_ptr()),           \
-            static_cast<ELEMENT_AB_TYPE**>(b_starts.data_ptr()),           \
-            static_cast<C_TYPE**>(out_starts.data_ptr()),                  \
-            static_cast<SF_TYPE**>(a_scales_starts.data_ptr()),            \
-            static_cast<SF_TYPE**>(b_scales_starts.data_ptr()),            \
-            static_cast<float**>(alpha_starts.data_ptr()),                 \
-            reinterpret_cast<LayoutSFA*>(layout_sfa.data_ptr()),           \
-            reinterpret_cast<LayoutSFB*>(layout_sfb.data_ptr()),           \
-            static_cast<ELEMENT_AB_TYPE*>(a_tensors.data_ptr()),           \
-            static_cast<ELEMENT_AB_TYPE*>(b_tensors.data_ptr()),           \
-            static_cast<C_TYPE*>(out_tensors.data_ptr()),                  \
-            static_cast<SF_TYPE*>(a_scales.data_ptr()),                    \
-            static_cast<SF_TYPE*>(b_scales.data_ptr()),                    \
-            static_cast<float*>(alphas.data_ptr()),                        \
-            static_cast<int32_t*>(expert_offsets.data_ptr()),              \
-            static_cast<int32_t*>(sf_offsets.data_ptr()),                  \
-            static_cast<int32_t*>(problem_sizes.data_ptr()),               \
-            static_cast<int64_t*>(a_strides.data_ptr()),                   \
-            static_cast<int64_t*>(b_strides.data_ptr()),                   \
-            static_cast<int64_t*>(c_strides.data_ptr()), a_stride_val,     \
-            b_stride_val, c_stride_val, K, N);                             \
+#define __CALL_MXFP4_GET_STARTS_KERNEL(ELEMENT_AB_TYPE, SF_TYPE,               \
+                                       TENSOR_C_TYPE, C_TYPE, LayoutSFA,       \
+                                       LayoutSFB, ScaleConfig)                 \
+  else if (out_tensors.dtype() == TENSOR_C_TYPE) {                             \
+    __mxfp4_get_group_gemm_starts<ELEMENT_AB_TYPE, C_TYPE, SF_TYPE, LayoutSFA, \
+                                  LayoutSFB, ScaleConfig>                      \
+        <<<1, num_experts, 0, stream>>>(                                       \
+            static_cast<ELEMENT_AB_TYPE**>(a_starts.data_ptr()),               \
+            static_cast<ELEMENT_AB_TYPE**>(b_starts.data_ptr()),               \
+            static_cast<C_TYPE**>(out_starts.data_ptr()),                      \
+            static_cast<SF_TYPE**>(a_scales_starts.data_ptr()),                \
+            static_cast<SF_TYPE**>(b_scales_starts.data_ptr()),                \
+            reinterpret_cast<LayoutSFA*>(layout_sfa.data_ptr()),               \
+            reinterpret_cast<LayoutSFB*>(layout_sfb.data_ptr()),               \
+            static_cast<ELEMENT_AB_TYPE*>(a_tensors.data_ptr()),               \
+            static_cast<ELEMENT_AB_TYPE*>(b_tensors.data_ptr()),               \
+            static_cast<C_TYPE*>(out_tensors.data_ptr()),                      \
+            static_cast<SF_TYPE*>(a_scales.data_ptr()),                        \
+            static_cast<SF_TYPE*>(b_scales.data_ptr()),                        \
+            static_cast<int32_t*>(expert_offsets.data_ptr()),                  \
+            static_cast<int32_t*>(sf_offsets.data_ptr()),                      \
+            static_cast<int32_t*>(problem_sizes.data_ptr()),                   \
+            static_cast<int64_t*>(a_strides.data_ptr()),                       \
+            static_cast<int64_t*>(b_strides.data_ptr()),                       \
+            static_cast<int64_t*>(c_strides.data_ptr()), a_stride_val,         \
+            b_stride_val, c_stride_val, K, N);                                 \
   }
 
 template <typename LayoutSFA, typename LayoutSFB, typename ScaleConfig>
 void mxfp4_run_get_group_gemm_starts(
     const torch::Tensor& a_starts, const torch::Tensor& b_starts,
     const torch::Tensor& out_starts, const torch::Tensor& a_scales_starts,
-    const torch::Tensor& b_scales_starts, const torch::Tensor& alpha_starts,
-    const torch::Tensor& layout_sfa, const torch::Tensor& layout_sfb,
-    const torch::Tensor& a_strides, const torch::Tensor& b_strides,
-    const torch::Tensor& c_strides, int64_t a_stride_val, int64_t b_stride_val,
-    int64_t c_stride_val, torch::Tensor const& a_tensors,
-    torch::Tensor const& b_tensors, torch::Tensor const& out_tensors,
-    torch::Tensor const& a_scales, torch::Tensor const& b_scales,
-    torch::Tensor const& alphas, torch::Tensor const& expert_offsets,
+    const torch::Tensor& b_scales_starts, const torch::Tensor& layout_sfa,
+    const torch::Tensor& layout_sfb, const torch::Tensor& a_strides,
+    const torch::Tensor& b_strides, const torch::Tensor& c_strides,
+    int64_t a_stride_val, int64_t b_stride_val, int64_t c_stride_val,
+    torch::Tensor const& a_tensors, torch::Tensor const& b_tensors,
+    torch::Tensor const& out_tensors, torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& sf_offsets, torch::Tensor const& problem_sizes, int M,
     int N, int K) {
   int num_experts = (int)expert_offsets.size(0);
@@ -168,9 +161,8 @@ template <typename OutType>
 void run_mxfp4_blockwise_scaled_group_mm_sm100(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
     const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
-    const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
-    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets, int M,
-    int N, int K) {
+    const torch::Tensor& problem_sizes, const torch::Tensor& expert_offsets,
+    const torch::Tensor& sf_offsets, int M, int N, int K) {
   using ProblemShape =
       cutlass::gemm::GroupProblemShape<Shape<int32_t, int32_t, int32_t>>;
   using ElementType = cutlass::float_e2m1_t;
@@ -250,7 +242,6 @@ void run_mxfp4_blockwise_scaled_group_mm_sm100(
   torch::Tensor out_ptrs = torch::empty(num_experts, options_int);
   torch::Tensor a_scales_ptrs = torch::empty(num_experts, options_int);
   torch::Tensor b_scales_ptrs = torch::empty(num_experts, options_int);
-  torch::Tensor alpha_ptrs = torch::empty(num_experts, options_int);
   torch::Tensor layout_sfa = torch::empty({num_experts, 5}, options_int);
   torch::Tensor layout_sfb = torch::empty({num_experts, 5}, options_int);
   torch::Tensor a_strides1 = torch::empty(num_experts, options_int);
@@ -258,11 +249,10 @@ void run_mxfp4_blockwise_scaled_group_mm_sm100(
   torch::Tensor c_strides1 = torch::empty(num_experts, options_int);
 
   mxfp4_run_get_group_gemm_starts<LayoutSFA, LayoutSFB, ScaleConfig>(
-      a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs, b_scales_ptrs, alpha_ptrs,
-      layout_sfa, layout_sfb, a_strides1, b_strides1, c_strides1,
-      a.stride(0) * 2, b.stride(1) * 2, output.stride(0), a, b, output,
-      a_blockscale, b_blockscales, alphas, expert_offsets, sf_offsets,
-      problem_sizes, M, N, K);
+      a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs, b_scales_ptrs, layout_sfa,
+      layout_sfb, a_strides1, b_strides1, c_strides1, a.stride(0) * 2,
+      b.stride(1) * 2, output.stride(0), a, b, output, a_blockscale,
+      b_blockscales, expert_offsets, sf_offsets, problem_sizes, M, N, K);
 
   // Create an instance of the GEMM
   Gemm gemm_op;
@@ -305,9 +295,15 @@ void run_mxfp4_blockwise_scaled_group_mm_sm100(
       static_cast<ElementD**>(out_ptrs.data_ptr()),
       static_cast<StrideC*>(c_strides1.data_ptr())};
   auto& fusion_args = epilogue_args.thread;
-  fusion_args.alpha_ptr_array =
-      reinterpret_cast<float**>(alpha_ptrs.data_ptr());
-  fusion_args.dAlpha = {_0{}, _0{}, 1};
+  // Scalar epilogue (CUTLASS grouped GEMM): D = 1 * accum + 0 * C
+  fusion_args.alpha_ptr = nullptr;
+  fusion_args.beta_ptr = nullptr;
+  fusion_args.alpha = 1.0f;
+  fusion_args.alpha_ptr_array = nullptr;
+  fusion_args.dAlpha = {_0{}, _0{}, 0};
+  fusion_args.beta = 0.0f;
+  fusion_args.beta_ptr_array = nullptr;
+  fusion_args.dBeta = {_0{}, _0{}, 0};
 
   // Gemm Arguments
   typename GemmKernel::Arguments args{
@@ -344,14 +340,13 @@ template <typename OutType>
 void run_mxfp4_blockwise_scaled_group_mm(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
     const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
-    const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
-    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets, int M,
-    int N, int K) {
+    const torch::Tensor& problem_sizes, const torch::Tensor& expert_offsets,
+    const torch::Tensor& sf_offsets, int M, int N, int K) {
   int32_t version_num = get_sm_version_num();
 #if defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100
   if (version_num >= 100 && version_num < 120) {
     run_mxfp4_blockwise_scaled_group_mm_sm100<OutType>(
-        output, a, b, a_blockscale, b_blockscales, alphas, problem_sizes,
+        output, a, b, a_blockscale, b_blockscales, problem_sizes,
         expert_offsets, sf_offsets, M, N, K);
     return;
   }
@@ -379,11 +374,13 @@ constexpr auto MXFP4_SF_DTYPE = at::ScalarType::Byte;
   CHECK_CONTIGUOUS(x, m);     \
   CHECK_TYPE(x, st, m)
 
-void cutlass_mxfp4_group_mm(
-    torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
-    const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
-    const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
-    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets) {
+void cutlass_mxfp4_group_mm(torch::Tensor& output, const torch::Tensor& a,
+                            const torch::Tensor& b,
+                            const torch::Tensor& a_blockscale,
+                            const torch::Tensor& b_blockscales,
+                            const torch::Tensor& problem_sizes,
+                            const torch::Tensor& expert_offsets,
+                            const torch::Tensor& sf_offsets) {
 #if defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100
   // Input validation
   CHECK_INPUT(a, MXFP4_FLOAT4_E2M1X2, "a");
@@ -391,7 +388,6 @@ void cutlass_mxfp4_group_mm(
   // MXFP4 uses E8M0 scale factors (stored as uint8)
   CHECK_INPUT(a_blockscale, MXFP4_SF_DTYPE, "a_blockscale");
   CHECK_INPUT(b_blockscales, MXFP4_SF_DTYPE, "b_blockscales");
-  CHECK_INPUT(alphas, at::ScalarType::Float, "alphas");
 
   TORCH_CHECK(a_blockscale.dim() == 2,
               "expected a_blockscale to be of shape [num_experts, rounded_m,"
@@ -416,11 +412,11 @@ void cutlass_mxfp4_group_mm(
 
   if (output.scalar_type() == torch::kBFloat16) {
     run_mxfp4_blockwise_scaled_group_mm<cutlass::bfloat16_t>(
-        output, a, b, a_blockscale, b_blockscales, alphas, problem_sizes,
+        output, a, b, a_blockscale, b_blockscales, problem_sizes,
         expert_offsets, sf_offsets, M, N, K);
   } else {
     run_mxfp4_blockwise_scaled_group_mm<cutlass::half_t>(
-        output, a, b, a_blockscale, b_blockscales, alphas, problem_sizes,
+        output, a, b, a_blockscale, b_blockscales, problem_sizes,
         expert_offsets, sf_offsets, M, N, K);
   }
 #else

@@ -317,7 +317,6 @@ void mxfp4_quant_impl(void* output, void* output_scale, void* input,
 
 constexpr auto HALF = at::ScalarType::Half;
 constexpr auto BF16 = at::ScalarType::BFloat16;
-constexpr auto FLOAT = at::ScalarType::Float;
 constexpr auto INT = at::ScalarType::Int;
 constexpr auto UINT8 = at::ScalarType::Byte;
 

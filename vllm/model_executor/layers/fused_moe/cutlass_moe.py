@@ -885,15 +885,12 @@ def run_cutlass_moe_mxfp4(
     c2 = _resize_cache(workspace2, (m * topk, n))
     c3 = _resize_cache(workspace13, (m * topk, k))
 
-    # MXFP4 has no global scales - pass ones for GEMM epilogue alpha
-    ones_per_expert = torch.ones((e,), device=device, dtype=torch.float32)
     ops.cutlass_mxfp4_moe_mm(
         c1,
         rep_a_fp4,
         w1_fp4,
         rep_a_blockscale,
         w1_blockscale,
-        ones_per_expert,
         problem_sizes1,
         expert_offsets[:-1],
         blockscale_offsets[:-1],
@@ -915,7 +912,6 @@ def run_cutlass_moe_mxfp4(
         w2_fp4,
         int_blockscale,
         w2_blockscale,
-        ones_per_expert,
         problem_sizes2,
         expert_offsets[:-1],
         blockscale_offsets[:-1],
