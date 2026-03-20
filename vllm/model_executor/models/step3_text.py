@@ -346,7 +346,7 @@ class Step3TextModel(nn.Module):
             self.norm = PPMissingLayer()
 
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size
+            ["hidden_states", "residual"], config.hidden_size
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
