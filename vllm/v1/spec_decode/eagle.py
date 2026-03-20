@@ -1222,11 +1222,35 @@ class SpecDecodeBaseProposer:
         Default method to call get_model(). Can be overridden by subclasses which
         need to customize model loading.
         """
+        import copy
+
         from vllm.compilation.backends import set_model_tag
+
+        vllm_config = self.vllm_config
+
+        # When a draft model is loaded from a different checkpoint than
+        # the target (e.g. unquantized pretrained weights paired with a
+        # quantized target), the target's quant_config must not be applied to
+        # the draft model -- its layers would be constructed expecting
+        # quantized weight formats that the pretrained checkpoint does not
+        # provide.  Clear quant_config so the draft model is built in BF16.
+        if (
+            self.method == "mtp"
+            and self.draft_model_config is not None
+            and self.vllm_config.model_config is not None
+            and self.draft_model_config.model != self.vllm_config.model_config.model
+            and vllm_config.quant_config is not None
+        ):
+            vllm_config = copy.copy(vllm_config)
+            vllm_config.quant_config = None
+            logger.warning(
+                "Draft model path differs from target model. "
+                "Loading draft model without quantization."
+            )
 
         with set_model_tag("eagle_head"):
             model = get_model(
-                vllm_config=self.vllm_config,
+                vllm_config=vllm_config,
                 model_config=self.speculative_config.draft_model_config,
                 load_config=self.speculative_config.draft_load_config,
             )
