@@ -261,11 +261,8 @@ class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "attn_quant_fusion_pass")
 
-    def get_pattern_replacements(
-        self, config: VllmConfig
-    ) -> list[VllmPatternReplacement]:
         dtype = config.model_config.dtype
-        layers = get_layers_from_vllm_config(config, Attention).values()
+        layers = list(get_layers_from_vllm_config(config, Attention).values())
 
         if len(layers) == 0:
             logger.warning(
@@ -274,17 +271,13 @@ class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
                 "so no fusion patterns were registered."
             )
 
-        pattern_replacements: list[VllmPatternReplacement] = [
-            AttnFp8StaticQuantPattern(layer, dtype)
-            for layer in layers
-            if layer.impl.fused_output_quant_supported(_FP8_QUANT_KEY)
-        ]
+        for layer in layers:
+            if layer.impl.fused_output_quant_supported(_FP8_QUANT_KEY):
+                self.register(AttnFp8StaticQuantPattern(layer, dtype))
 
         if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-            pattern_replacements += [
-                AttnNvfp4QuantPattern(layer, dtype)
-                for layer in layers
-                if layer.impl.fused_output_quant_supported(kNvfp4Dynamic)
-            ]
+            for layer in layers:
+                if layer.impl.fused_output_quant_supported(kNvfp4Dynamic):
+                    self.register(AttnNvfp4QuantPattern(layer, dtype))
 
-        return pattern_replacements
+        self.dump_patterns(config, self.pm_pass)

@@ -230,34 +230,28 @@ def _remove_noop_permutes(gm: fx.GraphModule) -> None:
         gm.graph.erase_node(node)
 
 
-class VllmFusionPatternMatcherPass(VllmPatternMatcherPass, ABC):
+class VllmFusionPatternMatcherPass(VllmPatternMatcherPass):
     """
     A VllmPatternMatcherPass for passes that use VllmPatternReplacement objects.
-    Subclasses implement get_pattern_replacements() and pass pass_name to __init__.
+    Subclasses register patterns via self.register() in their own __init__.
     """
 
-    @enable_fake_mode
     def __init__(self, config: VllmConfig, pass_name: str) -> None:
         super().__init__(config)
         self.pass_name = pass_name
         self.pm_pass = PatternMatcherPass(pass_name=pass_name)
+        self._pattern_replacements: list[VllmPatternReplacement] = []
 
-        self._pattern_replacements = self.get_pattern_replacements(config)
-        for pr in self._pattern_replacements:
-            pm.register_replacement(
-                pr.pattern,
-                pr.replacement,
-                pr.get_inputs,
-                self._trace_fn,
-                self.pm_pass,
-            )
-
-        self.dump_patterns(config, self.pm_pass)
-
-    @abstractmethod
-    def get_pattern_replacements(
-        self, config: VllmConfig
-    ) -> list[VllmPatternReplacement]: ...
+    @enable_fake_mode
+    def register(self, pr: VllmPatternReplacement) -> None:
+        pm.register_replacement(
+            pr.pattern,
+            pr.replacement,
+            pr.get_inputs,
+            self._trace_fn,
+            self.pm_pass,
+        )
+        self._pattern_replacements.append(pr)
 
     def uuid(self) -> str:
         return VllmInductorPass.hash_source(
