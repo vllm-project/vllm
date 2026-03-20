@@ -29,11 +29,13 @@ from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.server_utils import (
     engine_error_handler,
     exception_handler,
+    generation_error_handler,
     get_uvicorn_log_config,
     http_exception_handler,
     lifespan,
@@ -44,6 +46,7 @@ from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     ScalingMiddleware,
 )
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     cli_env_setup,
@@ -76,7 +79,6 @@ async def build_async_engine_client(
     args: Namespace,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
-    disable_frontend_multiprocessing: bool | None = None,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncIterator[EngineClient]:
     if os.getenv("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver":
@@ -95,13 +97,9 @@ async def build_async_engine_client(
         engine_args._api_process_count = client_config.get("client_count", 1)
         engine_args._api_process_rank = client_config.get("client_index", 0)
 
-    if disable_frontend_multiprocessing is None:
-        disable_frontend_multiprocessing = bool(args.disable_frontend_multiprocessing)
-
     async with build_async_engine_client_from_engine_args(
         engine_args,
         usage_context=usage_context,
-        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
         client_config=client_config,
     ) as engine:
         yield engine
@@ -112,7 +110,6 @@ async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
-    disable_frontend_multiprocessing: bool = False,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncIterator[EngineClient]:
     """
@@ -125,9 +122,6 @@ async def build_async_engine_client_from_engine_args(
 
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
-
-    if disable_frontend_multiprocessing:
-        logger.warning("V1 is enabled, but got --disable-frontend-multiprocessing.")
 
     from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -263,6 +257,7 @@ def build_app(
     app.exception_handler(RequestValidationError)(validation_exception_handler)
     app.exception_handler(EngineGenerateError)(engine_error_handler)
     app.exception_handler(EngineDeadError)(engine_error_handler)
+    app.exception_handler(GenerationError)(generation_error_handler)
     app.exception_handler(Exception)(exception_handler)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
@@ -362,12 +357,31 @@ async def init_app_state(
         lora_modules=lora_modules,
     )
     await state.openai_serving_models.init_static_loras()
-    state.openai_serving_tokenization = OpenAIServingTokenization(
-        engine_client,
-        state.openai_serving_models,
+
+    state.openai_serving_render = OpenAIServingRender(
+        model_config=engine_client.model_config,
+        renderer=engine_client.renderer,
+        io_processor=engine_client.io_processor,
+        model_registry=state.openai_serving_models.registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        log_error_stack=args.log_error_stack,
+    )
+
+    state.openai_serving_tokenization = OpenAIServingTokenization(
+        engine_client,
+        state.openai_serving_models,
+        state.openai_serving_render,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
 
@@ -414,11 +428,19 @@ async def init_render_app_state(
     directly from the :class:`~vllm.config.VllmConfig`.
     """
     from vllm.entrypoints.chat_utils import load_chat_template
+    from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
     from vllm.plugins.io_processors import get_io_processor
     from vllm.renderers import renderer_from_config
 
     served_model_names = args.served_model_name or [args.model]
+    model_registry = OpenAIModelRegistry(
+        model_config=vllm_config.model_config,
+        base_model_paths=[
+            BaseModelPath(name=name, model_path=args.model)
+            for name in served_model_names
+        ],
+    )
 
     if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
@@ -435,7 +457,7 @@ async def init_render_app_state(
         model_config=vllm_config.model_config,
         renderer=renderer,
         io_processor=io_processor,
-        served_model_names=served_model_names,
+        model_registry=model_registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -447,8 +469,10 @@ async def init_render_app_state(
         log_error_stack=args.log_error_stack,
     )
 
-    # Expose models endpoint via the render handler.
-    state.openai_serving_models = state.openai_serving_render
+    state.openai_serving_models = model_registry
+
+    # Expose tokenization via the render handler (no engine required).
+    state.openai_serving_tokenization = state.openai_serving_render
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.

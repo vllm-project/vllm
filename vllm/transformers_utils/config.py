@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from functools import cache, partial
 from importlib.metadata import version
@@ -10,8 +11,10 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
-from huggingface_hub import get_safetensors_metadata
+import torch
+from huggingface_hub import constants, get_safetensors_metadata
 from packaging.version import Version
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -28,6 +31,7 @@ from vllm.transformers_utils.utils import (
     parse_safetensors_file_metadata,
     without_trust_remote_code,
 )
+from vllm.utils.torch_utils import common_broadcastable_dtype
 
 from .config_parser_base import ConfigParserBase
 from .gguf_utils import (
@@ -78,6 +82,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     bagel="BagelConfig",
     chatglm="ChatGLMConfig",
     colmodernvbert="ColModernVBertConfig",
+    colpali="ColPaliConfig",
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
@@ -133,6 +138,19 @@ def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
     if not rope_parameters:
         return False
     return set(rope_parameters.keys()).issubset(ALLOWED_ATTENTION_LAYER_TYPES)
+
+
+@contextmanager
+def _mistral_patch_hf_hub_constants() -> Iterator[None]:
+    hf_safetensors_single_file = constants.SAFETENSORS_SINGLE_FILE
+    hf_safetensors_index_file = constants.SAFETENSORS_INDEX_FILE
+    constants.SAFETENSORS_SINGLE_FILE = "consolidated.safetensors"
+    constants.SAFETENSORS_INDEX_FILE = "consolidated.safetensors.index.json"
+    try:
+        yield
+    finally:
+        constants.SAFETENSORS_SINGLE_FILE = hf_safetensors_single_file
+        constants.SAFETENSORS_INDEX_FILE = hf_safetensors_index_file
 
 
 class HFConfigParser(ConfigParserBase):
@@ -244,6 +262,25 @@ class MistralConfigParser(ConfigParserBase):
             )
         except OSError:  # Not found
             hf_config_dict = {}
+
+        if config_dict.get("dtype") is None:
+            with _mistral_patch_hf_hub_constants():
+                model_str = model if isinstance(model, str) else model.as_posix()
+                param_mt = get_safetensors_params_metadata(model_str, revision=revision)
+            if param_mt:
+                param_dtypes: set[torch.dtype] = {
+                    _SAFETENSORS_TO_TORCH_DTYPE[dtype]
+                    for info in param_mt.values()
+                    if (dtype := info.get("dtype", None))
+                    and dtype in _SAFETENSORS_TO_TORCH_DTYPE
+                }
+
+                if param_dtypes:
+                    config_dict["dtype"] = common_broadcastable_dtype(param_dtypes)
+                    logger.info_once(
+                        "Inferred from consolidated*.safetensors files "
+                        f"{config_dict['dtype']} dtype."
+                    )
 
         config = adapt_config_dict(config_dict, defaults=hf_config_dict)
 

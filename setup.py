@@ -54,6 +54,9 @@ elif sys.platform.startswith("linux") and os.getenv("VLLM_TARGET_DEVICE") is Non
     if torch.version.hip is not None:
         VLLM_TARGET_DEVICE = "rocm"
         logger.info("Auto-detected ROCm")
+    elif torch.version.xpu is not None:
+        VLLM_TARGET_DEVICE = "xpu"
+        logger.info("Auto-detected XPU")
     elif torch.version.cuda is not None:
         VLLM_TARGET_DEVICE = "cuda"
         logger.info("Auto-detected CUDA")
@@ -597,6 +600,7 @@ class precompiled_wheel_utils:
             with zipfile.ZipFile(wheel_path) as wheel:
                 files_to_copy = [
                     "vllm/_C.abi3.so",
+                    "vllm/_C_stable_libtorch.abi3.so",
                     "vllm/_moe_C.abi3.so",
                     "vllm/_flashmla_C.abi3.so",
                     "vllm/_flashmla_extension_C.abi3.so",
@@ -657,13 +661,18 @@ class precompiled_wheel_utils:
     def get_base_commit_in_main_branch() -> str:
         try:
             # Get the latest commit hash of the upstream main branch.
-            resp_json = subprocess.check_output(
-                [
-                    "curl",
-                    "-s",
-                    "https://api.github.com/repos/vllm-project/vllm/commits/main",
+            curl_cmd = [
+                "curl",
+                "-s",
+                "https://api.github.com/repos/vllm-project/vllm/commits/main",
+            ]
+            github_token = os.getenv("GH_TOKEN", os.getenv("GITHUB_TOKEN"))
+            if github_token:
+                curl_cmd += [
+                    "-H",
+                    f"Authorization: token {github_token}",
                 ]
-            ).decode("utf-8")
+            resp_json = subprocess.check_output(curl_cmd).decode("utf-8")
             upstream_main_commit = json.loads(resp_json)["sha"]
             print(f"Upstream main branch latest commit: {upstream_main_commit}")
 
@@ -920,12 +929,17 @@ if _is_cpu():
 
     if platform.machine() in ("x86_64", "AMD64"):
         ext_modules.append(CMakeExtension(name="vllm._C"))
+        ext_modules.append(CMakeExtension(name="vllm._C_AVX512"))
         ext_modules.append(CMakeExtension(name="vllm._C_AVX2"))
     else:
         ext_modules.append(CMakeExtension(name="vllm._C"))
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
+    # also _is_hip() once https://github.com/vllm-project/vllm/issues/35163 is
+    # fixed
+    if _is_cuda():
+        ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
 
 package_data = {
     "vllm": [
@@ -965,10 +979,13 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
+        # AMD Zen CPU optimizations via zentorch
+        "zen": ["zentorch"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.2.2"],
-        "runai": ["runai-model-streamer[s3,gcs] >= 0.15.3"],
+        "instanttensor": ["instanttensor >= 0.1.5"],
+        "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
             "librosa",
             "scipy",
@@ -981,9 +998,9 @@ setup(
         # Optional deps for AMD FP4 quantization support
         "petit-kernel": ["petit-kernel"],
         # Optional deps for Helion kernel development
-        "helion": ["helion"],
+        "helion": ["helion==0.3.2"],
         # Optional deps for gRPC server (vllm serve --grpc)
-        "grpc": ["smg-grpc-servicer >= 0.4.2"],
+        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
         # Optional deps for OpenTelemetry tracing
         "otel": [
             "opentelemetry-sdk>=1.26.0",

@@ -1080,19 +1080,10 @@ class SupportsQuant:
     def __new__(cls, *args, **kwargs) -> Self:
         instance = super().__new__(cls)
 
-        # find config passed in arguments
-        quant_config = cls._find_quant_config(*args, **kwargs)
-        if quant_config is not None:
-            # attach config to model for general use
-            instance.quant_config = quant_config
+        # find config passed in arguments and attach it to model for general use
+        instance.quant_config = cls._find_quant_config(*args, **kwargs)
 
-            # apply model mappings to config for proper config-model matching
-            if (hf_to_vllm_mapper := instance.hf_to_vllm_mapper) is not None:
-                instance.quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
-            if instance.packed_modules_mapping is not None:
-                instance.quant_config.packed_modules_mapping.update(
-                    instance.packed_modules_mapping
-                )
+        cls._maybe_apply_model_mapping(instance)
 
         return instance
 
@@ -1110,6 +1101,15 @@ class SupportsQuant:
                 return arg
 
         return None
+
+    def _maybe_apply_model_mapping(self):
+        """Apply model mappings to config for proper config-model matching"""
+        if self.quant_config is None:
+            return
+        if (hf_to_vllm_mapper := self.hf_to_vllm_mapper) is not None:
+            self.quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
+        if self.packed_modules_mapping is not None:
+            self.quant_config.packed_modules_mapping.update(self.packed_modules_mapping)
 
 
 @runtime_checkable
@@ -1358,6 +1358,25 @@ def supports_any_eagle(
     return supports_eagle(model) or supports_eagle3(model)
 
 
+class EagleModelMixin:
+    aux_hidden_state_layers: tuple[int, ...] = ()
+
+    def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.aux_hidden_state_layers = layers
+
+    def _maybe_add_hidden_state(
+        self,
+        aux_hidden_states: list[torch.Tensor],
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        if layer_idx in self.aux_hidden_state_layers:
+            value = hidden_states + residual if residual is not None else hidden_states
+            aux_hidden_states.append(value)
+        return aux_hidden_states
+
+
 @runtime_checkable
 class SupportsEagle(SupportsEagleBase, Protocol):
     """The interface required for models that support
@@ -1405,24 +1424,48 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         """
-        Set which layers should output auxiliary
-        hidden states for EAGLE-3.
+        Set which layers should output auxiliary hidden states for EAGLE-3.
 
         Args:
             layers: Tuple of layer indices that should output auxiliary
                 hidden states.
         """
-        ...
+        parent_ref = self
+        if hasattr(self, "get_language_model"):
+            parent_ref = self.get_language_model()
+        elif hasattr(self, "language_model"):
+            parent_ref = self.language_model
+        assert hasattr(parent_ref, "model"), (
+            "Model instance must have 'model' attribute to set number of layers"
+        )
+        assert isinstance(parent_ref.model, EagleModelMixin), (
+            "Model instance must inherit from EagleModelMixin to set auxiliary layers"
+        )
+        parent_ref.model._set_aux_hidden_state_layers(layers)
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         """
-        Get the layer indices that should output auxiliary hidden states
-        for EAGLE-3.
+        Get the default layer indices that should output auxiliary hidden states
+        for EAGLE-3 for this model. Models can override this method to provide
+        different default layers based on their architecture, but it is encouraged
+        to instead include the layer specification in the model's config if possible.
 
         Returns:
             Tuple of layer indices for auxiliary hidden state outputs.
         """
-        ...
+        parent_ref = self
+        if hasattr(self, "get_language_model"):
+            parent_ref = self.get_language_model()
+        elif hasattr(self, "language_model"):
+            parent_ref = self.language_model
+        assert hasattr(parent_ref, "model"), (
+            "Model instance must have 'model' attribute to get number of layers"
+        )
+        assert hasattr(parent_ref.model, "layers"), (
+            "Model instance must have 'layers' attribute to get number of layers"
+        )
+        num_layers = len(parent_ref.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
 
 @overload

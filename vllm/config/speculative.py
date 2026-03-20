@@ -57,10 +57,7 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
 ]
-RejectionSampleMethod = Literal[
-    "strict",
-    "probabilistic",
-]
+RejectionSampleMethod = Literal["strict", "probabilistic"]
 
 
 @config
@@ -523,8 +520,10 @@ class SpeculativeConfig:
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):
-                    from vllm.transformers_utils.configs import SpeculatorsConfig
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
+                    from vllm.transformers_utils.configs.speculators import (
+                        SpeculatorsConfig,
+                    )
 
                     if isinstance(
                         self.draft_model_config.hf_config,
