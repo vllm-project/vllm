@@ -139,7 +139,7 @@ class ServingTokens(OpenAIServing):
                 cache_salt=request.cache_salt,
             )
         else:
-            engine_prompts = await self._preprocess_completion(
+            engine_prompts = await self.openai_serving_render.preprocess_completion(
                 request,
                 prompt_input=request.token_ids,
                 prompt_embeds=None,
