@@ -1027,12 +1027,15 @@ class OpenAIServingChat(OpenAIServing):
                     # wasn't ready to send a token, then
                     #   get the next token without streaming a chunk
                     if delta_message is None:
-                        # NOTE: If return_token_ids is enabled, we still need to
-                        # send a chunk with token_ids even if delta_message is None
-                        # to ensure all tokens are included in the response
-                        if (
-                            output.finish_reason is None
-                            and not request.return_token_ids
+                        # Some tool parsers intentionally suppress control
+                        # tokens by returning None. When the client asked for
+                        # token_ids or logprobs, still emit an empty delta so
+                        # those per-token details are not dropped from the
+                        # stream.
+                        if not self._should_emit_empty_delta_chunk(
+                            output=output,
+                            request=request,
+                            logprobs=logprobs,
                         ):
                             continue
                         delta_message = DeltaMessage()
@@ -1778,6 +1781,18 @@ class OpenAIServingChat(OpenAIServing):
             and delta_message.tool_calls[0]
             and delta_message.tool_calls[0].function
             and delta_message.tool_calls[0].function.arguments is not None
+        )
+
+    @staticmethod
+    def _should_emit_empty_delta_chunk(
+        output: CompletionOutput,
+        request: ChatCompletionRequest,
+        logprobs: ChatCompletionLogProbs | None,
+    ) -> bool:
+        return bool(
+            output.finish_reason is not None
+            or request.return_token_ids
+            or logprobs is not None
         )
 
     @staticmethod
