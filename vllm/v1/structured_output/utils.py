@@ -113,10 +113,13 @@ def apply_grammar_bitmask(
             # and the xgrammar CPU kernel expects Sequence[int], not a tensor.
             indices = out_indices
         else:
-            indices = torch.tensor(
-                out_indices, dtype=torch.int32, device="cpu", pin_memory=True,
+            index_tensor = torch.tensor(
+                out_indices,
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=True,
             )
-            indices = indices.to(logits.device, non_blocking=True)
+            indices = index_tensor.to(logits.device, non_blocking=True)
 
     # Handle dtype conversion for CPU (older xgrammar CPU kernels require float32)
     # See: https://github.com/vllm-project/vllm/issues/31901
