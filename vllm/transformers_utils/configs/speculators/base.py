@@ -8,12 +8,18 @@ from transformers import PretrainedConfig
 from vllm.transformers_utils.configs.speculators.algos import (
     SUPPORTED_SPECULATORS_TYPES,
 )
-
-__all__ = ["SpeculatorsConfig"]
+from vllm.transformers_utils.utils import without_trust_remote_code
 
 
 class SpeculatorsConfig(PretrainedConfig):
     model_type = "speculators"
+
+    def __init__(self, **kwargs):
+        """In Transformers v5, `PretrainedConfig` is decorated with `dataclass` and
+        `huggingface_hub.dataclasses.strict(accept_kwargs=True)`.
+        Inheriting classes do not inherit the `accept_kwargs=True` behaviour so we must
+        explicitly pass any kwargs to `PretrainedConfig.__init__`."""
+        super().__init__(**kwargs)
 
     @classmethod
     def from_pretrained(
@@ -22,7 +28,9 @@ class SpeculatorsConfig(PretrainedConfig):
         **kwargs,
     ) -> "SpeculatorsConfig":
         """Load speculators Eagle config and convert to vLLM format."""
-        config_dict, _ = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
+        config_dict, _ = cls.get_config_dict(
+            pretrained_model_name_or_path, **without_trust_remote_code(kwargs)
+        )
 
         vllm_config = cls.extract_transformers_pre_trained_config(config_dict)
         return cls(**vllm_config)

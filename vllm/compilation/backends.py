@@ -9,6 +9,7 @@ import operator
 import os
 import pprint
 import time
+from collections import defaultdict
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
@@ -370,13 +371,15 @@ class CompilerManager:
                 logger.info_once(
                     "Cache the graph of compile range %s for later use",
                     str(compile_range),
+                    scope="local",
                 )
-            logger.debug(
+            logger.debug_once(
                 "Store the %s-th graph for compile range%s from %s via handle %s",
                 graph_index,
                 str(compile_range),
                 self.compiler.name,
                 handle,
+                scope="local",
             )
 
         # after compiling the last graph, record the end time
@@ -405,9 +408,130 @@ class SplitItem:
     graph: fx.GraphModule
 
 
+def _is_empty_allocation_node(node: fx.Node) -> bool:
+    if node.op == "call_method":
+        return node.target == "new_empty"
+
+    if node.op != "call_function":
+        return False
+
+    target = node.target
+    if target in (torch.empty, torch.empty_like, torch.empty_strided):
+        return True
+
+    if isinstance(target, torch._ops.OpOverloadPacket):
+        packet_name = target._qualified_op_name
+    elif isinstance(target, torch._ops.OpOverload):
+        packet_name = target.name()
+    else:
+        return False
+
+    return packet_name.startswith("aten::empty") or packet_name.startswith(
+        "aten::new_empty"
+    )
+
+
+def _merge_empty_only_subgraphs(
+    node_to_subgraph_id: dict[fx.Node, int],
+    split_op_graphs: list[int],
+) -> None:
+    """
+    Merge a partition that only contains an empty allocation op into the
+    previous partition. This avoids generating standalone empty submodules,
+    which can lead to empty cudagraph captures.
+    """
+
+    nodes_by_subgraph_id: dict[int, list[fx.Node]] = defaultdict(list)
+    for node, subgraph_id in node_to_subgraph_id.items():
+        nodes_by_subgraph_id[subgraph_id].append(node)
+
+    splitting_subgraphs = set(split_op_graphs)
+    prev_non_splitting_subgraph_id: int | None = None
+
+    max_subgraph_id = max(node_to_subgraph_id.values(), default=-1)
+    for subgraph_id in range(max_subgraph_id + 1):
+        nodes = nodes_by_subgraph_id.get(subgraph_id, [])
+        if not nodes:
+            continue
+
+        is_non_splitting_subgraph = subgraph_id not in splitting_subgraphs
+        is_empty_only_subgraph = len(nodes) == 1 and _is_empty_allocation_node(nodes[0])
+        merged = False
+
+        if is_empty_only_subgraph and prev_non_splitting_subgraph_id is not None:
+            # Safety check: don't move allocation before any input producer.
+            empty_node = nodes[0]
+            if all(
+                input_node.op == "placeholder"
+                or node_to_subgraph_id[input_node] <= prev_non_splitting_subgraph_id
+                for input_node in empty_node.all_input_nodes
+            ):
+                node_to_subgraph_id[empty_node] = prev_non_splitting_subgraph_id
+                merged = True
+
+        if not merged and is_non_splitting_subgraph:
+            prev_non_splitting_subgraph_id = subgraph_id
+
+
+def _decompose_size_nodes(graph: fx.GraphModule) -> None:
+    """Decompose x.size() into per-dim sym_size.int calls.
+
+    torch.Size objects cannot cross split boundaries because aot_autograd
+    cannot handle them as submodule outputs. This replaces each size() call
+    with individual sym_size.int(x, dim) nodes:
+      - Dynamic dims (SymInt) → new sym_size.int node
+      - Static dims (plain int) → inlined as literal constant
+    """
+    # Dynamo captures x.size()/x.shape as call_method target="size".
+    size_nodes = list(graph.graph.find_nodes(op="call_method", target="size"))
+
+    for node in size_nodes:
+        tensor_node = node.args[0]
+        ev = tensor_node.meta.get("example_value")
+        assert ev is not None, (
+            f"Tensor node '{tensor_node.name}' has no example_value metadata. "
+            f"Cannot decompose size node '{node.name}'."
+        )
+
+        # Build per-dim replacements: sym_size.int node or literal int.
+        dims: list[fx.Node | int] = []
+        with graph.graph.inserting_after(tensor_node):
+            for i in range(ev.dim()):
+                dim_val = ev.shape[i]
+                if isinstance(dim_val, torch.SymInt):
+                    dn = graph.graph.call_function(
+                        torch.ops.aten.sym_size.int, args=(tensor_node, i)
+                    )
+                    dn.meta["example_value"] = dim_val
+                    dims.append(dn)
+                elif isinstance(dim_val, int):
+                    dims.append(dim_val)
+                else:
+                    raise AssertionError(
+                        f"dim_val is either torch.SymInt or int, "
+                        f"got {type(dim_val)} for dim {i} of "
+                        f"'{node.name}'"
+                    )
+
+        # Replace size node in each user's args.
+        # Dynamo always passes size as a direct arg: view(clone, size)
+        # → view(clone, d0, d1, ...)
+        for user in list(node.users):
+            new_args = []
+            for arg in user.args:
+                if arg is node:
+                    new_args.extend(dims)
+                else:
+                    new_args.append(arg)
+            user.args = tuple(new_args)
+        graph.graph.erase_node(node)
+
+
 def split_graph(
     graph: fx.GraphModule, splitting_ops: list[str]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
+    _decompose_size_nodes(graph)
+
     # split graph by ops
     subgraph_id = 0
     node_to_subgraph_id: dict[fx.Node, int] = {}
@@ -442,6 +566,8 @@ def split_graph(
                 subgraph_id += 1
         else:
             node_to_subgraph_id[node] = subgraph_id
+
+    _merge_empty_only_subgraphs(node_to_subgraph_id, split_op_graphs)
 
     # `keep_original_order` is important!
     # otherwise pytorch might reorder the nodes and
@@ -830,8 +956,8 @@ class VllmBackend:
                     "splitting_ops": list_to_str(cc.splitting_ops),
                     "cudagraph_mode": str(cc.cudagraph_mode),
                     "compile_sizes": list_to_str(cc.compile_sizes),
-                    "compile_ranges_split_points": list_to_str(
-                        cc.compile_ranges_split_points
+                    "compile_ranges_endpoints": list_to_str(
+                        cc.compile_ranges_endpoints
                     ),
                     "use_inductor_graph_partition": cc.use_inductor_graph_partition,
                     "inductor_passes": list_to_str(list(cc.inductor_passes.keys())),
@@ -906,6 +1032,13 @@ class VllmBackend:
 
         # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
         disable_cache = not is_compile_cache_enabled(self.inductor_config)
+
+        # TODO(patchy): ngram gpu kernel will cause vllm torch compile cache errors.
+        is_ngram_gpu_enabled = (
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.use_ngram_gpu()
+        )
+        disable_cache = disable_cache or is_ngram_gpu_enabled
 
         if disable_cache:
             logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")

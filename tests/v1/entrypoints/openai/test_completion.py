@@ -26,19 +26,12 @@ def default_server_args():
         "128",
         "--enforce-eager",
         "--enable-prompt-tokens-details",
+        "--no-enable-prefix-caching",
     ]
 
 
-@pytest.fixture(
-    scope="module",
-    params=[
-        ["--no-enable-prefix-caching"],
-        ["--no-enable-prefix-caching", "--disable-frontend-multiprocessing"],
-    ],
-)
-def server(default_server_args, request):
-    if request.param:
-        default_server_args = default_server_args + request.param
+@pytest.fixture(scope="module")
+def server(default_server_args):
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
 
@@ -456,6 +449,18 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name:
                 final_chunk.usage.prompt_tokens + final_chunk.usage.completion_tokens
             )
             assert final_chunk.choices == []
+
+    # Test stream=True, stream_options={}
+    stream = await client.completions.create(
+        model=model_name,
+        prompt=prompt,
+        max_tokens=5,
+        temperature=0.0,
+        stream=True,
+        stream_options={},
+    )
+    async for chunk in stream:
+        assert chunk.usage is None
 
     # Test stream=False, stream_options=
     #     {"include_usage": None}

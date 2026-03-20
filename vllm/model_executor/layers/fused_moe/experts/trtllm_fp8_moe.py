@@ -4,12 +4,16 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     RoutingMethodType,
+)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
@@ -19,11 +23,187 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
+    kMxfp8Dynamic,
+    kMxfp8Static,
 )
 from vllm.platforms import current_platform
 
+logger = init_logger(__name__)
 
-class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
+
+class TrtLlmFp8ExpertsBase:
+    """
+    Fp8 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic
+    interfaces.
+    """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        self.routing_method_type = moe_config.routing_method
+        self.topk = moe_config.experts_per_token
+        self.intermediate_size_per_partition = (
+            moe_config.intermediate_size_per_partition
+        )
+        self.hidden_dim = moe_config.hidden_dim
+        self.local_num_experts = moe_config.num_local_experts
+        self.ep_rank = moe_config.moe_parallel_config.ep_rank
+
+        self.quant_config = quant_config
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        """Supports only Blackwell-family GPUs."""
+        p = current_platform
+        # Add check flashinfer trtllm is available
+        return p.is_cuda() and p.is_device_capability_family(100)
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        """Does not support non-gated MoE (i.e. Nanotron-3-Nano)."""
+        return True
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        """Supports only SiLU and RELU^2 non-gated activation."""
+        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        """Monolithic kernel so only use with naive DP/EP and TP."""
+        return (
+            not moe_parallel_config.use_all2all_kernels
+            or moe_parallel_config.use_ag_rs_all2all_kernels
+        ) and not moe_parallel_config.enable_eplb
+
+    def supports_chunking(self) -> bool:
+        return False
+
+    def supports_expert_map(self) -> bool:
+        return False
+
+
+class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
+    """
+    Fp8 TRTLLM-Gen MoE kernels. Supports modular interface.
+    """
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        """Supports Fp8 block and MXFP8."""
+        SUPPORTED_W_A = [
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            (kMxfp8Static, kMxfp8Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # The workspaces for this implementation are managed by flashinfer.
+        workspace1 = (0,)
+        workspace2 = (0,)
+        output = (M, K)
+
+        return (workspace1, workspace2, output)
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        return TopKWeightAndReduceNoOP()
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        import flashinfer
+        from flashinfer.fused_moe import Fp8QuantizationType
+
+        # Pack topk_ids and topk_weights into single tensor
+        # Format: (expert_id << 16) | (weight_bf16.view(int16))
+        packed_topk_ids = (topk_ids << 16) | topk_weights.to(torch.bfloat16).view(
+            torch.int16
+        )
+
+        # trtllm_fp8_block_scale_routed_moe does not support autotuning
+        # so skip this kernel during dummy run for autotuning.
+        import vllm.utils.flashinfer as fi_utils
+
+        if fi_utils._is_fi_autotuning:
+            return
+
+        assert a1q_scale is not None
+
+        is_mxfp8 = self.quant_config.block_shape == [1, 32]
+        if is_mxfp8:
+            fp8_quant_type = Fp8QuantizationType.MxFp8
+            use_shuffled_weight = True
+            hidden_states_scale = a1q_scale
+        else:
+            fp8_quant_type = Fp8QuantizationType.DeepSeekFp8
+            use_shuffled_weight = False
+            hidden_states_scale = a1q_scale.t().contiguous()
+
+        # `trtllm_fp8_block_scale_routed_moe` has a bug and does not write to the
+        # output tensor in-place so we need to manually copy the result to the
+        # output tensor
+        # https://github.com/flashinfer-ai/flashinfer/issues/2703
+        result = flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
+            topk_ids=packed_topk_ids,
+            routing_bias=None,
+            hidden_states=hidden_states,
+            hidden_states_scale=hidden_states_scale,
+            gemm1_weights=w1,
+            gemm1_weights_scale=self.quant_config.w1_scale,
+            gemm2_weights=w2,
+            gemm2_weights_scale=self.quant_config.w2_scale,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            n_group=None,
+            topk_group=None,
+            intermediate_size=self.intermediate_size_per_partition,
+            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_num_experts=self.local_num_experts,
+            routed_scaling_factor=None,
+            routing_method_type=1,
+            use_shuffled_weight=use_shuffled_weight,
+            weight_layout=0,
+            fp8_quantization_type=fp8_quant_type,
+            # output=output,
+        )
+        output.copy_(result)
+
+
+class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolithic):
     """
     Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface.
     """
@@ -34,21 +214,6 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
-
-        if moe_config.moe_parallel_config.use_ep and quant_config.is_per_tensor:
-            raise NotImplementedError(
-                "EP parallelism is not supported with TRTLLM"
-                "per-tensor FP8 quantization."
-            )
-
-        self.routing_method_type = moe_config.routing_method
-        self.topk = moe_config.experts_per_token
-        self.intermediate_size_per_partition = (
-            moe_config.intermediate_size_per_partition
-        )
-        self.hidden_dim = moe_config.hidden_dim
-        self.local_num_experts = moe_config.num_local_experts
-        self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
         # Make additional scales for per-tensor interface.
         if self.quant_config.is_per_tensor:
@@ -70,72 +235,17 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
             )
 
     @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
-
-    @staticmethod
-    def _supports_current_device() -> bool:
-        """Supports only Blackwell-family GPUs."""
-        p = current_platform
-        # Add check flashinfer trtllm is available
-        return p.is_cuda() and p.is_device_capability_family(100)
-
-    @staticmethod
-    def _supports_no_act_and_mul() -> bool:
-        """Does not support non-gated MoE (i.e. Nanotron-3-Nano)."""
-        return True
-
-    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        """Supports Fp8 per-tensor and Fp8 block."""
+        """Supports Fp8 per-tensor, Fp8 block, and MXFP8."""
         SUPPORTED_W_A = [
             (kFp8Static128BlockSym, kFp8Dynamic128Sym),
             (kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (kMxfp8Static, kMxfp8Dynamic),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
-
-    @staticmethod
-    def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports only SiLU and RELU^2 non-gated activation."""
-        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
-
-    @staticmethod
-    def _supports_routing_method(
-        routing_method: RoutingMethodType,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        """Monolithic kernels need to express router support."""
-        # NOTE(dbari): TopK routing could also be enabled, but need to validate models
-        # NOTE(dbari): Default is not implemented and should not be enabled until it is
-        if (weight_key, activation_key) == (kFp8Static128BlockSym, kFp8Dynamic128Sym):
-            # NOTE(rob): potentially allow others here. This is a conservative list.
-            return routing_method in [
-                RoutingMethodType.DeepSeekV3,
-                RoutingMethodType.Renormalize,
-                RoutingMethodType.RenormalizeNaive,
-            ]
-        elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
-            # NOTE(dbari): as above, potentially allow others here.
-            return routing_method in [
-                RoutingMethodType.DeepSeekV3,
-                RoutingMethodType.Llama4,
-                RoutingMethodType.Renormalize,
-                RoutingMethodType.RenormalizeNaive,
-            ]
-        else:
-            raise ValueError("Unsupported quantization scheme.")
-
-    @staticmethod
-    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        """Monolithic kernel so only use with naive DP/EP and TP."""
-        return (
-            not moe_parallel_config.use_all2all_kernels
-            or moe_parallel_config.use_naive_all2all_kernels
-        ) and not moe_parallel_config.enable_eplb
 
     @staticmethod
     def _supports_router_logits_dtype(
@@ -153,13 +263,37 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
             return routing_method == RoutingMethodType.DeepSeekV3
         return True
 
-    def supports_chunking(self) -> bool:
-        return False
+    @staticmethod
+    def _supports_routing_method(
+        routing_method: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        """Monolithic kernels need to express router support."""
+        # NOTE(dbari): TopK routing could also be enabled, but need to validate models
+        # NOTE(dbari): Default is not implemented and should not be enabled until it is
+        if (weight_key, activation_key) in [
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            (kMxfp8Static, kMxfp8Dynamic),
+        ]:
+            # NOTE(rob): potentially allow others here. This is a conservative list.
+            return routing_method in [
+                RoutingMethodType.DeepSeekV3,
+                RoutingMethodType.Renormalize,
+                RoutingMethodType.RenormalizeNaive,
+            ]
+        elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
+            # NOTE(dbari): as above, potentially allow others here.
+            return routing_method in [
+                RoutingMethodType.DeepSeekV3,
+                RoutingMethodType.Llama4,
+                RoutingMethodType.Renormalize,
+                RoutingMethodType.RenormalizeNaive,
+            ]
+        else:
+            raise ValueError("Unsupported quantization scheme.")
 
-    def supports_expert_map(self) -> bool:
-        return False
-
-    def _apply_per_block(
+    def _apply_block_scale(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -176,35 +310,38 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
-        # Delay import for non-CUDA.
         import flashinfer
+        from flashinfer.fused_moe import Fp8QuantizationType
 
         assert not apply_router_weight_on_input
         assert activation == MoEActivation.SILU
-
-        if e_score_correction_bias is not None:
-            e_score_correction_bias = e_score_correction_bias.to(hidden_states.dtype)
+        assert self.topk <= global_num_experts
+        assert self.topk <= 10
+        assert global_num_experts % 4 == 0
+        assert self.quant_config.block_shape in [[128, 128], [1, 32]]
+        # Kernel expects #experts <= #threads 512
+        assert global_num_experts <= 512
+        # TODO: fuse into the quant kernel.
+        assert a1q_scale is not None
 
         if self.routing_method_type == RoutingMethodType.DeepSeekV3:
             router_logits = router_logits.to(torch.float32)
 
-        assert self.topk <= global_num_experts
-        assert self.topk <= 10
-        assert global_num_experts % 4 == 0
-        assert self.quant_config.block_shape == [128, 128]
-        # Routing kernel expects #experts <= #threads 512
-        assert global_num_experts <= 512
-
-        # Kernel requires transposed hidden state scales
-        # TODO: fuse into the quant kernel.
-        assert a1q_scale is not None
-        a1q_scale_t = a1q_scale.t().contiguous()
+        is_mxfp8 = self.quant_config.block_shape == [1, 32]
+        if is_mxfp8:
+            fp8_quant_type = Fp8QuantizationType.MxFp8
+            use_shuffled_weight = True
+            hidden_states_scale = a1q_scale
+        else:
+            fp8_quant_type = Fp8QuantizationType.DeepSeekFp8
+            use_shuffled_weight = False
+            hidden_states_scale = a1q_scale.t().contiguous()
 
         return flashinfer.fused_moe.trtllm_fp8_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
-            hidden_states_scale=a1q_scale_t,
+            hidden_states_scale=hidden_states_scale,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale,
             gemm2_weights=w2,
@@ -218,7 +355,8 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
-            use_shuffled_weight=False,
+            use_shuffled_weight=use_shuffled_weight,
+            fp8_quantization_type=fp8_quant_type,
         )
 
     def _apply_per_tensor(
@@ -297,7 +435,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         topk_group: int | None = None,
     ) -> torch.Tensor:
         if self.quant_config.block_shape is not None:
-            return self._apply_per_block(
+            return self._apply_block_scale(
                 hidden_states,
                 w1,
                 w2,
@@ -329,6 +467,6 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
             )
         else:
             raise NotImplementedError(
-                "Only per-block and per-tensor quantization are supported in "
-                f"{self.__class__.__name__}."
+                "Only per-block, per-tensor, and MXFP8 quantization are "
+                f"supported in {self.__class__.__name__}."
             )
