@@ -246,6 +246,18 @@ class AttnNvfp4QuantPattern(
 
 
 class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
+    """
+    This pass fuses post-attention quantization onto attention if supported.
+
+    It uses the pattern matcher and matches each layer manually, as strings
+    cannot be wildcarded. This also lets us check support on attention layers
+    upon registration instead of during pattern matching.
+
+    Currently, only static fp8 quant is supported, but patterns could easily be
+    added for other quant schemes and dtypes. The bigger hurdle for wider
+    support are attention kernels, which need to support fusing output quant.
+    """
+
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "attn_quant_fusion_pass")
 
