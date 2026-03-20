@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from pydantic import ValidationError
 
 from vllm.compilation.counter import compilation_counter
@@ -14,6 +15,7 @@ from vllm.compilation.passes.utility.fix_functionalization import (
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
+    DeviceConfig,
     ParallelConfig,
     SchedulerConfig,
     VllmConfig,
@@ -26,6 +28,7 @@ from vllm.utils.torch_utils import (
     is_torch_equal,
 )
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.worker.utils import is_residual_scattered_for_sp
 
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
@@ -268,6 +271,75 @@ def test_splitting_ops_dynamic():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
 
+@pytest.mark.parametrize(
+    (
+        "use_inductor_graph_partition",
+        "splitting_ops",
+        "expected_sp_enabled",
+        "expected_residual_scattered",
+        "expected_num_compile_ranges",
+    ),
+    [
+        (False, None, False, False, 1),
+        (False, ["silly::attention"], False, False, 1),
+        (True, None, True, True, 2),
+    ],
+)
+def test_sp_requires_full_graph_compile(
+    mock_cuda_platform,
+    use_inductor_graph_partition: bool,
+    splitting_ops: list[str] | None,
+    expected_sp_enabled: bool,
+    expected_residual_scattered: bool,
+    expected_num_compile_ranges: int,
+):
+    if use_inductor_graph_partition and not _is_torch_equal_or_newer(
+        torch.__version__, "2.9.0.dev"
+    ):
+        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
+
+    with (
+        mock_cuda_platform(capability=(9, 0)) as mock_platform,
+        patch("vllm.config.parallel.cuda_device_count_stateless", return_value=2),
+    ):
+        mock_platform.device_type = "cuda"
+        mock_platform.is_cuda_alike.return_value = True
+        mock_platform.support_static_graph_mode.return_value = True
+
+        vllm_config = VllmConfig(
+            device_config=DeviceConfig(device="cuda"),
+            parallel_config=ParallelConfig(tensor_parallel_size=2),
+            scheduler_config=SchedulerConfig(
+                max_num_seqs=8,
+                max_num_batched_tokens=2048,
+                max_model_len=2048,
+                is_encoder_decoder=False,
+            ),
+            compilation_config=CompilationConfig(
+                splitting_ops=splitting_ops,
+                use_inductor_graph_partition=use_inductor_graph_partition,
+                pass_config=PassConfig(
+                    enable_sp=True,
+                    fuse_gemm_comms=True,
+                    fuse_allreduce_rms=False,
+                    sp_min_token_num=512,
+                ),
+                cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            ),
+        )
+
+    assert vllm_config.compilation_config.pass_config.enable_sp is expected_sp_enabled
+    assert (
+        vllm_config.compilation_config.pass_config.fuse_gemm_comms
+        is expected_sp_enabled
+    )
+    assert is_residual_scattered_for_sp(vllm_config, 2) is expected_residual_scattered
+    assert (
+        len(vllm_config.compilation_config.get_compile_ranges())
+        == expected_num_compile_ranges
+    )
+
+
 def test_moe_splitting_ops_deepep_ht_inductor_partition():
     # Inductor partition case: user-provided splitting_ops should be
     # preserved and MoE ops should be appended for DeepEP HT with dp>1.
@@ -363,37 +435,95 @@ def test_should_split():
         "max_cudagraph_capture_size",
         "tp_size",
         "enable_sp",
+        "use_inductor_graph_partition",
         "max_num_batched_tokens",
         "cudagraph_mode",
         "expected_max_size",
     ),
     [
-        (None, None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
-        ([1, 2, 4], 4, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
+        (None, None, 1, False, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
+        ([1, 2, 4], 4, 1, False, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
         (
             [1, 2, 4],
             8,
             1,
             False,
+            False,
             2048,
             CUDAGraphMode.FULL_AND_PIECEWISE,
             ValidationError,
         ),
-        ([1, 256], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
-        ([], None, 1, False, 2048, CUDAGraphMode.NONE, 0),
-        (None, 0, 1, False, 2048, CUDAGraphMode.NONE, 0),
+        (
+            [1, 256],
+            None,
+            1,
+            False,
+            False,
+            2048,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            256,
+        ),
+        ([], None, 1, False, False, 2048, CUDAGraphMode.NONE, 0),
+        (None, 0, 1, False, False, 2048, CUDAGraphMode.NONE, 0),
         # truncated to nearest multiple of 8 or 16
-        (None, 257, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
+        (None, 257, 1, False, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
         # max from list
-        ([1, 2, 4, 15], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
-        # filtered out 15 due to SP
-        ([1, 2, 4, 15], None, 2, True, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
+        (
+            [1, 2, 4, 15],
+            None,
+            1,
+            False,
+            False,
+            2048,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            15,
+        ),
+        # Piecewise compilation disables SP, so 15 remains valid.
+        (
+            [1, 2, 4, 15],
+            None,
+            2,
+            True,
+            False,
+            2048,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            15,
+        ),
+        # Full-graph SP still filters out capture sizes that would misalign shards.
+        (
+            [1, 2, 4, 15],
+            None,
+            2,
+            True,
+            True,
+            2048,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            4,
+        ),
         # limited by the max_tokens
-        ([1, 2, 4, 15], None, 1, False, 8, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
+        ([1, 2, 4, 15], None, 1, False, False, 8, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
         # the list should contain at least 1 element when use cudagraph
-        ([], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, ValidationError),
+        (
+            [],
+            None,
+            1,
+            False,
+            False,
+            2048,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            ValidationError,
+        ),
         # the max capturing size should be >= 1 when use cudagraph
-        (None, 0, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, ValidationError),
+        (
+            None,
+            0,
+            1,
+            False,
+            False,
+            2048,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            ValidationError,
+        ),
     ],
 )
 def test_cudagraph_sizes_post_init(
@@ -401,10 +531,16 @@ def test_cudagraph_sizes_post_init(
     max_cudagraph_capture_size,
     tp_size,
     enable_sp,
+    use_inductor_graph_partition,
     max_num_batched_tokens,
     cudagraph_mode,
     expected_max_size,
 ):
+    if use_inductor_graph_partition and not _is_torch_equal_or_newer(
+        torch.__version__, "2.9.0.dev"
+    ):
+        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
+
     ctx = nullcontext()
     if expected_max_size == ValidationError:
         ctx = pytest.raises(expected_max_size)
@@ -416,6 +552,7 @@ def test_cudagraph_sizes_post_init(
         compilation_config = CompilationConfig(
             cudagraph_capture_sizes=cudagraph_capture_sizes,
             max_cudagraph_capture_size=max_cudagraph_capture_size,
+            use_inductor_graph_partition=use_inductor_graph_partition,
             pass_config=PassConfig(
                 enable_sp=enable_sp,
                 fuse_norm_quant=True,

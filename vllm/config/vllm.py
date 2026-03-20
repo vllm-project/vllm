@@ -865,6 +865,15 @@ class VllmConfig:
                 logger.warning("Sequence Parallelism requires TP>1, disabling")
                 self.compilation_config.pass_config.enable_sp = False
                 self.compilation_config.pass_config.fuse_gemm_comms = False
+            elif self.compilation_config.uses_v1_piecewise_compile():
+                logger.warning_once(
+                    "Sequence Parallelism requires full-graph compilation. "
+                    "Disabling because the current config uses Dynamo "
+                    "piecewise compilation.",
+                    scope="local",
+                )
+                self.compilation_config.pass_config.enable_sp = False
+                self.compilation_config.pass_config.fuse_gemm_comms = False
             else:
                 # Compute SP threshold early; disable if None (model too
                 # small for SP to be beneficial).
@@ -1050,10 +1059,7 @@ class VllmConfig:
                     self.compilation_config.mode,
                 )
 
-            is_fullgraph = (
-                self.compilation_config.use_inductor_graph_partition
-                or len(self.compilation_config.splitting_ops) == 0
-            )
+            is_fullgraph = not self.compilation_config.uses_v1_piecewise_compile()
             if self.parallel_config.pipeline_parallel_size > 1 or not is_fullgraph:
                 if "-rms_norm" not in self.compilation_config.custom_ops:
                     self.compilation_config.custom_ops.append("+rms_norm")

@@ -987,8 +987,7 @@ class CompilationConfig:
         # NOTE: this function needs to be called only when mode is
         # CompilationMode.VLLM_COMPILE
         assert self.mode == CompilationMode.VLLM_COMPILE, (
-            "set_splitting_ops_for_v1 should only be called when "
-            "mode is CompilationMode.VLLM_COMPILE"
+            "set_splitting_ops_for_v1 should only be called when mode is "
         )
 
         if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
@@ -1083,6 +1082,24 @@ class CompilationConfig:
         return self.splitting_ops is not None and all(
             op in self.splitting_ops for op in self._attention_ops
         )
+
+    def uses_v1_piecewise_compile(self) -> bool:
+        """Return whether v1 will end up using Dynamo FX-level graph splitting.
+
+        This intentionally handles the common `splitting_ops=None` case before
+        `set_splitting_ops_for_v1()` has materialized the default attention
+        splitting ops.
+        """
+        if self.mode != CompilationMode.VLLM_COMPILE:
+            return False
+
+        if self.use_inductor_graph_partition:
+            return False
+
+        if self.splitting_ops is None:
+            return not self.pass_config.fuse_attn_quant
+
+        return len(self.splitting_ops) > 0
 
     def is_attention_compiled_piecewise(self) -> bool:
         if not self.splitting_ops_contain_attention():
