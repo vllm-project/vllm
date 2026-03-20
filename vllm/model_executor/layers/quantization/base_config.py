@@ -3,12 +3,12 @@
 
 import functools
 import inspect
-import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 else:
     QuantizationMethods = str
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 class QuantizeMethodBase(ABC):
