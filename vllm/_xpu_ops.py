@@ -161,6 +161,9 @@ class xpu_ops:
             # alibi_slopes = alibi_slopes,
             # softcap=softcap,
             return_softmax_lse=return_softmax_lse,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
 
     @staticmethod
