@@ -347,6 +347,15 @@ class Dashboard:
                 if count > 0:
                     self.mask = set(tuple(x) for x in experts)
                     self.show_mask = True
+                    # Fetch health to compute prune percentage
+                    self._fetch_health()
+                    url2 = f"http://{self.host}:{self.port}/riy/health"
+                    req2 = urllib.request.Request(url2)
+                    with urllib.request.urlopen(req2, timeout=2.0) as resp2:
+                        h = json.loads(resp2.read().decode())
+                        total = h.get("num_layers", 0) * h.get("num_experts", 0)
+                        if total > 0:
+                            self.prune_pct = int(count * 100 / total)
         except Exception:
             pass
 
@@ -801,11 +810,13 @@ class Dashboard:
                 # Show current prune level + estimated savings
                 expert_bytes = self._estimate_expert_bytes()
                 mask_count = len(self.mask)
-                if mask_count > 0 and expert_bytes > 0:
-                    savings_gb = mask_count * expert_bytes / (1024**3)
-                    prune_info = f"  ACTIVE: {self.prune_pct}% ({mask_count} exp, ~{savings_gb:.1f}GB)"
-                elif mask_count > 0:
-                    prune_info = f"  ACTIVE: {self.prune_pct}% ({mask_count} exp)"
+                if mask_count > 0:
+                    mask_pct = round(mask_count * 100 / max(len(stats.experts), 1))
+                    if expert_bytes > 0:
+                        savings_gb = mask_count * expert_bytes / (1024**3)
+                        prune_info = f"  ACTIVE: {mask_pct}% ({mask_count} exp, ~{savings_gb:.1f}GB)"
+                    else:
+                        prune_info = f"  ACTIVE: {mask_pct}% ({mask_count} exp)"
                 else:
                     prune_info = ""
                 prune_label = f" prunable: [{bar}] {pct*100:.0f}%{prune_info}"
