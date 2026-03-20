@@ -770,13 +770,18 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         if get_fi_ar_workspace(**workspace_kwargs) is None:
             logger.warning_once(
                 "Failed to initialize Flashinfer allreduce workspace. "
-                "Flashinfer allreduce fusion will be disabled."
+                "Flashinfer allreduce-norm fusion will be disabled."
             )
             return
 
         self.supports_quant_fusion = (
             get_fi_ar_quant_workspace(**workspace_kwargs) is not None
         )
+        if not self.supports_quant_fusion:
+            logger.warning_once(
+                "Failed to initialize Flashinfer allreduce workspace. "
+                "Flashinfer allreduce-norm-quant fusion will be disabled."
+            )
 
         self.allreduce_params = FlashInferFusedAllReduceParams(
             world_size=self.tp_size,
