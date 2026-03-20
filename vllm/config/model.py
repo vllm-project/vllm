@@ -1125,13 +1125,10 @@ class ModelConfig:
         # CoreEngine the scheduler will assign work to. TP>1 is
         # also not supported because this requires broadcasting
         # MM tensors between all TP ranks.
-        dp_size = parallel_config.data_parallel_size
-        tp_size = parallel_config.tensor_parallel_size
-        pp_size = parallel_config.pipeline_parallel_size
         if (
             self.multimodal_config is not None
             and self.multimodal_config.mm_tensor_ipc == "torch_shm"
-            and (dp_size > 1 or tp_size > 1 or pp_size > 1)
+            and parallel_config.world_size_across_dp > 1
         ):
             raise ValueError(
                 "mm_tensor_ipc='torch_shm' is not supported with "

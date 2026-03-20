@@ -1377,7 +1377,6 @@ class EngineCoreProc(EngineCore):
     ):
         """Input socket IO thread."""
 
-        # Create TensorIpcReceiver when queue is available.
         oob_tensor_provider: OOBTensorProvider | None = None
         if self.tensor_ipc_receiver is not None:
             oob_tensor_provider = self.tensor_ipc_receiver.recv_tensor

@@ -232,7 +232,6 @@ def encoder_request_context(
     # Set request context if this is an ADD request with a request_id
     if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
         sender.set_request_context(request.request_id)
-
     try:
         yield
     finally:
