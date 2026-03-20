@@ -104,6 +104,9 @@ def stream_api_response(audio_path: str, model: str, openai_api_base: str):
         ):
             if chunk:
                 data = chunk[len("data: ") :]
+                # For long audio files, we should only check for b"[DONE]",
+                # because they are split into multiple chunks, and each chunk
+                # has its own finish_reason.
                 if data == b"[DONE]":
                     break
                 data = json.loads(data.decode("utf-8"))
