@@ -398,6 +398,14 @@ class Worker(WorkerBase):
             if not self.model_config.enforce_eager and not current_platform.is_rocm():
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
+            measured_fragmentation = max(
+                0, int(profile_torch_reserved_peak - profile_torch_peak)
+            )
+            logger.info(
+                "Fragmentation profiling: selected=cold, value=%d MiB",
+                measured_fragmentation >> 20,
+            )
+
         # Use the pre-cudagraph torch peak to avoid double-counting.
         profile_result.torch_peak_increase = (
             profile_torch_peak - profile_result.before_profile.torch_peak
@@ -422,27 +430,19 @@ class Worker(WorkerBase):
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
-        # Measure caching allocator fragmentation: the gap between what
-        # PyTorch reserved from CUDA vs what it actually allocated.
-        # At runtime, fragmentation grows beyond profiling (freshly initialized
-        # allocator is best-case). Use 2x as safety factor, minimum 150 MiB.
-        measured_fragmentation = max(
-            0,
-            profile_torch_reserved_peak - profile_torch_peak,
-        )
+        # Fragmentation observed during profiling is typically lower than
+        # runtime steady state. Use a safety factor with a minimum floor.
+        fragmentation_multiplier = 2.0
         self.fragmentation_buffer = max(
             150 * (1 << 20),
-            int(measured_fragmentation * 2),
+            int(measured_fragmentation * fragmentation_multiplier),
         )
         fragmentation_buffer = self.fragmentation_buffer
         logger.info(
-            "Memory profiling: allocated_peak=%.2f MiB, "
-            "reserved_peak=%.2f MiB, "
-            "measured_fragmentation=%.2f MiB, "
+            "Memory profiling: fragmentation=%.2f MiB, multiplier=%.2f, "
             "fragmentation_buffer=%.2f MiB",
-            profile_torch_peak / (1 << 20),
-            profile_torch_reserved_peak / (1 << 20),
             measured_fragmentation / (1 << 20),
+            fragmentation_multiplier,
             fragmentation_buffer / (1 << 20),
         )
 
