@@ -447,12 +447,12 @@ def test_generate_block_hash_extra_keys():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 5, 0)
-    assert extra_keys == ("hash1",)
+    assert extra_keys == (("hash1", 0),)
     assert next_mm_idx == 1
 
     # Test with partial overlap
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 3, 8, 0)
-    assert extra_keys == ("hash1",)
+    assert extra_keys == (("hash1", -3),)
     assert next_mm_idx == 1
 
     # Test with no overlap
@@ -462,7 +462,7 @@ def test_generate_block_hash_extra_keys():
 
     # Test with multiple extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 15, 0)
-    assert extra_keys == ("hash1", "hash2")
+    assert extra_keys == (("hash1", 0), ("hash2", 10))
     assert next_mm_idx == 2
 
 
@@ -513,7 +513,7 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request_mm, 0, 5, 0)
-    assert extra_keys == ("hash1", "salt")
+    assert extra_keys == (("hash1", 0), "salt")
     assert next_mm_idx == 1
 
 
@@ -637,8 +637,10 @@ def test_request_block_hasher(hash_fn):
 
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
-    assert block_hashes[0] == hash_fn((kv_cache_utils.NONE_HASH, (0, 1, 2), ("hash1",)))
-    assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), ("hash2",)))
+    assert block_hashes[0] == hash_fn(
+        (kv_cache_utils.NONE_HASH, (0, 1, 2), (("hash1", 0),))
+    )
+    assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), (("hash2", 0),)))
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -1973,7 +1975,7 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            ("hash1", block1_embeds_hash),
+            (("hash1", 0), block1_embeds_hash),
         )
     )
     assert block_hashes[0] == expected_hash1
@@ -1985,7 +1987,7 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            ("hash2", block2_embeds_hash),
+            (("hash2", 0), block2_embeds_hash),
         )
     )
     assert block_hashes[1] == expected_hash2
