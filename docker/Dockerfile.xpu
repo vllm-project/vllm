@@ -76,19 +76,22 @@ ENV UV_LINK_MODE="copy"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
     --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
+    --mount=type=bind,src=requirements/xpu-test.in,target=/workspace/vllm/requirements/xpu-test.in \
     uv pip install --upgrade pip && \
-    uv pip install -r requirements/xpu.txt
-
- # used for suffix method speculative decoding
- # build deps for proto + nanobind-based extensions to set up the build environment
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install grpcio-tools protobuf nanobind
- # arctic-inference is built from source which needs torch-xpu properly installed first
-RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -r requirements/xpu.txt && \
+    uv pip compile /workspace/vllm/requirements/xpu-test.in \
+        -o /workspace/vllm/requirements/xpu-test.txt \
+        -c /workspace/vllm/requirements/xpu.txt \
+        --index-strategy unsafe-best-match \
+        --extra-index-url ${PIP_EXTRA_INDEX_URL} \
+        --python-version ${PYTHON_VERSION} && \
+    uv pip install grpcio-tools protobuf nanobind && \
     source /opt/intel/oneapi/setvars.sh --force && \
     source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force && \
-    export CMAKE_PREFIX_PATH="$(python -c 'import site; print(site.getsitepackages()[0])'):${CMAKE_PREFIX_PATH}" && \
-    uv pip install --no-build-isolation arctic-inference==0.1.1
+    export CMAKE_PREFIX_PATH="$(python3 -c 'import site; print(site.getsitepackages()[0])'):${CMAKE_PREFIX_PATH}" && \
+    uv pip install --no-build-isolation -r /workspace/vllm/requirements/xpu-test.txt
+
+
 
 ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
 

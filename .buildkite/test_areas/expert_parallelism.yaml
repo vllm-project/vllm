@@ -24,8 +24,7 @@ steps:
 
 - label: Elastic EP Scaling Test
   timeout_in_minutes: 20
-  device: b200
-  optional: true
+  device: h100
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
