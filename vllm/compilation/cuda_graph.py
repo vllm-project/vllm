@@ -181,6 +181,7 @@ class CUDAGraphWrapper:
         vllm_config: VllmConfig,
         runtime_mode: CUDAGraphMode,
         cudagraph_options: CUDAGraphOptions | None = None,
+        graph_pool: Any | None = None,
     ) -> None:
         self.runnable = runnable
         self.vllm_config = vllm_config
@@ -194,10 +195,17 @@ class CUDAGraphWrapper:
         # assert runtime_mode is not NONE(no cudagraph), otherwise, we don't
         # need to initialize a CUDAGraphWrapper.
         assert self.runtime_mode != CUDAGraphMode.NONE
+        # In production, all wrappers share the global pool so captured graphs
+        # can share memory. Pass an explicit graph_pool to use an isolated pool
+        # (e.g. in tests, to avoid stale pool handles across test runs).
         # TODO: in the future, if we want to use multiple
         # streams, it might not be safe to share a global pool.
         # only investigate this when we use multiple streams
-        self.graph_pool = current_platform.get_global_graph_pool()
+        self.graph_pool = (
+            graph_pool
+            if graph_pool is not None
+            else current_platform.get_global_graph_pool()
+        )
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
@@ -295,10 +303,7 @@ class CUDAGraphWrapper:
                         patch("torch.accelerator.empty_cache", lambda: None)
                     )
 
-                if self.graph_pool is not None:
-                    set_graph_pool_id(self.graph_pool)
-                else:
-                    set_graph_pool_id(current_platform.graph_pool_handle())
+                set_graph_pool_id(self.graph_pool)
 
                 # Sync offloader's copy stream before capture.
                 # Ensure any pre-capture prefetches from offloader are complete.
