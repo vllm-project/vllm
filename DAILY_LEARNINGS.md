@@ -673,3 +673,145 @@
 *Last updated: 2026-03-21 04:20 HKT*
 
 ---
+
+## 📊 2026-03-21 05:23 清晨检查（Cron 任务）
+
+### PR 状态确认
+
+| PR # | 标题 | 状态 | 评论 | 行动 |
+|------|------|------|------|------|
+| #37621 | [Bugfix] JAIS: Only apply ALiBi when position_embedding_type is alibi | open, blocked | 0 | 等待 CI |
+| #37578 | [Bugfix] Fix unclean shutdown from Ctrl-C with AR Fusion | open, blocked | 1 (bot) | 等待 CI |
+
+**评论详情：**
+- PR #37621：无评论，CI blocked 状态
+- PR #37578：仅 gemini-code-assist[bot] 评论（无法 review 文件类型），无需行动
+
+### 社区学习（昨日 merged PRs）
+
+| PR # | 标题 | 作者 | 学习点 |
+|------|------|------|--------|
+| #37711 | [ROCm][CI] Setting some mi325_4 tests back to optional | AndreasKaratzas | 已 merged，CI 配置调整 |
+| #37693 | [Model] Update Kimi-K25 and Isaac processors to fit HF-style | DarkLight1337 | 模型兼容性 |
+| #37685 | Fix attribute error in `isaac_patch_hf_runner` | hmellor | 核心贡献者，快速 merge |
+| #37683 | [Perf] Eliminate redundant SparseMatrix creation | xyang16 | 性能优化 |
+| #37681 | Fix various config related issues for Transformers v5 | hmellor | 批量修复相关问题 |
+
+**观察：**
+- 核心贡献者（hmellor, AndreasKaratzas, DarkLight1337）的 PR merge 较快
+- 标题格式：`[标签] 描述` 或直接描述问题
+- 改动专注：一个 PR 解决一类问题
+
+### izhuhaoran 动态（2026-03-20 至今）
+
+| PR # | 标题 | 状态 | 时间 |
+|------|------|------|------|
+| #37715 | [Bugfix] Mask padded rows for FlashInfer CUTLASS MoE | open | 21:11 UTC |
+| #37713 | Readability cleanup for wvSplitK reduces. | open | 20:50 UTC |
+| #37712 | Properly enable wvSplitK fp8 path for RDNA | open | 20:35 UTC |
+| #37711 | [ROCm][CI] Setting some mi325_4 tests back to optional | **merged** | 18:25 UTC |
+| #37706 | [Bugfix] Fix structured output crash on CPU due to pin_memory=True | open | 17:42 UTC |
+
+**学习点：**
+- izhuhaoran 昨天创建了 10+ 个 PR，其中 #37711 已 merged（第一个 merge！）
+- 领域覆盖：ROCm、CI、MoE、wvSplitK、CPU bugfix
+- PR 标题格式：`[标签] 描述` 或直接描述
+- **关键观察**：高产出贡献者也会等待 merge，不是一次性全部 merge
+
+### 今日计划（2026-03-21 周六）
+
+| 时间 | 任务 | 优先级 |
+|------|------|--------|
+| 09:00-10:00 | 检查 PR #37621 和 #37578 的 CI 结果 | 最高 |
+| 10:00-11:00 | 如 CI 通过，给 #37621 添加 `Fixes #37400` 关联 | 高 |
+| 11:00-12:00 | 研究候选 issue (#37223 Qwen3 ASR LoRA) | 中 |
+| 14:00-16:00 | 本地复现/测试，准备新 PR | 中 |
+| 16:00-17:00 | 如测试通过，提交第二个 PR | 中 |
+
+### 当前决策
+
+**状态：** 待机（非工作时段）
+
+| 检查项 | 结果 |
+|--------|------|
+| 当前时间 | 05:23 HKT（周六清晨）|
+| 工作时段 | ❌ 非工作时段 (9:00-18:00) |
+| 今日 PR 数 | 0/2（新的一天，上限重置）|
+| 维护者评论 | ✅ 无（无需回复）|
+| CI 状态 | ⏳ blocked |
+
+**行动：** 无新行动。等待 9:00 后工作时段再推进。
+
+---
+
+*Last updated: 2026-03-21 05:23 HKT*
+
+---
+
+## 📊 2026-03-21 06:28 清晨检查（Cron 任务）
+
+### PR 状态确认
+
+| PR # | 标题 | 状态 | 评论 | 行动 |
+|------|------|------|------|------|
+| #37621 | [Bugfix] JAIS: Only apply ALiBi when position_embedding_type is alibi | open | 0 | 等待维护者 review |
+| #37578 | [Bugfix] Fix unclean shutdown from Ctrl-C with AR Fusion | open | 1 (bot) | 等待维护者 review |
+
+**评论详情：**
+- PR #37621：无评论，创建约 30 小时
+- PR #37578：仅 gemini-code-assist[bot] 评论（无法 review 文件类型），创建约 2 天
+
+**观察：** 两个 PR 都还在等待首次维护者 review。这是正常现象 — vLLM 维护者需要时间 review 社区贡献。
+
+### 社区学习（最新 merged PRs）
+
+| PR # | 标题 | 作者 | 改动 | 学习点 |
+|------|------|------|------|--------|
+| #37711 | [ROCm][CI] Setting some mi325_4 tests back to optional | AndreasKaratzas | - | CI 配置，已 merged |
+| #37693 | [Model] Update Kimi-K25 and Isaac processors | DarkLight1337 | - | 模型兼容性更新 |
+| #37685 | Fix attribute error in `isaac_patch_hf_runner` | hmellor | +9/-4 | 核心贡献者，快速 merge |
+| #37683 | [Perf] Eliminate redundant SparseMatrix creation | xyang16 | - | 性能优化 |
+| #37681 | Fix various config related issues for Transformers v5 | hmellor | - | 批量修复相关问题 |
+
+**模式确认：**
+- 小改动（<20 行）merge 快
+- 标题带 `[标签]` 前缀清晰
+- 核心贡献者（hmellor, AndreasKaratzas, DarkLight1337）PR 流转快
+- 单次专注一类问题
+
+### izhuhaoran 动态
+
+昨天创建了 10+ PRs，#37711（ROCm CI 调整）已 merged。这是第一个 merge，说明：
+- 高产出也需要等待
+- CI/测试类 PR 容易先 merge
+- 不追求一次性全 merge
+
+### 今日计划（2026-03-21 周六）
+
+| 时间 | 任务 | 优先级 |
+|------|------|--------|
+| 09:00-10:00 | 检查 PR #37621 和 #37578 的 CI/review 状态 | 最高 |
+| 10:00-11:00 | 如有 maintainer 评论，准备回复 | 高 |
+| 11:00-12:00 | 研究 #37223（Qwen3 ASR LoRA）或新 good first issue | 中 |
+| 14:00-16:00 | 本地复现/测试，准备新 PR | 中 |
+| 16:00-17:00 | 如测试通过，提交第二个 PR（上限 2/天） | 中 |
+
+### 当前决策
+
+**状态：** 待机（非工作时段）
+
+| 检查项 | 结果 |
+|--------|------|
+| 当前时间 | 06:28 HKT（周六清晨）|
+| 工作时段 | ❌ 非工作时段 (9:00-18:00) |
+| 今日 PR 数 | 0/2（新的一天，上限重置）|
+| 维护者评论 | ✅ 无（无需回复）|
+| 需要行动 | ❌ 无 |
+
+**行动：** 继续等待。9:00 后开始工作时段检查。
+
+---
+
+*Last updated: 2026-03-21 06:28 HKT*
+
+---
