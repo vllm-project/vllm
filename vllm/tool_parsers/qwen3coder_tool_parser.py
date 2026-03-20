@@ -158,11 +158,15 @@ class Qwen3CoderToolParser(ToolParser):
         ):
             param_type = str(param_config[param_name]["type"]).strip().lower()
         elif isinstance(param_config[param_name], dict) and (
-            "anyOf" in param_config[param_name] or "$ref" in param_config[param_name]
+            "anyOf" in param_config[param_name]
         ):
-            # anyOf and $ref have no top-level "type"; treat as object to trigger
-            # json.loads.
+            # anyOf has no top-level "type"; treat as object to trigger json.loads.
             param_type = "object"
+        elif isinstance(param_config[param_name], dict) and (
+            "$ref" in param_config[param_name]
+        ):
+            # $ref has no type information at this level; treat it separately.
+            param_type = "$ref"
         else:
             param_type = "string"
         if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
@@ -214,6 +218,24 @@ class Qwen3CoderToolParser(ToolParser):
                     func_name,
                 )
             return param_value == "true"
+        elif param_type == "$ref":
+            # For $ref types, we don't have direct type information here.
+            # Attempt JSON parsing first, then fallback to string.
+            # We avoid ast.literal_eval for $ref types due to potential complexity and
+            # security concerns.
+            try:
+                param_value = json.loads(param_value)
+                return param_value
+            except (json.JSONDecodeError, TypeError, ValueError):
+                logger.debug(
+                    "Parsed value '%s' of parameter '%s' cannot be "
+                    "parsed with json.loads for $ref type in tool '%s', "
+                    "degenerating to string.",
+                    param_value,
+                    param_name,
+                    func_name,
+                )
+                return param_value
         else:
             if (
                 param_type in ["object", "array", "arr"]
