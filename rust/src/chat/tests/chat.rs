@@ -9,8 +9,8 @@ use futures::StreamExt as _;
 use tokio::time::timeout;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
-    ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
-    UserSamplingParams,
+    ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTextBackend, ChatTool,
+    ChatToolChoice, UserSamplingParams,
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
@@ -125,7 +125,7 @@ async fn setup_mock_engine(
     (dealer, push)
 }
 
-async fn connect_chat_llm(handshake_address: String, backend: Arc<dyn ChatBackend>) -> ChatLlm {
+async fn connect_chat_llm(handshake_address: String, backend: Arc<dyn ChatTextBackend>) -> ChatLlm {
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
         local_host: "127.0.0.1".to_string(),
@@ -134,7 +134,7 @@ async fn connect_chat_llm(handshake_address: String, backend: Arc<dyn ChatBacken
     })
     .await
     .unwrap();
-    ChatLlm::new(Llm::new(client), backend)
+    ChatLlm::from_shared_backend(Llm::new(client), backend)
 }
 
 #[derive(Clone)]
@@ -317,7 +317,7 @@ async fn chat_streams_text_events() {
         }
     });
 
-    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new());
+    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
     let chat = connect_chat_llm(handshake_address, backend).await;
 
     let mut stream = chat.chat(sample_request("chat-1")).await.unwrap();
@@ -406,7 +406,7 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
         }
     });
 
-    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new());
+    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
     let chat = connect_chat_llm(handshake_address, backend).await;
 
     let mut stream = chat.chat(sample_request("chat-utf8")).await.unwrap();
@@ -479,7 +479,7 @@ async fn chat_stream_flushes_held_text_on_finish() {
         }
     });
 
-    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new());
+    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
     let chat = connect_chat_llm(handshake_address, backend).await;
 
     let mut stream = chat.chat(sample_request("chat-final-flush")).await.unwrap();
@@ -570,7 +570,7 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
         }
     });
 
-    let backend: Arc<dyn ChatBackend> = Arc::new(FailingDecodeBackend {
+    let backend: Arc<dyn ChatTextBackend> = Arc::new(FailingDecodeBackend {
         inner: FakeChatBackend::new(),
     });
     let chat = connect_chat_llm(handshake_address, backend).await;
@@ -621,7 +621,7 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
         }
     });
 
-    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new());
+    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
     let chat = connect_chat_llm(handshake_address, backend).await;
 
     let mut request = sample_request("chat-include-stop");
@@ -716,7 +716,8 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
         }
     });
 
-    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
+    let backend: Arc<dyn ChatTextBackend> =
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
     let chat = connect_chat_llm(handshake_address, backend).await;
 
     let mut stream = chat.chat(sample_request("chat-reasoning")).await.unwrap();
@@ -826,7 +827,8 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
         }
     });
 
-    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
+    let backend: Arc<dyn ChatTextBackend> =
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
     let chat = connect_chat_llm(handshake_address.clone(), backend.clone()).await;
 
     let message = chat
@@ -890,7 +892,8 @@ async fn chat_stream_parses_tool_calls_automatically() {
         }
     });
 
-    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
+    let backend: Arc<dyn ChatTextBackend> =
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
     let chat = connect_chat_llm(handshake_address, backend).await;
     let mut stream = chat.chat(sample_tool_request("chat-tool")).await.unwrap();
 
@@ -981,7 +984,8 @@ async fn chat_stream_separates_reasoning_before_tool_calls() {
         }
     });
 
-    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
+    let backend: Arc<dyn ChatTextBackend> =
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
     let chat = connect_chat_llm(handshake_address, backend).await;
     let message = chat
         .chat(sample_tool_request("chat-reasoning-tool"))
@@ -1013,7 +1017,7 @@ async fn chat_rejects_tool_parsing_without_model_hint() {
         }
     });
 
-    let backend: Arc<dyn ChatBackend> = Arc::new(FakeChatBackend::new());
+    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
     let chat = connect_chat_llm(handshake_address, backend).await;
     let error = match chat.chat(sample_tool_request("chat-tool-no-model")).await {
         Ok(_) => panic!("tool parsing without model hint should fail"),

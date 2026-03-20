@@ -9,13 +9,15 @@
 //! structured reasoning and final-answer blocks. It is closer to vLLM's internal chat-rendering
 //! flow than to a full OpenAI-compatible surface.
 
-pub use backend::{ChatBackend, DynChatBackend, SamplingHints};
+pub use backend::{
+    ChatBackend, ChatTextBackend, DynChatBackend, DynChatTextBackend, SamplingHints,
+};
 pub use error::{Error, Result};
 pub use event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantMessageExt,
     AssistantToolCall, ChatEvent,
 };
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt as _};
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
     ChatToolChoice, UserSamplingParams,
@@ -26,16 +28,15 @@ mod backend;
 pub mod backends;
 mod error;
 mod event;
-mod lower;
 mod output;
 mod request;
 mod stream;
 mod template;
 
-use lower::lower_chat_request;
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use tool_parser::ParserFactory as ToolParserFactory;
 use vllm_llm::Llm;
+use vllm_text::{Prompt, TextLlm, TextRequest};
 
 /// Chat facade with a text-first request model layered above [`vllm_llm::Llm`].
 ///
@@ -43,7 +44,7 @@ use vllm_llm::Llm;
 /// `messages -> rendered prompt -> tokenized prompt -> engine request -> streamed structured
 /// assistant events`.
 pub struct ChatLlm {
-    llm: Llm,
+    text: TextLlm,
     backend: DynChatBackend,
     reasoning_parser_factory: ReasoningParserFactory,
     tool_parser_factory: ToolParserFactory,
@@ -51,22 +52,26 @@ pub struct ChatLlm {
     tool_call_parser: Option<String>,
     /// Explicit reasoning parser name override (bypasses model-based auto-detection).
     reasoning_parser: Option<String>,
-    /// Explicit override for the maximum model context length.
-    max_model_len: Option<u32>,
 }
 
 impl ChatLlm {
-    /// Create a new chat facade from an LLM client plus a chat backend.
-    pub fn new(llm: Llm, backend: DynChatBackend) -> Self {
+    /// Create a new chat facade from a text-generation facade plus a chat backend.
+    pub fn new(text: TextLlm, backend: DynChatBackend) -> Self {
         Self {
-            llm,
+            text,
             backend,
             reasoning_parser_factory: ReasoningParserFactory::new(),
             tool_parser_factory: ToolParserFactory::new(),
             tool_call_parser: None,
             reasoning_parser: None,
-            max_model_len: None,
         }
+    }
+
+    /// Convenience constructor for one shared backend object that implements both text and chat
+    /// responsibilities.
+    pub fn from_shared_backend(llm: Llm, backend: DynChatTextBackend) -> Self {
+        let text = TextLlm::new(llm, backend.clone());
+        Self::new(text, backend)
     }
 
     /// Set an explicit tool call parser name, bypassing model-based auto-detection.
@@ -81,33 +86,32 @@ impl ChatLlm {
         self
     }
 
-    /// Override the maximum model context length, taking priority over the backend's
-    /// `max_position_embeddings` from `config.json`.
-    pub fn with_max_model_len(mut self, max_model_len: u32) -> Self {
-        self.max_model_len = Some(max_model_len);
-        self
+    /// Expose the underlying text facade for raw text-generation routes such as `/v1/completions`.
+    pub fn text(&self) -> &TextLlm {
+        &self.text
+    }
+
+    /// Return the model ID reported by the underlying text backend when available.
+    pub fn model_id(&self) -> Option<&str> {
+        self.text.model_id()
     }
 
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
         request.validate()?;
 
-        let model_id = self.backend.model_id();
-
         let prompt = self.backend.apply_chat_template(&request)?;
-        let prompt_token_ids = self.backend.encode(&prompt)?;
-        let mut sampling_hints = self.backend.sampling_hints()?;
-        if let Some(max_model_len) = self.max_model_len {
-            sampling_hints.max_model_len = Some(max_model_len);
-        }
-        let prepared = lower_chat_request(request, prompt_token_ids, sampling_hints)?;
-
-        let raw_stream = self.llm.generate(prepared.generate_request).await?;
+        let text_request = TextRequest {
+            request_id: request.request_id.clone(),
+            prompt: Prompt::Text(prompt),
+            sampling_params: request.sampling_params.clone(),
+            decode_options: request.decode_options.clone(),
+        };
+        let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from);
         let structured_stream = output::output_stream(
-            prepared.chat_request.clone(),
-            self.backend.clone(),
-            raw_stream,
-            model_id,
+            request.clone(),
+            decoded_stream,
+            self.text.model_id(),
             &self.reasoning_parser_factory,
             &self.tool_parser_factory,
             self.reasoning_parser.as_deref(),
@@ -115,20 +119,20 @@ impl ChatLlm {
         )?;
 
         Ok(ChatEventStream::new(
-            prepared.chat_request.request_id.clone(),
+            request.request_id.clone(),
             structured_stream.boxed(),
         ))
     }
 
     /// Abort one in-flight chat request by request ID.
     pub async fn abort(&self, request_id: &str) -> Result<()> {
-        self.llm.abort(request_id).await?;
+        self.text.abort(request_id).await?;
         Ok(())
     }
 
     /// Shut down the underlying LLM client and its background tasks.
     pub async fn shutdown(self) -> Result<()> {
-        self.llm.shutdown().await?;
+        self.text.shutdown().await?;
         Ok(())
     }
 }

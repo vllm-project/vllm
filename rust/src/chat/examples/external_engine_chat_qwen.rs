@@ -11,6 +11,8 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
+use vllm_text::TextLlm;
+use vllm_text::backends::hf::HfTextBackend;
 
 #[derive(Debug, Parser)]
 #[command(about = "Smoke-test the Rust chat facade against an external Qwen vLLM engine.")]
@@ -44,9 +46,13 @@ fn init_tracing() {
 async fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
-    let backend = std::sync::Arc::new(
-        HfChatBackend::from_model(&args.model)
+    let text_backend = std::sync::Arc::new(
+        HfTextBackend::from_model(&args.model)
             .await
+            .with_context(|| format!("failed to load text backend for {}", args.model))?,
+    );
+    let backend = std::sync::Arc::new(
+        HfChatBackend::from_text_backend((*text_backend).clone())
             .with_context(|| format!("failed to load chat backend for {}", args.model))?,
     );
 
@@ -72,7 +78,7 @@ async fn main() -> Result<()> {
     println!("ready_message={:?}", client.ready_message);
 
     let llm = Llm::new(client);
-    let chat = ChatLlm::new(llm, backend);
+    let chat = ChatLlm::new(TextLlm::new(llm, text_backend), backend);
 
     let request = ChatRequest {
         request_id: request_id.clone(),

@@ -4267,6 +4267,7 @@ name = "vllm-text"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "expect-test",
  "fastokens",
  "futures",
  "futures-async-stream",
@@ -4277,6 +4278,7 @@ dependencies = [
  "thiserror 2.0.18",
  "thiserror-ext",
  "tokenizers",
+ "tokio",
  "tracing",
  "uuid",
  "vllm-engine-core-client",

@@ -2,8 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use tracing::info;
+use vllm_text::TextBackend;
 use vllm_text::backends::hf::HfTextBackend;
-use vllm_text::{SamplingHints, TextBackend};
 
 use crate::backend::ChatBackend;
 use crate::error::Result;
@@ -17,7 +17,6 @@ pub struct HfChatBackend {
 }
 
 struct HfChatBackendInner {
-    text_backend: HfTextBackend,
     chat_template: ChatTemplate,
 }
 
@@ -51,32 +50,8 @@ impl HfChatBackend {
         );
 
         Ok(Self {
-            inner: Arc::new(HfChatBackendInner {
-                text_backend,
-                chat_template,
-            }),
+            inner: Arc::new(HfChatBackendInner { chat_template }),
         })
-    }
-}
-
-/// Delegate text encoding/decoding to the text backend.
-impl TextBackend for HfChatBackend {
-    fn encode(&self, text: &str) -> vllm_text::Result<Vec<u32>> {
-        self.inner.text_backend.encode(text)
-    }
-
-    fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> vllm_text::Result<String> {
-        self.inner
-            .text_backend
-            .decode(token_ids, skip_special_tokens)
-    }
-
-    fn model_id(&self) -> Option<&str> {
-        self.inner.text_backend.model_id()
-    }
-
-    fn sampling_hints(&self) -> vllm_text::Result<SamplingHints> {
-        self.inner.text_backend.sampling_hints()
     }
 }
 

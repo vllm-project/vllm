@@ -2,10 +2,6 @@
 #![feature(iterator_try_collect)]
 
 //! Minimal OpenAI-compatible HTTP server above [`vllm_chat`].
-//!
-//! This crate keeps the northbound surface intentionally narrow:
-//! one configured model, `GET /v1/models`, and streaming
-//! `POST /v1/chat/completions`.
 
 mod config;
 mod convert;
@@ -23,6 +19,7 @@ use vllm_chat::ChatLlm;
 use vllm_chat::backends::hf::HfChatBackend;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
+use vllm_text::TextLlm;
 use vllm_text::backends::hf::HfTextBackend;
 
 use crate::routes::build_router;
@@ -30,8 +27,10 @@ use crate::state::AppState;
 
 /// Build the shared application state for one configured model and one engine client.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
-    let text_backend = HfTextBackend::from_model(&config.model).await?;
-    let backend = Arc::new(HfChatBackend::from_text_backend(text_backend)?);
+    let text_backend = Arc::new(HfTextBackend::from_model(&config.model).await?);
+    // Build chat on top of the already loaded text backend so tokenizer/model metadata stay
+    // shared between raw completions and chat requests.
+    let backend = Arc::new(HfChatBackend::from_text_backend((*text_backend).clone())?);
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address: config.handshake_address.clone(),
         local_host: config.engine_local_host.clone(),
@@ -40,23 +39,26 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     })
     .await?;
 
-    let mut chat = ChatLlm::new(Llm::new(client), backend);
+    let mut text = TextLlm::new(Llm::new(client), text_backend);
+    if let Some(max_model_len) = config.max_model_len {
+        text = text.with_max_model_len(max_model_len);
+    }
+
+    let mut chat = ChatLlm::new(text, backend);
     if let Some(ref name) = config.tool_call_parser {
         chat = chat.with_tool_call_parser(name);
     }
     if let Some(ref name) = config.reasoning_parser {
         chat = chat.with_reasoning_parser(name);
     }
-    if let Some(max_model_len) = config.max_model_len {
-        chat = chat.with_max_model_len(max_model_len);
-    }
-    let chat = Arc::new(chat);
+
     Ok(Arc::new(AppState::new(config.model.clone(), chat)))
 }
 
 /// Run the OpenAI-compatible HTTP server until the supplied shutdown future resolves.
 ///
-/// The server owns one `vllm-chat` stack and shuts it down before returning.
+/// The server owns one `vllm-chat` facade, which in turn owns the lower `vllm-text` and
+/// `vllm-llm` layers, and shuts them down before returning.
 pub async fn serve<F>(config: Config, shutdown: F) -> Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,

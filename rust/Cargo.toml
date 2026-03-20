@@ -59,6 +59,7 @@ tower-http = { version = "0.6.8", features = ["trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 uuid = { version = "1.22.0", features = ["v4"] }
+validator = { version = "0.20.0", features = ["derive"] }
 vllm-chat = { path = "src/chat" }
 vllm-engine-core-client = { path = "src/engine-core-client" }
 vllm-llm = { path = "src/llm" }

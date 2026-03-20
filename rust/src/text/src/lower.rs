@@ -5,39 +5,30 @@ use vllm_llm::GenerateRequest;
 
 use crate::backend::SamplingHints;
 use crate::error::{Error, Result};
-use crate::request::{ChatRequest, UserSamplingParams};
+use crate::request::{TextRequest, UserSamplingParams};
 
+/// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
-pub(crate) struct PreparedChatRequest {
-    pub chat_request: ChatRequest,
+pub struct PreparedTextRequest {
+    /// The original high-level request, preserved for response-side metadata and decoding options.
+    pub text_request: TextRequest,
+    /// The southbound request ready to be sent to `vllm-llm`.
     pub generate_request: GenerateRequest,
 }
 
-/// Convert a high-level [`ChatRequest`] into a lower-level [`GenerateRequest`] ready to be sent to
-/// the `llm` crate, enriching the user sampling parameters with tokenizer/model-derived hints from
-/// the chat backend as needed.
-pub(crate) fn lower_chat_request(
-    request: ChatRequest,
+/// Convert a high-level [`TextRequest`] into one lower-level [`GenerateRequest`] ready for the
+/// `llm` crate.
+pub fn lower_text_request(
+    request: TextRequest,
     prompt_token_ids: Vec<u32>,
     sampling_hints: SamplingHints,
-) -> Result<PreparedChatRequest> {
-    let ChatRequest {
-        request_id,
-        messages: _,
-        sampling_params,
-        chat_options: _,
-        tools: _,
-        tool_choice: _,
-        decode_options: _,
-    } = &request;
-
+) -> Result<PreparedTextRequest> {
     let prompt_len = prompt_token_ids.len() as u32;
-
     let generate_request = GenerateRequest {
-        request_id: request_id.clone(),
+        request_id: request.request_id.clone(),
         prompt_token_ids,
         sampling_params: lower_sampling_params(
-            sampling_params.clone(),
+            request.sampling_params.clone(),
             sampling_hints,
             prompt_len,
         )?,
@@ -51,15 +42,15 @@ pub(crate) fn lower_chat_request(
         lora_request: None,
     };
 
-    Ok(PreparedChatRequest {
-        chat_request: request.clone(),
+    Ok(PreparedTextRequest {
+        text_request: request,
         generate_request,
     })
 }
 
-/// Convert [`UserSamplingParams`] to the lower-level [`EngineCoreSamplingParams`] with the given
-/// context from the chat backend.
-fn lower_sampling_params(
+/// Convert [`UserSamplingParams`] into engine-core sampling params, enriching omitted user values
+/// with tokenizer/model-derived hints when available.
+pub fn lower_sampling_params(
     sampling_params: UserSamplingParams,
     SamplingHints {
         primary_eos_token_id,
@@ -99,13 +90,11 @@ fn lower_sampling_params(
         .or(default_repetition_penalty)
         .unwrap_or(1.0);
     let max_tokens = resolve_max_tokens(max_tokens, default_max_tokens, max_model_len, prompt_len)?;
-
     let min_tokens = min_tokens.unwrap_or(0);
     let frequency_penalty = frequency_penalty.unwrap_or(0.0);
     let presence_penalty = presence_penalty.unwrap_or(0.0);
 
     let mut stop_token_ids = stop_token_ids.unwrap_or_default();
-
     let mut all_stop_token_ids = BTreeSet::from_iter(stop_token_ids.iter().copied());
     if let Some(primary_eos_token_id) = primary_eos_token_id {
         all_stop_token_ids.insert(primary_eos_token_id);
@@ -140,7 +129,7 @@ fn lower_sampling_params(
 /// Takes the minimum of all available limits (user-specified, generation-config default, and
 /// `max_model_len - prompt_len`). When nothing is known, falls back to `u32::MAX` so the
 /// engine-core can apply its own context-window limit.
-fn resolve_max_tokens(
+pub fn resolve_max_tokens(
     user_max_tokens: Option<u32>,
     default_max_tokens: Option<u32>,
     max_model_len: Option<u32>,
@@ -158,7 +147,6 @@ fn resolve_max_tokens(
     };
 
     let fallback_max_tokens = user_max_tokens.or(default_max_tokens);
-
     Ok([fallback_max_tokens, model_max_tokens]
         .into_iter()
         .flatten()
@@ -170,6 +158,7 @@ fn merge_unique_token_ids(
     stop_token_ids: &mut Vec<u32>,
     extra_token_ids: impl Iterator<Item = u32>,
 ) {
+    // Keep user-provided ordering stable while still folding in backend-derived EOS aliases.
     for token_id in extra_token_ids {
         if !stop_token_ids.contains(&token_id) {
             stop_token_ids.push(token_id);
@@ -181,21 +170,16 @@ fn merge_unique_token_ids(
 mod tests {
     use std::collections::BTreeSet;
 
-    use vllm_text::TextBackend as _;
-
     use super::*;
-    use crate::backend::SamplingHints;
-    use crate::backends::hf::HfChatBackend;
-    use crate::request::{ChatOptions, ChatRequest, ChatToolChoice, UserSamplingParams};
+    use crate::backend::{SamplingHints, TextBackend as _};
+    use crate::backends::hf::HfTextBackend;
+    use crate::request::{Prompt, TextRequest};
 
-    fn sample_request() -> ChatRequest {
-        ChatRequest {
-            request_id: "chat-1".to_string(),
-            messages: vec![],
+    fn sample_request() -> TextRequest {
+        TextRequest {
+            request_id: "text-1".to_string(),
+            prompt: Prompt::TokenIds(vec![1, 2, 3]),
             sampling_params: UserSamplingParams::default(),
-            chat_options: ChatOptions::default(),
-            tools: Vec::new(),
-            tool_choice: ChatToolChoice::None,
             decode_options: Default::default(),
         }
     }
@@ -215,9 +199,9 @@ mod tests {
     }
 
     #[test]
-    fn lower_chat_request_applies_python_style_eos_hints() {
+    fn lower_text_request_applies_python_style_eos_hints() {
         let prepared =
-            lower_chat_request(sample_request(), vec![1, 2, 3], sample_sampling_hints()).unwrap();
+            lower_text_request(sample_request(), vec![1, 2, 3], sample_sampling_hints()).unwrap();
 
         let params = prepared.generate_request.sampling_params;
         expect_test::expect![[r#"
@@ -249,11 +233,11 @@ mod tests {
     }
 
     #[test]
-    fn lower_chat_request_respects_ignore_eos_for_stop_token_ids() {
+    fn lower_text_request_respects_ignore_eos_for_stop_token_ids() {
         let mut request = sample_request();
         request.sampling_params.ignore_eos = true;
 
-        let prepared = lower_chat_request(request, vec![1, 2, 3], sample_sampling_hints()).unwrap();
+        let prepared = lower_text_request(request, vec![1, 2, 3], sample_sampling_hints()).unwrap();
 
         let params = prepared.generate_request.sampling_params;
         expect_test::expect![[r#"
@@ -278,222 +262,12 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
-    }
-
-    #[test]
-    fn lower_chat_request_preserves_explicit_stop_token_ids_in_all_stop_set() {
-        let mut request = sample_request();
-        request.sampling_params.stop_token_ids = Some(vec![11, 77]);
-
-        let prepared = lower_chat_request(
-            request,
-            vec![1, 2, 3],
-            SamplingHints {
-                primary_eos_token_id: Some(99),
-                extra_eos_token_ids: BTreeSet::from([77, 88]),
-                default_temperature: None,
-                default_top_p: None,
-                default_top_k: None,
-                default_min_p: None,
-                default_repetition_penalty: None,
-                default_max_tokens: None,
-                max_model_len: None,
-            },
-        )
-        .unwrap();
-
-        let params = prepared.generate_request.sampling_params;
-        expect_test::expect![[r#"
-            EngineCoreSamplingParams {
-                temperature: 1.0,
-                top_p: 1.0,
-                top_k: 0,
-                seed: None,
-                max_tokens: 4294967295,
-                min_tokens: 0,
-                min_p: 0.0,
-                frequency_penalty: 0.0,
-                presence_penalty: 0.0,
-                repetition_penalty: 1.0,
-                stop_token_ids: [
-                    11,
-                    77,
-                    88,
-                ],
-                eos_token_id: Some(
-                    99,
-                ),
-                all_stop_token_ids: {
-                    11,
-                    77,
-                    88,
-                    99,
-                },
-                output_kind: Delta,
-            }
-        "#]]
-        .assert_debug_eq(&params);
-    }
-
-    #[test]
-    fn lower_chat_request_prefers_user_values_over_generation_defaults() {
-        let mut request = sample_request();
-        request.sampling_params.temperature = Some(0.2);
-        request.sampling_params.top_p = Some(0.3);
-        request.sampling_params.top_k = Some(4);
-        request.sampling_params.max_tokens = Some(32);
-        request.sampling_params.min_tokens = Some(2);
-
-        let prepared = lower_chat_request(
-            request,
-            vec![1, 2, 3],
-            SamplingHints {
-                primary_eos_token_id: None,
-                extra_eos_token_ids: BTreeSet::new(),
-                default_temperature: Some(0.8),
-                default_top_p: Some(0.9),
-                default_top_k: Some(12),
-                default_min_p: Some(0.1),
-                default_repetition_penalty: Some(1.2),
-                default_max_tokens: Some(128),
-                max_model_len: None,
-            },
-        )
-        .unwrap();
-
-        let params = prepared.generate_request.sampling_params;
-        expect_test::expect![[r#"
-            EngineCoreSamplingParams {
-                temperature: 0.2,
-                top_p: 0.3,
-                top_k: 4,
-                seed: None,
-                max_tokens: 32,
-                min_tokens: 2,
-                min_p: 0.1,
-                frequency_penalty: 0.0,
-                presence_penalty: 0.0,
-                repetition_penalty: 1.2,
-                stop_token_ids: [],
-                eos_token_id: None,
-                all_stop_token_ids: {},
-                output_kind: Delta,
-            }
-        "#]]
-        .assert_debug_eq(&params);
-    }
-
-    #[test]
-    fn lower_chat_request_uses_generation_defaults_when_user_omits_values() {
-        let prepared = lower_chat_request(
-            sample_request(),
-            vec![1, 2, 3],
-            SamplingHints {
-                primary_eos_token_id: None,
-                extra_eos_token_ids: BTreeSet::new(),
-                default_temperature: Some(0.8),
-                default_top_p: Some(0.9),
-                default_top_k: Some(12),
-                default_min_p: Some(0.1),
-                default_repetition_penalty: Some(1.2),
-                default_max_tokens: Some(128),
-                max_model_len: None,
-            },
-        )
-        .unwrap();
-
-        let params = prepared.generate_request.sampling_params;
-        expect_test::expect![[r#"
-            EngineCoreSamplingParams {
-                temperature: 0.8,
-                top_p: 0.9,
-                top_k: 12,
-                seed: None,
-                max_tokens: 128,
-                min_tokens: 0,
-                min_p: 0.1,
-                frequency_penalty: 0.0,
-                presence_penalty: 0.0,
-                repetition_penalty: 1.2,
-                stop_token_ids: [],
-                eos_token_id: None,
-                all_stop_token_ids: {},
-                output_kind: Delta,
-            }
-        "#]]
-        .assert_debug_eq(&params);
-    }
-
-    #[test]
-    fn resolve_max_tokens_caps_by_model_len() {
-        // prompt_len=100, max_model_len=200 → model_max_tokens=100; user asks for 150 → capped to
-        // 100.
-        let result = resolve_max_tokens(Some(150), None, Some(200), 100);
-        assert_eq!(result.unwrap(), 100);
-    }
-
-    #[test]
-    fn resolve_max_tokens_user_smaller_than_model_limit() {
-        // prompt_len=100, max_model_len=200 → model_max_tokens=100; user asks for 50 → keeps 50.
-        let result = resolve_max_tokens(Some(50), None, Some(200), 100);
-        assert_eq!(result.unwrap(), 50);
-    }
-
-    #[test]
-    fn resolve_max_tokens_uses_default_when_user_omits() {
-        // No user value, default=64, max_model_len=200, prompt_len=100 → min(64, 100) = 64.
-        let result = resolve_max_tokens(None, Some(64), Some(200), 100);
-        assert_eq!(result.unwrap(), 64);
-    }
-
-    #[test]
-    fn resolve_max_tokens_default_capped_by_model_len() {
-        // No user value, default=256, max_model_len=200, prompt_len=100 → min(256, 100) = 100.
-        let result = resolve_max_tokens(None, Some(256), Some(200), 100);
-        assert_eq!(result.unwrap(), 100);
-    }
-
-    #[test]
-    fn resolve_max_tokens_no_model_len_falls_back() {
-        // No max_model_len → no capping, just use user or default.
-        let result = resolve_max_tokens(Some(9999), None, None, 100);
-        assert_eq!(result.unwrap(), 9999);
-    }
-
-    #[test]
-    fn resolve_max_tokens_no_limits_known_falls_back_to_u32_max() {
-        let result = resolve_max_tokens(None, None, None, 100);
-        assert_eq!(result.unwrap(), u32::MAX);
-    }
-
-    #[test]
-    fn resolve_max_tokens_prompt_too_long() {
-        let result = resolve_max_tokens(Some(10), None, Some(100), 100);
-        assert!(matches!(
-            result,
-            Err(Error::PromptTooLong {
-                max_model_len: 100,
-                prompt_len: 100,
-            })
-        ));
-    }
-
-    #[test]
-    fn resolve_max_tokens_prompt_exceeds_model_len() {
-        let result = resolve_max_tokens(Some(10), None, Some(100), 200);
-        assert!(matches!(
-            result,
-            Err(Error::PromptTooLong {
-                max_model_len: 100,
-                prompt_len: 200,
-            })
-        ));
     }
 
     #[tokio::test]
     #[ignore = "requires network access to Hugging Face"]
-    async fn lower_chat_request_uses_real_qwen_generation_defaults() {
-        let backend = HfChatBackend::from_model("Qwen/Qwen3-0.6B")
+    async fn lower_text_request_uses_real_qwen_generation_defaults() {
+        let backend = HfTextBackend::from_model("Qwen/Qwen3-0.6B")
             .await
             .expect("load qwen tokenizer and generation config");
         let hints = backend.sampling_hints().expect("collect sampling hints");
@@ -530,7 +304,7 @@ mod tests {
         .assert_debug_eq(&hints);
 
         let prepared =
-            lower_chat_request(sample_request(), vec![1, 2, 3], hints).expect("lower request");
+            lower_text_request(sample_request(), vec![1, 2, 3], hints).expect("lower request");
         let params = prepared.generate_request.sampling_params;
 
         expect_test::expect![[r#"
@@ -559,5 +333,208 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
+    }
+
+    #[test]
+    fn lower_sampling_params_preserves_explicit_stop_token_ids_in_all_stop_set() {
+        let mut sampling_params = UserSamplingParams::default();
+        sampling_params.stop_token_ids = Some(vec![11, 77]);
+
+        let params = lower_sampling_params(
+            sampling_params,
+            SamplingHints {
+                primary_eos_token_id: Some(99),
+                extra_eos_token_ids: BTreeSet::from([77, 88]),
+                default_temperature: None,
+                default_top_p: None,
+                default_top_k: None,
+                default_min_p: None,
+                default_repetition_penalty: None,
+                default_max_tokens: None,
+                max_model_len: None,
+            },
+            3,
+        )
+        .unwrap();
+
+        expect_test::expect![[r#"
+            EngineCoreSamplingParams {
+                temperature: 1.0,
+                top_p: 1.0,
+                top_k: 0,
+                seed: None,
+                max_tokens: 4294967295,
+                min_tokens: 0,
+                min_p: 0.0,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+                repetition_penalty: 1.0,
+                stop_token_ids: [
+                    11,
+                    77,
+                    88,
+                ],
+                eos_token_id: Some(
+                    99,
+                ),
+                all_stop_token_ids: {
+                    11,
+                    77,
+                    88,
+                    99,
+                },
+                output_kind: Delta,
+            }
+        "#]]
+        .assert_debug_eq(&params);
+    }
+
+    #[test]
+    fn lower_sampling_params_prefers_user_values_over_generation_defaults() {
+        let sampling_params = UserSamplingParams {
+            temperature: Some(0.2),
+            top_p: Some(0.3),
+            top_k: Some(4),
+            max_tokens: Some(32),
+            min_tokens: Some(2),
+            ..Default::default()
+        };
+
+        let params = lower_sampling_params(
+            sampling_params,
+            SamplingHints {
+                primary_eos_token_id: None,
+                extra_eos_token_ids: BTreeSet::new(),
+                default_temperature: Some(0.8),
+                default_top_p: Some(0.9),
+                default_top_k: Some(12),
+                default_min_p: Some(0.1),
+                default_repetition_penalty: Some(1.2),
+                default_max_tokens: Some(128),
+                max_model_len: None,
+            },
+            3,
+        )
+        .unwrap();
+
+        expect_test::expect![[r#"
+            EngineCoreSamplingParams {
+                temperature: 0.2,
+                top_p: 0.3,
+                top_k: 4,
+                seed: None,
+                max_tokens: 32,
+                min_tokens: 2,
+                min_p: 0.1,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+                repetition_penalty: 1.2,
+                stop_token_ids: [],
+                eos_token_id: None,
+                all_stop_token_ids: {},
+                output_kind: Delta,
+            }
+        "#]]
+        .assert_debug_eq(&params);
+    }
+
+    #[test]
+    fn lower_sampling_params_uses_generation_defaults_when_user_omits_values() {
+        let params = lower_sampling_params(
+            UserSamplingParams::default(),
+            SamplingHints {
+                primary_eos_token_id: None,
+                extra_eos_token_ids: BTreeSet::new(),
+                default_temperature: Some(0.8),
+                default_top_p: Some(0.9),
+                default_top_k: Some(12),
+                default_min_p: Some(0.1),
+                default_repetition_penalty: Some(1.2),
+                default_max_tokens: Some(128),
+                max_model_len: None,
+            },
+            3,
+        )
+        .unwrap();
+
+        expect_test::expect![[r#"
+            EngineCoreSamplingParams {
+                temperature: 0.8,
+                top_p: 0.9,
+                top_k: 12,
+                seed: None,
+                max_tokens: 128,
+                min_tokens: 0,
+                min_p: 0.1,
+                frequency_penalty: 0.0,
+                presence_penalty: 0.0,
+                repetition_penalty: 1.2,
+                stop_token_ids: [],
+                eos_token_id: None,
+                all_stop_token_ids: {},
+                output_kind: Delta,
+            }
+        "#]]
+        .assert_debug_eq(&params);
+    }
+
+    #[test]
+    fn resolve_max_tokens_caps_by_model_len() {
+        let result = resolve_max_tokens(Some(150), None, Some(200), 100);
+        assert_eq!(result.unwrap(), 100);
+    }
+
+    #[test]
+    fn resolve_max_tokens_user_smaller_than_model_limit() {
+        let result = resolve_max_tokens(Some(50), None, Some(200), 100);
+        assert_eq!(result.unwrap(), 50);
+    }
+
+    #[test]
+    fn resolve_max_tokens_uses_default_when_user_omits() {
+        let result = resolve_max_tokens(None, Some(64), Some(200), 100);
+        assert_eq!(result.unwrap(), 64);
+    }
+
+    #[test]
+    fn resolve_max_tokens_default_capped_by_model_len() {
+        let result = resolve_max_tokens(None, Some(256), Some(200), 100);
+        assert_eq!(result.unwrap(), 100);
+    }
+
+    #[test]
+    fn resolve_max_tokens_no_model_len_falls_back() {
+        let result = resolve_max_tokens(Some(9999), None, None, 100);
+        assert_eq!(result.unwrap(), 9999);
+    }
+
+    #[test]
+    fn resolve_max_tokens_no_limits_known_falls_back_to_u32_max() {
+        let result = resolve_max_tokens(None, None, None, 100);
+        assert_eq!(result.unwrap(), u32::MAX);
+    }
+
+    #[test]
+    fn resolve_max_tokens_prompt_too_long() {
+        let result = resolve_max_tokens(Some(10), None, Some(100), 100);
+        assert!(matches!(
+            result,
+            Err(Error::PromptTooLong {
+                max_model_len: 100,
+                prompt_len: 100,
+            })
+        ));
+    }
+
+    #[test]
+    fn resolve_max_tokens_prompt_exceeds_model_len() {
+        let result = resolve_max_tokens(Some(10), None, Some(100), 200);
+        assert!(matches!(
+            result,
+            Err(Error::PromptTooLong {
+                max_model_len: 100,
+                prompt_len: 200,
+            })
+        ));
     }
 }

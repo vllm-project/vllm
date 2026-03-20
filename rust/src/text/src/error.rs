@@ -5,6 +5,8 @@ use vllm_llm::Error as LlmError;
 pub enum Error {
     #[error("tokenizer error: {0}")]
     Tokenizer(String),
+    #[error("text request `{request_id}` must contain at least one prompt token ID")]
+    EmptyPromptTokenIds { request_id: String },
     #[error(
         "this model's maximum context length is {max_model_len} tokens, \
          but the prompt contains {prompt_len} input tokens"

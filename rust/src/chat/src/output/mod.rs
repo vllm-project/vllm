@@ -4,18 +4,16 @@ mod reasoning;
 mod structured;
 mod tool;
 
-use futures::{Stream, TryStreamExt as _};
+use futures::Stream;
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use subenum::subenum;
 use tool_parser::ParserFactory as ToolParserFactory;
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
-use vllm_llm::GenerateOutputStream;
-use vllm_text::output::{DecodedTextEvent, decoded_text_event_stream};
+use vllm_text::output::DecodedTextEvent;
 
 use self::reasoning::reasoning_event_stream;
 use self::tool::tool_event_stream;
 use crate::ChatRequest;
-use crate::backend::DynChatBackend;
 use crate::error::{Error, Result};
 use crate::event::{AssistantBlockKind, AssistantToolCall, ChatEvent};
 use crate::output::structured::structured_chat_event_stream;
@@ -80,22 +78,20 @@ impl ContentEvent {
     }
 }
 
-trait DecodedTextEventStream = Stream<Item = Result<DecodedTextEvent>> + Send + 'static;
 trait ContentEventStream = Stream<Item = Result<ContentEvent>> + Send + 'static;
 trait AssistantEventStream = Stream<Item = Result<AssistantEvent>> + Send + 'static;
+pub(crate) trait DecodedTextEventStream = Stream<Item = Result<DecodedTextEvent>> + Send + 'static;
 pub(crate) trait ChatEventStream = Stream<Item = Result<ChatEvent>> + Send + 'static;
 
 /// Transforms a raw generate-output token stream into structured chat events
-/// through four sequential stages:
+/// through three sequential stages once text decoding has already happened:
 ///
-/// 1. [`decoded_text_event_stream`] — token-to-text decoding
-/// 2. [`reasoning_event_stream`] — reasoning/content separation
-/// 3. [`tool_event_stream`] — tool-call parsing
-/// 4. [`structured_chat_event_stream`] — final block assembly
+/// 1. [`reasoning_event_stream`] — reasoning/content separation
+/// 2. [`tool_event_stream`] — tool-call parsing
+/// 3. [`structured_chat_event_stream`] — final block assembly
 pub(crate) fn output_stream(
     request: ChatRequest,
-    backend: DynChatBackend,
-    raw_stream: GenerateOutputStream,
+    decoded: impl DecodedTextEventStream,
     model_id: Option<&str>,
     reasoning_parser_factory: &ReasoningParserFactory,
     tool_parser_factory: &ToolParserFactory,
@@ -143,14 +139,6 @@ pub(crate) fn output_stream(
                 .create_for_model(model_id)
         })
     };
-    // Chain the streams together.
-    let decoded = decoded_text_event_stream(
-        request.request_id.clone(),
-        backend,
-        raw_stream,
-        request.decode_options.clone(),
-    )
-    .map_err(Error::from);
     let reasoning = reasoning_event_stream(decoded, reasoning_parser);
     let tool = tool_event_stream(reasoning, request, tool_parser);
     Ok(structured_chat_event_stream(tool))

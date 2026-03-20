@@ -4,17 +4,16 @@ use anyhow::Context as _;
 use vllm_chat::ChatLlm;
 
 /// Shared router state for the minimal single-model OpenAI server.
-#[derive(Clone)]
 pub struct AppState {
     /// Public model ID returned by `/v1/models` and validated on chat requests.
     pub model_id: String,
     /// Shared chat facade used by all requests.
-    pub chat: Arc<ChatLlm>,
+    pub chat: ChatLlm,
 }
 
 impl AppState {
     /// Construct one application state instance.
-    pub fn new(model_id: impl Into<String>, chat: Arc<ChatLlm>) -> Self {
+    pub fn new(model_id: impl Into<String>, chat: ChatLlm) -> Self {
         Self {
             model_id: model_id.into(),
             chat,
@@ -27,11 +26,7 @@ impl AppState {
         let state = Arc::try_unwrap(self)
             .ok()
             .context("openai server state still has outstanding references")?;
-        let chat = Arc::try_unwrap(state.chat)
-            .ok()
-            .context("openai server chat still has outstanding references")?;
-
-        chat.shutdown().await?;
+        state.chat.shutdown().await?;
         Ok(())
     }
 }

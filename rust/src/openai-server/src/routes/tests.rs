@@ -10,8 +10,8 @@ use futures::StreamExt as _;
 use serde_json::json;
 use tower::util::ServiceExt as _;
 use vllm_chat::{
-    ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatRequest, ChatRole, ChatToolChoice,
-    UserSamplingParams,
+    ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatRequest, ChatRole, ChatTextBackend,
+    ChatToolChoice, UserSamplingParams,
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
@@ -247,8 +247,8 @@ impl ChatBackend for FailingDecodeChatBackend {
 async fn test_chat_with_engine_outputs_and_backend(
     engine_identity: &[u8],
     output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
-    backend: Arc<dyn ChatBackend>,
-) -> (Arc<ChatLlm>, tokio::task::JoinHandle<()>) {
+    backend: Arc<dyn ChatTextBackend>,
+) -> (ChatLlm, tokio::task::JoinHandle<()>) {
     let handshake_address = unique_tcp_endpoint();
     let engine_identity = engine_identity.to_vec();
 
@@ -279,7 +279,7 @@ async fn test_chat_with_engine_outputs_and_backend(
     .expect("connect client");
 
     (
-        Arc::new(ChatLlm::new(Llm::new(client), backend)),
+        ChatLlm::from_shared_backend(Llm::new(client), backend),
         engine_task,
     )
 }
@@ -287,7 +287,7 @@ async fn test_chat_with_engine_outputs_and_backend(
 async fn test_chat_with_engine_outputs(
     engine_identity: &[u8],
     output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
-) -> (Arc<ChatLlm>, tokio::task::JoinHandle<()>) {
+) -> (ChatLlm, tokio::task::JoinHandle<()>) {
     test_chat_with_engine_outputs_and_backend(
         engine_identity,
         output_specs,
@@ -317,7 +317,7 @@ async fn test_app_with_stream_output_specs(
 }
 
 async fn test_app_with_backend_and_stream_output_specs(
-    backend: Arc<dyn ChatBackend>,
+    backend: Arc<dyn ChatTextBackend>,
     output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
 ) -> (axum::Router, tokio::task::JoinHandle<()>) {
     let (chat, engine_task) =
@@ -328,7 +328,7 @@ async fn test_app_with_backend_and_stream_output_specs(
     )
 }
 
-async fn test_chat_with_engine_handle() -> (Arc<ChatLlm>, tokio::task::JoinHandle<()>) {
+async fn test_chat_with_engine_handle() -> (ChatLlm, tokio::task::JoinHandle<()>) {
     test_chat_with_engine_outputs(b"engine-openai-chat", default_stream_output_specs()).await
 }
 
