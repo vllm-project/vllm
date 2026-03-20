@@ -15,11 +15,22 @@ class SpeculatorsConfig(PretrainedConfig):
     model_type = "speculators"
 
     def __init__(self, **kwargs):
-        """In Transformers v5, `PretrainedConfig` is decorated with `dataclass` and
-        `huggingface_hub.dataclasses.strict(accept_kwargs=True)`.
-        Inheriting classes do not inherit the `accept_kwargs=True` behaviour so we must
-        explicitly pass any kwargs to `PretrainedConfig.__init__`."""
-        super().__init__(**kwargs)
+        """
+        In Transformers v5, `PretrainedConfig` is decorated with `dataclass` and
+        `huggingface_hub.dataclasses.strict(accept_kwargs=True)`. Therefore:
+
+        - Inheriting classes do not inherit the `accept_kwargs=True` behaviour so we
+        must define `__init__` to accept them here.
+        - Additionally, `super().__init__()` cannot be called where _all_ the config
+        fields are passed via `kwargs`, so we set any unknown fields here.
+        """
+        super_kwargs = dict()
+        for key, value in kwargs.items():
+            if hasattr(self, key):
+                super_kwargs[key] = value
+            else:
+                setattr(self, key, value)
+        super().__init__(**super_kwargs)
 
     @classmethod
     def from_pretrained(
