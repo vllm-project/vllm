@@ -72,6 +72,12 @@ class XPUwNa16LinearKernel(MPLinearKernel):
             layer.g_idx.data = layer.g_idx.t().contiguous()
         else:
             layer.g_idx = None
+        # Normalize group_size for group_size=-1 case. Kernel requires actual group size
+        self.config.group_size = (
+            layer.weight_packed.size(1)
+            * layer.weight_packed.packed_factor
+            // layer.weight_scale.size(0)
+        )
 
     def apply_weights(
         self,
@@ -165,6 +171,11 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
             layer,
             self.w_q_name,
             torch.nn.Parameter(packed, requires_grad=False),
+        )
+
+        # Normalize group_size for group_size=-1 case. Kernel requires actual group size
+        self.config.group_size = (
+            layer.weight_packed.size(1) * 8 // layer.weight_scale.size(0)
         )
 
         # Free the original unpacked int8 weight (still registered as "weight")
