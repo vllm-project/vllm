@@ -54,6 +54,7 @@ from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai_harmony import Author, Role, TextContent
 from openai_harmony import Message as HarmonyMessage
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
@@ -97,12 +98,20 @@ class StreamingState:
     sent_output_item_added: bool = False
     is_first_function_call_delta: bool = False
 
+    # Channel-transition tracking for mid-message done events
+    last_channel: str | None = None
+    last_recipient: str | None = None
+    accumulated_text: str = ""
+
     def reset_for_new_item(self) -> None:
         """Reset state when expecting a new output item."""
         self.current_output_index += 1
         self.sent_output_item_added = False
         self.is_first_function_call_delta = False
         self.current_call_id = ""
+        self.last_channel = None
+        self.last_recipient = None
+        self.accumulated_text = ""
 
 
 def is_mcp_tool_by_namespace(recipient: str | None) -> bool:
@@ -575,6 +584,30 @@ def _emit_delta_for_channel(
     return []
 
 
+def _needs_channel_transition(
+    state: StreamingState,
+    channel: str | None,
+    recipient: str | None,
+) -> bool:
+    """Return True when the channel/recipient changed from the last delta."""
+    if state.last_channel is None:
+        return False
+    return channel != state.last_channel or recipient != state.last_recipient
+
+
+def _emit_channel_done_events(
+    state: StreamingState,
+) -> list[StreamingResponsesResponse]:
+    """Emit done events for the channel currently tracked in state."""
+    synthetic_msg = HarmonyMessage(
+        author=Author(role=Role.ASSISTANT),
+        content=[TextContent(text=state.accumulated_text)],
+        channel=state.last_channel,
+        recipient=state.last_recipient,
+    )
+    return emit_previous_item_done_events(synthetic_msg, state)
+
+
 def emit_content_delta_events(
     ctx: StreamingHarmonyContext,
     state: StreamingState,
@@ -588,13 +621,27 @@ def emit_content_delta_events(
     commentary), ctx.channel_deltas contains one entry per contiguous
     (channel, recipient) run so each segment is emitted with the correct
     event type.
+
+    If the channel/recipient changes from the previous delta (either
+    within this batch or across batches), done events are emitted for
+    the previous channel before starting the new one.
     """
     if not ctx.channel_deltas:
         return []
 
     events: list[StreamingResponsesResponse] = []
     for channel, recipient, delta in ctx.channel_deltas:
+        # Detect mid-message channel transition (e.g. analysis → final)
+        if state.sent_output_item_added and _needs_channel_transition(
+            state, channel, recipient
+        ):
+            events.extend(_emit_channel_done_events(state))
+            state.reset_for_new_item()
+
         events.extend(_emit_delta_for_channel(channel, recipient, delta, state))
+        state.last_channel = channel
+        state.last_recipient = recipient
+        state.accumulated_text += delta
     return events
 
 
