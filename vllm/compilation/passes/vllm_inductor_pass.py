@@ -186,18 +186,32 @@ R = TypeVar("R")
 
 
 class VllmPatternReplacement(ABC, Generic[P, R]):
-    @property
+    """
+    A pattern/replacement pair for FX graph fusion.
+
+    Implement the three abstract members below, then pass
+    instances to VllmFusionPatternMatcherPass.register(). The pass will
+    find every occurrence of `pattern` in the graph and substitute it
+    with `replacement`.
+    """
+
     @abstractmethod
-    def pattern(self) -> Callable[P, R]: ...
+    def pattern(self, *args: P.args, **kwargs: P.kwargs) -> R:
+        """The FX subgraph to search for."""
+        ...
+
+    @abstractmethod
+    def replacement(self, *args: P.args, **kwargs: P.kwargs) -> R:
+        """The FX subgraph to substitute in place of each match."""
+        ...
 
     @property
     @abstractmethod
-    def replacement(self) -> Callable[P, R]: ...
+    def get_inputs(self) -> list[torch.Tensor]:
+        """Example CUDA tensors used to trace pattern and replacement."""
+        ...
 
-    @property
-    @abstractmethod
-    def get_inputs(self) -> list[torch.Tensor]: ...
-
+    # Helpers for get_inputs: uninitialized tensors of common dtypes.
     empty: ClassVar = staticmethod(functools.partial(torch.empty, device="cuda"))
     empty_bf16: ClassVar = staticmethod(
         functools.partial(torch.empty, dtype=torch.bfloat16, device="cuda")
