@@ -125,9 +125,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "Tensor)");
   m.impl("grouped_topk", torch::kCUDA, &grouped_topk);
 
+  // cuBLAS bf16 x bf16 -> fp32 router GEMM (fallback for non-SM90 / batch > 16)
+  m.def("router_gemm_bf16_fp32(Tensor input, Tensor weight) -> Tensor");
+  m.impl("router_gemm_bf16_fp32", torch::kCUDA, &router_gemm_bf16_fp32);
+
   // DeepSeek V3 optimized router GEMM for SM90+
   m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
-  m.impl("dsv3_router_gemm", torch::kCUDA, &dsv3_router_gemm);
+  // conditionally compiled so impl registration is in source file
+
+  // gpt-oss optimized router GEMM kernel for SM90+
+  m.def(
+      "gpt_oss_router_gemm(Tensor! output, Tensor input, Tensor weights, "
+      "Tensor bias) -> ()");
+  m.impl("gpt_oss_router_gemm", torch::kCUDA, &gpt_oss_router_gemm);
 #endif
 }
 

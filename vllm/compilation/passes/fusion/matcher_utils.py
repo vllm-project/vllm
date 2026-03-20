@@ -38,7 +38,7 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
 }
 
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
+    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.out  # noqa: E501
 
 if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
@@ -89,10 +89,13 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         num_heads: int,
         num_kv_heads: int,
         use_flashinfer: bool = False,
+        match_rocm_aiter: bool | None = None,
         enabled: bool | None = None,
     ) -> None:
         if enabled is None:
             enabled = RotaryEmbedding.enabled()
+        if match_rocm_aiter is None:
+            match_rocm_aiter = rocm_aiter_ops.is_triton_rotary_embed_enabled()
 
         super().__init__(enabled)
         self.is_neox = is_neox
@@ -104,6 +107,8 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         self.rotary_dim = head_size
         if use_flashinfer:
             self.rotary_op = FLASHINFER_ROTARY_OP
+        elif match_rocm_aiter:
+            self.rotary_op = rocm_aiter_ops.get_triton_rotary_embedding_op()
         else:
             self.rotary_op = ROTARY_OP
 

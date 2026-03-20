@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 from typing import Any, cast
 
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
@@ -29,7 +30,10 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
 
 def init_attn_backend(
-    kv_cache_config: KVCacheConfig, vllm_config: VllmConfig, device: torch.device
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    device: torch.device,
+    active_layer_names: set[str] | None = None,
 ):
     attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_groups: list[list[AttentionGroup]] = []
@@ -38,6 +42,8 @@ def init_attn_backend(
         kv_cache_config.kv_cache_groups
     ):
         layer_names = kv_cache_group_spec.layer_names
+        if active_layer_names is not None:
+            layer_names = list(active_layer_names.intersection(layer_names))
 
         layer_type = cast(type[Any], AttentionLayerBase)
         attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
@@ -180,6 +186,7 @@ def build_attn_metadata(
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
     dcp_local_seq_lens: torch.Tensor | None = None,
+    encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]] | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
@@ -204,6 +211,10 @@ def build_attn_metadata(
             causal=True,
             dcp_local_seq_lens=dcp_local_seq_lens,
         )
+        if encoder_seq_lens and i in encoder_seq_lens:
+            encoder_seq_lens_gpu, encoder_seq_lens_cpu = encoder_seq_lens[i]
+            common_attn_metadata.encoder_seq_lens = encoder_seq_lens_gpu
+            common_attn_metadata.encoder_seq_lens_cpu = encoder_seq_lens_cpu
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)

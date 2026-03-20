@@ -50,7 +50,6 @@ def default_server_args():
     params=[
         "",
         "--enable-chunked-prefill",
-        "--disable-frontend-multiprocessing",
         f"--show-hidden-metrics-for-version={PREV_MINOR_VERSION}",
     ],
 )
@@ -447,7 +446,7 @@ def test_metrics_exist_run_batch():
                 "--model",
                 "intfloat/multilingual-e5-small",
                 "--enable-metrics",
-                "--url",
+                "--host",
                 base_url,
                 "--port",
                 port,

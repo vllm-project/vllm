@@ -157,7 +157,6 @@ class GraniteMoeSharedModel(nn.Module):
 
         self.config = config
         self.quant_config = quant_config  # Required by MixtralModel
-        self.padding_idx = config.pad_token_id
 
         self.vocab_size = config.vocab_size
 

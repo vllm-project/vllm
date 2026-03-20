@@ -207,6 +207,9 @@ class MusicFlamingoProcessingInfo(AudioFlamingo3ProcessingInfo):
             expected_hidden_size=self._get_expected_hidden_size(),
         )
 
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"audio": 1}
+
 
 class MusicFlamingoDummyInputsBuilder(AudioFlamingo3DummyInputsBuilder):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
