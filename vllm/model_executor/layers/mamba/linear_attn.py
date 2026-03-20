@@ -59,7 +59,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
             self._ar_workspace = get_allreduce_workspace(
                 self.tp_rank,
                 self.tp_world,
-                max_tokens=max_tokens,
+                max_tokens=_FUSED_AR_TOKEN_THRESHOLD,
                 process_group=get_tp_group().cpu_group,
             )
 

@@ -3503,20 +3503,3 @@ if hasattr(torch.ops._C, "minimax_allreduce_rms"):
         eps: float,
     ) -> torch.Tensor:
         return torch.empty_like(input)
-
-
-if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
-
-    @register_fake("_C::minimax_allreduce_rms_qk")
-    def _minimax_allreduce_rms_qk_fake(
-        qkv: torch.Tensor,
-        norm_weight_q: torch.Tensor,
-        norm_weight_k: torch.Tensor,
-        workspace: torch.Tensor,
-        q_size: int,
-        kv_size: int,
-        rank: int,
-        nranks: int,
-        eps: float,
-    ) -> None:
-        return None
