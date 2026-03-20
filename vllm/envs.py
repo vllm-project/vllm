@@ -177,7 +177,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
-    VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
+
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
@@ -1315,13 +1315,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Control the workspace buffer size for the FlashInfer backend.
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
         os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
-    ),
-    # Control the maximum number of tokens per expert supported by the
-    # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
-    # the blockscale tensor of activations NVFP4 Quantization.
-    # This is used to prevent the kernel from running out of memory.
-    "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE": lambda: int(
-        os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")
     ),
     # Specifies the thresholds of the communicated tensor sizes under which
     # vllm should use flashinfer fused allreduce. The variable should be a
