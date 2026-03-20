@@ -448,6 +448,28 @@ class FusedMoE(CustomOp):
                 None,
             )
 
+        # RIY sparse loading — orthogonal to EP/TP/PP
+        # Logit mask: -inf for pruned experts → router never selects them
+        # Weight zeroing: pruned expert weights set to zero after load
+        import os
+        _riy_profile = os.environ.get("RIY_EXPERT_PROFILE", "")
+        self._riy_logit_mask = None
+        self._riy_pruned_ids: set[int] = set()
+        if _riy_profile and os.path.exists(_riy_profile):
+            from vllm.model_executor.layers.fused_moe.riy import (
+                build_riy_expert_map,
+            )
+            _num_kept, _riy_emap, _lmask = build_riy_expert_map(
+                self.global_num_experts, _riy_profile)
+            self._riy_logit_mask = _lmask
+            self._riy_pruned_ids = set(
+                i for i in range(self.global_num_experts)
+                if _riy_emap[i] == -1)
+            logger.info_once(
+                "RIY: %d/%d experts pruned — weights will be zeroed, "
+                "router logits masked",
+                len(self._riy_pruned_ids), self.global_num_experts)
+
         self.top_k = top_k
 
         self._init_aiter_shared_experts_topK_buffer(
@@ -514,6 +536,13 @@ class FusedMoE(CustomOp):
             layer_idx=_layer_idx,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
+
+        # Set RIY logit mask on router (registered buffer for graph compat)
+        if self._riy_logit_mask is not None:
+            self.register_buffer(
+                "_riy_logit_mask_buf", self._riy_logit_mask,
+                persistent=False)
+            self.router.riy_logit_mask = self._riy_logit_mask_buf
 
         # Wire RIY stats as registered buffers (graph-compatible).
         self._riy_layer_idx = _layer_idx
