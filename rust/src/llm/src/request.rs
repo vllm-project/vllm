@@ -27,6 +27,7 @@ pub struct GenerateRequest {
     /// delta-only, cumulative, or final-only.
     pub sampling_params: EngineCoreSamplingParams,
 
+    // Fields below are currently likely unused by callers.
     pub arrival_time: Option<f64>,
     pub cache_salt: Option<String>,
     pub trace_headers: Option<BTreeMap<String, String>>,

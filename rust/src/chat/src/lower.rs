@@ -40,6 +40,7 @@ pub(crate) fn lower_chat_request(
             sampling_hints,
             prompt_len,
         )?,
+        // Fields below are currently placeholders.
         arrival_time: None,
         cache_salt: None,
         trace_headers: None,
