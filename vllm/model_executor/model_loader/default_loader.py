@@ -68,9 +68,6 @@ class DefaultModelLoader(BaseModelLoader):
         allow_patterns_overrides: list[str] | None = None
         """If defined, weights will load exclusively using these patterns."""
 
-    counter_before_loading_weights: float = 0.0
-    counter_after_loading_weights: float = 0.0
-
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         self.local_expert_ids: set[int] | None = None
@@ -266,8 +263,6 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config.pt_load_map_location,
                 )
 
-        if self.counter_before_loading_weights == 0.0:
-            self.counter_before_loading_weights = time.perf_counter()
         # Apply the prefix.
         return ((source.prefix + name, tensor) for (name, tensor) in weights_iterator)
 
@@ -378,12 +373,12 @@ class DefaultModelLoader(BaseModelLoader):
         self._init_ep_weight_filter(model_config)
 
         weights_to_load = {name for name, _ in model.named_parameters()}
+        counter_before_loading_weights = time.perf_counter()
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
-
-        self.counter_after_loading_weights = time.perf_counter()
+        counter_after_loading_weights = time.perf_counter()
         logger.info_once(
             "Loading weights took %.2f seconds",
-            self.counter_after_loading_weights - self.counter_before_loading_weights,
+            counter_after_loading_weights - counter_before_loading_weights,
             scope="local",
         )
         # We only enable strict check for non-quantized models
