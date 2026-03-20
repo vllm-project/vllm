@@ -62,6 +62,7 @@ from vllm.entrypoints.openai.engine.serving import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
+    auto_drop_analysis_messages,
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_system_message,
@@ -1294,30 +1295,11 @@ class OpenAIServingResponses(OpenAIServing):
                     )
                 prev_msgs = stored
 
-            # FIXME(woosuk): The slice-delete-reappend cycle below is
-            # currently a no-op --- it removes messages then puts them all
-            # back unfiltered. It may be intentionally deferred (see FIXME
-            # above) or redundant if the Harmony encoder already strips
-            # analysis messages at render time. If analysis messages need
-            # to be dropped here, add a channel != "analysis" filter when
-            # re-appending, similar to auto_drop_analysis_messages in
-            # harmony_utils.py.
-            if len(prev_msgs) > 0:
-                last_msg = prev_msgs[-1]
-                assert isinstance(last_msg, OpenAIHarmonyMessage)
-                if last_msg.channel == "final":
-                    prev_final_msg_idx = -1
-                    for i in range(len(prev_msgs) - 2, -1, -1):
-                        prev_msg_i = prev_msgs[i]
-                        assert isinstance(prev_msg_i, OpenAIHarmonyMessage)
-                        if prev_msg_i.channel == "final":
-                            prev_final_msg_idx = i
-                            break
-                    recent_turn_msgs = prev_msgs[prev_final_msg_idx + 1 :]
-                    del prev_msgs[prev_final_msg_idx + 1 :]
-                    for msg in recent_turn_msgs:
-                        assert isinstance(msg, OpenAIHarmonyMessage)
-                        prev_msgs.append(msg)
+            # Drop analysis messages from completed turns so they don't
+            # bloat the prompt in multi-turn conversations. This mirrors
+            # what parse_chat_inputs_to_harmony_messages does for the
+            # Chat Completions path.
+            prev_msgs = auto_drop_analysis_messages(prev_msgs)
             messages.extend(prev_msgs)
         # Append the new input.
         # Responses API supports simple text inputs without chat format.

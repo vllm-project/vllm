@@ -13,6 +13,7 @@ from openai_harmony import (
     HarmonyEncodingName,
     Message,
     ReasoningEffort,
+    RenderConversationConfig,
     Role,
     StreamableParser,
     StreamState,
@@ -489,8 +490,13 @@ def parse_chat_input_to_harmony_message(
 
 def render_for_completion(messages: list[Message]) -> list[int]:
     conversation = Conversation.from_messages(messages)
+    # Disable auto_drop_analysis: vLLM handles analysis filtering via
+    # auto_drop_analysis_messages(). Letting the encoder also drop causes
+    # double-filtering that strips reasoning the model needs between
+    # tool-calling turns.
+    config = RenderConversationConfig(auto_drop_analysis=False)
     token_ids = get_encoding().render_conversation_for_completion(
-        conversation, Role.ASSISTANT
+        conversation, Role.ASSISTANT, config=config
     )
     return token_ids
 
