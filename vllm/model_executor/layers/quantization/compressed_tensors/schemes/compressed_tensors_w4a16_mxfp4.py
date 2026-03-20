@@ -24,13 +24,9 @@ class CompressedTensorsW4A16Mxfp4(CompressedTensorsScheme):
     """
     Compressed tensors scheme for MXFP4 weight-only quantization.
 
-    Supports models quantized with the compressed-tensors mxfp4-pack-quantized
-    format.
-
     MXFP4 format:
     - 4-bit float weights (E2M1) packed into uint8
     - Per-group E8M0 scales with group_size=32
-    - No global scale (unlike NVFP4)
     """
 
     def __init__(self):

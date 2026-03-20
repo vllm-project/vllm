@@ -1947,7 +1947,6 @@ def mxfp4_experts_quant(
         f" for cutlass_moe_mxfp4, observed m_numtopk = {m_numtopk}. Use"
         f" VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE to set this value."
     )
-    # MXFP4 block_size = 32 (vs NVFP4's 16)
     scales_k = k // 32
     padded_k = (scales_k + (4 - 1)) // 4
 

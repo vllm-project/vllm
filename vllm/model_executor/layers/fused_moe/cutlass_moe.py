@@ -816,14 +816,7 @@ def run_cutlass_moe_mxfp4(
     device: torch.device,
     apply_router_weight_on_input: bool = False,
 ) -> None:
-    """
-    MXFP4 x MXFP4 MoE implementation using CUTLASS grouped GEMM.
-
-    Unlike NVFP4, MXFP4 uses single-level block scaling only:
-    - 32-element blocks with E8M0 (power-of-two) scale factors
-    - No global scales (alphas/gscale) - the GEMM epilogue uses alpha=1.0
-    - Activation quantization uses global_scale=1.0 per expert
-    """
+    """MXFP4 x MXFP4 MoE implementation using CUTLASS grouped GEMM."""
     is_gated = activation.is_gated
     w1_n = n * 2 if is_gated else n
 
@@ -990,11 +983,7 @@ def swizzle_mxfp4_scales(
 
 
 class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
-    """CUTLASS MXFP4 x MXFP4 fused MoE expert implementation.
-
-    MXFP4 uses single-level block scaling (E8M0, 32-element groups) without
-    the global scales (alphas/gscale) that NVFP4 requires.
-    """
+    """CUTLASS MXFP4 x MXFP4 fused MoE expert implementation."""
 
     @property
     def expects_unquantized_inputs(self) -> bool:

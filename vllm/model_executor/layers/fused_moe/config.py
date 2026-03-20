@@ -769,8 +769,8 @@ def mxfp4_moe_quant_config(
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for MXFP4 x MXFP4 MoE.
-    MXFP4 uses single-level block scaling only (E8M0 scales, 32-element groups).
-    No global scales (alphas/gscale) needed unlike NVFP4.
+    MXFP4 uses block scaling only (E8M0 scales, 32-element groups), with no
+    separate alphas / global activation scales in this config.
     """
     return FusedMoEQuantConfig.make(
         "mxfp4",
