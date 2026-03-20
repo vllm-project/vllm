@@ -120,13 +120,15 @@ class RiyState:
                         RiyLayerStats(num_experts))
                 self._num_layers = len(self._layer_stats)
             self._enabled = True
-            # Auto-load profile from config on first registration
-            if not self._profile_loaded:
-                self._try_load_profile_from_config()
+            _should_load = not self._profile_loaded
+            if _should_load:
+                self._profile_loaded = True
+        # Load profile OUTSIDE the lock to avoid deadlock
+        if _should_load:
+            self._try_load_profile_from_config()
 
     def _try_load_profile_from_config(self):
         """Load RIY profile from env var or CLI config."""
-        self._profile_loaded = True
         import os
         profile_path = os.environ.get("RIY_EXPERT_PROFILE", "")
         if not profile_path:

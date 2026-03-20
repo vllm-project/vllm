@@ -494,10 +494,14 @@ class FusedMoE(CustomOp):
                 intermediate_size=intermediate_size,
                 quantization=_quant_name)
 
-        # RIY sparse loading — per-layer expert pruning
-        # Must be before create_weights (which uses local_num_experts)
+        # RIY pruning — per-layer logit mask + weight skip
+        # Tensor stays full size (256 experts), but:
+        # 1. Logit mask: router never selects pruned experts
+        # 2. Weight loader: skips pruned expert weights (never written
+        #    → CUDA lazy page allocation → no physical VRAM used)
         import os as _os
         _riy_profile = _os.environ.get("RIY_EXPERT_PROFILE", "")
+        self._riy_pruned_ids: set[int] = set()
         if _riy_profile and _os.path.exists(_riy_profile) and _layer_idx >= 0:
             from vllm.model_executor.layers.fused_moe.riy import (
                 build_riy_prune_map,
@@ -505,24 +509,9 @@ class FusedMoE(CustomOp):
             _num_kept, _prune_map, _lmask = build_riy_prune_map(
                 _layer_idx, self.global_num_experts, _riy_profile)
             self._prune_logit_mask = _lmask
-            if self._expert_map is not None:
-                # EP active: merge prune into EP map
-                for i in range(self.global_num_experts):
-                    if _prune_map[i] == -1:
-                        self._expert_map[i] = -1
-                compact = 0
-                for i in range(self.global_num_experts):
-                    if self._expert_map[i] >= 0:
-                        self._expert_map[i] = compact
-                        compact += 1
-                self.local_num_experts = compact
-            else:
-                # No EP: set prune map as expert_map
-                self.local_num_experts = _num_kept
-                # Must delete the plain attribute before register_buffer
-                if hasattr(self, '_expert_map'):
-                    delattr(self, '_expert_map')
-                self.register_buffer("_expert_map", _prune_map)
+            self._riy_pruned_ids = set(
+                i for i in range(self.global_num_experts)
+                if _prune_map[i] == -1)
 
         # TODO(bnell): we should not have to create a router if the kernel is
         # monolithic.
@@ -1131,6 +1120,11 @@ class FusedMoE(CustomOp):
 
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
+
+        # RIY: skip pruned expert weights (lazy alloc → no VRAM)
+        if global_expert_id in self._riy_pruned_ids:
+            return False if return_success else None
+
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
         use_global_sf = (
