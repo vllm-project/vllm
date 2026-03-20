@@ -142,10 +142,11 @@ class RiyState:
     def collecting(self) -> bool:
         return self._collecting
 
-    def initialize_tensors(self, device: torch.device):
+    def initialize_tensors(self, device: torch.device, num_layers: int = 0):
         """Allocate pre-sized GPU tensors for compiled stats.
 
-        Called once from FusedMoE.__init__ when the first layer registers.
+        Called from FusedMoE.__init__. Uses max(num_layers, self._num_layers)
+        to ensure the tensors are large enough for all layers.
         Tensor addresses must remain stable for the @torch.compile'd graph.
         """
         if self._tensors_initialized:
@@ -153,17 +154,23 @@ class RiyState:
         with self._lock:
             if self._tensors_initialized:
                 return
+            n_layers = max(num_layers, self._num_layers)
+            if n_layers == 0:
+                return  # Not ready yet
             self._freq_pass = torch.zeros(
-                self._num_layers, self._num_experts,
+                n_layers, self._num_experts,
                 dtype=torch.int64, device=device)
             self._weight_pass = torch.zeros(
-                self._num_layers, self._num_experts,
+                n_layers, self._num_experts,
                 dtype=torch.float32, device=device)
             self._collecting_flag = torch.zeros(
                 (), dtype=torch.int32, device=device)
             self._tensors_initialized = True
+            # Update num_layers if we got a better count
+            if n_layers > self._num_layers:
+                self._num_layers = n_layers
             logger.info("RIY tensors allocated on %s: %d layers x %d experts",
-                        device, self._num_layers, self._num_experts)
+                        device, n_layers, self._num_experts)
 
     def get_freq_view(self, layer_idx: int) -> torch.Tensor | None:
         """Get 1D freq slice for a layer (stable address for compiled graph)."""
