@@ -86,8 +86,6 @@ if flashinfer_comm is not None:
         destroy_fi_ar_workspace,
         get_fi_ar_quant_workspace,
         get_fi_ar_workspace,
-        initialize_fi_ar_quant_workspace,
-        initialize_fi_ar_workspace,
     )
 
     ar_fusion_patterns = flashinfer_comm.AllReduceFusionPattern
@@ -133,15 +131,23 @@ if flashinfer_comm is not None:
 
         # Select workspace based on pattern: quant patterns use the
         # trtllm quant workspace, non-quant patterns use the primary workspace.
-        if pattern_code in (
+        is_quant_pattern = pattern_code in (
             ar_fusion_patterns.kARResidualRMSNormFP8Quant,
             ar_fusion_patterns.kARResidualRMSNormFP4Quant,
-        ):
-            workspace = get_fi_ar_quant_workspace()
-        else:
-            workspace = get_fi_ar_workspace()
+        )
+        get_workspace_fn = (
+            get_fi_ar_quant_workspace if is_quant_pattern else get_fi_ar_workspace
+        )
+        workspace = get_workspace_fn(
+            world_size=world_size,
+            rank=get_tensor_model_parallel_rank(),
+            max_token_num=max_token_num,
+            hidden_dim=hidden_size,
+            dtype=allreduce_in.dtype,
+            group=get_tp_group().device_group,
+        )
         assert workspace is not None, (
-            "Flashinfer workspace must be initialized when using flashinfer"
+            "Flashinfer allreduce workspace must be initialized when using flashinfer"
         )
         assert flashinfer_comm is not None
         if norm_out is None:
@@ -753,35 +759,29 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             scope="global",
         )
 
-        for workspace_init_fn in [
-            initialize_fi_ar_workspace,
-            initialize_fi_ar_quant_workspace,
-        ]:
-            try:
-                workspace_init_fn(
-                    world_size=self.tp_size,
-                    rank=rank,
-                    max_token_num=self.max_token_num,
-                    hidden_dim=self.hidden_dim,
-                    dtype=self.model_dtype,
-                    group=self.group,
-                )
-            except Exception as e:
-                if "multicast" in str(e).lower():
-                    logger.warning(
-                        "AllReduce fusion pass is disabled: flashinfer workspace "
-                        "creation failed: %s. This is expected on GPUs without "
-                        "NVSwitch (e.g., NVLink bridge-only or PCIe topologies). "
-                        "Falling back to non-fused allreduce.",
-                        str(e),
-                    )
-                else:
-                    logger.warning(
-                        "Failed to initialize FlashInfer All Reduce workspace: %s. "
-                        "AllReduce fusion pass will be disabled.",
-                        e,
-                    )
-                return
+        workspace_kwargs = dict(
+            world_size=self.tp_size,
+            rank=rank,
+            max_token_num=self.max_token_num,
+            hidden_dim=self.hidden_dim,
+            dtype=self.model_dtype,
+            group=self.group,
+        )
+        if get_fi_ar_workspace(**workspace_kwargs) is None:
+            logger.warning_once(
+                "Failed to initialize Flashinfer allreduce workspace. "
+                "Flashinfer allreduce-norm fusion will be disabled."
+            )
+            return
+
+        self.supports_quant_fusion = (
+            get_fi_ar_quant_workspace(**workspace_kwargs) is not None
+        )
+        if not self.supports_quant_fusion:
+            logger.warning_once(
+                "Failed to initialize Flashinfer allreduce workspace. "
+                "Flashinfer allreduce-norm-quant fusion will be disabled."
+            )
 
         self.allreduce_params = FlashInferFusedAllReduceParams(
             world_size=self.tp_size,
@@ -793,9 +793,8 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
 
     @enable_fake_mode
     def register_patterns(self) -> None:
-        supports_quantization = get_fi_ar_quant_workspace() is not None
         for epsilon in [1e-5, 1e-6]:
-            if supports_quantization:
+            if self.supports_quant_fusion:
                 AllReduceFusedRMSNormStaticQuantFP8Pattern(
                     epsilon,
                     self.model_dtype,
