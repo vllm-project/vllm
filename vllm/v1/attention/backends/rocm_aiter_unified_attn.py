@@ -30,6 +30,13 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
         return [MultipleOf(16)]
 
     @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        logger.warning_once(
+            "[ROCM_AITER_UNIFIED_ATTN]: Setting kv cache block size to 64."
+        )
+        return 64
+
+    @classmethod
     def supports_block_size(cls, block_size: int | None) -> bool:
         if block_size is None:
             return True
