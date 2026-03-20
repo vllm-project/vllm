@@ -43,7 +43,7 @@ def _reasoning_item(
     item_id: str | None = None,
     status: str | None = None,
 ) -> dict:
-    item = {
+    item: dict[str, object] = {
         "type": "reasoning",
         "summary": [],
         "encrypted_content": None,
