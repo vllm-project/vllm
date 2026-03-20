@@ -827,14 +827,20 @@ class Dashboard:
                 bar = "\u2588" * filled + "\u2591" * (bar_w - filled)
                 # Show current prune level + estimated savings
                 expert_bytes = self._estimate_expert_bytes()
-                mask_count = len(self.mask)
-                if mask_count > 0:
-                    mask_pct = mask_count * 100 / max(len(stats.experts), 1)
-                    if expert_bytes > 0:
-                        savings_gb = mask_count * expert_bytes / (1024**3)
-                        prune_info = f"  ACTIVE: {mask_pct:.2f}% ({mask_count} exp, ~{savings_gb:.1f}GB)"
-                    else:
-                        prune_info = f"  ACTIVE: {mask_pct:.2f}% ({mask_count} exp)"
+                profile_count = len(self.profile_mask)
+                runtime_count = len(self.mask) - profile_count
+                total_count = len(self.mask)
+                if total_count > 0:
+                    total_pct = total_count * 100 / max(len(stats.experts), 1)
+                    parts = []
+                    if profile_count > 0 and expert_bytes > 0:
+                        saved_gb = profile_count * expert_bytes / (1024**3)
+                        parts.append(f"profile:{profile_count}z(~{saved_gb:.1f}GB saved)")
+                    elif profile_count > 0:
+                        parts.append(f"profile:{profile_count}z")
+                    if runtime_count > 0:
+                        parts.append(f"live:{runtime_count}X")
+                    prune_info = f"  ACTIVE: {total_pct:.1f}% " + " + ".join(parts)
                 else:
                     prune_info = ""
                 prune_label = f" prunable: [{bar}] {pct*100:.0f}%{prune_info}"
