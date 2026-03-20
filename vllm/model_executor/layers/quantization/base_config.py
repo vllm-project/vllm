@@ -184,7 +184,8 @@ class QuantizationConfig(ABC):
             revision: The revision of the model
         Returns:
         """
-        # TODO: revision is never passed currently but is used in subclasses
+        # TODO: revision is never passed currently in vllm.py,
+        # but is used in subclasses, should we remove this parameter?
         pass
 
     def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:

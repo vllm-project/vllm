@@ -73,13 +73,8 @@ class QuarkConfig(QuantizationConfig):
         hf_config: PretrainedConfig | None = None,
         revision: str | None = None,
     ):
-        """Enable dynamic MXFP4 only for DeepSeek-V3-family + fp4 Quark checkpoints.
+        """Enable dynamic MXFP4 only for DeepSeek-V3-family + fp4 Quark checkpoints."""
 
-        Uses the Hugging Face config already loaded on :class:`~vllm.config.ModelConfig`
-        (passed as ``hf_config`` kwarg) so ``trust_remote_code`` matches the
-        """
-
-        # only update dynamic_mxfp4_quant config for deepseek family models
         if (
             getattr(hf_config, "model_type", None)
             not in _DEEPSEEK_V3_FAMILY_MODEL_TYPES
