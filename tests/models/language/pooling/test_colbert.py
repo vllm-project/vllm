@@ -59,6 +59,22 @@ COLBERT_MODELS = {
             "model_cls": "AutoModel",
         },
     },
+    "lfm2": {
+        "model": "LiquidAI/LFM2-ColBERT-350M",
+        "colbert_dim": 128,
+        "max_model_len": 511,
+        "extra_kwargs": {
+            "hf_overrides": {
+                "architectures": ["ColBERTLfm2Model"],
+            },
+        },
+        "hf_comparison": {
+            "weights_file": "1_Dense/model.safetensors",
+            "weights_key": "linear.weight",
+            "trust_remote_code": False,
+            "model_cls": "AutoModel",
+        },
+    },
 }
 
 
