@@ -688,20 +688,6 @@ class FusedMoE(CustomOp):
         prepare_finalize = self.base_quant_method.maybe_make_prepare_finalize(
             routing_tables=routing_tables
         )
-        if prepare_finalize is None and (
-            self.moe_parallel_config.use_mori_kernels
-            or self.moe_parallel_config.use_deepep_ht_kernels
-            or self.moe_parallel_config.use_deepep_ll_kernels
-            or self.moe_parallel_config.use_nixl_ep_kernels
-        ):
-            raise ValueError(
-                f"all2all backend '{self.moe_parallel_config.all2all_backend}'"
-                " requires a prepare/finalize implementation, but "
-                f"{self.base_quant_method.__class__.__name__}"
-                ".maybe_make_prepare_finalize() returned None. "
-                "This means tokens will not be dispatched across GPUs "
-                "and only local experts will be used (silent degradation)."
-            )
         if prepare_finalize is not None:
             logger.debug(
                 "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
