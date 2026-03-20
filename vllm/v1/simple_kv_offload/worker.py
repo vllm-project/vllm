@@ -173,7 +173,9 @@ class SimpleCPUOffloadWorker:
         )
 
         self._copy_thread = threading.Thread(
-            target=self._copy_loop, args=(self._copy_queue, self.device), daemon=True
+            target=self._copy_loop,
+            args=(self._copy_queue, self.device, self._load_events, self._store_events),
+            daemon=True,
         )
         self._copy_thread.start()
 
@@ -245,8 +247,6 @@ class SimpleCPUOffloadWorker:
             store_wm = self._drain_stream_events(is_store=True)
             for j in [j for j in self._pending_store_event_indices if j <= store_wm]:
                 self._pending_store_event_indices.discard(j)
-                if finished_sending is None:
-                    finished_sending = set()
                 finished_sending.add(f"__store_done_{j}")
 
         return finished_sending, finished_recving
@@ -264,15 +264,22 @@ class SimpleCPUOffloadWorker:
         self._store_events.clear()
 
     @staticmethod
-    def _copy_loop(q: queue.SimpleQueue, device: torch.device) -> None:
+    def _copy_loop(
+        q: queue.SimpleQueue,
+        device: torch.device,
+        load_events: list[tuple[int, torch.Event]],
+        store_events: list[tuple[int, torch.Event]],
+    ) -> None:
         current_platform.set_device(device)
         while True:
             item = q.get()
             if item is None:
                 return
-            src_blocks, dst_blocks, params, stream, event = item
+            src_blocks, dst_blocks, params, stream, event_idx, is_store = item
             copy_ops.copy_blocks(src_blocks, dst_blocks, params)
+            event = torch.Event()
             event.record(stream)
+            (store_events if is_store else load_events).append((event_idx, event))
 
     def _launch_copy_kernel(
         self,
@@ -285,17 +292,17 @@ class SimpleCPUOffloadWorker:
             return
 
         if is_store:
-            stream, events = self.store_stream, self._store_events
             batch_params = self._store_batch_params
+            stream = self.store_stream
         else:
-            stream, events = self.load_stream, self._load_events
             batch_params = self._load_batch_params
+            stream = self.load_stream
 
         assert stream is not None and batch_params is not None
 
-        event = torch.Event()
-        self._copy_queue.put((src_blocks, dst_blocks, batch_params, stream, event))
-        events.append((event_idx, event))
+        self._copy_queue.put(
+            (src_blocks, dst_blocks, batch_params, stream, event_idx, is_store)
+        )
 
     def _drain_stream_events(self, is_store: bool) -> int:
         """Drain completed events and return the high-water mark."""
