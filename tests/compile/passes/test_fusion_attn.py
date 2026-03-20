@@ -299,7 +299,8 @@ def test_attention_quant_pattern(
     torch.set_default_dtype(dtype)
     torch.manual_seed(42)
 
-    block_size = 64 if backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN else 16
+    backend_cls = backend.get_class()
+    block_size = backend_cls.get_preferred_block_size(16)
 
     model_config = ModelConfig(
         model=model_name,
