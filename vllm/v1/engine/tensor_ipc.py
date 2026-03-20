@@ -59,9 +59,6 @@ class TensorIpcSender:
     def send_tensor(self, tensor: torch.Tensor) -> dict[str, Any] | None:
         """Send tensor via queue, return its handle. Returns None if failed."""
         try:
-            if not tensor.is_cuda:
-                return None
-
             tensor_id = f"{self._sender_id}_{self._tensor_id_counter}"
             self._tensor_id_counter += 1
 
