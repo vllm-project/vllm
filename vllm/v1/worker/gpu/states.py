@@ -15,7 +15,6 @@ class RequestState:
         num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
-        cache_draft_logits: bool,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -71,18 +70,6 @@ class RequestState:
             dtype=torch.int64,
             device=device,
         )
-        # Draft token logits.
-        # NOTE: This tensor maintains the "processed" logits after applying temperature,
-        # top-p, etc.
-        self.draft_logits: torch.Tensor | None = None
-        if cache_draft_logits:
-            self.draft_logits = torch.zeros(
-                self.max_num_reqs,
-                self.num_speculative_steps,
-                self.vocab_size,
-                dtype=torch.float32,
-                device=device,
-            )
 
         self.next_prefill_tokens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=device
