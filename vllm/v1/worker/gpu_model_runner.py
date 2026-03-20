@@ -5330,7 +5330,10 @@ class GPUModelRunner(
                     # In the mixed batch mode (used for FI warmup), we use
                     # shorter sequence lengths to run faster.
                     # TODO(luka) better system for describing dummy batches
-                    seq_lens = [1] * num_decode_tokens + [num_prefill_tokens + 1]  # type: ignore[assignment]
+                    seq_lens = torch.tensor(  # type: ignore[assignment]
+                        [1] * num_decode_tokens + [num_prefill_tokens + 1],
+                        dtype=torch.int,
+                    )
                 else:
                     seq_lens = max_query_len  # type: ignore[assignment]
                 self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
