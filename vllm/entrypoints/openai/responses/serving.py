@@ -2325,10 +2325,8 @@ class OpenAIServingResponses(OpenAIServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         state = StreamingState()
-        last_ctx: StreamingHarmonyContext | None = None
 
         async for ctx in result_generator:
-            last_ctx = ctx
             assert isinstance(ctx, StreamingHarmonyContext)
 
             # finish_reason='error' indicates a retryable error
@@ -2341,7 +2339,10 @@ class OpenAIServingResponses(OpenAIServing):
                         yield _increment_sequence_number_and_return(event)
                 state.reset_for_new_item()
 
-            # Stream the output of a harmony message
+            # Stream the output of a harmony message.
+            # emit_content_delta_events detects mid-message channel
+            # transitions (e.g. analysis → final) and emits done events
+            # for the previous channel before starting the new one.
             for event in emit_content_delta_events(ctx, state):
                 yield _increment_sequence_number_and_return(event)
 
@@ -2349,22 +2350,21 @@ class OpenAIServingResponses(OpenAIServing):
             for event in emit_tool_action_events(ctx, state, self.tool_server):
                 yield _increment_sequence_number_and_return(event)
 
-        # Flush done events for the final message. During the loop,
-        # done events are only emitted when is_expecting_start() fires
-        # (i.e. when a new message begins), so the last message never
-        # gets its done events.
-        if state.sent_output_item_added and last_ctx is not None:
-            synthetic_msg = OpenAIHarmonyMessage(
-                author=Author(role=Role.ASSISTANT),
-                content=[
-                    TextContent(
-                        text=last_ctx.parser.current_content or "",
-                    )
-                ],
-                channel=last_ctx.parser.current_channel,
-                recipient=last_ctx.parser.current_recipient,
-            )
-            for event in emit_previous_item_done_events(synthetic_msg, state):
+        # Flush done events for the final item. During the loop, done
+        # events are emitted either at is_expecting_start() boundaries
+        # or at mid-message channel transitions — but the very last
+        # item never gets its done events because there is no
+        # subsequent boundary to trigger them.
+        if state.sent_output_item_added and state.last_channel is not None:
+            for event in emit_previous_item_done_events(
+                OpenAIHarmonyMessage(
+                    author=Author(role=Role.ASSISTANT),
+                    content=[TextContent(text=state.accumulated_text)],
+                    channel=state.last_channel,
+                    recipient=state.last_recipient,
+                ),
+                state,
+            ):
                 yield _increment_sequence_number_and_return(event)
 
     async def responses_stream_generator(
