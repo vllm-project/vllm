@@ -516,26 +516,29 @@ class FusedMoE(CustomOp):
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
         # Wire RIY stats as registered buffers (graph-compatible).
-        # register_buffer makes tensors known to torch.compile,
-        # so scatter_add_ on them survives CUDA Graph capture.
+        self._riy_layer_idx = _layer_idx
         if _layer_idx >= 0:
             _riy = get_riy_state()
             if _riy.enabled:
+                # Get total layers from model config
+                _total_layers = 0
+                try:
+                    _hf = vllm_config.model_config.hf_config
+                    _total_layers = getattr(_hf, 'num_hidden_layers', 0)
+                    if not _total_layers:
+                        _tc = getattr(_hf, 'text_config', None)
+                        if _tc:
+                            _total_layers = getattr(_tc, 'num_hidden_layers', 0)
+                except Exception:
+                    pass
                 if not _riy._tensors_initialized:
-                    _riy.initialize_tensors(torch.device("cuda"))
+                    _riy.initialize_tensors(
+                        torch.device("cuda"),
+                        num_layers=_total_layers)
                 fv = _riy.get_freq_view(_layer_idx)
                 wv = _riy.get_weight_view(_layer_idx)
                 if fv is not None:
-                    self.register_buffer(
-                        "_riy_freq", fv, persistent=False)
-                    self.register_buffer(
-                        "_riy_weight", wv, persistent=False)
-                    self.register_buffer(
-                        "_riy_collecting", _riy._collecting_flag,
-                        persistent=False)
-                    self.router.riy_freq_view = self._riy_freq
-                    self.router.riy_weight_view = self._riy_weight
-                    self.router.riy_collecting_flag = self._riy_collecting
+                    self.set_riy_state(fv, wv, _riy._collecting_flag)
 
         # Round up hidden size before creating moe_config.
         # This way moe_config is created with the correct hidden_size from the start.
@@ -1508,6 +1511,18 @@ class FusedMoE(CustomOp):
         Some combine kernels reduce across GPU ranks by default.
         """
         return self.runner.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
+
+    def set_riy_state(self, freq_view: torch.Tensor,
+                      weight_view: torch.Tensor,
+                      collecting_flag: torch.Tensor) -> None:
+        """Wire RIY stats views. Called after model load, before compile."""
+        self.register_buffer("_riy_freq", freq_view, persistent=False)
+        self.register_buffer("_riy_weight", weight_view, persistent=False)
+        self.register_buffer("_riy_collecting", collecting_flag,
+                             persistent=False)
+        self.router.riy_freq_view = self._riy_freq
+        self.router.riy_weight_view = self._riy_weight
+        self.router.riy_collecting_flag = self._riy_collecting
 
     def forward_native(
         self,
