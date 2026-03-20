@@ -499,6 +499,8 @@ class ModelConfig:
             self.model, hf_token=self.hf_token, revision=self.revision
         )
         self.model_arch_config = self.get_model_arch_config()
+        if self.model_arch_config.architectures is not None:
+            self.hf_config.architectures = self.model_arch_config.architectures.copy()
 
         architectures = self.architectures
         registry = self.registry

@@ -208,6 +208,7 @@ def test_qwen3_5_text_model_arch_config(
     model_config = ModelConfig(str(model_dir), tokenizer=str(model_dir))
 
     assert model_config.hf_config.model_type == model_type
+    assert model_config.hf_config.architectures == [expected_architecture]
     assert model_config.architectures == [expected_architecture]
     assert model_config.architecture == expected_architecture
     assert not model_config.is_multimodal_model

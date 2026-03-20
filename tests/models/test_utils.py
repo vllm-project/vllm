@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
 pytestmark = pytest.mark.cpu_test
 
@@ -155,3 +155,39 @@ def test_module_skip_substr():
     )
     assert torch.all(new_mod.nested_mod.bn.running_var == mod.nested_mod.bn.running_var)
     assert new_mod.nested_mod.bn.num_batches_tracked.item() == 1
+
+
+class DummyQwen3_5TextOnlyModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.proj = torch.nn.Linear(2, 2, bias=False)
+        self.lm_head = torch.nn.Linear(2, 2, bias=False)
+
+
+def test_qwen3_5_text_loader_remaps_vl_weights_and_ignores_visual_keys():
+    """Mirror the Qwen3.5 text-only weight-loading path on CPU."""
+    mod = DummyQwen3_5TextOnlyModule()
+    model_weight = torch.full_like(mod.model.proj.weight, 1.25)
+    lm_head_weight = torch.full_like(mod.lm_head.weight, 2.5)
+
+    loader = AutoWeightsLoader(
+        mod,
+        skip_prefixes=["mtp."],
+        ignore_unexpected_prefixes=["model.visual."],
+    )
+    loaded = loader.load_weights(
+        [
+            ("model.language_model.proj.weight", model_weight),
+            ("model.visual.proj.weight", torch.tensor([7.0])),
+            ("lm_head.weight", lm_head_weight),
+            ("mtp.extra.weight", torch.tensor([9.0])),
+        ],
+        mapper=WeightsMapper(
+            orig_to_new_prefix={"model.language_model.": "model."},
+        ),
+    )
+
+    assert loaded == {"model.proj.weight", "lm_head.weight"}
+    assert torch.allclose(mod.model.proj.weight, model_weight)
+    assert torch.allclose(mod.lm_head.weight, lm_head_weight)
