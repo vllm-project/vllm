@@ -84,7 +84,7 @@ class AuxBufferSpec:
 
     name: str  # e.g. "k_scale_cache"
     dtype: torch.dtype  # e.g. torch.float32
-    shape_per_block: tuple[int, ...]  # e.g. (block_size, num_kv_heads)
+    shape_per_block: tuple[int, ...]  # e.g. (block_size,)
 
 
 @dataclass(frozen=True)
@@ -183,9 +183,9 @@ class AttentionSpec(KVCacheSpec):
         mode = self.kv_quant_mode
 
         if mode == KVQuantMode.PER_TOKEN:
-            # Per-(token, head) dynamic scales.
+            # One float32 scale per token (shared across all KV heads).
             # Works for int8_per_token, fp8_per_token, etc.
-            shape = (self.block_size, self.num_kv_heads)
+            shape = (self.block_size,)
             return [
                 AuxBufferSpec("k_scale_cache", torch.float32, shape),
                 AuxBufferSpec("v_scale_cache", torch.float32, shape),
@@ -209,7 +209,7 @@ class AttentionSpec(KVCacheSpec):
             num_groups = (self.head_size + gs - 1) // gs
             blockscale_shape = (
                 self.block_size, self.num_kv_heads, num_groups)
-            global_scale_shape = (self.block_size, self.num_kv_heads)
+            global_scale_shape = (self.block_size,)
             return [
                 AuxBufferSpec(
                     "k_blockscale", torch.float8_e4m3fn, blockscale_shape),
