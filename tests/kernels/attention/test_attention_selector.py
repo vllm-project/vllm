@@ -251,14 +251,15 @@ def test_fp32_fallback(device: str):
         elif device == "hip":
             if RocmPlatform is None:
                 pytest.skip("RocmPlatform not available")
-            attention_config = AttentionConfig(use_prefill_decode_attention=True)
-            hip_vllm_config = VllmConfig(attention_config=attention_config)
+            # ROCm backends do not support head_size=16 (minimum is 32).
+            # No known HuggingFace transformer model uses head_size=16.
+            # Revisit if a real model with this head size is identified
+            # and accuracy-tested.
             with (
-                set_current_vllm_config(hip_vllm_config),
                 patch("vllm.platforms.current_platform", RocmPlatform()),
+                pytest.raises(ValueError, match="No valid attention backend"),
             ):
-                backend = get_attn_backend(16, torch.float32, None)
-            assert backend.get_name() == "ROCM_ATTN"
+                get_attn_backend(16, torch.float32, None)
 
 
 def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
