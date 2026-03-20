@@ -767,7 +767,8 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
                     group=self.group,
                 )
             except Exception as e:
-                if "multicast" in str(e).lower():
+                err_str = str(e).lower()
+                if "multicast" in err_str or "multicasting" in err_str:
                     logger.warning(
                         "AllReduce fusion pass is disabled: flashinfer workspace "
                         "creation failed: %s. This is expected on GPUs without "
