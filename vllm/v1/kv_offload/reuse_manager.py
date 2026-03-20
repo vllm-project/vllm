@@ -7,6 +7,7 @@ FilterReusedOffloadingManager — OffloadingManager decorator that skips
     storing blocks that have not yet been seen enough times.
 """
 
+import copy
 from collections import OrderedDict
 from collections.abc import Iterable
 from typing import Any
@@ -116,7 +117,7 @@ class FilterReusedOffloadingManager(OffloadingManager):
         return self._backing.complete_load(block_hashes)
 
     def get_stats(self) -> dict[str, Any]:
-        stats = self._backing.get_stats()
+        stats = copy.deepcopy(self._backing.get_stats())
         stats.setdefault("gauges", {})["stores_skipped"] = self.stores_skipped
         return stats
 
