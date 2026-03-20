@@ -1,7 +1,6 @@
-import dataclasses
 import math
 from collections.abc import Mapping, Sequence
-from typing import Annotated, Optional, Tuple, Literal, cast
+from typing import Annotated, Literal, cast
 
 
 import torch
@@ -9,7 +8,6 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig, BatchFeature
-from transformers.utils import ModelOutput
 from vllm.inputs.data import PromptType
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.config.multimodal import BaseDummyOptions
@@ -53,7 +51,7 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.utils.jsontree import json_map_leaves
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.model_executor.models.fireredasr2 import Conv2dSubsampling, RelPositionalEncoding, RelPosEmbConformerBlock
+from vllm.model_executor.models.fireredasr import Conv2dSubsampling, RelPositionalEncoding, RelPosEmbConformerBlock
 
 
 class FireRedASRAudioInputs(TensorSchema):
@@ -68,14 +66,6 @@ class FireRedASRAudioInputs(TensorSchema):
         list[torch.Tensor] | None,
         TensorShape("b", "nmb", "t"),
     ]
-
-
-@dataclasses.dataclass
-class FireRedASROutput(ModelOutput):
-    """Output class for FireRedASR model"""
-    last_hidden_state: torch.FloatTensor = None
-    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
-    attentions: Optional[Tuple[torch.FloatTensor]] = None
 
 
 class ConformerEncoder(nn.Module):
@@ -309,13 +299,6 @@ class DecoderSelfAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.fc",
         )
-
-        # if block_pool_size > 1:
-        #     attn_cls = partial(
-        #         WhisperAttentionWithBlockPooling, block_pool_size=block_pool_size
-        #     )
-        # else:
-        #     attn_cls = Attention
 
         self.attn = Attention(
             self.num_heads,
