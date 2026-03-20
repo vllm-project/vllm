@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import set_env_var
 
-from .vllm_inductor_pass import VllmInductorPass
+from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 if rocm_aiter_ops.is_enabled():
     from .fusion.rocm_aiter_fusion import (
@@ -107,6 +107,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         # always run fix_functionalization last
         self.fix_functionalization(graph)
         VllmInductorPass.dump_prefix = None  # Cleanup index
+
+        VllmPatternMatcherPass.log_match_summary()
 
     def configure(self, config: VllmConfig) -> None:
         self.pass_config = config.compilation_config.pass_config

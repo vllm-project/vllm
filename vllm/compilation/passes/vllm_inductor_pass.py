@@ -109,12 +109,10 @@ class VllmPatternMatcherPass(VllmInductorPass):
             )
         )
 
-    def end_and_log(self) -> None:
-        super().end_and_log()
-        if VllmPatternMatcherPass.match_table:
-            logger.debug(
-                "fusion pass matches: %s", dict(VllmPatternMatcherPass.match_table)
-            )
+    @classmethod
+    def log_match_summary(cls) -> None:
+        if cls.match_table:
+            logger.debug("fusion pass matches: %s", dict(cls.match_table))
 
     def dump_patterns(self, config: VllmConfig, pm_pass: PatternMatcherPass) -> None:
         """
