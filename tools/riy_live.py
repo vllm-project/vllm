@@ -283,7 +283,8 @@ class Dashboard:
         self.demo_src   = DemoSource() if demo else None
         self.current    = Stats()
         self.previous   = Stats()
-        self.mask       = set()
+        self.mask       = set()   # runtime mask (from 'p')
+        self.profile_mask = set()  # profile mask (from --riy-expert-profile)
         self.show_mask  = False
         self.show_help  = False
         self.status_msg = ""
@@ -346,6 +347,11 @@ class Dashboard:
                 count = data.get("count", len(experts))
                 if count > 0:
                     self.mask = set(tuple(x) for x in experts)
+                    self.show_mask = True
+                # Profile mask (persistent, from --riy-expert-profile)
+                profile = data.get("profile_experts", [])
+                if profile:
+                    self.profile_mask = set(tuple(x) for x in profile)
                     self.show_mask = True
                     # Fetch health to compute prune percentage
                     self._fetch_health()
@@ -831,11 +837,15 @@ class Dashboard:
 
     def _draw_expert(self, stdscr, row, col, layer, expert, v,
                      max_freq, max_gate, flash, shared):
+        is_profile = self.show_mask and (layer, expert) in self.profile_mask
         is_masked = self.show_mask and (layer, expert) in self.mask
         is_flash  = (layer, expert) in flash
 
-        if is_masked:
-            ch   = "X"
+        if is_profile:
+            ch   = "z"  # profile-loaded (persistent, zeroed at load time)
+            attr = curses.color_pair(7) | curses.A_BOLD
+        elif is_masked:
+            ch   = "X"  # runtime-masked (via TUI 'p')
             attr = curses.color_pair(7) | curses.A_BOLD
         else:
             ch   = freq_char(v.frequency, max_freq)
