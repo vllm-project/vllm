@@ -335,9 +335,25 @@ class Dashboard:
         else:
             return params * 2  # BF16 = 2 bytes
 
+    def _fetch_mask(self):
+        """Fetch current mask from RIY server on startup."""
+        try:
+            url = f"http://{self.host}:{self.port}/riy/mask"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                data = json.loads(resp.read().decode())
+                experts = data.get("pruned_experts", [])
+                count = data.get("count", len(experts))
+                if count > 0:
+                    self.mask = set(tuple(x) for x in experts)
+                    self.show_mask = True
+        except Exception:
+            pass
+
     def fetch_loop(self):
         self._fetch_model_name()
         self._fetch_health()
+        self._fetch_mask()
         if not self.demo:
             post_enable(self.host, self.port, True)
         while self.running:
