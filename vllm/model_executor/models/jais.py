@@ -120,8 +120,15 @@ class JAISAttention(nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         head_start = tp_rank * self.num_heads
         head_end = (tp_rank + 1) * self.num_heads
-        alibi_slopes = _get_alibi_slopes(total_num_heads)
-        alibi_slopes = alibi_slopes[head_start:head_end]
+
+        # ALiBi is only used when position_embedding_type is "alibi"
+        # For "learned" positional embeddings, alibi_slopes should be None
+        if config.position_embedding_type == "alibi":
+            alibi_slopes = _get_alibi_slopes(total_num_heads)
+            alibi_slopes = alibi_slopes[head_start:head_end]
+        else:
+            alibi_slopes = None
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
