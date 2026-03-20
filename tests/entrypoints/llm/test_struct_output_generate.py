@@ -24,6 +24,108 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 
+SAMPLE_REGEX = (
+    r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
+    r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)"
+)
+
+# Note: Ensure this only uses attributes compatible with xgrammar
+SAMPLE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "age": {"type": "integer"},
+        "skills": {
+            "type": "array",
+            "items": {
+                "type": "string",
+            },
+        },
+        "grade": {
+            "type": "string",
+            "pattern": "^[A-D]$",  # Regex pattern
+        },
+        "email": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$",
+        },
+        "work_history": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string"},
+                    "duration": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 100.0,  # Numeric range
+                    },
+                    "position": {"type": "string"},
+                },
+                "required": ["company", "duration", "position"],
+                "additionalProperties": False,
+            },
+            "minItems": 0,
+            "maxItems": 3,
+        },
+    },
+    "required": ["name", "age", "skills", "grade", "email", "work_history"],
+    "additionalProperties": False,
+    "minProperties": 1,
+    "maxProperties": 10,
+}
+
+# A schema unsupported by xgrammar
+UNSUPPORTED_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {
+            "type": "integer",
+            "multipleOf": 5,  # Numeric multiple
+        },
+        "tags": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 10, "maxLength": 20},
+        },
+    },
+    "required": ["score", "tags"],
+    "additionalProperties": False,
+    "patternProperties": {
+        "^score$": {"type": "integer"},
+    },
+}
+
+SAMPLE_STRUCTURED_OUTPUTS_CHOICES = [
+    "Python",
+    "Java",
+    "JavaScript",
+    "C++",
+    "C#",
+    "PHP",
+    "TypeScript",
+    "Ruby",
+    "Swift",
+    "Kotlin",
+]
+
+SAMPLE_SQL_EBNF = """
+root ::= select_statement
+select_statement ::= "SELECT" column "from" table "where" condition
+column ::= "col_1" | "col_2"
+table ::= "table_1" | "table_2"
+condition ::= column "=" number
+number ::= "1" | "2"
+"""
+
+SAMPLE_SQL_LARK = """
+start: select_statement
+select_statement: "SELECT" column "from" table "where" condition
+column: "col_1" | "col_2"
+table: "table_1" | "table_2"
+condition: column "=" number
+number: "1" | "2"
+"""
+
 NGRAM_SPEC_CONFIG = {
     "model": "[ngram]",
     "num_speculative_tokens": 5,
@@ -110,17 +212,17 @@ class CarDescription(BaseModel):
     PARAMS_MODELS_BACKENDS_TOKENIZER_MODE,
 )
 def test_structured_output(
-    sample_json_schema: dict[str, Any],
-    unsupported_json_schema: dict[str, Any],
-    sample_sql_ebnf: str,
-    sample_sql_lark: str,
-    sample_regex: str,
-    sample_structured_outputs_choices: str,
     backend: str,
     tokenizer_mode: str,
     model_name: str,
     speculative_config: dict[str, Any],
 ):
+    sample_json_schema = SAMPLE_JSON_SCHEMA
+    unsupported_json_schema = UNSUPPORTED_JSON_SCHEMA
+    sample_sql_ebnf = SAMPLE_SQL_EBNF
+    sample_sql_lark = SAMPLE_SQL_LARK
+    sample_regex = SAMPLE_REGEX
+    sample_structured_outputs_choices = SAMPLE_STRUCTURED_OUTPUTS_CHOICES
     if current_platform.is_tpu() and speculative_config:
         pytest.skip("TPU does not support speculative decoding")
 
@@ -702,10 +804,10 @@ def test_structured_output_with_reasoning_matrices(
 
 @pytest.mark.parametrize("model_name, tokenizer_mode", PARAMS_MODELS_TOKENIZER_MODE)
 def test_structured_output_auto_mode(
-    unsupported_json_schema: dict[str, Any],
     model_name: str,
     tokenizer_mode: str,
 ):
+    unsupported_json_schema = UNSUPPORTED_JSON_SCHEMA
     llm = LLM(
         model=model_name,
         max_model_len=1024,
@@ -808,9 +910,9 @@ def test_guidance_no_additional_properties():
 
 @pytest.mark.parametrize("backend", ["guidance", "xgrammar", "outlines"])
 def test_structured_output_batched_with_non_structured_outputs_requests(
-    sample_json_schema: dict[str, Any],
     backend: str,
 ):
+    sample_json_schema = SAMPLE_JSON_SCHEMA
     # Don't use eager execution on TPUs because we want to test for no
     # recompilation at runtime
     enforce_eager = bool(not current_platform.is_tpu())
