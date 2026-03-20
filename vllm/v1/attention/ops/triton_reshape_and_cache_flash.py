@@ -112,19 +112,23 @@ def reshape_and_cache_kernel_flash(
 
 
 # ---------------------------------------------------------------------------
-# Per-token, per-head INT8 quantization kernel
+# Per-token, per-head dynamic quantization kernel
 # Grid: (num_tokens, num_kv_heads)
 # Each instance handles exactly one (token, head) pair:
-#   1. Computes scale = absmax(head_data) / 127
-#   2. Writes quantized int8 data to kv_cache
+#   1. Computes scale = absmax(head_data) / QUANT_MAX
+#   2. Writes quantized data to kv_cache
 #   3. Writes scale to k_scale_cache / v_scale_cache
+#
+# The kernel is parametrised by QUANT_MAX / QUANT_MIN so that the same
+# code path works for int8 (±127/128) and, in the future, fp8 or other
+# low-bitwidth formats with different representable ranges.
 # ---------------------------------------------------------------------------
 @triton.jit
-def _reshape_cache_int8_per_token_head(
+def _reshape_cache_per_token_head(
     key_ptr,  # [num_tokens, num_kv_heads, head_size]
     value_ptr,  # [num_tokens, num_kv_heads, head_size_v]
-    key_cache_ptr,  # [num_blocks, block_size, num_kv_heads, head_size]  int8
-    value_cache_ptr,  # [num_blocks, block_size, num_kv_heads, head_size_v] int8
+    key_cache_ptr,  # [num_blocks, block_size, num_kv_heads, head_size]
+    value_cache_ptr,  # [num_blocks, block_size, num_kv_heads, head_size_v]
     k_scale_cache_ptr,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache_ptr,  # [num_blocks, block_size, num_kv_heads] float32
     slot_mapping_ptr,  # [num_tokens]
@@ -148,6 +152,8 @@ def _reshape_cache_int8_per_token_head(
     head_size: tl.constexpr,
     head_size_v: tl.constexpr,
     head_size_padded: tl.constexpr,  # >= max(head_size, head_size_v), power-of-2
+    QUANT_MAX: tl.constexpr = 127.0,  # e.g. 127 for int8, 448 for fp8_e4m3
+    QUANT_MIN: tl.constexpr = -128.0,  # e.g. -128 for int8, -448 for fp8_e4m3
 ):
     tok = tl.program_id(0)
     head = tl.program_id(1)
@@ -169,8 +175,8 @@ def _reshape_cache_int8_per_token_head(
         other=0.0,
     ).to(tl.float32)
     k_absmax = tl.max(tl.abs(tl.where(k_mask, k, 0.0)), axis=0)
-    k_scale = tl.maximum(k_absmax / 127.0, 1e-6)
-    k_q = tl.clamp(k / k_scale, -128.0, 127.0)
+    k_scale = tl.maximum(k_absmax / QUANT_MAX, 1e-6)
+    k_q = tl.clamp(k / k_scale, QUANT_MIN, QUANT_MAX)
 
     tl.store(
         key_cache_ptr
@@ -197,8 +203,8 @@ def _reshape_cache_int8_per_token_head(
         other=0.0,
     ).to(tl.float32)
     v_absmax = tl.max(tl.abs(tl.where(v_mask, v, 0.0)), axis=0)
-    v_scale = tl.maximum(v_absmax / 127.0, 1e-6)
-    v_q = tl.clamp(v / v_scale, -128.0, 127.0)
+    v_scale = tl.maximum(v_absmax / QUANT_MAX, 1e-6)
+    v_q = tl.clamp(v / v_scale, QUANT_MIN, QUANT_MAX)
 
     tl.store(
         value_cache_ptr
@@ -218,22 +224,43 @@ def _reshape_cache_int8_per_token_head(
     )
 
 
+# Mapping from cache torch dtype to (QUANT_MAX, QUANT_MIN) for the
+# per-token quantization kernel.  Extend this dict when adding new
+# per-token quantization formats (e.g. fp8_per_token).
+_PER_TOKEN_QUANT_PARAMS: dict[torch.dtype, tuple[float, float]] = {
+    torch.int8: (127.0, -128.0),
+    # Future: torch.float8_e4m3fn: (448.0, -448.0),
+}
+
+
 def triton_reshape_and_cache_flash_per_token_quant(
     key: torch.Tensor,  # [num_tokens, num_kv_heads, head_size]
     value: torch.Tensor,  # [num_tokens, num_kv_heads, head_size_v]
-    key_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, head_size]int8
-    value_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, head_size_v]int
+    key_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, head_size]
+    value_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads, head_size_v]
     k_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     slot_mapping: torch.Tensor,  # [num_tokens]
 ):
-    """Quantize key/value per (token, head) and write to paged INT8 cache.
+    """Quantize key/value per (token, head) and write to paged cache.
 
-    Computes scale = absmax / 127 for each (token, kv_head) independently,
-    stores the int8 quantized data in key_cache/value_cache, and stores the
-    float32 scale in k_scale_cache/v_scale_cache (indexed by the same
-    block_table used for the KV cache).
+    Computes scale = absmax / QUANT_MAX for each (token, kv_head)
+    independently, stores the quantized data in key_cache/value_cache,
+    and stores the float32 scale in k_scale_cache/v_scale_cache.
+
+    The quantization range (QUANT_MAX, QUANT_MIN) is derived from the
+    cache tensor dtype so the same code path works for int8, and in the
+    future for fp8 or other low-bitwidth per-token formats.
     """
+    cache_dtype = key_cache.dtype
+    quant_params = _PER_TOKEN_QUANT_PARAMS.get(cache_dtype)
+    if quant_params is None:
+        raise ValueError(
+            f"Per-token quantization not supported for cache dtype "
+            f"{cache_dtype}.  Supported: {list(_PER_TOKEN_QUANT_PARAMS)}"
+        )
+    quant_max, quant_min = quant_params
+
     num_tokens, num_kv_heads, head_size = key.shape
     head_size_v = value.shape[2]
     head_size_padded = triton.next_power_of_2(max(head_size, head_size_v))
@@ -245,7 +272,7 @@ def triton_reshape_and_cache_flash_per_token_quant(
     else:
         num_warps = min(16, max(1, head_size_padded // 32))
 
-    _reshape_cache_int8_per_token_head[(num_tokens, num_kv_heads)](
+    _reshape_cache_per_token_head[(num_tokens, num_kv_heads)](
         key_ptr=key,
         value_ptr=value,
         key_cache_ptr=key_cache,
@@ -273,6 +300,8 @@ def triton_reshape_and_cache_flash_per_token_quant(
         head_size=head_size,
         head_size_v=head_size_v,
         head_size_padded=head_size_padded,
+        QUANT_MAX=quant_max,
+        QUANT_MIN=quant_min,
         num_warps=num_warps,
     )
 

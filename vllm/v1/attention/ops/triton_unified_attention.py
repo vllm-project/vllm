@@ -1017,6 +1017,9 @@ def unified_attention(
 
     # Auto-detect quant mode from tensor dtype if caller didn't specify.
     # This keeps backward compatibility with existing FP8 callers/tests.
+    # NOTE: When fp8_per_token is added, both per-tensor and per-token FP8
+    # will share the same torch dtype, so the caller *must* pass
+    # kv_quant_mode explicitly in that case.
     if kv_quant_mode == KVQuantMode.NONE:
         if k.dtype == torch.int8:
             kv_quant_mode = KVQuantMode.PER_TOKEN

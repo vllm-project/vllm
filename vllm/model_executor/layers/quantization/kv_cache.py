@@ -58,11 +58,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
 
         # Per-token quantized KV cache: scales are computed dynamically
         # per-token in the kernel at cache-write time.  Checkpoint scales
-        # are not used.
-        if (
-            kv_cache_uses_per_token_scales(layer.kv_cache_dtype)
-            and not layer.calculate_kv_scales
-        ):
+        # are never used regardless of calculate_kv_scales.
+        if kv_cache_uses_per_token_scales(layer.kv_cache_dtype):
             layer._k_scale.copy_(1.0)
             layer._v_scale.copy_(1.0)
             layer._k_scale_float = 1.0

@@ -3,6 +3,7 @@
 
 import copy
 from dataclasses import dataclass, fields, replace
+from enum import IntEnum
 from math import prod
 
 import torch
@@ -14,6 +15,49 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 
 logger = init_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# KV cache quantization mode
+# ---------------------------------------------------------------------------
+
+class KVQuantMode(IntEnum):
+    """KV cache quantization mode.
+
+    Describes the *scale granularity*, not the storage dtype.  The storage
+    dtype (int8, fp8_e4m3, …) is orthogonal and carried by
+    ``AttentionSpec.dtype`` / the ``kv_cache_dtype`` string.
+
+    Used by attention backends and kernels to dispatch quantization logic
+    without string matching on ``kv_cache_dtype``.
+    """
+
+    NONE = 0
+    FP8 = 1  # per-tensor scales (current fp8 path)
+    PER_TOKEN = 2  # per-(token, head) dynamic scales (e.g. int8, fp8)
+
+
+def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
+    """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`.
+
+    Per-token check is tested *before* the fp8 prefix check so that a
+    future ``"fp8_per_token"`` dtype is handled correctly (it needs
+    per-token scales, not per-tensor).
+    """
+    if kv_cache_dtype.endswith("_per_token"):
+        return KVQuantMode.PER_TOKEN
+    if kv_cache_dtype.startswith("fp8"):
+        return KVQuantMode.FP8
+    return KVQuantMode.NONE
+
+
+def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
+    return get_kv_quant_mode(kv_cache_dtype) != KVQuantMode.NONE
+
+
+def kv_cache_uses_per_token_scales(kv_cache_dtype: str) -> bool:
+    """Return True if *kv_cache_dtype* needs per-token scales."""
+    return get_kv_quant_mode(kv_cache_dtype) == KVQuantMode.PER_TOKEN
 
 
 @dataclass(frozen=True)
@@ -103,6 +147,7 @@ class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
+    kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
 
     @property
@@ -117,10 +162,12 @@ class AttentionSpec(KVCacheSpec):
     def auxiliary_buffer_specs(self) -> list[AuxBufferSpec]:
         """Auxiliary buffers for quantized KV cache formats.
 
-        For per-token quantization (e.g. int8_per_token): two float32 scale
-        caches of shape ``(block_size, num_kv_heads)`` each.
+        For per-token quantization (e.g. int8_per_token, fp8_per_token):
+        two float32 scale caches of shape ``(block_size, num_kv_heads)``
+        each.  The same scale structure works regardless of the quantised
+        storage dtype.
         """
-        if self.dtype != torch.int8:
+        if self.kv_quant_mode != KVQuantMode.PER_TOKEN:
             return []
         shape = (self.block_size, self.num_kv_heads)
         return [

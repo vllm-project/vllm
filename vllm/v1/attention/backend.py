@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
-from enum import Enum, IntEnum
+from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
 import numpy as np
@@ -983,34 +983,13 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         )
 
 
-class KVQuantMode(IntEnum):
-    """KV cache quantization mode.
-
-    Used by attention backends and kernels to dispatch quantization logic
-    without string matching on ``kv_cache_dtype``.
-    """
-
-    NONE = 0
-    FP8 = 1
-    PER_TOKEN = 2  # per-(token, head) dynamic quantization (e.g. int8)
-
-
-def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
-    """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
-    if kv_cache_dtype.startswith("fp8"):
-        return KVQuantMode.FP8
-    if kv_cache_dtype == "int8_per_token":
-        return KVQuantMode.PER_TOKEN
-    return KVQuantMode.NONE
-
-
-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return get_kv_quant_mode(kv_cache_dtype) != KVQuantMode.NONE
-
-
-def kv_cache_uses_per_token_scales(kv_cache_dtype: str) -> bool:
-    """Return True if *kv_cache_dtype* needs per-token scales."""
-    return get_kv_quant_mode(kv_cache_dtype) == KVQuantMode.PER_TOKEN
+# Re-exported from kv_cache_interface for backward compatibility.
+from vllm.v1.kv_cache_interface import (  # noqa: E402, F811
+    KVQuantMode,
+    get_kv_quant_mode,
+    is_quantized_kv_cache,
+    kv_cache_uses_per_token_scales,
+)
 
 
 def subclass_attention_backend(
