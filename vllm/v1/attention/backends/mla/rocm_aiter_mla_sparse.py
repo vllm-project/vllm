@@ -300,6 +300,7 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         indexer: "Indexer | None" = None,
         **mla_args,
     ) -> None:
+        self._decode_out = None
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -318,11 +319,18 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         attn_metadata: ROCMAiterMLASparseMetadata,
     ) -> torch.Tensor:
         num_tokens = q.shape[0]
-        output = torch.empty(
-            [num_tokens, self.num_heads, self.kv_lora_rank],
-            dtype=q.dtype,
-            device=q.device,
-        )
+        dtype = q.dtype
+        if (
+            self._decode_out is None
+            or self._decode_out.shape[0] < num_tokens
+            or self._decode_out.dtype != dtype
+        ):
+            self._decode_out = torch.zeros(
+                [num_tokens, self.num_heads, self.kv_lora_rank],
+                dtype=dtype,
+                device=q.device,
+            )
+        output = self._decode_out[:num_tokens]
         seq_len = (topk_indices != -1).sum(dim=-1)
         torch.cumsum(seq_len, dim=0, out=attn_metadata.paged_kv_indptr[1:])
         attn_metadata.paged_kv_indptr_rest.fill_(attn_metadata.paged_kv_indptr[-1])

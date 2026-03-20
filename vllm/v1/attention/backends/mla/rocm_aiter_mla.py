@@ -278,6 +278,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         from aiter import flash_attn_varlen_func
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
+        self._decode_out = None
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
@@ -316,13 +317,20 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         else:
             kernel_num_heads = self.num_heads
 
-        o = torch.zeros(
-            B,
-            kernel_num_heads,
-            self.kv_lora_rank,
-            dtype=attn_metadata.decode.attn_out_dtype,
-            device=q.device,
-        )
+        dtype = attn_metadata.decode.attn_out_dtype
+        if (
+            self._decode_out is None
+            or self._decode_out.shape[0] < B
+            or self._decode_out.dtype != dtype
+        ):
+            self._decode_out = torch.zeros(
+                B,
+                kernel_num_heads,
+                self.kv_lora_rank,
+                dtype=dtype,
+                device=q.device,
+            )
+        o = self._decode_out[:B]
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
