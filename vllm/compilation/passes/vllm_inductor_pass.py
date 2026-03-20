@@ -195,20 +195,25 @@ class VllmPatternReplacement(ABC, Generic[P, R]):
     with `replacement`.
     """
 
+    # TODO(Badr): bound methods work for pattern registration since
+    # PyTorch 2.10. Once vLLM requires torch>=2.11, replace these properties
+    # with plain methods and drop the closure indirection.
+    @property
     @abstractmethod
-    def pattern(self, *args: P.args, **kwargs: P.kwargs) -> R:
-        """The FX subgraph to search for."""
+    def pattern(self) -> Callable[P, R]:
+        """Returns a closure defining the FX subgraph to search for."""
         ...
 
+    @property
     @abstractmethod
-    def replacement(self, *args: P.args, **kwargs: P.kwargs) -> R:
-        """The FX subgraph to substitute in place of each match."""
+    def replacement(self) -> Callable[P, R]:
+        """Returns a closure defining the FX subgraph to substitute in place of each match."""
         ...
 
     @property
     @abstractmethod
     def get_inputs(self) -> list[torch.Tensor]:
-        """Example CUDA tensors used to trace pattern and replacement."""
+        """Example tensors used to trace pattern and replacement."""
         ...
 
     # Helpers for get_inputs: uninitialized tensors of common dtypes.

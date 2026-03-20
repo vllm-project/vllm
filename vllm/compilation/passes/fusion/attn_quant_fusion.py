@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Callable
+
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
@@ -49,57 +51,63 @@ class AttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
         self._dtype = dtype
         self._quant_matcher = MatcherQuantFP8(_FP8_QUANT_KEY)
 
-    def pattern(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        output_attn: torch.Tensor,
-        scale: torch.Tensor,
-        kv_cache_dummy_dep: torch.Tensor,
-    ) -> torch.Tensor:
-        at1 = auto_functionalized(
-            ATTN_OP,
-            query=q,
-            key=k,
-            value=v,
-            output=output_attn,
-            layer_name=self._layer_name,
-            output_scale=None,
-            output_block_scale=None,
-            kv_cache_dummy_dep=kv_cache_dummy_dep,
-        )
-        attn_out_view = RESHAPE_OP(
-            at1[1], [q.shape[0], self._num_heads * self._head_size]
-        )
-        return self._quant_matcher(attn_out_view, scale)[0]
+    @property
+    def pattern(self) -> Callable[..., torch.Tensor]:
+        def _pattern(
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            output_attn: torch.Tensor,
+            scale: torch.Tensor,
+            kv_cache_dummy_dep: torch.Tensor,
+        ) -> torch.Tensor:
+            at1 = auto_functionalized(
+                ATTN_OP,
+                query=q,
+                key=k,
+                value=v,
+                output=output_attn,
+                layer_name=self._layer_name,
+                output_scale=None,
+                output_block_scale=None,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            attn_out_view = RESHAPE_OP(
+                at1[1], [q.shape[0], self._num_heads * self._head_size]
+            )
+            return self._quant_matcher(attn_out_view, scale)[0]
 
-    def replacement(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        output_attn: torch.Tensor,
-        scale: torch.Tensor,
-        kv_cache_dummy_dep: torch.Tensor,
-    ) -> torch.Tensor:
-        output_attn = torch.empty(
-            [q.shape[0], self._num_heads, self._head_size],
-            dtype=FP8_DTYPE,
-            device=q.device,
-        )
-        at1 = auto_functionalized(
-            ATTN_OP,
-            query=q,
-            key=k,
-            value=v,
-            output=output_attn,
-            layer_name=self._layer_name,
-            output_scale=scale,
-            output_block_scale=None,
-            kv_cache_dummy_dep=kv_cache_dummy_dep,
-        )
-        return RESHAPE_OP(at1[1], [-1, self._num_heads * self._head_size])
+        return _pattern
+
+    @property
+    def replacement(self) -> Callable[..., torch.Tensor]:
+        def _replacement(
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            output_attn: torch.Tensor,
+            scale: torch.Tensor,
+            kv_cache_dummy_dep: torch.Tensor,
+        ) -> torch.Tensor:
+            output_attn = torch.empty(
+                [q.shape[0], self._num_heads, self._head_size],
+                dtype=FP8_DTYPE,
+                device=q.device,
+            )
+            at1 = auto_functionalized(
+                ATTN_OP,
+                query=q,
+                key=k,
+                value=v,
+                output=output_attn,
+                layer_name=self._layer_name,
+                output_scale=scale,
+                output_block_scale=None,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            return RESHAPE_OP(at1[1], [-1, self._num_heads * self._head_size])
+
+        return _replacement
 
     @property
     def get_inputs(self):
@@ -135,72 +143,78 @@ class AttnNvfp4QuantPattern(
         self._dtype = dtype
         self._QUANT_OP = QUANT_OPS[kNvfp4Dynamic]
 
-    def pattern(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        output_attn: torch.Tensor,
-        output_quant: torch.Tensor,
-        output_scale: torch.Tensor,
-        input_scale: torch.Tensor,
-        kv_cache_dummy_dep: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        at1 = auto_functionalized(
-            ATTN_OP,
-            query=q,
-            key=k,
-            value=v,
-            output=output_attn,
-            layer_name=self._layer_name,
-            output_scale=None,
-            output_block_scale=None,
-            kv_cache_dummy_dep=kv_cache_dummy_dep,
-        )
-        attn_out_view = RESHAPE_OP(
-            at1[1], [q.shape[0], self._num_heads * self._head_size]
-        )
-        at2 = auto_functionalized(
-            self._QUANT_OP,
-            input=attn_out_view,
-            input_scale=input_scale,
-            is_sf_swizzled_layout=True,
-            output=output_quant,
-            output_scale=output_scale,
-        )
-        output_scale_view = torch.ops.aten.view.dtype(at2[2], FP8_DTYPE)
-        return at2[1], output_scale_view
+    @property
+    def pattern(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+        def _pattern(
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            output_attn: torch.Tensor,
+            output_quant: torch.Tensor,
+            output_scale: torch.Tensor,
+            input_scale: torch.Tensor,
+            kv_cache_dummy_dep: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            at1 = auto_functionalized(
+                ATTN_OP,
+                query=q,
+                key=k,
+                value=v,
+                output=output_attn,
+                layer_name=self._layer_name,
+                output_scale=None,
+                output_block_scale=None,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            attn_out_view = RESHAPE_OP(
+                at1[1], [q.shape[0], self._num_heads * self._head_size]
+            )
+            at2 = auto_functionalized(
+                self._QUANT_OP,
+                input=attn_out_view,
+                input_scale=input_scale,
+                is_sf_swizzled_layout=True,
+                output=output_quant,
+                output_scale=output_scale,
+            )
+            output_scale_view = torch.ops.aten.view.dtype(at2[2], FP8_DTYPE)
+            return at2[1], output_scale_view
 
-    def replacement(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        output_attn: torch.Tensor,
-        _output_quant: torch.Tensor,
-        output_scale: torch.Tensor,
-        input_scale: torch.Tensor,
-        kv_cache_dummy_dep: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        output_attn = torch.empty(
-            [q.shape[0], self._num_heads, self._head_size // 2],
-            dtype=FP4_DTYPE,
-            device=q.device,
-        )
-        output_scale_view = torch.ops.aten.view.dtype(output_scale, FP8_DTYPE)
-        at2 = auto_functionalized(
-            ATTN_OP,
-            query=q,
-            key=k,
-            value=v,
-            output=output_attn,
-            layer_name=self._layer_name,
-            output_scale=input_scale,
-            output_block_scale=output_scale_view,
-            kv_cache_dummy_dep=kv_cache_dummy_dep,
-        )
-        output = RESHAPE_OP(at2[1], [-1, self._num_heads * self._head_size // 2])
-        return output, at2[2]
+        return _pattern
+
+    @property
+    def replacement(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+        def _replacement(
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            output_attn: torch.Tensor,
+            _output_quant: torch.Tensor,
+            output_scale: torch.Tensor,
+            input_scale: torch.Tensor,
+            kv_cache_dummy_dep: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            output_attn = torch.empty(
+                [q.shape[0], self._num_heads, self._head_size // 2],
+                dtype=FP4_DTYPE,
+                device=q.device,
+            )
+            output_scale_view = torch.ops.aten.view.dtype(output_scale, FP8_DTYPE)
+            at2 = auto_functionalized(
+                ATTN_OP,
+                query=q,
+                key=k,
+                value=v,
+                output=output_attn,
+                layer_name=self._layer_name,
+                output_scale=input_scale,
+                output_block_scale=output_scale_view,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            output = RESHAPE_OP(at2[1], [-1, self._num_heads * self._head_size // 2])
+            return output, at2[2]
+
+        return _replacement
 
     @property
     def get_inputs(self):
