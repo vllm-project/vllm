@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
 
 from tests.kernels.helion.utils import skip_if_platform_unsupported
 from tests.kernels.quant_utils import FP8_DTYPE
@@ -30,32 +31,35 @@ if not has_helion():
     )
 
 
-def _generate_input(
+def _generate_fake_input(
     num_tokens: int, hidden_size: int, group_size: int
 ) -> tuple[Any, ...]:
-    input = torch.randn((num_tokens, hidden_size), device="cuda", dtype=torch.bfloat16)
-    output_q = torch.empty(input.shape, device=input.device, dtype=FP8_DTYPE)
-    output_s = torch.empty(
-        (num_tokens, hidden_size // group_size),
-        device=input.device,
-        dtype=torch.float32,
-    )
-    use_ue8m0 = False
-    column_major = False
-    fp8_min, fp8_max = get_fp8_min_max()
-    eps = 1e-10
-    args = (
-        input,
-        output_q,
-        output_s,
-        group_size,
-        eps,
-        fp8_min,
-        fp8_max,
-        use_ue8m0,
-        column_major,
-    )
-    return args
+    with FakeTensorMode():
+        input = torch.randn(
+            (num_tokens, hidden_size), device="cuda", dtype=torch.bfloat16
+        )
+        output_q = torch.empty(input.shape, device=input.device, dtype=FP8_DTYPE)
+        output_s = torch.empty(
+            (num_tokens, hidden_size // group_size),
+            device=input.device,
+            dtype=torch.float32,
+        )
+        use_ue8m0 = False
+        column_major = False
+        fp8_min, fp8_max = get_fp8_min_max()
+        eps = 1e-10
+        args = (
+            input,
+            output_q,
+            output_s,
+            group_size,
+            eps,
+            fp8_min,
+            fp8_max,
+            use_ue8m0,
+            column_major,
+        )
+        return args
 
 
 @pytest.fixture(autouse=True)
@@ -74,7 +78,7 @@ class TestPerTokenGroupFp8QuantConfigPicker:
             "hidden_size_4096_group_size_128_num_tokens_16",
         ]
 
-        args = _generate_input(16, 4096, 128)
+        args = _generate_fake_input(16, 4096, 128)
         selected_key = pick_config(args, config_keys)
         assert selected_key == "hidden_size_4096_group_size_128_num_tokens_16"
 
@@ -91,21 +95,21 @@ class TestPerTokenGroupFp8QuantConfigPicker:
             "hidden_size_4096_group_size_128_num_tokens_32",
         ]
 
-        args = _generate_input(20, 3000, 70)
+        args = _generate_fake_input(20, 3000, 70)
         selected_key = pick_config(args, config_keys)
         assert selected_key == "hidden_size_2048_group_size_64_num_tokens_32"
 
     def test_config_picker_fallback_to_default(self):
         config_keys = ["default"]
 
-        args = _generate_input(16, 4096, 128)
+        args = _generate_fake_input(16, 4096, 128)
         selected_key = pick_config(args, config_keys)
         assert selected_key == "default"
 
     def test_config_picker_no_configs(self):
         config_keys: list[str] = []
 
-        args = _generate_input(16, 4096, 128)
+        args = _generate_fake_input(16, 4096, 128)
         selected_key = pick_config(args, config_keys)
         assert selected_key is None
 
@@ -122,7 +126,7 @@ class TestPerTokenGroupFp8QuantConfigPicker:
             "hidden_size_4096_group_size_128_num_tokens_32",
         ]
 
-        args = _generate_input(64, 8192, 256)
+        args = _generate_fake_input(64, 8192, 256)
         selected_key = pick_config(args, config_keys)
         assert selected_key == "hidden_size_4096_group_size_128_num_tokens_32"
 
@@ -131,7 +135,7 @@ class TestPerTokenGroupFp8QuantConfigPicker:
             "bad_key",
         ]
 
-        args = _generate_input(16, 4096, 128)
+        args = _generate_fake_input(16, 4096, 128)
         with pytest.raises(ValueError):
             pick_config(args, config_keys)
 
@@ -243,5 +247,5 @@ class TestPerTokenGroupFp8QuantIntegration:
         kernel_wrapper = registered_kernels["per_token_group_fp8_quant"]
         fake_impl = kernel_wrapper._fake_impl
 
-        args = _generate_input(16, 4096, 128)
+        args = _generate_fake_input(16, 4096, 128)
         assert fake_impl(*args) is None
