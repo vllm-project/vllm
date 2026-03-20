@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 import regex as re
 
-import vllm.envs as envs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
@@ -38,7 +37,6 @@ class _StreamState:
 
     in_section: bool = False
     buffer: str = ""  # Rolling buffer for split marker detection
-    section_chars: int = 0  # Characters processed in current tool section
 
 
 class KimiK2ToolParser(ToolParser):
@@ -236,7 +234,6 @@ class KimiK2ToolParser(ToolParser):
             logger.debug("Entering tool section")
             st.in_section = True
             st.buffer = buffered_text
-            st.section_chars = 0
 
         if found_section_end and st.in_section:
             logger.debug("Detected section end marker")
@@ -278,21 +275,7 @@ class KimiK2ToolParser(ToolParser):
         # Strip section markers from delta_text for subsequent processing
         delta_text, _, _ = self._check_and_strip_markers(delta_text)
 
-        # --- Phase 4: Section length limit (configurable) ---
-        if st.in_section:
-            st.section_chars += len(delta_text)
-            max_chars = envs.VLLM_KIMI_TOOL_PARSER_MAX_SECTION_CHARS
-            if st.section_chars > max_chars:
-                logger.warning(
-                    "Tool section exceeded max length (%d chars, limit %d), "
-                    "forcing exit. This may indicate malformed model output.",
-                    st.section_chars,
-                    max_chars,
-                )
-                self._reset_section_state()
-                return DeltaMessage(content=delta_text if delta_text.strip() else "")
-
-        # --- Phase 5: Token-counting state machine ---
+        # --- Phase 4: Token-counting state machine ---
         try:
             # figure out where we are in the parsing by counting tool call
             # start & end tags

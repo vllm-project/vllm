@@ -502,49 +502,6 @@ def test_empty_tool_section(kimi_k2_tool_parser):
     assert kimi_k2_tool_parser._stream_state.in_section is False
 
 
-def test_malformed_tool_section_recovery(kimi_k2_tool_parser, monkeypatch):
-    """
-    Test that the parser recovers from a malformed tool section
-    that never closes properly.
-    """
-    monkeypatch.setenv("VLLM_KIMI_TOOL_PARSER_MAX_SECTION_CHARS", "8192")
-    kimi_k2_tool_parser.reset_streaming_state()
-
-    section_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_begin|>")
-
-    # Enter tool section
-    _result1 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="",
-        current_text="<|tool_calls_section_begin|>",
-        delta_text="<|tool_calls_section_begin|>",
-        previous_token_ids=[],
-        current_token_ids=[section_begin_id],
-        delta_token_ids=[section_begin_id],
-        request=None,
-    )
-    assert kimi_k2_tool_parser._stream_state.in_section is True
-
-    # Simulate a lot of text without proper tool calls or section end
-    # This should trigger the error recovery mechanism
-    large_text = "x" * 10000  # Exceeds max_section_chars
-
-    result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="<|tool_calls_section_begin|>",
-        current_text="<|tool_calls_section_begin|>" + large_text,
-        delta_text=large_text,
-        previous_token_ids=[section_begin_id],
-        current_token_ids=[section_begin_id] + list(range(100, 100 + len(large_text))),
-        delta_token_ids=list(range(100, 100 + len(large_text))),
-        request=None,
-    )
-
-    # Parser should have force-exited the tool section
-    assert kimi_k2_tool_parser._stream_state.in_section is False
-    # And returned the content as reasoning
-    assert result2 is not None
-    assert result2.content == large_text
-
-
 def test_state_reset(kimi_k2_tool_parser):
     """Test that reset_streaming_state() properly clears all state."""
     # Put parser in a complex state
@@ -552,7 +509,6 @@ def test_state_reset(kimi_k2_tool_parser):
     kimi_k2_tool_parser._stream_state.buffer = "some buffer"
     kimi_k2_tool_parser.current_tool_id = 5
     kimi_k2_tool_parser.prev_tool_call_arr = [{"id": "test"}]
-    kimi_k2_tool_parser._stream_state.section_chars = 1000
 
     # Reset
     kimi_k2_tool_parser.reset_streaming_state()
@@ -923,85 +879,6 @@ def test_streaming_multiple_tool_calls_not_leaked(kimi_k2_tool_parser):
 
     # Legitimate content preserved
     assert "compare" in full_content.lower() or len(all_content) > 0
-
-
-def test_large_tool_call_arguments(kimi_k2_tool_parser):
-    """
-    Regression test: tool calls with >8KB arguments must succeed.
-
-    The previous implementation had a hard 8KB limit (max_section_chars=8192)
-    that would force-exit tool sections, truncating large arguments used in
-    coding use cases (file writes, code generation).
-    """
-    kimi_k2_tool_parser.reset_streaming_state()
-
-    section_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_begin|>")
-    section_end_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_end|>")
-    tool_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_call_begin|>")
-    tool_end_id = kimi_k2_tool_parser.vocab.get("<|tool_call_end|>")
-
-    # Generate a large JSON argument (>8KB but <512KB)
-    large_code = "x" * 16000  # 16KB of content
-    tool_args = json.dumps({"code": large_code})
-
-    tool_chunk = (
-        f"<|tool_call_begin|>functions.write_file:0 "
-        f"<|tool_call_argument_begin|> {tool_args} <|tool_call_end|>"
-    )
-
-    deltas = [
-        ("Let me write that file. ", [1, 2, 3]),
-        ("<|tool_calls_section_begin|>", [section_begin_id]),
-        (tool_chunk, [tool_begin_id, *range(10, 110), tool_end_id]),
-        ("<|tool_calls_section_end|>", [section_end_id]),
-    ]
-
-    results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
-
-    # CRITICAL: Parser should NOT have force-exited
-    # (this would have failed with the old 8KB limit)
-    assert kimi_k2_tool_parser._stream_state.in_section is False
-
-    # The tool call data should not leak into content
-    all_content = [r.content for r in results if r and r.content]
-    full_content = "".join(all_content)
-    assert large_code not in full_content
-
-
-def test_configurable_section_limit(kimi_k2_tool_parser, monkeypatch):
-    """Verify that VLLM_KIMI_TOOL_PARSER_MAX_SECTION_CHARS is respected."""
-    monkeypatch.setenv("VLLM_KIMI_TOOL_PARSER_MAX_SECTION_CHARS", "100")
-    kimi_k2_tool_parser.reset_streaming_state()
-
-    section_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_begin|>")
-
-    # Enter tool section
-    _result1 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="",
-        current_text="<|tool_calls_section_begin|>",
-        delta_text="<|tool_calls_section_begin|>",
-        previous_token_ids=[],
-        current_token_ids=[section_begin_id],
-        delta_token_ids=[section_begin_id],
-        request=None,
-    )
-    assert kimi_k2_tool_parser._stream_state.in_section is True
-
-    # Send content that exceeds the custom limit
-    overflow_text = "a" * 200
-    result2 = kimi_k2_tool_parser.extract_tool_calls_streaming(
-        previous_text="<|tool_calls_section_begin|>",
-        current_text="<|tool_calls_section_begin|>" + overflow_text,
-        delta_text=overflow_text,
-        previous_token_ids=[section_begin_id],
-        current_token_ids=[section_begin_id] + list(range(100, 300)),
-        delta_token_ids=list(range(100, 300)),
-        request=None,
-    )
-
-    # Should have force-exited due to custom 100-char limit
-    assert kimi_k2_tool_parser._stream_state.in_section is False
-    assert result2 is not None
 
 
 def test_multi_turn_section_reentry(kimi_k2_tool_parser):

@@ -179,7 +179,6 @@ if TYPE_CHECKING:
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
-    VLLM_KIMI_TOOL_PARSER_MAX_SECTION_CHARS: int = 524288
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
@@ -1345,12 +1344,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Regex timeout for use by the vLLM tool parsing plugins.
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")
-    ),
-    # Maximum characters allowed in a Kimi K2 tool section before forcing
-    # exit. Default 512KB (524288 chars). Set higher for very large tool
-    # call arguments (e.g., code generation).
-    "VLLM_KIMI_TOOL_PARSER_MAX_SECTION_CHARS": lambda: int(
-        os.getenv("VLLM_KIMI_TOOL_PARSER_MAX_SECTION_CHARS", "524288")
     ),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
