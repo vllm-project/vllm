@@ -2034,6 +2034,7 @@ class NixlConnectorWorker:
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
         # add requests that skipped transfer to done_recving
+        failed_recv_reqs = set(self._failed_recv_reqs)
         done_recving.update(self._failed_recv_reqs)
         self._failed_recv_reqs.clear()
 
@@ -2052,6 +2053,13 @@ class NixlConnectorWorker:
             meta = self._recving_metadata.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
             assert meta.remote is not None
+
+            # Skip post-processing for failed requests: handshake failure means
+            # no data was transferred and the remote engine was never registered
+            # in kv_topo, so block_size_ratio_from_engine_id would KeyError.
+            if req_id in failed_recv_reqs:
+                continue
+
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
 
