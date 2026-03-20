@@ -913,13 +913,7 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         k_scale: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        """MHA-style prefill forward pass.
-
-        Default raises NotImplementedError. Sparse impls that inherit from
-        SparseMLACommonImpl get a concrete implementation automatically.
-        Impls without MHA support (e.g. ROCm) can leave this as-is; the
-        dispatch will never call it when num_decode_tokens == num_actual_tokens.
-        """
+        """MHA-style forward pass."""
         raise NotImplementedError
 
     @abstractmethod
@@ -930,7 +924,7 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         attn_metadata: T,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """MQA-style decode forward pass."""
+        """MQA-style forward pass."""
         raise NotImplementedError
 
     def do_kv_cache_update(

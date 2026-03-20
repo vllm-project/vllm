@@ -302,8 +302,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     """FlashInfer MLA Sparse implementation.
 
     Uses the TRT-LLM MLA kernel with sparse_mla_top_k parameter for
-    sparse attention decode, and inherits FA-based forward_mha for prefill
-    from SparseMLACommonImpl.
+    sparse attention computation.
     """
 
     def __init__(
