@@ -3,8 +3,7 @@
  * SPDX-FileCopyrightText: Copyright contributors to the vLLM project
  *
  * MXFP4 x MXFP4 block-scaled grouped GEMM kernel for MoE on SM100.
- * Modeled on nvfp4_blockwise_moe_kernel.cu but using mx_float4_t types
- * with E8M0 scale factors and 32-element block size.
+ * Uses Cutlass mx_float4_t operands, E8M0 block scales, and 32-element groups.
  */
 
 #include "core/registration.h"
@@ -33,8 +32,7 @@
 
 using namespace cute;
 
-// Offset-computation kernel for MXFP4 grouped GEMM.
-// group_size = 32 for MXFP4 (vs 16 for NVFP4).
+// Offset-computation kernel for MXFP4 grouped GEMM (group size 32).
 template <typename ElementAB, typename ElementC, typename ElementSF,
           typename ElementAccumulator, typename LayoutSFA, typename LayoutSFB,
           typename ScaleConfig>
@@ -56,7 +54,6 @@ __global__ void __mxfp4_get_group_gemm_starts(
   }
   int64_t expert_offset = static_cast<int64_t>(expert_offsets[expert_id]);
   int64_t sf_offset = static_cast<int64_t>(sf_offsets[expert_id]);
-  // MXFP4 block size = 32 (vs NVFP4 block size = 16)
   int64_t group_size = 32;
   int64_t m = static_cast<int64_t>(problem_sizes_as_shapes[expert_id * 3]);
   int64_t n = static_cast<int64_t>(problem_sizes_as_shapes[expert_id * 3 + 1]);
@@ -178,7 +175,6 @@ void run_mxfp4_blockwise_scaled_group_mm_sm100(
       cutlass::gemm::GroupProblemShape<Shape<int32_t, int32_t, int32_t>>;
   using ElementType = cutlass::float_e2m1_t;
   using ElementSFType = cutlass::float_ue8m0_t;
-  // MXFP4 types (vs nv_float4_t for NVFP4)
   using ElementA = cutlass::mx_float4_t<cutlass::float_e2m1_t>;
   using ElementB = cutlass::mx_float4_t<cutlass::float_e2m1_t>;
 
@@ -191,7 +187,6 @@ void run_mxfp4_blockwise_scaled_group_mm_sm100(
   using LayoutC = cutlass::layout::RowMajor;
   using LayoutD = LayoutC;
 
-  // Alignment constraints (same as NVFP4 - 32 elements)
   static constexpr int AlignmentA = 32;
   static constexpr int AlignmentB = 32;
   static constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementC>::value;
@@ -206,7 +201,6 @@ void run_mxfp4_blockwise_scaled_group_mm_sm100(
   using ClusterShape = Shape<_1, _1, _1>;
   struct MMA1SMConfig {
     using MmaTileShape = Shape<_128, _128, _128>;
-    // MXFP4-specific kernel schedule (vs Nvf4 for NVFP4)
     using KernelSchedule =
         cutlass::gemm::KernelPtrArrayTmaWarpSpecialized1SmMxf4Sm100;
     using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecialized1Sm;
@@ -432,9 +426,8 @@ void cutlass_mxfp4_group_mm(
 #else
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
-      "No compiled cutlass_mxfp4_group_mm kernel, vLLM must "
-      "be compiled with ENABLE_NVFP4_SM100 for SM100 "
-      "and CUDA 12.8 or above.");
+      "No compiled cutlass_mxfp4_group_mm kernel; build vLLM with "
+      "SM100 block-scaled FP4 MoE (ENABLE_NVFP4_SM100) and CUDA 12.8+.");
 #endif
 }
 

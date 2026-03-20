@@ -3,10 +3,10 @@
  * SPDX-FileCopyrightText: Copyright contributors to the vLLM project
  *
  * MXFP4 activation quantization kernel for MoE experts.
- * Quantizes BF16/FP16 activations to MXFP4 (E2M1 data + E8M0 scale factors)
- * with 32-element block size (vs NVFP4's 16-element blocks with E4M3 SFs).
+ * Quantizes BF16/FP16 activations to MXFP4: E2M1 values with E8M0 block scales
+ * over 32-element groups.
  *
- * Reuses the E2M1 packing from nvfp4_utils.cuh but with:
+ * Uses PACK16 E2M1 conversion helpers (nvfp4_utils.cuh) configured for:
  *   - Block size 32 (2 threads per SF in PACK16 mode)
  *   - E8M0 (power-of-two) scale factors
  *   - SF layout: [numMTiles, numKTiles, 32, 4, 4] where numKTiles=ceil(K/128)
@@ -137,7 +137,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
         cvt_quant_to_fp4_get_sf_out_offset<uint32_t, MXFP4_NUM_THREADS_PER_SF>(
             rowIdx_in_expert, colIdx, numKTiles, SFout_in_expert);
 
-    // MXFP4 has no global scale, but this util is shared with NVFP4
+    // Block E8M0 scales only; no extra tensor-level scale in this path
     constexpr float SFScaleVal = 1.0f;
     // UE8M0_SF=true for MXFP4 E8M0 scale factors
     out_pos =
@@ -321,7 +321,6 @@ constexpr auto FLOAT = at::ScalarType::Float;
 constexpr auto INT = at::ScalarType::Int;
 constexpr auto UINT8 = at::ScalarType::Byte;
 
-// MXFP4 block size = 32 (vs NVFP4 = 16)
 static constexpr int MXFP4_BLOCK_SIZE = 32;
 
 static void validate_mxfp4_experts_quant_inputs(
@@ -355,7 +354,7 @@ static void validate_mxfp4_experts_quant_inputs(
   TORCH_CHECK(output.size(0) == m_topk);
   TORCH_CHECK(output.size(1) == k / 2);
   int scales_k = k / MXFP4_BLOCK_SIZE;
-  // 4 = swizzle requirement (same as NVFP4)
+  // K-dimension scale columns padded to a multiple of 4 for swizzle layout
   int padded_k = (scales_k + (4 - 1)) / 4 * 4;
   // 4 = 4 E8M0 values packed into one int32
   TORCH_CHECK(output_scale.size(1) * 4 == padded_k);
