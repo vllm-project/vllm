@@ -252,7 +252,6 @@ def main():
     ray.init(
         runtime_env={
             "env_vars": {
-                "PYTHONPATH": "/home/ray/default/personal/vllm",
                 "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
             }
         }
