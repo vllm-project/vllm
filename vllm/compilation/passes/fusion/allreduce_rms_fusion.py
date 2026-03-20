@@ -994,12 +994,6 @@ class RocmAiterAllReduceFusionPass(VllmPatternMatcherPass):
             config.scheduler_config.max_num_batched_tokens,
         )
 
-        logger.debug_once(
-            f"AITER stage-1 fused allreduce max tokens: {self.max_token_num} "
-            f"(tp={self.tp_size}, hidden={hidden_dim})",
-            scope="global",
-        )
-
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="rocm_aiter_allreduce_rmsnorm_fusion_pass"
         )
