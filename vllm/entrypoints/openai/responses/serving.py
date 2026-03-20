@@ -37,6 +37,7 @@ from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 from openai.types.responses.tool import Mcp, Tool
+from openai_harmony import Author, Role, TextContent
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import TypeAdapter
 
@@ -1910,8 +1911,10 @@ class OpenAIServingResponses(OpenAIServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         state = StreamingState()
+        last_ctx: StreamingHarmonyContext | None = None
 
         async for ctx in result_generator:
+            last_ctx = ctx
             assert isinstance(ctx, StreamingHarmonyContext)
 
             # finish_reason='error' indicates a retryable error
@@ -1930,6 +1933,24 @@ class OpenAIServingResponses(OpenAIServing):
 
             # Stream tool call outputs
             for event in emit_tool_action_events(ctx, state, self.tool_server):
+                yield _increment_sequence_number_and_return(event)
+
+        # Flush done events for the final message. During the loop,
+        # done events are only emitted when is_expecting_start() fires
+        # (i.e. when a new message begins), so the last message never
+        # gets its done events.
+        if state.sent_output_item_added and last_ctx is not None:
+            synthetic_msg = OpenAIHarmonyMessage(
+                author=Author(role=Role.ASSISTANT),
+                content=[
+                    TextContent(
+                        text=last_ctx.parser.current_content or "",
+                    )
+                ],
+                channel=last_ctx.parser.current_channel,
+                recipient=last_ctx.parser.current_recipient,
+            )
+            for event in emit_previous_item_done_events(synthetic_msg, state):
                 yield _increment_sequence_number_and_return(event)
 
     async def responses_stream_generator(
