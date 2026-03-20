@@ -792,6 +792,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         trust_remote_code=True,
     ),
+    "FireRedAsrAedLForConditionalGeneration": _HfExamplesInfo(
+        "Leebin/FireRedASR-AED-L-vllm",
+    ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
     ),

@@ -828,8 +828,6 @@ class FireRedAsrAedLForConditionalGeneration(
         The checkpoint uses FireRedASR naming convention which matches
         our model structure exactly.
         """
-        import re
-
         params_dict = dict(self.named_parameters())
         buffers_dict = dict(self.named_buffers())
         loaded_params = set()
