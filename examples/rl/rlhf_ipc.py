@@ -45,6 +45,8 @@ class MyLLM(LLM):
         # Each worker uses 0.4 GPU so that two instances fit on the same GPU.
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = "0.4"
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = "0"
+        # needed for ipc handle serialization
+        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
         super().__init__(*args, **kwargs)
 
 

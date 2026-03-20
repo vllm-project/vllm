@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """IPC-based weight transfer engine using CUDA IPC for communication."""
 
+import asyncio
 import pickle
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Coroutine, Iterator
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -31,10 +32,14 @@ from vllm.distributed.weight_transfer.packed_tensor import (
 class IPCTrainerSendWeightsArgs:
     """Arguments for IPC trainer_send_weights method."""
 
-    send_mode: str | Callable[["IPCWeightTransferUpdateInfo"], None]
+    send_mode: (
+        str
+        | Callable[["IPCWeightTransferUpdateInfo"], None | Coroutine[Any, Any, None]]
+    )
     """How to send updates to vLLM. Either a string ('ray' or 'http') for
-    built-in transports, or a callable that receives an
-    IPCWeightTransferUpdateInfo and performs the send."""
+    built-in transports, or a callable (sync or async) that receives an
+    IPCWeightTransferUpdateInfo and performs the send. Use
+    async_trainer_send_weights when the callable is async."""
     llm_handle: Any = None
     """Ray ObjectRef to LLM handle (required for 'ray' send_mode)."""
     url: str | None = None
@@ -229,6 +234,30 @@ class IPCWeightTransferEngine(
         pass
 
     @staticmethod
+    def _trainer_send_weights_impl(
+        iterator: Iterator[tuple[str, torch.Tensor]],
+        trainer_args: dict[str, Any] | IPCTrainerSendWeightsArgs,
+    ) -> Iterator[Coroutine[Any, Any, None]]:
+        """Generator that yields coroutines when send_mode is async.
+
+        Single implementation for both sync and async entry points.
+        Yields nothing when send_mode is sync (ray/http or sync callable).
+        """
+        args = (
+            IPCTrainerSendWeightsArgs(**trainer_args)
+            if isinstance(trainer_args, dict)
+            else trainer_args
+        )
+        device_index = torch.accelerator.current_device_index()
+        gpu_uuid = str(torch.cuda.get_device_properties(device_index).uuid)
+        send_method = (
+            IPCWeightTransferEngine._send_packed
+            if args.packed
+            else IPCWeightTransferEngine._send_unpacked
+        )
+        yield from send_method(iterator, args, gpu_uuid)
+
+    @staticmethod
     def trainer_send_weights(
         iterator: Iterator[tuple[str, torch.Tensor]],
         trainer_args: dict[str, Any] | IPCTrainerSendWeightsArgs,
@@ -245,25 +274,46 @@ class IPCWeightTransferEngine(
         so that each vLLM worker can find its own GPU UUID. Only rank 0
         sends the payload to vLLM.
 
+        Use ``async_trainer_send_weights`` when ``send_mode`` is an
+        async callable.
+
         Args:
             iterator: Iterator of (name, tensor) pairs. For multi-GPU,
                      each rank should yield the full tensor on its own GPU
                      (e.g. via FSDP full_tensor()).
             trainer_args: IPCTrainerSendWeightsArgs or equivalent dict.
         """
-        if isinstance(trainer_args, dict):
-            args = IPCTrainerSendWeightsArgs(**trainer_args)
-        else:
-            args = trainer_args
+        gen = IPCWeightTransferEngine._trainer_send_weights_impl(iterator, trainer_args)
+        if next(gen, None) is not None:
+            raise ValueError(
+                "Async send_mode requires async_trainer_send_weights; "
+                "use IPCWeightTransferEngine.async_trainer_send_weights instead"
+            )
 
-        device_index = torch.accelerator.current_device_index()
-        props = torch.cuda.get_device_properties(device_index)
-        gpu_uuid = str(props.uuid)
+    @staticmethod
+    async def async_trainer_send_weights(
+        iterator: Iterator[tuple[str, torch.Tensor]],
+        trainer_args: dict[str, Any] | IPCTrainerSendWeightsArgs,
+    ) -> None:
+        """Async variant of trainer_send_weights for async send_mode callables.
 
-        if args.packed:
-            IPCWeightTransferEngine._send_packed(iterator, args, gpu_uuid)
-        else:
-            IPCWeightTransferEngine._send_unpacked(iterator, args, gpu_uuid)
+        Use this when ``send_mode`` is an async callable. For sync
+        send_mode (ray/http or sync callable), either this or
+        ``trainer_send_weights`` works; this one awaits each send.
+
+        For multi-GPU training, **all ranks** must call this method in
+        parallel.
+
+        Args:
+            iterator: Iterator of (name, tensor) pairs. For multi-GPU,
+                     each rank should yield the full tensor on its own GPU
+                     (e.g. via FSDP full_tensor()).
+            trainer_args: IPCTrainerSendWeightsArgs or equivalent dict.
+        """
+        for coro in IPCWeightTransferEngine._trainer_send_weights_impl(
+            iterator, trainer_args
+        ):
+            await coro
 
     @staticmethod
     def _is_rank_zero() -> bool:
@@ -324,7 +374,7 @@ class IPCWeightTransferEngine(
         iterator: Iterator[tuple[str, torch.Tensor]],
         args: IPCTrainerSendWeightsArgs,
         gpu_uuid: str,
-    ) -> None:
+    ) -> Iterator[Coroutine[Any, Any, None]]:
         """Send all weights in a single API call (non-packed mode)."""
         names: list[str] = []
         dtype_names: list[str] = []
@@ -343,13 +393,15 @@ class IPCWeightTransferEngine(
         ipc_handles = IPCWeightTransferEngine._all_gather_and_merge_handles(ipc_handles)
 
         if IPCWeightTransferEngine._is_rank_zero():
-            IPCWeightTransferEngine._do_send(
+            maybe_coro = IPCWeightTransferEngine._do_send(
                 args=args,
                 names=names,
                 dtype_names=dtype_names,
                 shapes=shapes,
                 ipc_handles=ipc_handles,
             )
+            if maybe_coro is not None:
+                yield maybe_coro
 
         IPCWeightTransferEngine._post_send_sync()
 
@@ -358,7 +410,7 @@ class IPCWeightTransferEngine(
         iterator: Iterator[tuple[str, torch.Tensor]],
         args: IPCTrainerSendWeightsArgs,
         gpu_uuid: str,
-    ) -> None:
+    ) -> Iterator[Coroutine[Any, Any, None]]:
         """Send weights in bounded-memory chunks (packed mode)."""
         post_iter_func: Callable = lambda item: item[1]
 
@@ -373,7 +425,7 @@ class IPCWeightTransferEngine(
             )[0]
 
             if IPCWeightTransferEngine._is_rank_zero():
-                IPCWeightTransferEngine._do_send(
+                maybe_coro = IPCWeightTransferEngine._do_send(
                     args=args,
                     names=chunk.names,
                     dtype_names=chunk.dtype_names,
@@ -384,6 +436,8 @@ class IPCWeightTransferEngine(
                     run_initialize_layerwise_reload=chunk.is_first,
                     run_finalize_layerwise_reload=chunk.is_last,
                 )
+                if maybe_coro is not None:
+                    yield maybe_coro
 
             IPCWeightTransferEngine._post_send_sync()
 
@@ -398,8 +452,11 @@ class IPCWeightTransferEngine(
         packed: bool = False,
         run_initialize_layerwise_reload: bool = True,
         run_finalize_layerwise_reload: bool = True,
-    ) -> None:
-        """Send a single update payload via the configured transport."""
+    ) -> Coroutine[Any, Any, None] | None:
+        """Send a single update payload via the configured transport.
+
+        Returns a coroutine when send_mode is an async callable; otherwise None.
+        """
         update_fields: dict[str, Any] = {
             "names": names,
             "dtype_names": dtype_names,
@@ -415,6 +472,8 @@ class IPCWeightTransferEngine(
         update_info = IPCWeightTransferUpdateInfo(**update_fields)
 
         if callable(args.send_mode):
+            if asyncio.iscoroutinefunction(args.send_mode):
+                return args.send_mode(update_info)
             args.send_mode(update_info)
         elif args.send_mode == "ray":
             ray.get(
@@ -433,3 +492,4 @@ class IPCWeightTransferEngine(
             payload = {"update_info": http_fields}
             response = requests.post(url, json=payload, timeout=300)
             response.raise_for_status()
+        return None

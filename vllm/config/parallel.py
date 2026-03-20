@@ -214,6 +214,15 @@ class ParallelConfig:
     placement_group: PlacementGroup | None = None
     """ray distributed model workers placement group."""
 
+    ray_data_parallel_placement_groups: list[Any] | None = None
+    """If set, the Ray data-parallel engine path uses these placement groups
+    (one per global DP rank) instead of auto-creating them. Length must equal
+    ``data_parallel_size``. Use with ``ray_data_parallel_local_dp_ranks``."""
+
+    ray_data_parallel_local_dp_ranks: list[int] | None = None
+    """Local DP rank index for each entry in ``ray_data_parallel_placement_groups``.
+    Required when ``ray_data_parallel_placement_groups`` is set."""
+
     distributed_executor_backend: (
         str | DistributedExecutorBackend | type[Executor] | None
     ) = None

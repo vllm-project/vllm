@@ -346,7 +346,10 @@ def test_nccl_weight_transfer_between_processes():
     This test verifies that the NCCLWeightTransferEngine can receive
     tensors broadcast by a trainer process via NCCL.
     """
-    ray.init(ignore_reinit_error=True)
+    ray.init(
+        ignore_reinit_error=True,
+        runtime_env={"env_vars": {"PYTHONPATH": "/home/ray/default/personal/vllm"}},
+    )
 
     master_address = "127.0.0.1"
     master_port = get_open_port()
@@ -515,10 +518,12 @@ class TestIPCEngineParsing:
         assert update_info.shapes == [[100, 100], [50]]
         assert len(update_info.ipc_handles) == 2
 
-    def test_parse_update_info_pickled(self):
+    def test_parse_update_info_pickled(self, monkeypatch):
         """Test parsing update info with pickled IPC handles (HTTP path)."""
         if torch.accelerator.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")
+
+        monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
         config = WeightTransferConfig(backend="ipc")
         parallel_config = create_mock_parallel_config()
@@ -720,7 +725,10 @@ def test_ipc_weight_transfer_between_processes(mode: str):
     from ray.util.placement_group import placement_group
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-    ray.init(ignore_reinit_error=True)
+    ray.init(
+        ignore_reinit_error=True,
+        runtime_env={"env_vars": {"PYTHONPATH": "/home/ray/default/personal/vllm"}},
+    )
 
     # Create a placement group to ensure both processes are on the same GPU
     # Use fractional GPUs so both tasks can share the same GPU bundle
