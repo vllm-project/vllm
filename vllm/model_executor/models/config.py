@@ -117,6 +117,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 
         # Disable calculate_kv_scales for hybrid models: uninitialized
         # recurrent state corrupts scales during the calibration pass.
+        # See issue: https://github.com/vllm-project/vllm/issues/37554
         if cache_config.calculate_kv_scales:
             logger.warning(
                 "Disabling calculate_kv_scales for hybrid model '%s'. "
