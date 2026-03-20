@@ -211,7 +211,8 @@ class LamportWorkspace:
 
     @property
     def workspace(self) -> torch.Tensor:
-        """Device tensor (int64) that can be passed to the kernel as ``void** workspace``."""
+        """Device tensor (int64) that can be passed to the kernel
+        as ``void** workspace``."""
         return self._workspace
 
     # ------------------------------------------------------------------
@@ -229,7 +230,7 @@ class LamportWorkspace:
 
         The kernel stores per-token variance scalars in the Lamport buffer:
           - single-matrix path: ``world_size × max_tokens × 4`` bytes per slot
-          - fused Q+K path:     ``world_size × 2 × ceil(max_tokens/4) × 16`` bytes per slot
+          - fused Q+K path: ``world_size × 2 × ceil(max_tokens/4) × 16`` bytes per slot
 
         The returned value is rounded up to 2 MiB alignment.
         """

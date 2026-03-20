@@ -30,7 +30,9 @@ def _worker_forward_qk(
     eps,
 ):
     """Per-rank worker that exercises both paths of forward_qk."""
-    torch.cuda.set_device(local_rank)
+
+    device = torch.device(f"cuda:{local_rank}")
+    torch.accelerator.set_device_index(device)
     init_test_distributed_environment(
         world_size, 1, local_rank, port, local_rank=local_rank
     )
@@ -64,7 +66,7 @@ def _worker_forward_qk(
     fused_q, fused_k, fused_v = MiniMaxText01RMSNormTP.forward_qk(
         q_norm, k_norm, qkv.clone(), hq, hk
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # atol = 5e-2 if dtype == torch.float16 else 1e-2
     # rtol = 5e-2 if dtype == torch.float16 else 1e-2

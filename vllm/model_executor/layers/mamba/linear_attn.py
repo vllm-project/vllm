@@ -54,7 +54,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
 
         self._ar_workspace: torch.Tensor | None = None
         if current_platform.is_cuda() and self.tp_world > 1:
-            from .ipc_minimax import get_allreduce_workspace
+            from .lamport_workspace import get_allreduce_workspace
 
             self._ar_workspace = get_allreduce_workspace(
                 self.tp_rank,
