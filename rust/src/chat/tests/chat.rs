@@ -18,6 +18,7 @@ use vllm_engine_core_client::protocol::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
+use vllm_text::TextBackend;
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
@@ -171,6 +172,21 @@ impl FakeChatBackend {
     }
 }
 
+impl TextBackend for FakeChatBackend {
+    fn encode(&self, text: &str) -> vllm_text::Result<Vec<u32>> {
+        Ok(text.bytes().map(u32::from).collect())
+    }
+
+    fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> vllm_text::Result<String> {
+        let bytes = token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>();
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn model_id(&self) -> Option<&str> {
+        self.model_id.as_deref()
+    }
+}
+
 impl ChatBackend for FakeChatBackend {
     fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
         if !self.has_template {
@@ -190,19 +206,6 @@ impl ChatBackend for FakeChatBackend {
 
         Ok(prompt)
     }
-
-    fn encode(&self, text: &str) -> vllm_chat::Result<Vec<u32>> {
-        Ok(text.bytes().map(u32::from).collect())
-    }
-
-    fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> vllm_chat::Result<String> {
-        let bytes = token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>();
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
-    }
-
-    fn model_id(&self) -> Option<&str> {
-        self.model_id.as_deref()
-    }
 }
 
 #[derive(Debug)]
@@ -210,17 +213,19 @@ struct FailingDecodeBackend {
     inner: FakeChatBackend,
 }
 
-impl ChatBackend for FailingDecodeBackend {
-    fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
-        self.inner.apply_chat_template(request)
-    }
-
-    fn encode(&self, text: &str) -> vllm_chat::Result<Vec<u32>> {
+impl TextBackend for FailingDecodeBackend {
+    fn encode(&self, text: &str) -> vllm_text::Result<Vec<u32>> {
         self.inner.encode(text)
     }
 
-    fn decode(&self, _token_ids: &[u32], _skip_special_tokens: bool) -> vllm_chat::Result<String> {
-        Err(vllm_chat::Error::Tokenizer("decode failed".to_string()))
+    fn decode(&self, _token_ids: &[u32], _skip_special_tokens: bool) -> vllm_text::Result<String> {
+        Err(vllm_text::Error::Tokenizer("decode failed".to_string()))
+    }
+}
+
+impl ChatBackend for FailingDecodeBackend {
+    fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
+        self.inner.apply_chat_template(request)
     }
 }
 
@@ -577,7 +582,7 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
         .await
         .unwrap()
     {
-        Some(Err(vllm_chat::Error::Tokenizer(message))) => {
+        Some(Err(vllm_chat::Error::Text(vllm_text::Error::Tokenizer(message)))) => {
             assert_eq!(message, "decode failed");
         }
         other => panic!("unexpected event after close: {other:?}"),

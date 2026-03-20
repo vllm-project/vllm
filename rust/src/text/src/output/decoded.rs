@@ -1,18 +1,24 @@
+use std::sync::Arc;
+
 use futures_async_stream::try_stream;
 use tracing::info;
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 use vllm_llm::GenerateOutputStream;
 
-use super::incremental::IncrementalTextDecoder;
-use crate::ChatRequest;
-use crate::backend::DynChatBackend;
+use crate::backend::TextBackend;
 use crate::error::Error;
+use crate::output::incremental::IncrementalTextDecoder;
 
-/// Internal decoded-text event emitted before higher-level reasoning adaptation.
-///
-/// For user-facing structured events, see [`crate::ChatEvent`].
+/// Request-neutral options for incremental text decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextDecodeOptions {
+    pub skip_special_tokens: bool,
+    pub include_stop_str_in_output: bool,
+}
+
+/// Internal decoded-text event emitted before higher-level assistant adaptation.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum DecodedTextEvent {
+pub enum DecodedTextEvent {
     /// The request was accepted and streaming has started.
     Start,
     /// A delta of text has been decoded.
@@ -32,34 +38,34 @@ pub(crate) enum DecodedTextEvent {
 }
 
 /// Convert the output token stream from the `vllm_llm` layer into incrementally decoded text.
-// TODO: apply small-string-optimization
 #[try_stream(ok = DecodedTextEvent, error = Error)]
-pub(crate) async fn decoded_text_event_stream(
-    request: ChatRequest,
-    backend: DynChatBackend,
+pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
+    request_id: String,
+    backend: Arc<B>,
     raw_stream: GenerateOutputStream,
+    decode_options: TextDecodeOptions,
 ) {
     yield DecodedTextEvent::Start;
 
-    let mut decoder: Option<IncrementalTextDecoder> = None;
+    let mut decoder: Option<IncrementalTextDecoder<B>> = None;
     let mut text = String::new();
     let mut token_ids = Vec::new();
 
     #[for_await]
     for next in raw_stream {
-        let output: vllm_llm::GenerateOutput = next?;
+        let output = next?;
         token_ids.extend_from_slice(&output.token_ids);
         let decoder = decoder.get_or_insert_with(|| {
             IncrementalTextDecoder::new(
                 backend.clone(),
                 &output.prompt_token_ids,
-                request.sampling_params.skip_special_tokens,
+                decode_options.skip_special_tokens,
             )
         });
 
         let suppress_terminal_stop_token = output.finished()
             && output.raw.finish_reason == Some(FinishReason::Stop)
-            && !request.sampling_params.include_stop_str_in_output;
+            && !decode_options.include_stop_str_in_output;
         let decodable_token_ids = if suppress_terminal_stop_token {
             // Match Python V1 token-stop detokenization by keeping the stop token
             // in metadata while excluding it from user-visible text.
@@ -97,7 +103,7 @@ pub(crate) async fn decoded_text_event_stream(
 
         if output.finished() {
             info!(
-                request_id = %request.request_id,
+                request_id = %request_id,
                 finish_reason = ?output.raw.finish_reason,
                 stop_reason = ?output.raw.stop_reason,
                 text_length = text.chars().count(),
@@ -116,7 +122,5 @@ pub(crate) async fn decoded_text_event_stream(
         }
     }
 
-    Err(Error::StreamClosedBeforeTerminalOutput {
-        request_id: request.request_id,
-    })?;
+    Err(Error::StreamClosedBeforeTerminalOutput { request_id })?;
 }

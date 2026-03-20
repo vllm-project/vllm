@@ -25,6 +25,7 @@ tracing.workspace = true
 uuid.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
+vllm-text.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true

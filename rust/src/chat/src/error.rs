@@ -11,8 +11,8 @@ pub enum Error {
     ConflictingGenerationPromptMode,
     #[error("chat template is required but none was configured")]
     MissingChatTemplate,
-    #[error("tokenizer error: {0}")]
-    Tokenizer(String),
+    #[error("chat template error: {0}")]
+    ChatTemplate(String),
     #[error("tool parsing requires a backend model ID")]
     ToolParserRequiresModelId,
     #[error("tool parsing is not available for model `{model_id}`")]
@@ -28,6 +28,8 @@ pub enum Error {
     PromptTooLong { max_model_len: u32, prompt_len: u32 },
     #[error("chat request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
+    #[error(transparent)]
+    Text(#[from] vllm_text::Error),
     #[error("llm request failed: {0}")]
     Llm(#[from] LlmError),
 }

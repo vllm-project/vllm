@@ -6,7 +6,7 @@ At the moment, the repository contains a minimal end-to-end path up to an OpenAI
 
 ## Architecture
 
-The project is organized as a Cargo workspace with 5 crates, layered bottom-up:
+The project is organized as a Cargo workspace with 6 crates, layered bottom-up:
 
 ```
 ┌─────────────────────────────────┐
@@ -16,9 +16,11 @@ The project is organized as a Cargo workspace with 5 crates, layered bottom-up:
 ├─────────────────────────────────┤
 │  vllm-openai-server             │  OpenAI-compatible HTTP API (axum)
 ├─────────────────────────────────┤
-│  vllm-chat                      │  Chat interface: message rendering,
-│                                 │  tokenization, structured assistant
-│                                 │  events, reasoning & tool parsing
+│  vllm-chat                      │  Chat completions: template rendering,
+│                                 │  structured assistant events,
+│                                 │  reasoning & tool parsing
+├─────────────────────────────────┤
+│  vllm-text                      │  Tokenizer & incremental detokenizer
 ├─────────────────────────────────┤
 │  vllm-llm                       │  Thin token-in/token-out facade over
 │                                 │  the engine client

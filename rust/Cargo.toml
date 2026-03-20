@@ -5,6 +5,7 @@ members = [
     "src/engine-core-client",
     "src/llm",
     "src/openai-server",
+    "src/text",
 ]
 resolver = "3"
 
@@ -62,6 +63,7 @@ vllm-chat = { path = "src/chat" }
 vllm-engine-core-client = { path = "src/engine-core-client" }
 vllm-llm = { path = "src/llm" }
 vllm-openai-server = { path = "src/openai-server" }
+vllm-text = { path = "src/text" }
 zeromq = { version = "0.6.0-pre.1", default-features = false, features = [
     "tokio-runtime",
     "all-transport",

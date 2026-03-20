@@ -182,8 +182,10 @@ fn merge_unique_token_ids(
 mod tests {
     use std::collections::BTreeSet;
 
+    use vllm_text::TextBackend as _;
+
     use super::*;
-    use crate::backend::{ChatBackend, SamplingHints};
+    use crate::backend::SamplingHints;
     use crate::backends::hf::HfChatBackend;
     use crate::request::{ChatOptions, ChatRequest, ChatToolChoice, UserSamplingParams};
 

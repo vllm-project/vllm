@@ -23,13 +23,15 @@ use vllm_chat::ChatLlm;
 use vllm_chat::backends::hf::HfChatBackend;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
+use vllm_text::backends::hf::HfTextBackend;
 
 use crate::routes::build_router;
 use crate::state::AppState;
 
 /// Build the shared application state for one configured model and one engine client.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
-    let backend = Arc::new(HfChatBackend::from_model(&config.model).await?);
+    let text_backend = HfTextBackend::from_model(&config.model).await?;
+    let backend = Arc::new(HfChatBackend::from_text_backend(text_backend)?);
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address: config.handshake_address.clone(),
         local_host: config.engine_local_host.clone(),

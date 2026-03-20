@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use hf_hub::Cache;
-use hf_hub::api::tokio::{Api, ApiBuilder};
+use hf_hub::api::tokio::{Api, ApiBuilder, ApiRepo};
 use thiserror_ext::AsReport as _;
 
 use crate::error::{Error, Result};
@@ -9,8 +9,8 @@ use crate::error::{Error, Result};
 const HF_TOKEN_ENV: &str = "HF_TOKEN";
 
 /// Concrete tokenizer/config file locations resolved for one HF model id.
-#[derive(Debug)]
-pub(super) struct ResolvedModelFiles {
+#[derive(Debug, Clone)]
+pub struct ResolvedModelFiles {
     pub tokenizer_path: PathBuf,
     pub tokenizer_config_path: Option<PathBuf>,
     pub generation_config_path: Option<PathBuf>,
@@ -94,8 +94,6 @@ fn resolve_cached_model_files(model_id: &str) -> Option<ResolvedModelFiles> {
     let model_dir = tokenizer_path.parent()?;
     let tokenizer_config_path = cache_repo.get("tokenizer_config.json");
     let generation_config_path = cache_repo.get("generation_config.json");
-    // Chat templates are sometimes stored as dedicated .jinja files rather
-    // than as a fixed-name config entry, so we scan the cached model dir.
     let chat_template_path = discover_chat_template_in_dir(model_dir);
     let config_path = cache_repo.get("config.json");
 
@@ -108,11 +106,7 @@ fn resolve_cached_model_files(model_id: &str) -> Option<ResolvedModelFiles> {
     })
 }
 
-async fn download_known_file(
-    repo: &hf_hub::api::tokio::ApiRepo,
-    model_id: &str,
-    filename: &str,
-) -> Result<PathBuf> {
+async fn download_known_file(repo: &ApiRepo, model_id: &str, filename: &str) -> Result<PathBuf> {
     repo.get(filename).await.map_err(|error| {
         Error::Tokenizer(format!(
             "failed to download '{filename}' for model '{model_id}': {error}"
@@ -122,8 +116,6 @@ async fn download_known_file(
 
 fn build_api() -> anyhow::Result<Api> {
     let mut builder = ApiBuilder::from_env().with_progress(true);
-    // `hf-hub` reads the cached token file automatically, but CI/dev setups
-    // often only provide `HF_TOKEN` as an env var.
     if let Ok(token) = std::env::var(HF_TOKEN_ENV)
         && !token.is_empty()
     {
@@ -132,6 +124,8 @@ fn build_api() -> anyhow::Result<Api> {
     Ok(builder.build()?)
 }
 
+/// Chat templates are sometimes stored as dedicated .jinja files rather than as a fixed-name config
+/// entry, so we scan the cached model dir.
 fn discover_chat_template_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
     let json_template_path = dir.join("chat_template.json");
     if json_template_path.exists() {

@@ -33,7 +33,7 @@ impl ChatTemplate {
             .and_then(|path| path.to_str())
             .map(load_chat_template_from_config)
             .transpose()
-            .map_err(|error| Error::Tokenizer(error.to_report_string()))?
+            .map_err(|error| Error::ChatTemplate(error.to_report_string()))?
             .flatten();
 
         if let Some(chat_template_path) = chat_template_path {
@@ -42,7 +42,7 @@ impl ChatTemplate {
                     .to_str()
                     .expect("chat template path should be valid UTF-8"),
             )
-            .map_err(|error| Error::Tokenizer(error.to_report_string()))?;
+            .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
         }
 
         Self::new(chat_template)
@@ -52,7 +52,7 @@ impl ChatTemplate {
     pub fn new(template: Option<String>) -> Result<Self> {
         Ok(Self {
             inner: ChatTemplateState::new(template)
-                .map_err(|error| Error::Tokenizer(error.to_report_string()))?,
+                .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
         })
     }
 
@@ -94,7 +94,7 @@ impl ChatTemplate {
                 if message.contains("tokenizer.chat_template is not set") {
                     Error::MissingChatTemplate
                 } else {
-                    Error::Tokenizer(message)
+                    Error::ChatTemplate(message)
                 }
             })?;
 
@@ -203,7 +203,7 @@ fn template_tool_calls_to_json(
 
     for tool_call in content.tool_calls() {
         let arguments = serde_json::from_str::<Value>(&tool_call.arguments).map_err(|error| {
-            Error::Tokenizer(format!(
+            Error::ChatTemplate(format!(
                 "assistant tool call `{}` has invalid JSON arguments: {error}",
                 tool_call.id
             ))

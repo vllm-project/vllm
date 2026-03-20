@@ -11,7 +11,7 @@ use serde_json::json;
 use tower::util::ServiceExt as _;
 use vllm_chat::{
     ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatRequest, ChatRole, ChatToolChoice,
-    Error as ChatError, UserSamplingParams,
+    UserSamplingParams,
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
@@ -19,6 +19,7 @@ use vllm_engine_core_client::protocol::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
+use vllm_text::TextBackend;
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
@@ -185,6 +186,23 @@ impl FakeChatBackend {
     }
 }
 
+impl TextBackend for FakeChatBackend {
+    fn encode(&self, text: &str) -> vllm_text::Result<Vec<u32>> {
+        Ok(text.bytes().map(u32::from).collect())
+    }
+
+    fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> vllm_text::Result<String> {
+        Ok(
+            String::from_utf8_lossy(&token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>())
+                .into_owned(),
+        )
+    }
+
+    fn model_id(&self) -> Option<&str> {
+        self.model_id.as_deref()
+    }
+}
+
 impl ChatBackend for FakeChatBackend {
     fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
         let mut prompt = String::new();
@@ -199,43 +217,30 @@ impl ChatBackend for FakeChatBackend {
         }
         Ok(prompt)
     }
-
-    fn encode(&self, text: &str) -> vllm_chat::Result<Vec<u32>> {
-        Ok(text.bytes().map(u32::from).collect())
-    }
-
-    fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> vllm_chat::Result<String> {
-        Ok(
-            String::from_utf8_lossy(&token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>())
-                .into_owned(),
-        )
-    }
-
-    fn model_id(&self) -> Option<&str> {
-        self.model_id.as_deref()
-    }
 }
 
 #[derive(Clone, Debug)]
 struct FailingDecodeChatBackend;
 
-impl ChatBackend for FailingDecodeChatBackend {
-    fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
-        FakeChatBackend::new().apply_chat_template(request)
-    }
-
-    fn encode(&self, text: &str) -> vllm_chat::Result<Vec<u32>> {
+impl TextBackend for FailingDecodeChatBackend {
+    fn encode(&self, text: &str) -> vllm_text::Result<Vec<u32>> {
         FakeChatBackend::new().encode(text)
     }
 
-    fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> vllm_chat::Result<String> {
+    fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> vllm_text::Result<String> {
         if token_ids.contains(&(b'i' as u32)) {
-            return Err(ChatError::Tokenizer(
+            return Err(vllm_text::Error::Tokenizer(
                 "forced decode failure for streaming test".to_string(),
             ));
         }
 
         FakeChatBackend::new().decode(token_ids, skip_special_tokens)
+    }
+}
+
+impl ChatBackend for FailingDecodeChatBackend {
+    fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
+        FakeChatBackend::new().apply_chat_template(request)
     }
 }
 

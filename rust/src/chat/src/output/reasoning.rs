@@ -10,9 +10,9 @@ use futures_async_stream::try_stream;
 use reasoning_parser::ReasoningParser;
 use thiserror_ext::AsReport;
 use tracing::warn;
+use vllm_text::output::DecodedTextEvent;
 
 use super::ContentEvent;
-use super::decoded::DecodedTextEvent;
 use crate::error::Error;
 use crate::event::AssistantBlockKind;
 use crate::output::DecodedTextEventStream;
@@ -129,9 +129,9 @@ mod tests {
     use futures::{StreamExt as _, stream};
     use reasoning_parser::{ParseError, ParserResult, ReasoningParser};
     use vllm_engine_core_client::protocol::FinishReason;
+    use vllm_text::output::DecodedTextEvent;
 
     use super::super::ContentEvent;
-    use super::super::decoded::DecodedTextEvent;
     use super::reasoning_event_stream;
     use crate::event::AssistantBlockKind;
 

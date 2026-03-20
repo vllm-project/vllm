@@ -4170,6 +4170,7 @@ dependencies = [
  "uuid",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-text",
  "zeromq",
 ]
 
@@ -4257,7 +4258,29 @@ dependencies = [
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-text",
  "zeromq",
+]
+
+[[package]]
+name = "vllm-text"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fastokens",
+ "futures",
+ "futures-async-stream",
+ "hf-hub 0.5.0",
+ "serde",
+ "serde_default",
+ "serde_json",
+ "thiserror 2.0.18",
+ "thiserror-ext",
+ "tokenizers",
+ "tracing",
+ "uuid",
+ "vllm-engine-core-client",
+ "vllm-llm",
 ]
 
 [[package]]

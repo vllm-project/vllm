@@ -1,16 +1,17 @@
-use crate::backend::DynChatBackend;
+use std::sync::Arc;
+
+use crate::backend::TextBackend;
 use crate::error::Result;
 
 /// Small left-context window retained when initializing the decoder from prompt tokens.
 const INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET: usize = 5;
 
-/// Minimal chat-local incremental decoder built on top of `ChatBackend::decode()`.
-pub(crate) struct IncrementalTextDecoder {
-    /// Backend used for full-slice detokenization.
-    backend: DynChatBackend,
+/// Minimal incremental decoder built on top of [`TextBackend::decode()`].
+pub struct IncrementalTextDecoder<B: TextBackend + ?Sized> {
+    backend: Arc<B>,
+
     /// Whether special tokens should be suppressed while decoding.
     skip_special_tokens: bool,
-
     /// Prompt tokens followed by every generated token observed so far.
     all_token_ids: Vec<u32>,
     /// Start of the left-context window used for incremental diffing.
@@ -19,16 +20,12 @@ pub(crate) struct IncrementalTextDecoder {
     read_offset: usize,
 }
 
-impl IncrementalTextDecoder {
+impl<B: TextBackend + ?Sized> IncrementalTextDecoder<B> {
     /// Create one incremental decoder primed with the request prompt tokens.
     ///
     /// The decoder retains only a small suffix of the prompt as left context for the first
     /// generated token; it does not attempt to re-emit prompt text.
-    pub(crate) fn new(
-        backend: DynChatBackend,
-        prompt_token_ids: &[u32],
-        skip_special_tokens: bool,
-    ) -> Self {
+    pub fn new(backend: Arc<B>, prompt_token_ids: &[u32], skip_special_tokens: bool) -> Self {
         Self {
             backend,
             skip_special_tokens,
@@ -45,7 +42,7 @@ impl IncrementalTextDecoder {
     /// Returning `Ok(None)` means the token did not yet produce a stable text fragment. This
     /// commonly happens when the tokenizer is still in the middle of decoding a multi-byte UTF-8
     /// sequence.
-    pub(crate) fn push_token(&mut self, token_id: u32) -> Result<Option<String>> {
+    pub fn push_token(&mut self, token_id: u32) -> Result<Option<String>> {
         self.all_token_ids.push(token_id);
 
         // Decode the previously stable window first, then decode the same window extended with
@@ -81,7 +78,7 @@ impl IncrementalTextDecoder {
     ///
     /// This is mainly relevant at terminal completion, where the caller wants to force out the
     /// last chunk after all generated tokens have been observed.
-    pub(crate) fn flush(&mut self) -> Result<Option<String>> {
+    pub fn flush(&mut self) -> Result<Option<String>> {
         if self.read_offset >= self.all_token_ids.len() {
             return Ok(None);
         }
@@ -105,17 +102,12 @@ mod tests {
     use std::sync::Arc;
 
     use super::IncrementalTextDecoder;
-    use crate::backend::ChatBackend;
-    use crate::request::ChatRequest;
+    use crate::backend::TextBackend;
 
     #[derive(Debug)]
     struct Utf8Backend;
 
-    impl ChatBackend for Utf8Backend {
-        fn apply_chat_template(&self, _request: &ChatRequest) -> crate::Result<String> {
-            unreachable!()
-        }
-
+    impl TextBackend for Utf8Backend {
         fn encode(&self, _text: &str) -> crate::Result<Vec<u32>> {
             unreachable!()
         }
@@ -128,7 +120,7 @@ mod tests {
 
     #[test]
     fn incremental_decoder_holds_utf8_until_complete() {
-        let backend: Arc<dyn ChatBackend> = Arc::new(Utf8Backend);
+        let backend: Arc<dyn TextBackend> = Arc::new(Utf8Backend);
         let mut decoder = IncrementalTextDecoder::new(backend, &[], false);
 
         assert_eq!(decoder.push_token(0xe4).unwrap(), None);
@@ -138,7 +130,7 @@ mod tests {
 
     #[test]
     fn incremental_decoder_flushes_remaining_text() {
-        let backend: Arc<dyn ChatBackend> = Arc::new(Utf8Backend);
+        let backend: Arc<dyn TextBackend> = Arc::new(Utf8Backend);
         let mut decoder = IncrementalTextDecoder::new(backend, &[], false);
 
         assert_eq!(
@@ -155,11 +147,7 @@ mod tests {
     #[derive(Debug)]
     struct SpecialTokenBackend;
 
-    impl ChatBackend for SpecialTokenBackend {
-        fn apply_chat_template(&self, _request: &ChatRequest) -> crate::Result<String> {
-            unreachable!()
-        }
-
+    impl TextBackend for SpecialTokenBackend {
         fn encode(&self, _text: &str) -> crate::Result<Vec<u32>> {
             unreachable!()
         }
@@ -180,7 +168,7 @@ mod tests {
 
     #[test]
     fn incremental_decoder_respects_skip_special_tokens() {
-        let backend: Arc<dyn ChatBackend> = Arc::new(SpecialTokenBackend);
+        let backend: Arc<dyn TextBackend> = Arc::new(SpecialTokenBackend);
         let mut skip_decoder = IncrementalTextDecoder::new(backend.clone(), &[], true);
         let mut keep_decoder = IncrementalTextDecoder::new(backend, &[], false);
 
