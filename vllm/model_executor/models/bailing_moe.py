@@ -127,8 +127,9 @@ class BailingAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        rotary_dim = getattr(config, "rotary_dim", self.head_dim)
-        config.rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
+        if "partial_rotary_factor" not in config.rope_parameters:
+            rotary_dim = getattr(config, "rotary_dim", self.head_dim)
+            config.rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
 
         self.rotary_emb = get_rope(
             self.head_dim,
