@@ -192,7 +192,8 @@ steps:
           - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
 
       - label: "Annotate release workflow - CUDA 12.9"
-        depends_on: ~
+        depends_on:
+          - create-multi-arch-manifest
         id: annotate-release-workflow
         agents:
           queue: small_cpu_queue_postmerge
