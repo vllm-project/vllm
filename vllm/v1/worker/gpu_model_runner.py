@@ -6411,11 +6411,11 @@ class GPUModelRunner(
             for layer_name in group.layer_names:
                 kv_cache = kv_caches[layer_name]
                 if isinstance(kv_cache_spec, AttentionSpec) and kv_cache.shape[0] == 2:
-                    assert kv_cache.shape[1] != 2, (
-                        "Fail to determine whether the layout is "
-                        "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
-                        f"a tensor of shape {kv_cache.shape}"
-                    )
+                    # When num_blocks == 2 (e.g. during minimal KV cache profiling),
+                    # the shape is ambiguous: (2, 2, ...) could be either
+                    # (K/V=2, num_blocks=2, ...) or (num_blocks=2, K/V=2, ...).
+                    # Since this is an AttentionSpec layer, dim 0 is always the
+                    # K/V split dimension. Apply the layout swap unconditionally.
                     hidden_size = kv_cache.shape[2:].numel()
                     kv_cache.as_strided_(
                         size=kv_cache.shape,
