@@ -17,7 +17,6 @@ import pytest
 import torch
 from transformers import AutoModel, AutoModelForSequenceClassification, AutoProcessor
 
-from tests.models.multimodal.conftest import patch_hf_vision_attn_for_rocm
 from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
@@ -79,7 +78,6 @@ def _run_test(
 
     # Run HF inference using the model's encode_queries/encode_documents API
     with hf_runner(model, dtype=dtype, auto_cls=AutoModel) as hf_model:
-        patch_hf_vision_attn_for_rocm(hf_model.model)
         hf_outputs = []
         for text, image in zip(input_texts, input_images):
             with torch.inference_mode():
@@ -212,7 +210,6 @@ def _run_hf_reranker(
         trust_remote_code=True,
         auto_cls=AutoModelForSequenceClassification,
     ) as hf_model:
-        patch_hf_vision_attn_for_rocm(hf_model.model)
         processor = AutoProcessor.from_pretrained(
             model,
             trust_remote_code=True,
@@ -329,7 +326,6 @@ def _run_reranker_test(
     assert len(hf_scores) == len(vllm_scores), (
         f"Output length mismatch: HF={len(hf_scores)}, vLLM={len(vllm_scores)}"
     )
-
     # NOTE: ROCm shows slightly higher numerical variance dues to different attention
     # backend between vLLM and HF; use a marginally looser tolerance
     rel_tol = 0.022 if current_platform.is_rocm() else 0.02
