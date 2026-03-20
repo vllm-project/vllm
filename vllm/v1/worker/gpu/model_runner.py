@@ -195,7 +195,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
-            model_dtype=self.dtype,
             cache_draft_logits=not use_strict_rejection_sampling,
         )
         self.input_buffers = InputBuffers(
@@ -351,7 +350,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.set_attn(
                 self.model_state,
                 self.kv_cache_config,
-                self.attn_groups,
                 self.block_tables,
             )
 
@@ -821,9 +819,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logits,
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
-                self.req_states.draft_logits[input_batch.idx_mapping]
-                if self.req_states.draft_logits is not None
-                else None,
+                self.req_states.draft_logits,
             )
 
         # Get the number of sampled and rejected tokens.
