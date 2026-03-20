@@ -223,7 +223,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
-  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/serve/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
 
 
 - label: Entrypoints Integration (LLM) # TBD
@@ -254,11 +254,11 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/rpc
-  - tests/entrypoints/instrumentator
+  - tests/entrypoints/serve/instrumentator
   - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/instrumentator
+  - pytest -v -s entrypoints/serve/instrumentator
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 
@@ -1402,7 +1402,7 @@ steps:
 - label: Distributed Tests (2 GPUs)(H100-MI250) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_2
+  agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
@@ -1412,7 +1412,6 @@ steps:
   - vllm/v1/attention/backends/
   - vllm/v1/attention/selector.py
   - tests/distributed/test_context_parallel.py
-  - tests/v1/distributed/test_dbo.py
   - examples/offline_inference/data_parallel.py
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
@@ -1420,7 +1419,6 @@ steps:
   - export TORCH_NCCL_BLOCKING_WAIT=1
   - pytest -v -s tests/distributed/test_context_parallel.py
   - VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
-  - pytest -v -s tests/v1/distributed/test_dbo.py
 
 
 #####################################################################################################################################
@@ -1477,11 +1475,11 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/rpc
-  - tests/entrypoints/instrumentator
+  - tests/entrypoints/serve/instrumentator
   - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/instrumentator
+  - pytest -v -s entrypoints/serve/instrumentator
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 
@@ -1511,8 +1509,6 @@ steps:
   - vllm/distributed/
   - tests/distributed/test_torchrun_example.py
   - tests/distributed/test_torchrun_example_moe.py
-  - examples/offline_inference/rlhf.py
-  - examples/offline_inference/rlhf_colocate.py
   - examples/rl/
   - tests/examples/offline_inference/data_parallel.py
   - vllm/platforms/rocm.py
@@ -2596,21 +2592,16 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_2
   num_gpus: 2
-  optional: true
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
   - vllm/distributed/
   - vllm/v1/distributed/
   - vllm/model_executor/layers/fused_moe/
-  - tests/distributed/test_context_parallel.py
   - tests/v1/distributed/test_dbo.py
-  - examples/offline_inference/data_parallel.py
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
   - export TORCH_NCCL_BLOCKING_WAIT=1
-  - pytest -v -s tests/distributed/test_context_parallel.py
-  - VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
   - pytest -v -s tests/v1/distributed/test_dbo.py
 
 
@@ -2669,7 +2660,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
 
 - label: LM Eval Large Models (H200-MI325) # TBD
@@ -2990,11 +2981,11 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/rpc
-  - tests/entrypoints/instrumentator
+  - tests/entrypoints/serve/instrumentator
   - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/instrumentator
+  - pytest -v -s entrypoints/serve/instrumentator
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 
