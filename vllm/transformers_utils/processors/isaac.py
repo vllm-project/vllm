@@ -422,7 +422,7 @@ class IsaacProcessor(ProcessorMixin):
             if not isinstance(text, list):
                 text = [text]
 
-            if image_inputs is not None:
+            if image_inputs:
                 text = text.copy()  # below lines change text in-place
                 merge_length = self.image_processor.pixel_shuffle_scale**2
                 index = 0
