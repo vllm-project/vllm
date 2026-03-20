@@ -1596,6 +1596,17 @@ class Qwen3VLForConditionalGeneration(
             out_hidden_size=self.visual.out_hidden_size,
         )
 
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config,
+    ) -> tuple[int, int]:
+        # Min: estimated smallest possible encoder input.
+        # 224x224 image → 16x16 patches, spatial_merge_size=2 → 8x8 = 64 tokens
+        min_budget = 64
+        # Max: capped by max_num_batched_tokens
+        max_budget = vllm_config.scheduler_config.max_num_batched_tokens
+        return (min_budget, max_budget)
+
     def get_encoder_cudagraph_num_items(
         self,
         mm_kwargs: dict[str, Any],

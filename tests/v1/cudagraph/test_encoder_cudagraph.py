@@ -48,6 +48,31 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
 
 
 # ---------------------------------------------------------------------------
+# _generate_budgets
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateBudgets:
+    """Auto-generate power-of-2 budgets from min to max."""
+
+    def test_exact_powers_of_2(self):
+        result = EncoderCudaGraphManager._generate_budgets(64, 1024)
+        assert result == [64, 128, 256, 512, 1024]
+
+    def test_max_not_power_of_2(self):
+        result = EncoderCudaGraphManager._generate_budgets(64, 800)
+        assert result == [64, 128, 256, 512, 800]
+
+    def test_min_equals_max(self):
+        result = EncoderCudaGraphManager._generate_budgets(64, 64)
+        assert result == [64]
+
+    def test_large_range(self):
+        result = EncoderCudaGraphManager._generate_budgets(64, 8192)
+        assert result == [64, 128, 256, 512, 1024, 2048, 4096, 8192]
+
+
+# ---------------------------------------------------------------------------
 # _find_smallest_fitting_budget_given_tokens
 # ---------------------------------------------------------------------------
 
@@ -184,6 +209,13 @@ class SimpleMockViTModel(torch.nn.Module):
             buffer_keys=["dummy_buf"],
             out_hidden_size=_HIDDEN,
         )
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config,
+    ) -> tuple[int, int]:
+        # For tests: min=4, max=128 (small values for fast capture)
+        return (4, 128)
 
     def get_encoder_cudagraph_num_items(
         self,

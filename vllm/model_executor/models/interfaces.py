@@ -1517,6 +1517,23 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig": ...
 
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: "VllmConfig",
+    ) -> tuple[int, int]:
+        """Return (min_token_budget, max_token_budget) for auto-inference.
+
+        - min_token_budget: estimated smallest possible encoder input
+          (e.g. 64 for a 224x224 image)
+        - max_token_budget: estimated largest budget worth capturing
+          (e.g. max_num_batched_tokens)
+
+        Used when ``encoder_cudagraph_token_budgets`` and/or
+        ``encoder_cudagraph_max_images_per_batch`` are not explicitly
+        specified by the user.
+        """
+        ...
+
     def get_encoder_cudagraph_num_items(
         self,
         mm_kwargs: dict[str, Any],

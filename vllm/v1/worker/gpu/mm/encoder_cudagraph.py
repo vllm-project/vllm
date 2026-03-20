@@ -65,8 +65,26 @@ class EncoderCudaGraphManager:
         self.config: EncoderCudaGraphConfig = model.get_encoder_cudagraph_config()
 
         comp_config = vllm_config.compilation_config
-        self.token_budgets = sorted(comp_config.encoder_cudagraph_token_budgets)
-        self.max_batch_size = comp_config.encoder_cudagraph_max_images_per_batch
+        user_budgets = comp_config.encoder_cudagraph_token_budgets
+        user_max_images = comp_config.encoder_cudagraph_max_images_per_batch
+
+        if user_budgets and user_max_images > 0:
+            # Fully user-specified
+            self.token_budgets = sorted(user_budgets)
+            self.max_batch_size = user_max_images
+        else:
+            # Auto-infer missing values from model
+            min_budget, max_budget = model.get_encoder_cudagraph_budget_range(
+                vllm_config
+            )
+            self.token_budgets = (
+                sorted(user_budgets)
+                if user_budgets
+                else self._generate_budgets(min_budget, max_budget)
+            )
+            self.max_batch_size = (
+                user_max_images if user_max_images > 0 else max_budget // min_budget
+            )
 
         mm_config = vllm_config.model_config.multimodal_config
         self.use_dp = (
@@ -87,6 +105,19 @@ class EncoderCudaGraphManager:
             self.max_batch_size,
             self.use_dp,
         )
+
+    @staticmethod
+    def _generate_budgets(min_budget: int, max_budget: int) -> list[int]:
+        """Generate power-of-2 token budgets from min_budget to max_budget."""
+        budgets: list[int] = []
+        b = min_budget
+        while b <= max_budget:
+            budgets.append(b)
+            b *= 2
+        # Always include max_budget if it's not already a power-of-2 boundary
+        if not budgets or budgets[-1] < max_budget:
+            budgets.append(max_budget)
+        return budgets
 
     def supports_modality(self, modality: str) -> bool:
         """Check if a modality is supported by this manager."""
