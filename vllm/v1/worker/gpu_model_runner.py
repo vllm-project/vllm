@@ -3920,6 +3920,14 @@ class GPUModelRunner(
                     self.model.get_mamba_state_copy_func(),
                     self._get_mamba_copy_bufs(),
                 )
+                # preprocess_mamba resets num_accepted_tokens_cpu to 1
+                # for requests whose state was copied to a new block.
+                # Re-sync to GPU so the mamba kernel reads from the
+                # correct initial state slot (init_token_idx = 0).
+                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                )
+                self.num_accepted_tokens.copy_to_gpu(num_reqs)
 
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
