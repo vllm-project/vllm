@@ -230,7 +230,6 @@ def maybe_roundup_hidden_size(
             is used in the case of mxfp4 quantization in selecting the
             MxFP4Backend.
         model_type: for checking if gpt-oss
-        is_mxfp4_quant: whether the layer is quantized with mxfp4
 
     Return:
         Rounded up hidden_size if rounding up is required based on the configs.
