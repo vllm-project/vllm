@@ -137,7 +137,13 @@ def register_hf_hub_resolver():
                 " because it allows remote downloads."
             )
         else:
-            hf_hub_resolver = HfHubResolver(hf_repo_list.split(","))
+            hf_hub_resolver = HfHubResolver(
+                [
+                    hf_repo.strip()
+                    for hf_repo in hf_repo_list.split(",")
+                    if hf_repo.strip()
+                ]
+            )
             LoRAResolverRegistry.register_resolver("Hf Hub Resolver", hf_hub_resolver)
 
     return
