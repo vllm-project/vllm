@@ -489,7 +489,7 @@ class Step3VLProcessor(ProcessorMixin):
                 start = 0
                 for n_patches in num_patches:
                     image_repl_str = self.get_image_repl_feature_text(
-                        1, n_patches, patch_newline_mask[start : start + num_patches]
+                        1, n_patches, patch_newline_mask[start : start + n_patches]
                     )
                     image_repl_str_lst.append(image_repl_str)
 
