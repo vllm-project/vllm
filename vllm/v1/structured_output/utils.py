@@ -46,6 +46,7 @@ def apply_grammar_bitmask(
     grammar_output: GrammarOutput,
     input_batch: InputBatch,
     logits: torch.Tensor,
+    bitmask_backend: str = "auto",
 ) -> None:
     """
     Apply grammar bitmask to output logits of the model with xgrammar function.
@@ -54,6 +55,8 @@ def apply_grammar_bitmask(
         scheduler_output (SchedulerOutput): The result of engine scheduling.
         input_batch (InputBatch): The input of model runner.
         logits (torch.Tensor): The output logits of model forward.
+        bitmask_backend (str): Backend for xgrammar apply_token_bitmask_inplace.
+            Options: "auto", "cpu", "cuda", "triton", "torch_compile", "torch_native".
     """
     # Serialization of np.ndarray is much more efficient than a tensor,
     # so we receive it in that format.
@@ -122,12 +125,17 @@ def apply_grammar_bitmask(
         # Convert to float32, apply bitmask, then convert back
         logits_float32 = logits.to(torch.float32)
         xgr.apply_token_bitmask_inplace(
-            logits_float32, grammar_bitmask, indices=index_tensor
+            logits_float32,
+            grammar_bitmask,
+            indices=index_tensor,
+            backend=bitmask_backend,
         )
         # Copy the modified values back to the original tensor
         logits.copy_(logits_float32.to(logits.dtype))
     else:
-        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
+        xgr.apply_token_bitmask_inplace(
+            logits, grammar_bitmask, indices=index_tensor, backend=bitmask_backend
+        )
 
 
 class OutlinesVocabulary:

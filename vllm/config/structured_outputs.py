@@ -13,6 +13,10 @@ StructuredOutputsBackend = Literal[
     "auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"
 ]
 
+BitmaskBackend = Literal[
+    "auto", "cpu", "cuda", "triton", "torch_compile", "torch_native"
+]
+
 
 @config
 class StructuredOutputsConfig:
@@ -40,6 +44,10 @@ class StructuredOutputsConfig:
     loaded and registered."""
     enable_in_reasoning: bool = False
     """Whether to use structured input for reasoning."""
+    bitmask_backend: BitmaskBackend = "auto"
+    """Backend for applying xgrammar token bitmask. Options: "auto", "cpu", "cuda",
+    "triton", "torch_compile", "torch_native". Default "auto" lets xgrammar
+    choose the best backend for the current device."""
 
     def compute_hash(self) -> str:
         """
