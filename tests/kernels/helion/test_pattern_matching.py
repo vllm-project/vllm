@@ -52,7 +52,7 @@ def _helion_mock_context():
 
     with (
         patch(
-            "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
+            "vllm.kernels.helion.config_manager.ConfigManager",
             return_value=mock_config_manager,
         ),
         patch(
@@ -87,8 +87,8 @@ class TestMakeFxHop:
                 raw_kernel_func=raw_add_scale,
                 op_name="test_make_fx",
                 fake_impl=lambda *a, **kw: None,
+                config_picker=lambda args, keys: "default",
             )
-            wrapper.register_config_picker(lambda args, keys: "default")
 
             def fn(x, y):
                 return wrapper(x, y, scale)
@@ -143,8 +143,8 @@ class TestMakeFxHop:
                 raw_kernel_func=raw_silu_mul,
                 op_name="test_pm_silu_mul",
                 fake_impl=lambda *a, **kw: None,
+                config_picker=lambda args, keys: "default",
             )
-            wrapper.register_config_picker(lambda args, keys: "default")
 
             def pattern(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
                 return torch.nn.functional.silu(x) * y

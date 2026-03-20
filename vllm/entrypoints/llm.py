@@ -1477,9 +1477,9 @@ class LLM:
             data_1 = data_1 * len(data_2)
 
         if pooling_params is None:
-            pooling_params = PoolingParams(task="score")
+            pooling_params = PoolingParams(task="classify")
         elif pooling_params.task is None:
-            pooling_params.task = "score"
+            pooling_params.task = "classify"
 
         pooling_params_list = list[PoolingParams]()
 
@@ -1584,8 +1584,11 @@ class LLM:
             )
 
         supported_tasks = self.supported_tasks
+        score_type = self.model_config.score_type
+        is_late_interaction = score_type == "late-interaction"
+        is_cross_encoder = score_type == "cross-encoder"
+
         # Late interaction models (e.g., ColBERT) use token_embed for scoring
-        is_late_interaction = model_config.is_late_interaction
         if not is_late_interaction and all(
             t not in supported_tasks for t in ("embed", "classify")
         ):
@@ -1595,13 +1598,10 @@ class LLM:
                 "`--convert embed` or `--convert classify`."
             )
 
-        if (
-            model_config.is_cross_encoder
-            and getattr(model_config.hf_config, "num_labels", 0) != 1
-        ):
+        if is_cross_encoder and getattr(model_config.hf_config, "num_labels", 0) != 1:
             raise ValueError("Score API is only enabled for num_labels == 1.")
 
-        if not model_config.is_cross_encoder and chat_template is not None:
+        if not is_cross_encoder and chat_template is not None:
             raise ValueError(
                 "chat_template is only supported for cross-encoder models."
             )
@@ -1622,7 +1622,7 @@ class LLM:
         )
         encode_kwargs = tok_params.get_encode_kwargs()
 
-        if model_config.is_cross_encoder:
+        if is_cross_encoder:
             return self._cross_encoding_score(
                 score_data_1,
                 score_data_2,

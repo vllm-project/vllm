@@ -42,6 +42,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils.network_utils import (
     get_distributed_init_method,
@@ -486,6 +487,10 @@ class MultiprocExecutor(Executor):
             * self.parallel_config.prefill_context_parallel_size
         )
 
+    @classmethod
+    def supports_async_scheduling(cls) -> bool:
+        return True
+
 
 @dataclass
 class UnreadyWorkerProcHandle:
@@ -592,17 +597,6 @@ class WorkerProc:
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
 
-        scheduler_config = vllm_config.scheduler_config
-        self.use_async_scheduling = scheduler_config.async_scheduling
-        if self.use_async_scheduling:
-            self.async_output_queue: queue.Queue = queue.Queue()
-            self.async_output_copy_thread = Thread(
-                target=self.async_output_busy_loop,
-                daemon=True,
-                name="WorkerAsyncOutputCopy",
-            )
-            self.async_output_copy_thread.start()
-
         self.setup_proc_title_and_log_prefix(
             enable_ep=vllm_config.parallel_config.enable_expert_parallel
         )
@@ -616,6 +610,20 @@ class WorkerProc:
                 enable_ep=vllm_config.parallel_config.enable_expert_parallel
             )
             self.worker.load_model()
+
+        scheduler_config = vllm_config.scheduler_config
+        self.use_async_scheduling = scheduler_config.async_scheduling
+        if self.use_async_scheduling:
+            self.async_output_queue: queue.Queue = queue.Queue()
+            self.async_output_copy_thread = Thread(
+                target=self.async_output_busy_loop,
+                daemon=True,
+                name="WorkerAsyncOutputCopy",
+            )
+            self.async_output_copy_thread.start()
+
+        # Set block size based on the attention backends
+        current_platform.update_block_size_for_backend(vllm_config)
 
         # Initialize message queues after init_device() since multi-node setups
         # (nnodes_within_dp > 1) require distributed groups to be initialized
@@ -903,6 +911,18 @@ class WorkerProc:
 
     def async_output_busy_loop(self):
         """Entrypoint for the thread which handles outputs asynchronously."""
+
+        # set device to the worker device for the thread.
+        # a thread will not inherit the context of the main thread.
+        # when calling any cuda runtime functions, it will implicitly
+        # create a new cuda context on device 0, consuming extra memory.
+        # here we set the device to the worker device for the thread,
+        # enforcing the context to be the same as the main thread.
+        from vllm.platforms import current_platform
+
+        if hasattr(self.worker, "device"):
+            current_platform.set_device(self.worker.device)
+
         while True:
             output = self.async_output_queue.get()
             self.enqueue_output(output)
@@ -990,12 +1010,13 @@ def set_multiprocessing_worker_envs():
         "OMP_NUM_THREADS" not in os.environ
         and (current_parallelism := torch.get_num_threads()) > default_omp_num_threads
     ):
-        logger.warning(
+        logger.warning_once(
             "Reducing Torch parallelism from %d threads to %d to avoid "
             "unnecessary CPU contention. Set OMP_NUM_THREADS in the "
             "external environment to tune this value as needed.",
             current_parallelism,
             default_omp_num_threads,
+            scope="local",
         )
         os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
         torch.set_num_threads(default_omp_num_threads)
