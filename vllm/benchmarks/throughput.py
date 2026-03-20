@@ -3,12 +3,12 @@
 """Benchmark offline inference throughput."""
 
 import argparse
-import dataclasses
 import json
 import os
 import random
 import time
 import warnings
+from dataclasses import fields
 from typing import Any
 
 import torch
@@ -53,7 +53,7 @@ def run_vllm(
 ) -> tuple[float, list[RequestOutput] | None]:
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
     assert all(
         llm.llm_engine.model_config.max_model_len
         >= (request.prompt_len + request.expected_output_len)
@@ -141,7 +141,7 @@ def run_vllm_chat(
     """
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
 
     assert all(
         llm.llm_engine.model_config.max_model_len
@@ -181,7 +181,6 @@ async def run_vllm_async(
     n: int,
     engine_args: AsyncEngineArgs,
     do_profile: bool,
-    disable_frontend_multiprocessing: bool = False,
     disable_detokenize: bool = False,
 ) -> float:
     from vllm import SamplingParams
@@ -191,7 +190,6 @@ async def run_vllm_async(
 
     async with build_async_engine_client_from_engine_args(
         engine_args,
-        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
     ) as llm:
         model_config = llm.model_config
         assert all(
@@ -758,12 +756,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Use vLLM async engine rather than LLM class.",
     )
     parser.add_argument(
-        "--disable-frontend-multiprocessing",
-        action="store_true",
-        default=False,
-        help="Disable decoupled async engine frontend.",
-    )
-    parser.add_argument(
         "--disable-detokenize",
         action="store_true",
         help=(
@@ -880,7 +872,6 @@ def main(args: argparse.Namespace):
                     requests,
                     args.n,
                     AsyncEngineArgs.from_cli_args(args),
-                    disable_frontend_multiprocessing=args.disable_frontend_multiprocessing,
                     disable_detokenize=args.disable_detokenize,
                     do_profile=args.profile,
                 )
