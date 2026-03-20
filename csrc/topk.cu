@@ -52,8 +52,17 @@ void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
   // The kernel dynamically dispatches per-row: medium rows use only CTA 0
   // of each group, large rows use all CTAs in the group.
   // This fixed grid is CUDAGraph-safe — no host-side path branching.
+  int effective_max_smem;
+  constexpr int kSmemCapSmall = 48 * 1024;
+  constexpr int kSmemBatchThreshold = 8;
+  effective_max_smem = (num_rows <= kSmemBatchThreshold)
+                            ? std::min(max_smem_per_block, kSmemCapSmall)
+                            : max_smem_per_block;
+  if (effective_max_smem < static_cast<int>(P::kSmemMedium)) {
+    effective_max_smem = static_cast<int>(P::kSmemMedium);
+  }
   size_t available_for_ordered =
-      static_cast<size_t>(max_smem_per_block) - P::kFixedSmemLarge;
+      static_cast<size_t>(effective_max_smem) - P::kFixedSmemLarge;
   uint32_t max_chunk_elements =
       static_cast<uint32_t>(available_for_ordered / sizeof(uint32_t));
 
