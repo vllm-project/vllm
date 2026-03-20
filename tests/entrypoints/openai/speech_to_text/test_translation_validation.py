@@ -15,9 +15,9 @@ import pytest_asyncio
 import soundfile as sf
 
 from tests.entrypoints.openai.conftest import add_attention_backend
-from tests.utils import RemoteOpenAIServer
+from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 
-SERVER_ARGS = ["--enforce-eager"]
+SERVER_ARGS = ["--enforce-eager", *ROCM_EXTRA_ARGS]
 
 
 def _get_server_args(attention_config):
