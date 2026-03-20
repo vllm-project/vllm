@@ -612,8 +612,16 @@ class RocmPlatform(Platform):
     @classmethod
     @with_amdsmi_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
-        device = amdsmi_get_processor_handles()[device_id]
-        return amdsmi_get_gpu_device_uuid(device)
+        try:
+            device = amdsmi_get_processor_handles()[device_id]
+        except AmdSmiException as error:
+            logger.error("amdsmi device query failed ", exc_info=error)
+            return ""
+        try:
+            device_uuid = amdsmi_get_gpu_device_uuid(device)
+        except AmdSmiException as error:
+            logger.error("amdsmi device uuid query failed ", exc_info=error)
+        return device_uuid
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
