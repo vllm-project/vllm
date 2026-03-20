@@ -493,7 +493,7 @@ class ColBERTLfm2Model(ColBERTMixin, nn.Module, HasInnerState, IsHybrid):
 
         # Strip "model." prefix added by the embedding adapter
         model_weights = [
-            (n[len("model."):] if n.startswith("model.") else n, w)
+            (n[len("model.") :] if n.startswith("model.") else n, w)
             for n, w in other_weights
         ]
         loaded_model = self.model.load_weights(model_weights)
