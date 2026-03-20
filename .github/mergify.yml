@@ -260,7 +260,7 @@ pull_request_rules:
       - files=examples/offline_inference/structured_outputs.py
       - files=examples/online_serving/structured_outputs/structured_outputs.py
       - files~=^tests/v1/structured_output/
-      - files=tests/v1/entrypoints/llm/test_struct_output_generate.py
+      - files=tests/entrypoints/llm/test_struct_output_generate.py
       - files~=^vllm/v1/structured_output/
   actions:
     label:
