@@ -88,7 +88,6 @@ steps:
   - vllm/distributed/
   - tests/distributed/test_torchrun_example.py
   - tests/distributed/test_torchrun_example_moe.py
-  - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
   - examples/rl/
   - tests/examples/offline_inference/data_parallel.py
