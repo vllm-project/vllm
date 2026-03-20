@@ -223,8 +223,8 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
         else:
             mixed_qkvz, ba = torch.ops.vllm.gdn_in_proj(
                 hidden_states,
-                self.in_proj_qkvz.weight.shape[0],
-                self.in_proj_ba.weight.shape[0],
+                sum(self.in_proj_qkvz.output_sizes) // self.tp_size,
+                sum(self.in_proj_ba.output_sizes) // self.tp_size,
                 self.prefix,
             )
             qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size

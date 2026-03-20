@@ -660,8 +660,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         projected_states_qkvz, projected_states_ba = torch.ops.vllm.gdn_in_proj(
             hidden_states,
-            self.in_proj_qkvz.weight.shape[0],
-            self.in_proj_ba.weight.shape[0],
+            sum(self.in_proj_qkvz.output_sizes) // self.tp_size,
+            sum(self.in_proj_ba.output_sizes) // self.tp_size,
             self.prefix,
         )
         query, key, value, z, b, a = self.fix_query_key_value_ordering(
