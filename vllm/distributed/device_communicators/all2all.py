@@ -1,24 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.utils.flashinfer import has_flashinfer_all2all
+from vllm.utils.flashinfer import (
+    has_flashinfer_nvlink_one_sided,
+    has_flashinfer_nvlink_two_sided,
+)
 from vllm.utils.import_utils import has_deep_ep, has_mori
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
-if has_flashinfer_all2all():
+if has_flashinfer_nvlink_two_sided():
     from flashinfer.comm import Mapping  # type: ignore[import-not-found]
     from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
     from flashinfer.comm.trtllm_alltoall import (
         MnnvlMoe,  # type: ignore[import-not-found]
     )
+
+if has_flashinfer_nvlink_one_sided():
+    from flashinfer.comm import Mapping  # type: ignore[import-not-found]
+    from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
+    from flashinfer.comm.trtllm_moe_alltoall import (
+        MoeAlltoAll,  # type: ignore[import-not-found]
+        moe_a2a_get_workspace_size_per_rank,
+    )
+
 
 logger = init_logger(__name__)
 
@@ -413,9 +427,124 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         return 0
 
 
-class FlashInferAllToAllManager(All2AllManagerBase):
+class NixlEPAll2AllManager(All2AllManagerBase):
     """
-    All2All communication based on flashinfer kernels.
+    All2All communication based on NIXL EP kernels.
+    This backend supports elastic EP with dynamic rank connection/disconnection.
+    """
+
+    # (nixl_ep_buffer, ep_size)
+    _buffer: tuple[Any, int] | None = None
+    _lock = threading.Lock()
+
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
+
+        self.max_num_ep_ranks = envs.VLLM_NIXL_EP_MAX_NUM_RANKS
+
+    def _init_buffer(
+        self,
+        max_num_tokens_per_dp_rank: int,
+        token_hidden_size: int,
+        num_experts_per_rank: int,
+    ) -> None:
+        from nixl_ep import Buffer  # type: ignore[import-not-found]
+
+        max_num_global_experts = self.max_num_ep_ranks * num_experts_per_rank
+        num_rdma_bytes = Buffer.get_rdma_size_hint(
+            num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
+            hidden=token_hidden_size,
+            num_ranks=self.max_num_ep_ranks,
+            num_experts=max_num_global_experts,
+        )
+        assert NixlEPAll2AllManager._buffer is None, (
+            "NIXL EP buffer already initialized"
+        )
+        buffer = Buffer(
+            rank=self.rank,
+            tcp_store_group=self.tcp_store_group.store,
+        )
+        buffer.update_memory_buffers(
+            num_ranks=self.max_num_ep_ranks,
+            num_experts_per_rank=num_experts_per_rank,
+            num_rdma_bytes=num_rdma_bytes,
+        )
+        ranks_to_connect = list(range(self.cpu_group.size()))
+        buffer.connect_ranks(ranks_to_connect)
+        NixlEPAll2AllManager._buffer = (buffer, self.cpu_group.size())
+
+    def _update_buffer(self):
+        assert NixlEPAll2AllManager._buffer is not None
+        buffer, current_ep_size = NixlEPAll2AllManager._buffer
+        current_ranks = list(range(current_ep_size))
+        new_ep_size = self.cpu_group.size()
+        buffer.set_tcp_store_group(self.tcp_store_group.store)
+        if new_ep_size > len(current_ranks):
+            ranks_to_connect = list(range(len(current_ranks), new_ep_size))
+            buffer.connect_ranks(ranks_to_connect)
+        else:
+            ranks_to_disconnect = current_ranks[new_ep_size:]
+            buffer.disconnect_ranks(ranks_to_disconnect)
+        NixlEPAll2AllManager._buffer = (buffer, new_ep_size)
+
+    def get_handle(self, kwargs):
+        with NixlEPAll2AllManager._lock:
+            if (
+                NixlEPAll2AllManager._buffer is not None
+                and NixlEPAll2AllManager._buffer[1] == self.cpu_group.size()
+            ):
+                return NixlEPAll2AllManager._buffer[0]
+
+            num_experts_per_rank = (
+                kwargs["num_global_experts"] // kwargs["num_ep_ranks"]
+            )
+            nixl_kwargs = dict(
+                max_num_tokens_per_dp_rank=kwargs["max_num_tokens_per_dp_rank"],
+                token_hidden_size=kwargs["token_hidden_size"],
+                num_experts_per_rank=num_experts_per_rank,
+            )
+            if NixlEPAll2AllManager._buffer is None:
+                self._init_buffer(**nixl_kwargs)
+            else:
+                self._update_buffer()
+
+            assert NixlEPAll2AllManager._buffer is not None
+            handle = NixlEPAll2AllManager._buffer[0]
+            return handle
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
+        raise NotImplementedError
+
+    def combine(
+        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def destroy(self):
+        # NOTE(yongji): NIXLEPAll2AllManager instance is recreated during
+        # scale-up/down, so we cannot destroy the persistent buffer here.
+        assert NixlEPAll2AllManager._buffer is not None
+        buffer = NixlEPAll2AllManager._buffer[0]
+        buffer.set_tcp_store_group(None)
+
+    # NIXL EP uses RDMA so no SMs are used for communication
+    def max_sms_used(self) -> int | None:
+        return 0
+
+
+class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
+    """
+    All2All communication based on flashinfer all2allv/two-sided NVLink kernels.
     """
 
     # This type lint could be removed after all of the work in
@@ -424,7 +553,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
     world_size: int
 
     def __init__(self, cpu_group, tcp_store_group=None):
-        assert has_flashinfer_all2all(), (
+        assert has_flashinfer_nvlink_two_sided(), (
             "flashinfer all2all module not found. Please install/check flashinfer"
         )  # noqa
         super().__init__(cpu_group, tcp_store_group)
@@ -481,7 +610,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
 
     def ensure_alltoall_workspace_initialized(self):
         """Ensure workspace is initialized"""
-        if not has_flashinfer_all2all():
+        if not has_flashinfer_nvlink_two_sided():
             return False
 
         if self.world_size <= 1:
@@ -491,7 +620,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
             self.initialize(
                 world_size=self.world_size,
                 rank=self.rank,
-                gpus_per_node=torch.cuda.device_count,
+                gpus_per_node=torch.accelerator.device_count,
             )
         return self.initialized
 
@@ -513,6 +642,119 @@ class FlashInferAllToAllManager(All2AllManagerBase):
             finally:
                 self.workspace_tensor = None
                 self.prepare_workspace_tensor = None
+                self.mapping = None
+                self.initialized = False
+
+
+class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
+    """
+    All2All communication based on FlashInfer's MoeAlltoAll/One-sided NVLink kernel.
+    This is a newer kernel from trtllm that should perform better than the kernel
+    used by flashinfer_nvlink_two_sided.
+    """
+
+    rank: int
+    world_size: int
+
+    def __init__(self, cpu_group):
+        assert has_flashinfer_nvlink_one_sided(), (
+            "flashinfer trtllm_moe_alltoall module not found. "
+            "Please install/check flashinfer"
+        )
+        super().__init__(cpu_group)
+        logger.debug(
+            "Initialize FlashInfer One-sided NVLink rank=%d, world size=%d",
+            self.rank,
+            self.world_size,
+        )
+        self.initialized = False
+        self.moe_alltoall: MoeAlltoAll | None = None
+        self.mapping = None
+
+    def initialize(
+        self,
+        max_num_tokens: int,
+        top_k: int,
+        num_experts: int,
+        hidden_size: int,
+    ):
+        """Initialize the MoeAlltoAll workspace."""
+        if self.initialized:
+            return
+
+        self.cleanup()
+        gpus_per_node = torch.accelerator.device_count()
+        logger.debug(
+            "Making One-sided NVLink mapping: rank=%d, world size=%d",
+            self.rank,
+            self.world_size,
+        )
+        self.mapping = Mapping(
+            self.world_size,
+            self.rank,
+            gpus_per_node,
+            tp_size=self.world_size,
+            moe_ep_size=self.world_size,
+        )
+
+        from vllm.distributed.device_communicators.mnnvl_compat import (
+            CustomCommunicator,
+        )
+
+        dp_config = MnnvlConfig(
+            comm_backend=CustomCommunicator(get_dp_group().cpu_group),
+        )
+        total_dispatch_payload_size_per_token = (
+            hidden_size // 2  # nvfp4 hidden states
+            + hidden_size // 16  # fp8 scaling factors
+            + top_k * 4  # int32 topks ids
+            + top_k * 4  # float32 topk weights
+        )
+        combine_payload_size_per_token = hidden_size * 2  # bf16 hidden states
+        self.workspace_size = moe_a2a_get_workspace_size_per_rank(
+            ep_size=self.world_size,
+            max_num_tokens=max_num_tokens,
+            total_dispatch_payload_size_per_token=total_dispatch_payload_size_per_token,
+            combine_payload_size_per_token=combine_payload_size_per_token,
+        )
+
+        self.moe_alltoall = MoeAlltoAll(
+            mapping=self.mapping,
+            max_num_tokens=max_num_tokens,
+            top_k=top_k,
+            num_experts=num_experts,
+            workspace_size_per_rank=self.workspace_size,
+            mnnvl_config=dp_config,
+        )
+
+        self.gpus_per_node = gpus_per_node
+        self.max_num_tokens = max_num_tokens
+        self.top_k = top_k
+        self.num_experts = num_experts
+        self.hidden_size = hidden_size
+        self.initialized = True
+
+        logger.info(
+            "FlashInfer One-sided NVLink initialized for rank %s, size %s",
+            self.rank,
+            self.world_size,
+        )
+        dist.barrier()
+
+    def get_handle(self, kwargs):
+        return self
+
+    def cleanup(self):
+        """Clean up resources."""
+        if self.initialized and self.moe_alltoall is not None:
+            try:
+                del self.moe_alltoall
+            except Exception as e:
+                logger.warning(
+                    "Failed to cleanup FlashInfer One-sided NVLink workspace: %s", e
+                )
+            finally:
+                self.moe_alltoall = None
                 self.mapping = None
                 self.initialized = False
 
