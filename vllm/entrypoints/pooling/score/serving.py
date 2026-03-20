@@ -413,7 +413,7 @@ class ServingScores(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        default_pooling_params = request.to_pooling_params("score")
+        default_pooling_params = request.to_pooling_params("classify")
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"

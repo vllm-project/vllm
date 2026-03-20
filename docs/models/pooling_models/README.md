@@ -31,28 +31,29 @@ Of course, we also have "plugin" tasks that allow users to customize input and o
 
 ### Pooling Tasks
 
-| Pooling Tasks      | Granularity   | Outputs                                         |
-|--------------------|---------------|-------------------------------------------------|
-| `classify`         | Sequence-wise | probability vector of classes for each sequence |
-| `score` (see note) | Sequence-wise | reranker score for each sequence                |
-| `embed`            | Sequence-wise | vector representations for each sequence        |
-| `token_classify`   | Token-wise    | probability vector of classes for each token    |
-| `token_embed`      | Token-wise    | vector representations for each token           |
+| Pooling Tasks         | Granularity   | Outputs                                         |
+|-----------------------|---------------|-------------------------------------------------|
+| `classify` (see note) | Sequence-wise | probability vector of classes for each sequence |
+| `embed`               | Sequence-wise | vector representations for each sequence        |
+| `token_classify`      | Token-wise    | probability vector of classes for each token    |
+| `token_embed`         | Token-wise    | vector representations for each token           |
 
 !!! note
     Within classification tasks, there is a specialized subcategory: Cross-encoder (aka reranker) models. These models are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
 ### Score Types
 
-| Pooling Tasks      | Granularity   | Outputs                                         | Score Types        | scoring function         |
-|--------------------|---------------|-------------------------------------------------|--------------------|--------------------------|
-| `classify`         | Sequence-wise | probability vector of classes for each sequence | nan                | nan                      |
-| `score` (see note) | Sequence-wise | reranker score for each sequence                | `cross-encoder`    | linear classifier        |
-| `embed`            | Sequence-wise | vector representations for each sequence        | `bi-encoder`       | cosine similarity        |
-| `token_classify`   | Token-wise    | probability vector of classes for each token    | nan                | nan                      |
-| `token_embed`      | Token-wise    | vector representations for each token           | `late-interaction` | late interaction(MaxSim) |
+The scoring models is designed to compute similarity scores between two input prompts. It supports three model types (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
 
-The score models is designed to compute similarity scores between two input prompts. It supports three model types (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
+| Pooling Tasks         | Granularity   | Outputs                                      | Score Types        | scoring function         |
+|-----------------------|---------------|----------------------------------------------|--------------------|--------------------------|
+| `classify` (see note) | Sequence-wise | reranker score for each sequence             | `cross-encoder`    | linear classifier        |
+| `embed`               | Sequence-wise | vector representations for each sequence     | `bi-encoder`       | cosine similarity        |
+| `token_classify`      | Token-wise    | probability vector of classes for each token | nan                | nan                      |
+| `token_embed`         | Token-wise    | vector representations for each token        | `late-interaction` | late interaction(MaxSim) |
+
+!!! note
+    Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
 
 ### Pooling Usages
 
@@ -85,14 +86,16 @@ enabling the corresponding APIs.
 
 ### Offline APIs corresponding to pooling tasks
 
-| Task             | APIs                                                                       |
-|------------------|----------------------------------------------------------------------------|
-| `embed`          | `LLM.embed(...)`,`LLM.encode(..., pooling_task="embed")`, `LLM.score(...)` |
-| `classify`       | `LLM.classify(...)`, `LLM.encode(..., pooling_task="classify")`            |
-| `score`          | `LLM.score(...)`                                                           |
-| `token_classify` | `LLM.reward(...)`, `LLM.encode(..., pooling_task="token_classify")`        |
-| `token_embed`    | `LLM.encode(..., pooling_task="token_embed")`, `LLM.score(...)`            |
-| `plugin`         | `LLM.encode(..., pooling_task="plugin")`                                   |
+| Task             | APIs                                                                                  |
+|------------------|---------------------------------------------------------------------------------------|
+| `embed`          | `LLM.embed(...)`, `LLM.encode(..., pooling_task="embed")`, `LLM.score(...)`(see note) |
+| `classify`       | `LLM.classify(...)`, `LLM.encode(..., pooling_task="classify")`, `LLM.score(...)`     |
+| `token_classify` | `LLM.reward(...)`, `LLM.encode(..., pooling_task="token_classify")`                   |
+| `token_embed`    | `LLM.encode(..., pooling_task="token_embed")`, `LLM.score(...)`                       |
+| `plugin`         | `LLM.encode(..., pooling_task="plugin")`                                              |
+
+!!! note
+    Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
 
 ### `LLM.classify`
 
@@ -206,11 +209,11 @@ If `--runner pooling` has been set (manually or automatically) but the model doe
 vLLM will attempt to automatically convert the model according to the architecture names
 shown in the table below.
 
-| Architecture                                    | `--convert` | Supported pooling tasks               |
-| ----------------------------------------------- | ----------- | ------------------------------------- |
-| `*ForTextEncoding`, `*EmbeddingModel`, `*Model` | `embed`     | `token_embed`, `embed`                |
-| `*ForRewardModeling`, `*RewardModel`            | `embed`     | `token_embed`, `embed`                |
-| `*For*Classification`, `*ClassificationModel`   | `classify`  | `token_classify`, `classify`, `score` |
+| Architecture                                    | `--convert` | Supported pooling tasks      |
+|-------------------------------------------------|-------------|------------------------------|
+| `*ForTextEncoding`, `*EmbeddingModel`, `*Model` | `embed`     | `token_embed`, `embed`       |
+| `*ForRewardModeling`, `*RewardModel`            | `embed`     | `token_embed`, `embed`       |
+| `*For*Classification`, `*ClassificationModel`   | `classify`  | `token_classify`, `classify` |
 
 !!! tip
     You can explicitly set `--convert <type>` to specify how to convert the model.
@@ -251,3 +254,7 @@ Pooling models now default support all pooling, you can use it without any setti
 
 - Extracting hidden states prefers using `token_embed` task.
 - Named Entity Recognition (NER) and reward models prefers using `token_classify` task.
+
+### Score task
+
+`score` task is deprecated and will be removed in v0.20. Please use `classify` instead. Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.

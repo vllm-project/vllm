@@ -1477,9 +1477,9 @@ class LLM:
             data_1 = data_1 * len(data_2)
 
         if pooling_params is None:
-            pooling_params = PoolingParams(task="score")
+            pooling_params = PoolingParams(task="classify")
         elif pooling_params.task is None:
-            pooling_params.task = "score"
+            pooling_params.task = "classify"
 
         pooling_params_list = list[PoolingParams]()
 
