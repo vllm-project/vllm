@@ -336,12 +336,15 @@ apply_rocm_test_overrides() {
     --ignore=entrypoints/openai/chat_completion/test_audio.py \
     --ignore=entrypoints/openai/completion/test_shutdown.py \
     --ignore=entrypoints/openai/test_completion.py \
-    --ignore=entrypoints/openai/test_models.py \
-    --ignore=entrypoints/openai/test_lora_adapters.py \
+    --ignore=entrypoints/openai/models/test_models.py \
     --ignore=entrypoints/openai/test_return_tokens_as_ids.py \
     --ignore=entrypoints/openai/chat_completion/test_root_path.py \
-    --ignore=entrypoints/openai/test_tokenization.py \
     --ignore=entrypoints/openai/completion/test_prompt_validation.py "}
+  fi
+
+  if [[ $cmds == *" entrypoints/serve"* ]]; then
+    cmds="${cmds} \
+    --ignore=entrypoints/serve/lora/test_lora_adapters.py"
   fi
 
   if [[ $cmds == *" entrypoints/llm "* ]]; then
