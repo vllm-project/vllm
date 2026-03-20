@@ -28,7 +28,7 @@ def server_args(request: pytest.FixtureRequest) -> list[str]:
     >>> @pytest.mark.parametrize(
     >>>     "server_args",
     >>>     [
-    >>>         ["--disable-frontend-multiprocessing"],
+    >>>         ["--max-model-len", "10100"],
     >>>         [
     >>>             "--model=NousResearch/Hermes-3-Llama-3.1-70B",
     >>>             "--enable-auto-tool-choice",
@@ -40,7 +40,7 @@ def server_args(request: pytest.FixtureRequest) -> list[str]:
     >>>     ...
 
     This will run `test_foo` twice with servers with:
-    - `--disable-frontend-multiprocessing`
+    - `--max-model-len 10100`
     - `--model=NousResearch/Hermes-3-Llama-3.1-70B --enable-auto-tool-choice`.
 
     """
@@ -79,17 +79,6 @@ async def client(server):
         yield async_client
 
 
-@pytest.mark.parametrize(
-    "server_args",
-    [
-        pytest.param([], id="default-frontend-multiprocessing"),
-        pytest.param(
-            ["--disable-frontend-multiprocessing"],
-            id="disable-frontend-multiprocessing",
-        ),
-    ],
-    indirect=True,
-)
 @pytest.mark.asyncio
 async def test_show_version(server: RemoteOpenAIServer):
     response = requests.get(server.url_for("version"))
@@ -98,17 +87,6 @@ async def test_show_version(server: RemoteOpenAIServer):
     assert response.json() == {"version": VLLM_VERSION}
 
 
-@pytest.mark.parametrize(
-    "server_args",
-    [
-        pytest.param([], id="default-frontend-multiprocessing"),
-        pytest.param(
-            ["--disable-frontend-multiprocessing"],
-            id="disable-frontend-multiprocessing",
-        ),
-    ],
-    indirect=True,
-)
 @pytest.mark.asyncio
 async def test_check_health(server: RemoteOpenAIServer):
     response = requests.get(server.url_for("health"))
@@ -119,13 +97,7 @@ async def test_check_health(server: RemoteOpenAIServer):
 @pytest.mark.parametrize(
     "server_args",
     [
-        pytest.param(
-            ["--max-model-len", "10100"], id="default-frontend-multiprocessing"
-        ),
-        pytest.param(
-            ["--disable-frontend-multiprocessing", "--max-model-len", "10100"],
-            id="disable-frontend-multiprocessing",
-        ),
+        pytest.param(["--max-model-len", "10100"]),
     ],
     indirect=True,
 )
@@ -145,6 +117,7 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
                 model=MODEL_NAME,
                 max_tokens=10000,
                 extra_body={"min_tokens": 10000},
+                temperature=0.0,
             )
         )
         tasks.append(task)
@@ -163,7 +136,7 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
     # be able to respond to this one within the timeout
     client = server.get_async_client(timeout=5)
     response = await client.chat.completions.create(
-        messages=chat_input, model=MODEL_NAME, max_tokens=10
+        messages=chat_input, model=MODEL_NAME, max_tokens=10, temperature=0.0
     )
 
     assert len(response.choices) == 1

@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 import numpy as np
+import pytest
 
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_offload.abstract import (
@@ -76,6 +77,54 @@ def verify_events(
 
     assert tuple(evictions) == to_hash_sets(expected_evictions)
     assert tuple(stores) == to_hash_sets(expected_stores)
+
+
+@pytest.mark.parametrize("manager_class", [LRUOffloadingManager, ARCOffloadingManager])
+def test_already_stored_block_not_evicted_during_prepare_store(manager_class):
+    """
+    Regression test: a block that is already stored must not be evicted
+    by prepare_store() when it needs to make room for new blocks.
+    Applies to both LRUOffloadingManager and ARCOffloadingManager.
+
+    Scenario:
+        - Store blocks [1, 2] and complete.
+        - touch([1]) makes block 2 the LRU candidate.
+        - prepare_store([2, 3, 4, 5]):
+            * block 2 is filtered out as "already stored"
+            * but without the fix, block 2 would be evicted as the LRU
+              candidate to make room for [3, 4, 5]
+        - After complete_store([2, 3, 4, 5]), block 2 must still be present.
+    """
+    block_size = 256
+    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
+    manager = manager_class(cpu_backend, enable_events=True)
+
+    # store [1, 2] and complete
+    manager.prepare_store(to_hashes([1, 2]))
+    manager.complete_store(to_hashes([1, 2]))
+
+    # touch [1] to make block 2 the LRU candidate
+    manager.touch(to_hashes([1]))
+
+    # prepare_store([2, 3, 4, 5]):
+    #   - block 2 is already stored → filtered out of block_hashes_to_store
+    #   - block 2 must NOT be evicted even though it is the LRU candidate
+    #   - block 1 (ID 0) is evicted instead; new blocks [3,4,5] get IDs 2,3,0
+    prepare_store_output = manager.prepare_store(to_hashes([2, 3, 4, 5]))
+    verify_store_output(
+        prepare_store_output,
+        ExpectedPrepareStoreOutput(
+            block_hashes_to_store=[3, 4, 5],
+            store_block_ids=[2, 3, 0],
+            block_hashes_evicted=[1],  # block 1 evicted, not block 2
+        ),
+    )
+
+    # complete_store must not silently drop block 2
+    manager.complete_store(to_hashes([2, 3, 4, 5]))
+
+    # block 2 must still be present in the cache
+    assert manager.lookup(to_hashes([2])) == 1
 
 
 def test_cpu_manager():
@@ -495,3 +544,52 @@ def test_arc_manager_full_scenario():
     # verify events
     events = list(arc_manager.take_events())
     assert len(events) > 0  # should have store and eviction events
+
+
+def test_filter_reused_manager():
+    """
+    Tests FilterReusedOffloadingManager with a CPUBackend.
+    """
+    block_size = 256
+    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
+    lru_manager = LRUOffloadingManager(cpu_backend, enable_events=True)
+
+    from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
+
+    manager = FilterReusedOffloadingManager(
+        backing=lru_manager, store_threshold=2, max_tracker_size=3
+    )
+
+    # Lookup [1, 2] -> 1st time, added to tracker but not eligible for store yet
+    assert manager.lookup(to_hashes([1, 2])) == 0
+
+    # prepare store [1, 2] -> should be filtered
+    prepare_store_output = manager.prepare_store(to_hashes([1, 2]))
+    assert prepare_store_output is not None
+    assert prepare_store_output.block_hashes_to_store == []
+
+    # Lookup [1] -> 2nd time, eligible now
+    assert manager.lookup(to_hashes([1])) == 0
+
+    # prepare store [1, 2] -> [1] should be eligible, [2] should be filtered
+    prepare_store_output = manager.prepare_store(to_hashes([1, 2]))
+    assert prepare_store_output is not None
+    assert prepare_store_output.block_hashes_to_store == to_hashes([1])
+
+    # Lookup [3, 4] -> 1st time
+    # (evicts [2] from tracker since max_size is 3 and tracker has [1])
+    assert manager.lookup(to_hashes([3, 4])) == 0
+    # Verify [2] was evicted from the tracker (tracker now has: [1], [3], [4])
+    assert to_hashes([2])[0] not in manager.counts
+
+    # Lookup [2] again -> (this adds [2] back to the tracker as 1st time)
+    assert manager.lookup(to_hashes([2])) == 0
+    # Verify [2] was re-added with count=1 (not eligible yet)
+    assert manager.counts.get(to_hashes([2])[0]) == 1
+
+    # prepare store [2] -> should still be filtered out since count was reset
+    prepare_store_output = manager.prepare_store(to_hashes([2]))
+    assert prepare_store_output is not None
+    assert prepare_store_output.block_hashes_to_store == []
+
+    manager.complete_store(to_hashes([1]))

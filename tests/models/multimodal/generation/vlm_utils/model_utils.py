@@ -489,12 +489,13 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             self.image_size = self.vision_config.image_size
 
         def __call__(self, text: str, images: Image | list[Image], **kwargs):
-            from vllm.model_executor.models.h2ovl import (
-                IMG_CONTEXT,
-                IMG_END,
-                IMG_START,
+            from vllm.transformers_utils.processors.h2ovl import (
                 image_to_pixel_values_h2ovl,
             )
+
+            IMG_START = "<img>"
+            IMG_END = "</img>"
+            IMG_CONTEXT = "<IMG_CONTEXT>"
 
             images = [images] if isinstance(images, Image) else images
             pixel_values = [
@@ -719,7 +720,7 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         # Convert to tuple or None
         all_hidden_states = tuple(hidden_states_list) if output_hidden_states else None
 
-        # Include hiden_states for compatibility with hidden_states_to_seq_logprobs()
+        # Include hidden_states for compatibility with hidden_states_to_seq_logprobs()
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
@@ -751,16 +752,17 @@ def skyworkr1v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             self.image_size = self.vision_config.image_size
 
         def __call__(self, text: str, images: Image | list[Image], **kwargs):
-            from vllm.model_executor.models.skyworkr1v import (
-                IMG_CONTEXT,
-                IMG_END,
-                IMG_START,
-                image_to_pixel_values_skyworkr1v,
+            from vllm.transformers_utils.processors.internvl import (
+                image_to_pixel_values_internvl,
             )
+
+            IMG_START = "<img>"
+            IMG_END = "</img>"
+            IMG_CONTEXT = "<IMG_CONTEXT>"
 
             images = [images] if isinstance(images, Image) else images
             pixel_values = [
-                image_to_pixel_values_skyworkr1v(
+                image_to_pixel_values_internvl(
                     image,
                     input_size=self.image_size,
                     min_num=self.min_num,
@@ -815,13 +817,14 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             videos: npt.NDArray | list[npt.NDArray] = None,
             **kwargs,
         ):
-            from vllm.model_executor.models.internvl import (
-                IMG_CONTEXT,
-                IMG_END,
-                IMG_START,
+            from vllm.transformers_utils.processors.internvl import (
                 image_to_pixel_values_internvl,
                 video_to_pixel_values_internvl,
             )
+
+            IMG_START = "<img>"
+            IMG_END = "</img>"
+            IMG_CONTEXT = "<IMG_CONTEXT>"
 
             images = [images] if isinstance(images, Image) else images
             videos = [videos] if isinstance(videos, np.ndarray) else videos
@@ -1149,6 +1152,31 @@ def ovis2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
+def paddleocr_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches the HfRunner to fix create_causal_mask API mismatch.
+
+    The PaddleOCR-VL HF model passes `inputs_embeds` to create_causal_mask,
+    but transformers renamed this parameter to `input_embeds`.
+    """
+    import sys
+
+    model_module = sys.modules.get(type(hf_model.model.model).__module__)
+    if model_module is None:
+        return hf_model
+
+    original_create_causal_mask = getattr(model_module, "create_causal_mask", None)
+    if original_create_causal_mask is None:
+        return hf_model
+
+    def patched_create_causal_mask(*args, **kwargs):
+        if "inputs_embeds" in kwargs:
+            kwargs["input_embeds"] = kwargs.pop("inputs_embeds")
+        return original_create_causal_mask(*args, **kwargs)
+
+    model_module.create_causal_mask = patched_create_causal_mask  # type: ignore[attr-defined]
+    return hf_model
+
+
 def qwen2_5_omni_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner for Qwen2.5-Omni."""
     thinker = hf_model.model.thinker
@@ -1214,4 +1242,92 @@ def tarsier_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     if hf_processor.patch_size is None:
         hf_processor.patch_size = vision_encoder_info.get_patch_size()
 
+    return hf_model
+
+
+def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
+    """Patch HfRunner for Voxtral's conversation-based processor.
+
+    Two issues in HfRunner require patching:
+
+    1. VoxtralProcessor requires ``apply_chat_template()`` with conversation
+       dicts (accepting ``url``, ``path``, or ``base64`` audio) rather than
+       the standard ``processor(text=, audio=, sampling_rate=)`` interface.
+    2. HfRunner.get_inputs cannot handle multi-audio per prompt because it
+       incorrectly unpacks ``[(arr1, sr1), (arr2, sr2)]`` via a ``len == 2`` check.
+
+    We override ``get_inputs`` to build conversation dicts and call
+    ``apply_chat_template`` directly, bypassing both issues. We also wrap
+    ``model.generate`` to strip prompt tokens before decoding, since
+    HfRunner.generate calls batch_decode on the full sequence (prompt +
+    generated).
+    """
+
+    import io
+
+    import pybase64 as base64
+    import soundfile as sf
+
+    processor = hf_model.processor
+
+    def _audio_to_base64(audio_array, sample_rate: int) -> str:
+        """Encode a numpy audio array as a base64 WAV string."""
+        buf = io.BytesIO()
+        sf.write(buf, audio_array, int(sample_rate), format="WAV")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    def patched_get_inputs(prompts, images=None, videos=None, audios=None, **kwargs):
+        all_inputs = []
+        for i, prompt in enumerate(prompts):
+            content: list[dict] = []
+
+            if audios is not None and audios[i] is not None:
+                items = audios[i]
+                if not isinstance(items, list):
+                    items = [items]
+                for item in items:
+                    if isinstance(item, (list, tuple)) and len(item) == 2:
+                        arr, sr = item
+                    else:
+                        arr, sr = item, 16_000
+                    content.append(
+                        {
+                            "type": "audio",
+                            "base64": _audio_to_base64(arr, sr),
+                        }
+                    )
+
+            content.append({"type": "text", "text": prompt})
+
+            inputs = processor.apply_chat_template(
+                [{"role": "user", "content": content}]
+            )
+            if hasattr(inputs, "to"):
+                inputs = inputs.to(dtype=hf_model.dtype)
+            all_inputs.append(inputs)
+
+        return all_inputs
+
+    _orig_generate = hf_model.model.generate
+
+    def patched_generate(*args, **kwargs):
+        """Strip prompt tokens so only generated tokens are decoded."""
+        input_ids = kwargs.get("input_ids")
+        if input_ids is None and args:
+            input_ids = args[0]
+        prompt_len = input_ids.shape[1] if input_ids is not None else 0
+
+        output = _orig_generate(*args, **kwargs)
+        if prompt_len:
+            if isinstance(output, torch.Tensor):
+                output = output[:, prompt_len:]
+            else:
+                # GenerateDecoderOnlyOutput - trim sequences but preserve
+                # scores/logits so generate_greedy_logprobs_limit can
+                # extract per-token logprobs.
+                output.sequences = output.sequences[:, prompt_len:]
+        return output
+
+    hf_model.get_inputs = patched_get_inputs  # type: ignore[method-assign, assignment]
+    hf_model.model.generate = patched_generate  # type: ignore[method-assign]
     return hf_model

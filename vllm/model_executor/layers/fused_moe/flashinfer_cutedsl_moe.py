@@ -6,6 +6,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -29,7 +30,7 @@ from vllm.utils.flashinfer import (
 logger = init_logger(__name__)
 
 
-class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -47,6 +48,10 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "Only nvfp4 quantization are currently supported."
         )
         self.out_dtype = moe_config.in_dtype
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+        layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -72,20 +77,14 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
-    def _supports_activation(activation: str) -> bool:
-        return activation in ["silu"]
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SILU
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
     def supports_expert_map(self) -> bool:
-        return False
-
-    def supports_chunking(self) -> bool:
-        # This refers to TP chunking; DP chunking is handled separately.
-        # TODO(shuw@nvidia.com): Set to False to be consistent with
-        # batched_deep_gemm_moe
         return False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
@@ -101,7 +100,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
@@ -135,7 +134,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,

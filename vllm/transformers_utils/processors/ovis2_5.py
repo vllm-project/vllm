@@ -6,7 +6,7 @@ from functools import cached_property
 import numpy as np
 import PIL
 import torch
-from transformers import AutoProcessor, BatchFeature
+from transformers import BatchFeature
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
@@ -78,17 +78,32 @@ class Ovis2_5Processor(ProcessorMixin):
 
     @cached_property
     def extra_special_tokens(self):
-        image_pad_token_id = self.tokenizer.get_vocab()[self.image_pad_token]
-        extra_special_tokens = {
-            "image_token": -200,
-            "video_token": -201,
-            "visual_atom": -300,
-            "image_start": -301,
-            "image_end": -302,
-            "video_start": -303,
-            "video_end": -304,
-            "image_pad": image_pad_token_id,
+        vocab = self.tokenizer.get_vocab()
+        required_tokens = {
+            "image_token": "<image>",
+            "video_token": "<video>",
+            "visual_atom": "<ovis_visual_atom>",
+            "image_start": "<ovis_image_start>",
+            "image_end": "<ovis_image_end>",
+            "video_start": "<ovis_video_start>",
+            "video_end": "<ovis_video_end>",
+            "image_pad": "<|image_pad|>",
         }
+
+        extra_special_tokens = {}
+        suggestion = (
+            "please add '<image>', '<video>', '<ovis_visual_atom>', "
+            "'<ovis_image_start>', '<ovis_image_end>', '<ovis_video_start>', "
+            "'<ovis_video_end>' in 'additional_special_tokens' of "
+            "tokenizer_config.json, You can refer to "
+            "https://huggingface.co/AIDC-AI/Ovis2.6-30B-A3B/blob/main/tokenizer_config.json"
+        )
+
+        for key, token_name in required_tokens.items():
+            if token_name not in vocab:
+                raise ValueError(f"Can not find {token_name}, {suggestion}")
+            extra_special_tokens[key] = vocab[token_name]
+
         return extra_special_tokens
 
     def __call__(
@@ -156,9 +171,6 @@ class Ovis2_5Processor(ProcessorMixin):
                 - **second_per_grid_ts** -- list of video seconds per time grid.
                   Returned when `videos` is not `None`.
         """
-        min_pixels = kwargs.pop("min_pixels", MIN_PIXELS)
-        max_pixels = kwargs.pop("max_pixels", MAX_PIXELS)
-
         output_kwargs = self._merge_kwargs(
             Ovis2_5ProcessorKwargs,
             tokenizer_init_kwargs=self.tokenizer.init_kwargs,
@@ -175,8 +187,6 @@ class Ovis2_5Processor(ProcessorMixin):
             for image in images if isinstance(images, list) else [images]:
                 pixel_values, image_placeholders, grid = self.preprocess_multidata(
                     images=image,
-                    min_pixels=min_pixels,
-                    max_pixels=max_pixels,
                     **output_kwargs["images_kwargs"],
                 )
                 processed_images.append(pixel_values)
@@ -197,8 +207,6 @@ class Ovis2_5Processor(ProcessorMixin):
             for video in videos if isinstance(videos, list) else [videos]:
                 pixel_values, video_placeholders, grid = self.preprocess_multidata(
                     video=video,
-                    min_pixels=min_pixels,
-                    max_pixels=max_pixels,
                     **output_kwargs["videos_kwargs"],
                 )
                 processed_videos.append(pixel_values)
@@ -394,7 +402,7 @@ class Ovis2_5Processor(ProcessorMixin):
                 images = [images]
         elif video is not None:
             is_video = True
-            # type of vidoe in dummy_mm_data is np.ndarray
+            # type of video in dummy_mm_data is np.ndarray
             if isinstance(video, np.ndarray):
                 images = []
                 for i in range(video.shape[0]):
@@ -404,6 +412,7 @@ class Ovis2_5Processor(ProcessorMixin):
                 images = video
         else:
             raise ValueError("Either images or video should be provided.")
+        assert images is not None
         min_pixels = min(
             max_pixels if max_pixels is not None else MAX_PIXELS,
             min_pixels if min_pixels is not None else MIN_PIXELS,
@@ -468,6 +477,3 @@ class Ovis2_5Processor(ProcessorMixin):
             visual_placeholders,
             torch.tensor([[grid_t, grid_h, grid_w]]),
         )
-
-
-AutoProcessor.register("Ovis2_5Processor", Ovis2_5Processor)

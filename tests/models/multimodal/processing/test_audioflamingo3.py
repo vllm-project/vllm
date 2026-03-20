@@ -116,7 +116,7 @@ def test_dummy_data_generation(mock_ctx):
     builder = AudioFlamingo3DummyInputsBuilder(info)
 
     mm_counts = {"audio": 2}
-    dummy_data = builder.get_dummy_mm_data(100, mm_counts, None)
+    dummy_data = builder.get_dummy_mm_data(100, mm_counts, {})
 
     assert "audio" in dummy_data
     assert len(dummy_data["audio"]) == 2

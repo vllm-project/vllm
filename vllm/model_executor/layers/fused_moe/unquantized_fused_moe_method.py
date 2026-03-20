@@ -24,8 +24,8 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
-    FusedMoEPermuteExpertsUnpermute,
-    FusedMoEPrepareAndFinalize,
+    FusedMoEExpertsModular,
+    FusedMoEPrepareAndFinalizeModular,
 )
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
@@ -55,6 +55,8 @@ logger = init_logger(__name__)
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
+    # --8<-- [end:unquantized_fused_moe]
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.unquantized_backend = select_unquantized_moe_backend(
@@ -68,7 +70,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.rocm_aiter_moe_enabled = (
             rocm_aiter_ops.is_fused_moe_enabled() and moe.is_act_and_mul
         )
-        self.kernel: mk.FusedMoEModularKernel | None = None
+        self.kernel: mk.FusedMoEKernel | None = None
         self._is_monolithic = (
             current_platform.is_cpu()
             or self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
@@ -90,8 +92,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.forward_cuda(layer, x, topk_weights, topk_ids)
+        return self.forward_cuda(layer, x, topk_weights, topk_ids, shared_experts_input)
 
     @property
     def is_monolithic(self) -> bool:
@@ -104,7 +107,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> FusedMoEPrepareAndFinalize | None:
+    ) -> FusedMoEPrepareAndFinalizeModular | None:
         if self.unquantized_backend == UnquantizedMoeBackend.AITER:
             return None
         else:
@@ -112,9 +115,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def select_gemm_impl(
         self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
+        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
         layer: torch.nn.Module,
-    ) -> FusedMoEPermuteExpertsUnpermute:
+    ) -> FusedMoEExpertsModular:
         assert self.moe_quant_config is not None
         if (
             prepare_finalize.activation_format
@@ -197,7 +200,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         ):
             num_pad = 256 // weight.element_size()
             weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
 
         return weight
 
@@ -293,12 +296,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.forward(
             layer=layer,
             x=x,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            shared_experts_input=shared_experts_input,
         )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
@@ -316,10 +321,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.kernel is not None
 
-        return self.kernel(
+        return self.kernel.apply(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
@@ -329,6 +335,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
+            shared_experts_input=shared_experts_input,
         )
 
     def forward_monolithic_cuda(

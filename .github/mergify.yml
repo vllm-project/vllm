@@ -3,6 +3,7 @@ pull_request_rules:
   description: Automatically apply documentation label
   conditions:
     - label != stale
+    - -closed
     - or:
       - files~=^[^/]+\.md$
       - files~=^docs/
@@ -26,7 +27,7 @@ pull_request_rules:
         Hi @{{author}}, the pre-commit checks have failed. Please run:
 
         ```bash 
-        uv pip install pre-commit
+        uv pip install pre-commit>=4.5.1
         pre-commit install
         pre-commit run --all-files
         ```
@@ -37,15 +38,13 @@ pull_request_rules:
 
         > [!TIP]
         > <details>
-        > <summary>Is <code>mypy</code> or <code>markdownlint</code> failing?</summary>
+        > <summary>Is <code>mypy</code> failing?</summary>
         > <br/>
-        > <code>mypy</code> and <code>markdownlint</code> are run differently in CI. If the failure is related to either of these checks, please use the following commands to run them locally:
+        > <code>mypy</code> is run differently in CI. If the failure is related to this check, please use the following command to run it locally:
         >
         > ```bash
         > # For mypy (substitute "3.10" with the failing version if needed)
         > pre-commit run --hook-stage manual mypy-3.10
-        > # For markdownlint
-        > pre-commit run --hook-stage manual markdownlint
         > ```
         > </details>
 
@@ -259,8 +258,7 @@ pull_request_rules:
       - files=benchmarks/run_structured_output_benchmark.sh
       - files=docs/features/structured_outputs.md
       - files=examples/offline_inference/structured_outputs.py
-      - files=examples/online_serving/openai_chat_completion_structured_outputs.py
-      - files=examples/online_serving/openai_chat_completion_structured_outputs_with_reasoning.py
+      - files=examples/online_serving/structured_outputs/structured_outputs.py
       - files~=^tests/v1/structured_output/
       - files=tests/v1/entrypoints/llm/test_struct_output_generate.py
       - files~=^vllm/v1/structured_output/
@@ -335,9 +333,10 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=^tests/tool_use/
-      - files~=^tests/entrypoints/openai/tool_parsers/
-      - files=tests/entrypoints/openai/test_chat_with_tool_reasoning.py
-      - files~=^vllm/entrypoints/openai/tool_parsers/
+      - files~=^tests/tool_parsers/
+      - files~=^tests/entrypoints/openai/.*tool.*
+      - files~=^tests/entrypoints/anthropic/.*tool.*
+      - files~=^vllm/tool_parsers/
       - files=docs/features/tool_calling.md
       - files~=^examples/tool_chat_*
       - files=examples/offline_inference/chat_with_tools.py
@@ -383,7 +382,7 @@ pull_request_rules:
     - or:
       - files~=^vllm/model_executor/model_loader/tensorizer.py
       - files~=^vllm/model_executor/model_loader/tensorizer_loader.py
-      - files~=^tests/entrypoints/openai/test_tensorizer_entrypoint.py
+      - files~=^tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
       - files~=^tests/model_executor/model_loader/tensorizer_loader/
   actions:
     assign:

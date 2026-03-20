@@ -934,7 +934,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
     exc_ctx = nullcontext() if is_valid else pytest.raises(ValueError, match="At most")
 
     with exc_ctx:
-        processor.apply(
+        processor(
             "<image>" * num_images,
             mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs={},

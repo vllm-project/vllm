@@ -49,7 +49,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import JAISConfig
+from vllm.transformers_utils.configs.jais import JAISConfig
 
 from .interfaces import SupportsPP
 from .utils import (
@@ -244,7 +244,6 @@ class JAISModel(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.config = config
-        assert not config.add_cross_attention
         assert not config.scale_attn_by_inverse_layer_idx
         assert not config.reorder_and_upcast_attn
         self.embed_dim = config.hidden_size
