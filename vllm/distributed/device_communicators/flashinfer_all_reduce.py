@@ -137,6 +137,11 @@ def get_fi_ar_quant_workspace(
     if _fi_ar_quant_workspace is not None:
         return _fi_ar_quant_workspace
 
+    # Reuse the non-quant workspace if it was already created with trtllm
+    if _fi_ar_workspace is not None and _fi_ar_workspace.backend == "trtllm":
+        _fi_ar_quant_workspace = _fi_ar_workspace
+        return _fi_ar_quant_workspace
+
     _fi_ar_quant_workspace = _create_workspace(
         "trtllm", world_size, rank, max_token_num, hidden_dim, dtype, group
     )
