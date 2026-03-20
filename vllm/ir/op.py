@@ -35,9 +35,11 @@ def direct_dispatch(direct: bool = True):
 
     global _DIRECT_DISPATCH
     old = _DIRECT_DISPATCH
-    _DIRECT_DISPATCH = direct
-    yield
-    _DIRECT_DISPATCH = old
+    try:
+        _DIRECT_DISPATCH = direct
+        yield
+    finally:
+        _DIRECT_DISPATCH = old
 
 
 # 0-param decorator overload

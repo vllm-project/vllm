@@ -15,6 +15,10 @@ from vllm.ir.op import RESERVED_PROVIDERS, IrOp, IrOpImpl
 assert "_custom_add" not in IrOp.registry
 
 
+class CustomError(Exception):
+    pass
+
+
 @vllm.ir.register_op
 def _custom_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return x + y
@@ -131,7 +135,7 @@ class TestIrOpCustomAdd:
         def find_fn(target: Any, gm: fx.GraphModule):
             return gm.graph.find_nodes(op="call_function", target=target)
 
-        with vllm.ir.direct_dispatch(direct_dispatch):
+        with pytest.raises(CustomError), vllm.ir.direct_dispatch(direct_dispatch):
             if symbolic_trace:
                 gm = torch.fx.symbolic_trace(fn)
             else:
@@ -140,6 +144,9 @@ class TestIrOpCustomAdd:
             x1, y1 = torch.rand(5, 4), torch.rand(5, 4)
             out_fx = gm(x1, y1)
             out_eager = fn(x1, y1)
+
+            # raise error to check direct_dispatch context restored correctly
+            raise CustomError
 
         # check behavior matches eager in all cases
         torch.testing.assert_close(out_fx, out_eager)
@@ -150,6 +157,15 @@ class TestIrOpCustomAdd:
             assert len(ir_nodes) == 0, gm.code
         else:
             assert len(ir_nodes) == 1, gm.code
+
+        # without direct_dispatch, wrapped is the default
+        if symbolic_trace:
+            gm = torch.fx.symbolic_trace(fn)
+        else:
+            gm = make_fx(fn)(torch.randn(2, 2), torch.randn(2, 2))
+
+        ir_nodes = find_fn(torch.ops.vllm_ir._custom_add.default, gm)
+        assert len(ir_nodes) == 1, gm.code
 
 
 @_custom_add.register_impl("impl_a")
@@ -214,9 +230,9 @@ class TestIrOpImplDispatch:
             assert _custom_add.get_priority() == ["impl_even", "impl_b"]
 
             # Check that exception restores priority
-            with pytest.raises(ValueError), _custom_add.set_priority(["impl_a"]):
+            with pytest.raises(CustomError), _custom_add.set_priority(["impl_a"]):
                 assert _custom_add.get_priority() == ["impl_a"]
-                raise ValueError("test exception")
+                raise CustomError
 
             # Restored again
             assert _custom_add.get_priority() == ["impl_even", "impl_b"]
