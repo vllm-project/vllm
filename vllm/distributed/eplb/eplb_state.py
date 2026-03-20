@@ -46,7 +46,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .async_worker import start_async_worker
-from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
+from .policy import AbstractEplbPolicy, EplbPolicyFactory
 from .rebalance_execute import (
     RecvMetadata,
     move_from_buffer,
@@ -246,7 +246,7 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
-        self.policy: type[AbstractEplbPolicy] = DefaultEplbPolicy
+        self.policy: AbstractEplbPolicy = EplbPolicyFactory.create_policy()
         """
         Selected EPLB algorithm class
         """
@@ -459,7 +459,11 @@ class EplbState:
         self.expert_rearrangement_step_interval = eplb_step_interval
 
         policy_type = self.parallel_config.eplb_config.policy
-        self.policy = EPLB_POLICIES[policy_type]
+        self.policy = EplbPolicyFactory.create_policy(policy_type)
+        self.multi_stage = False
+        if policy_type == "flashlb":
+            self.policy.warm_up()
+            self.multi_stage = True
         logger.debug("Selected EPLB policy: %s", policy_type)
 
         model.set_eplb_state(
@@ -684,8 +688,10 @@ class EplbState:
                 .long(),
                 src=expert_load_window,
             )
-
-            global_expert_load_window = logical_expert_load_window.sum(dim=0)
+            if self.multi_stage:
+                global_expert_load_window = logical_expert_load_window
+            else:
+                global_expert_load_window = logical_expert_load_window.sum(dim=0)
             global_expert_load_windows.append(global_expert_load_window)
         # Perform all-reduce to get the expert load across all ranks for each model
         global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
@@ -719,6 +725,8 @@ class EplbState:
                 "not using hierarchical rearrangement algorithm.\n"
                 f"{num_gpus=}, {num_nodes=}"
             )
+
+        assert self.policy is not None, "EplbPolicy must be initialized"
 
         # Get new expert mappings
         for eplb_model_state, global_expert_load_window in zip(
