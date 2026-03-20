@@ -17,14 +17,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from math import pi
-from typing import Annotated, Any, TypeAlias
+from typing import Annotated, Any, Optional, TypeAlias
 
 import torch
 from torch import Tensor, broadcast_tensors, nn
-from torch.amp import autocast
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.models.musicflamingo import (
     MusicFlamingoConfig,
     MusicFlamingoProcessor,
@@ -66,7 +66,6 @@ from .audioflamingo3 import (
 )
 
 
-# === Rotary Embedding === #
 def rotate_half(x):
     x = x.reshape(*x.shape[:-1], -1, 2)
     x1, x2 = x.unbind(dim=-1)
@@ -74,115 +73,102 @@ def rotate_half(x):
     return x.flatten(-2)
 
 
-@autocast("cuda", enabled=False)
-def apply_rotary_emb(freqs, t, start_index=0, scale=1.0, seq_dim=-2):
-    ori_dtype = t.dtype
-    embed_dtype = torch.float64
-    t = t.to(embed_dtype)
-    if t.ndim == 3:
-        seq_len = t.shape[seq_dim]
-        freqs = freqs[-seq_len:].to(t) if freqs.ndim == 2 else freqs.to(t)
-
-    rot_dim = freqs.shape[-1]
-    end_index = start_index + rot_dim
-
-    if rot_dim > t.shape[-1]:
+def apply_rotary_time_emb(hidden_states, cos, sin):
+    original_dtype = hidden_states.dtype
+    hidden_states = hidden_states.to(torch.float64)
+    cos = cos.to(hidden_states)
+    sin = sin.to(hidden_states)
+    rot_dim = cos.shape[-1]
+    if rot_dim > hidden_states.shape[-1]:
         raise ValueError(
-            f"feature dimension {t.shape[-1]} is not of sufficient size to"
-            f" rotate in all the positions {rot_dim}"
+            f"feature dimension {hidden_states.shape[-1]} is not of "
+            f"sufficient size to rotate in all the positions {rot_dim}"
         )
 
-    t_left, t, t_right = (
-        t[..., :start_index],
-        t[..., start_index:end_index],
-        t[..., end_index:],
-    )
-    t = (t * freqs.cos() * scale) + (rotate_half(t) * freqs.sin() * scale)
-    return torch.cat((t_left, t, t_right), dim=-1).to(ori_dtype)
+    rotated = hidden_states[..., :rot_dim]
+    passthrough = hidden_states[..., rot_dim:]
+    rotated = (rotated * cos) + (rotate_half(rotated) * sin)
+    return torch.cat((rotated, passthrough), dim=-1).to(original_dtype)
 
 
 class MusicFlamingoRotaryEmbedding(nn.Module):
-    freqs: torch.Tensor
+    inv_freq: torch.Tensor
 
     def __init__(self, config: MusicFlamingoConfig, device=None):
         super().__init__()
+        self.max_seq_len_cached = config.max_position_embeddings
+        self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.dim = getattr(config, "rotary_dim", 256)
-        self.max_time = getattr(config, "rotary_max_time", 1200.0)
+        self.rope_type = self.config.rope_parameters["rope_type"]
+        rope_init_fn: Callable = self.compute_default_rope_parameters
+        if self.rope_type != "default":
+            rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        inv_freq, self.attention_scaling = rope_init_fn(self.config, device)
 
-        freqs = self.compute_default_rote_parameters(config, device=device)
-        self.freqs = nn.Parameter(freqs, requires_grad=False)
-
-        cached_freqs = self._build_cached_freqs(freqs)
-        self.register_buffer("cached_freqs", cached_freqs, persistent=False)
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.register_buffer("original_inv_freq", inv_freq.clone(), persistent=False)
+        position_angles = self._compute_position_angles(self.inv_freq)
+        self.register_buffer("position_angles", position_angles, persistent=False)
 
     @staticmethod
-    def compute_default_rote_parameters(
+    def compute_default_rope_parameters(
         config: MusicFlamingoConfig | None = None,
-        device=None,
-    ):
-        dim = getattr(config, "rotary_dim", 256)
-        max_time = getattr(config, "rotary_max_time", 1200.0)
-        theta = max_time / (2 * pi) if max_time is not None else 50000
-        freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-        if device is not None:
-            freqs = freqs.to(device=device)
-        return freqs
-
-    def _build_cached_freqs(self, freqs, device=None, dtype=None):
-        if self.max_time is None:
-            return None
-
-        positions = torch.arange(
-            int(self.max_time),
-            device=device,
-            dtype=dtype if dtype is not None else freqs.dtype,
+        device: Optional["torch.device"] = None,
+        seq_len: int | None = None,
+    ) -> tuple["torch.Tensor", float]:
+        del seq_len
+        base = config.rope_parameters["rope_theta"]
+        dim = getattr(config, "head_dim", None) or (
+            config.hidden_size // config.num_attention_heads
         )
-        positions = positions / self.max_time * (2 * pi)
-        cached_freqs = positions.unsqueeze(-1) * freqs
-        return torch.repeat_interleave(cached_freqs, 2, dim=-1)
+        attention_factor = 1.0
 
-    def get_axial_freqs(self, *dims):
-        Colon = slice(None)
-        all_freqs = []
+        inv_freq = 1.0 / (
+            base
+            ** (
+                torch.arange(0, dim, 2, dtype=torch.int64).to(
+                    device=device,
+                    dtype=torch.float,
+                )
+                / dim
+            )
+        )
+        return inv_freq, attention_factor
 
-        for ind, dim in enumerate(dims):
-            pos = torch.arange(dim, device=self.freqs.device)
+    def _compute_position_angles(self, inv_freq):
+        positions = torch.arange(
+            int(self.max_seq_len_cached),
+            device=inv_freq.device,
+            dtype=inv_freq.dtype,
+        )
+        positions = positions / self.max_seq_len_cached * (2 * pi)
+        position_angles = positions.unsqueeze(-1) * inv_freq
+        position_angles = torch.repeat_interleave(position_angles, 2, dim=-1)
+        return position_angles.to(dtype=inv_freq.dtype)
 
-            freqs = self.forward(pos, seq_len=dim)
+    @torch.no_grad()
+    def forward(self, timestamps: Tensor, seq_len: int) -> tuple[Tensor, Tensor]:
+        batch_positions = torch.arange(
+            timestamps.shape[0],
+            device=self.inv_freq.device,
+            dtype=self.inv_freq.dtype,
+        )
+        batch_positions = batch_positions / self.max_seq_len_cached
+        batch_freqs = batch_positions.unsqueeze(-1) * self.inv_freq
+        batch_freqs = torch.repeat_interleave(batch_freqs, 2, dim=-1)
 
-            all_axis = [None] * len(dims)
-            all_axis[ind] = Colon
-
-            new_axis_slice = (Ellipsis, *all_axis, Colon)
-            all_freqs.append(freqs[new_axis_slice])
-
-        all_freqs = broadcast_tensors(*all_freqs)
-        return torch.cat(all_freqs, dim=-1)
-
-    @autocast("cuda", enabled=False)
-    def forward(self, t: Tensor, seq_len=None, offset=0):
-        if (
-            seq_len is not None
-            and self.cached_freqs is not None
-            and (offset + seq_len) <= self.cached_freqs.shape[0]
-        ):
-            return self.cached_freqs[offset : (offset + seq_len)].detach()
-
-        freqs = self.freqs
-
-        if self.max_time is not None:
-            t = t / self.max_time * (2 * pi)
-
-        freqs = t.type(freqs.dtype).unsqueeze(-1) * freqs
-        freqs = torch.repeat_interleave(freqs, 2, dim=-1)
-        return freqs
+        batch_freqs = batch_freqs[:, None, :]
+        time_freqs = self.position_angles[:seq_len][None, :, :]
+        batch_freqs, time_freqs = broadcast_tensors(batch_freqs, time_freqs)
+        freqs = torch.cat((batch_freqs, time_freqs), dim=-1)
+        angle = (-timestamps * 2 * pi).to(freqs)
+        freqs = freqs * angle.unsqueeze(-1)
+        return freqs.cos(), freqs.sin()
 
 
-# === Audio Inputs === #
 class MusicFlamingoFeatureInputs(AudioFlamingo3FeatureInputs):
-    audio_times: Annotated[
+    rote_timestamps: Annotated[
         torch.Tensor,
         TensorShape(
             "num_chunks",
@@ -200,39 +186,7 @@ MusicFlamingoInputs: TypeAlias = (
 
 
 class MusicFlamingoEncoder(AudioFlamingo3Encoder):
-    def __init__(self, config: PretrainedConfig):
-        super().__init__(config)
-        self.pos_emb = MusicFlamingoRotaryEmbedding(config)
-        self._pending_audio_times: torch.Tensor | None = None
-
-    def forward(
-        self,
-        input_features: torch.Tensor | list[torch.Tensor],
-        attention_mask: torch.Tensor | None = None,
-        audio_times: torch.Tensor | None = None,
-    ):
-        hidden_states = super().forward(
-            input_features=input_features,
-            attention_mask=attention_mask,
-        )
-
-        if audio_times is None:
-            audio_times = self._pending_audio_times
-
-        if audio_times is not None:
-            times = audio_times.to(hidden_states.device)
-            freqs = self.pos_emb.get_axial_freqs(
-                times.shape[0], hidden_states.shape[-2]
-            ).to(self.conv1.weight.device)
-            angle = (-times * 2 * pi).to(self.conv1.weight.device)
-            angle_expanded = angle.unsqueeze(2).expand(
-                times.shape[0], hidden_states.shape[-2], freqs.shape[-1]
-            )
-            freqs = freqs * angle_expanded
-
-            hidden_states = apply_rotary_emb(freqs, hidden_states)
-
-        return hidden_states
+    pass
 
 
 class MusicFlamingoMultiModalProjector(AudioFlamingo3MultiModalProjector):
@@ -258,11 +212,7 @@ class MusicFlamingoDummyInputsBuilder(AudioFlamingo3DummyInputsBuilder):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_audios = mm_counts.get("audio", 0)
         hf_processor = self.info.get_hf_processor()
-        return (
-            hf_processor.audio_bos_token
-            + hf_processor.audio_token
-            + hf_processor.audio_eos_token
-        ) * num_audios
+        return hf_processor.audio_token * num_audios
 
     def get_dummy_mm_data(
         self,
@@ -290,11 +240,11 @@ def _musicflamingo_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     fields = dict(_audioflamingo3_field_config(hf_inputs))
     chunk_counts = hf_inputs.get("chunk_counts")
     if chunk_counts is not None:
-        fields["audio_times"] = MultiModalFieldConfig.flat_from_sizes(
+        fields["rote_timestamps"] = MultiModalFieldConfig.flat_from_sizes(
             "audio", chunk_counts, dim=0
         )
     else:
-        fields["audio_times"] = MultiModalFieldConfig.batched("audio")
+        fields["rote_timestamps"] = MultiModalFieldConfig.batched("audio")
     return fields
 
 
@@ -339,7 +289,7 @@ class MusicFlamingoMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
         processor = self.info.get_hf_processor(**mm_kwargs)
         feature_extractor = processor.feature_extractor
         sampling_rate = feature_extractor.sampling_rate
-        chunk_length = mm_kwargs.get("chunk_length", feature_extractor.chunk_length)
+        chunk_length = feature_extractor.chunk_length
         window_size = int(sampling_rate * chunk_length)
         max_windows = int(processor.max_audio_len // chunk_length)
 
@@ -350,8 +300,10 @@ class MusicFlamingoMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
             chunk_counts.append(min(n_win, max_windows))
         outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
 
-        if "audio_times" not in outputs:
-            raise KeyError("MusicFlamingoProcessor output must include `audio_times`.")
+        if "rote_timestamps" not in outputs:
+            raise KeyError(
+                "MusicFlamingoProcessor output must include `rote_timestamps`."
+            )
 
         return outputs
 
@@ -434,11 +386,12 @@ class MusicFlamingoForConditionalGeneration(AudioFlamingo3ForConditionalGenerati
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.audio_tower = MusicFlamingoEncoder(self.config.audio_config)
         self.multi_modal_projector = MusicFlamingoMultiModalProjector(self.config)
+        self.pos_emb = MusicFlamingoRotaryEmbedding(self.config)
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
     ) -> MusicFlamingoInputs | None:
-        audio_times = kwargs.pop("audio_times", None)
+        rote_timestamps = kwargs.pop("rote_timestamps", None)
         audio_input = super()._parse_and_validate_audio_input(**kwargs)
         if audio_input is None or audio_input["type"] == "audio_embeds":
             return audio_input
@@ -448,7 +401,7 @@ class MusicFlamingoForConditionalGeneration(AudioFlamingo3ForConditionalGenerati
             input_features=audio_input["input_features"],
             feature_attention_mask=audio_input["feature_attention_mask"],
             chunk_counts=audio_input["chunk_counts"],
-            audio_times=audio_times,
+            rote_timestamps=rote_timestamps,
         )
 
     def _process_audio_input(
@@ -457,18 +410,32 @@ class MusicFlamingoForConditionalGeneration(AudioFlamingo3ForConditionalGenerati
         if audio_input["type"] == "audio_embeds":
             return super()._process_audio_input(audio_input)
 
-        audio_times = audio_input["audio_times"]
-
-        if audio_times is None:
+        rote_timestamps = audio_input["rote_timestamps"]
+        if rote_timestamps is None:
             raise ValueError(
-                "MusicFlamingo audio feature inputs must include `audio_times`."
+                "MusicFlamingo audio feature inputs must include `rote_timestamps`."
             )
-        if isinstance(audio_times, list):
-            audio_times = torch.cat(audio_times, dim=0)
+        if isinstance(rote_timestamps, list):
+            rote_timestamps = torch.cat(rote_timestamps, dim=0)
 
-        assert isinstance(self.audio_tower, MusicFlamingoEncoder)
-        self.audio_tower._pending_audio_times = audio_times
-        try:
-            return super()._process_audio_input(audio_input)
-        finally:
-            self.audio_tower._pending_audio_times = None
+        (
+            input_features,
+            feature_attention_mask,
+            chunk_counts,
+        ) = self._normalize_audio_feature_inputs(audio_input)
+        hidden_states = self._encode_audio_features(
+            input_features,
+            feature_attention_mask,
+        )
+        cos, sin = self.pos_emb(
+            rote_timestamps.to(hidden_states.device),
+            seq_len=hidden_states.shape[-2],
+        )
+        hidden_states = apply_rotary_time_emb(hidden_states, cos, sin)
+        audio_features = self.multi_modal_projector(hidden_states)
+
+        return self._group_audio_embeddings(
+            audio_features,
+            feature_attention_mask,
+            chunk_counts,
+        )
