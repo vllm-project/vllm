@@ -65,6 +65,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.metrics.utils import create_metric_per_engine
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -3057,7 +3058,9 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             buckets=buckets[1:],
             labelnames=labelnames,
         )
-        self.nixl_histogram_xfer_time = self.make_per_engine(nixl_histogram_xfer_time)
+        self.nixl_histogram_xfer_time = create_metric_per_engine(
+            nixl_histogram_xfer_time, self.per_engine_labelvalues
+        )
         nixl_histogram_post_time = self._histogram_cls(
             name="vllm:nixl_post_time_seconds",
             documentation="Histogram of transfer post time for NIXL KV"
@@ -3065,7 +3068,9 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             buckets=buckets,
             labelnames=labelnames,
         )
-        self.nixl_histogram_post_time = self.make_per_engine(nixl_histogram_post_time)
+        self.nixl_histogram_post_time = create_metric_per_engine(
+            nixl_histogram_post_time, self.per_engine_labelvalues
+        )
         # uniform 2kb to 16gb range
         buckets = [2 ** (10 + i) for i in range(1, 25, 2)]
         nixl_histogram_bytes_transferred = self._histogram_cls(
@@ -3074,8 +3079,8 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             buckets=buckets,
             labelnames=labelnames,
         )
-        self.nixl_histogram_bytes_transferred = self.make_per_engine(
-            nixl_histogram_bytes_transferred
+        self.nixl_histogram_bytes_transferred = create_metric_per_engine(
+            nixl_histogram_bytes_transferred, self.per_engine_labelvalues
         )
         buckets = [
             10,
@@ -3100,24 +3105,24 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             buckets=buckets,
             labelnames=labelnames,
         )
-        self.nixl_histogram_num_descriptors = self.make_per_engine(
-            nixl_histogram_num_descriptors
+        self.nixl_histogram_num_descriptors = create_metric_per_engine(
+            nixl_histogram_num_descriptors, self.per_engine_labelvalues
         )
         counter_nixl_num_failed_transfers = self._counter_cls(
             name="vllm:nixl_num_failed_transfers",
             documentation="Number of failed NIXL KV Cache transfers.",
             labelnames=labelnames,
         )
-        self.counter_nixl_num_failed_transfers = self.make_per_engine(
-            counter_nixl_num_failed_transfers
+        self.counter_nixl_num_failed_transfers = create_metric_per_engine(
+            counter_nixl_num_failed_transfers, self.per_engine_labelvalues
         )
         counter_nixl_num_failed_notifications = self._counter_cls(
             name="vllm:nixl_num_failed_notifications",
             documentation="Number of failed NIXL KV Cache notifications.",
             labelnames=labelnames,
         )
-        self.counter_nixl_num_failed_notifications = self.make_per_engine(
-            counter_nixl_num_failed_notifications
+        self.counter_nixl_num_failed_notifications = create_metric_per_engine(
+            counter_nixl_num_failed_notifications, self.per_engine_labelvalues
         )
 
         counter_nixl_num_kv_expired_reqs = self._counter_cls(
@@ -3126,8 +3131,8 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             "NOTE: This metric is tracked on the P instance.",
             labelnames=labelnames,
         )
-        self.counter_nixl_num_kv_expired_reqs = self.make_per_engine(
-            counter_nixl_num_kv_expired_reqs
+        self.counter_nixl_num_kv_expired_reqs = create_metric_per_engine(
+            counter_nixl_num_kv_expired_reqs, self.per_engine_labelvalues
         )
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
