@@ -3898,6 +3898,12 @@ class GPUModelRunner(
             pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
             if self.cache_config.mamba_cache_mode == "align":
+                # preprocess_mamba reads req_state.num_computed_tokens (CPU)
+                # to decide copy operations, so we must apply deferred
+                # corrections before it runs.
+                if deferred_state_corrections_fn:
+                    deferred_state_corrections_fn()
+                    deferred_state_corrections_fn = None
                 mamba_utils.preprocess_mamba(
                     scheduler_output,
                     self.kv_cache_config,
