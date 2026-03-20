@@ -524,18 +524,18 @@ class Dashboard:
             return
 
         if pct == 0:
-            # Clear mask
-            self._send_clear_mask()
-            self.mask.clear()
-            self.show_mask = False
+            # Clear runtime mask only — profile mask stays
+            self._send_mask(list(self.profile_mask))  # restore profile-only
+            self.mask = set(self.profile_mask)
+            self.show_mask = bool(self.profile_mask)
             self.prune_pct = 0
-            self.set_status("Mask cleared")
+            self.set_status("Runtime mask cleared (profile mask kept)")
             return
 
         self._apply_prune(pct)
 
     def _apply_prune(self, pct):
-        """Rank experts by combined score, prune bottom N%, send mask."""
+        """Rank non-profile experts by score, prune bottom N%."""
         with self.lock:
             stats = self.current
 
@@ -543,27 +543,35 @@ class Dashboard:
             self.set_status("No stats — send requests first")
             return
 
-        # Score each expert: combined frequency + contribution
-        # Normalize both to [0,1] then average
+        # Only score experts that are NOT already profile-pruned
         mf = stats.max_freq
         mg = stats.max_gate
         scored = []
         for (l, e), v in stats.experts.items():
+            if (l, e) in self.profile_mask:
+                continue  # already pruned at load time — skip
             f_norm = v.frequency / mf if mf > 0 else 0
             g_norm = v.avg_gate / mg if mg > 0 else 0
             score = (f_norm + g_norm) / 2.0
             scored.append((score, l, e))
 
+        if not scored:
+            self.set_status("No unpruned experts to rank")
+            return
+
         # Sort ascending — lowest score = best prune candidates
         scored.sort()
 
-        # Take bottom N%
+        # Take bottom N% of REMAINING (non-profile) experts
         n_prune = int(len(scored) * pct / 100.0)
-        pruned = [(l, e) for _, l, e in scored[:n_prune]]
+        runtime_pruned = [(l, e) for _, l, e in scored[:n_prune]]
+
+        # Combined mask = profile + runtime
+        all_pruned = list(self.profile_mask) + runtime_pruned
 
         # Send to vLLM
-        self._send_mask(pruned)
-        self.mask = set((l, e) for l, e in pruned)
+        self._send_mask(all_pruned)
+        self.mask = set(all_pruned)
         self.show_mask = True
         self.prune_pct = pct
 
