@@ -985,6 +985,8 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
 from vllm.v1.kv_cache_interface import (  # noqa: E402, F811
     KVQuantMode,
     get_kv_quant_mode,
+    is_quantized_kv_cache,
+    kv_cache_uses_per_token_scales,
 )
 
 
