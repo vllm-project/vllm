@@ -31,7 +31,6 @@ from vllm.entrypoints.pooling.score.utils import (
     ScoreInputs,
     _cosine_similarity,
     compress_token_type_ids,
-    compute_maxsim_scores,
     get_score_prompt,
     parse_score_data_single,
     validate_score_input,
@@ -43,6 +42,10 @@ from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import make_async, merge_async_iterators
 from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.v1.pool.late_interaction import (
+    build_late_interaction_doc_params,
+    build_late_interaction_query_params,
+)
 
 logger = init_logger(__name__)
 
@@ -56,7 +59,6 @@ class ServingScores(OpenAIServing):
         request_logger: RequestLogger | None,
         score_template: str | None = None,
         log_error_stack: bool = False,
-        use_gpu_for_pooling_score: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -64,20 +66,18 @@ class ServingScores(OpenAIServing):
             request_logger=request_logger,
         )
         self.score_template = score_template
-        self.use_gpu_for_pooling_score = use_gpu_for_pooling_score
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
-        self.is_cross_encoder = self.model_config.is_cross_encoder
-        self.is_multimodal_model = self.model_config.is_multimodal_model
+        self.score_type = self.model_config.score_type
         self.architecture = self.model_config.architecture
-        self.is_late_interaction = self.model_config.is_late_interaction
+        self.is_multimodal_model = self.model_config.is_multimodal_model
 
-        if self.is_cross_encoder:
+        if self.score_type == "cross-encoder":
             self._score_func = self._cross_encoding_score
-        elif self.is_late_interaction:
+        elif self.score_type == "late-interaction":
             self._score_func = self._late_interaction_score
-        else:
+        else:  # "bi-encoder"
             self._score_func = self._embedding_score
 
     async def _embedding_score(
@@ -253,19 +253,30 @@ class ServingScores(OpenAIServing):
             )
         )
 
-        input_texts: list[str] = []
-        engine_prompts: list[TokensPrompt] = []
-        for text, engine_prompt in preprocessed:
-            input_texts.append(text)
-            engine_prompts.append(engine_prompt)
+        query_prompts: list[TokensPrompt] = [
+            prompt for _, prompt in preprocessed[: len(data_1)]
+        ]
+        doc_prompts: list[TokensPrompt] = [
+            prompt for _, prompt in preprocessed[len(data_1) :]
+        ]
 
-        # Schedule the request and get the result generator.
-        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
+        default_pooling_params = request.to_pooling_params("token_embed")
 
-        pooling_params = request.to_pooling_params("token_embed")
-
-        for i, engine_prompt in enumerate(engine_prompts):
-            request_id_item = f"{request_id}-{i}"
+        # stage 1: encode queries and cache token embeddings on workers.
+        query_keys = [f"{request_id}-query-{i}" for i in range(len(query_prompts))]
+        query_uses = [len(doc_prompts) if len(query_prompts) == 1 else 1] * len(
+            query_prompts
+        )
+        query_generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
+        for i, engine_prompt in enumerate(query_prompts):
+            request_id_item = f"{request_id}-query-{i}"
+            pooling_params = default_pooling_params.clone()
+            pooling_params.late_interaction_params = (
+                build_late_interaction_query_params(
+                    query_key=query_keys[i],
+                    query_uses=query_uses[i],
+                )
+            )
 
             self._log_inputs(
                 request_id_item,
@@ -274,7 +285,7 @@ class ServingScores(OpenAIServing):
                 lora_request=lora_request,
             )
 
-            generators.append(
+            query_generators.append(
                 self.engine_client.encode(
                     engine_prompt,
                     pooling_params,
@@ -285,53 +296,71 @@ class ServingScores(OpenAIServing):
                 )
             )
 
-        result_generator = merge_async_iterators(*generators)
+        query_outputs: list[PoolingRequestOutput | None] = [None] * len(query_prompts)
+        if query_generators:
+            async for i, res in merge_async_iterators(*query_generators):
+                query_outputs[i] = res
 
-        # Collect token embeddings
-        embeddings: list[PoolingRequestOutput | None] = [None] * len(engine_prompts)
+        assert all(res is not None for res in query_outputs)
+        query_results = [res for res in query_outputs if res is not None]
 
-        async for i, res in result_generator:
-            embeddings[i] = res
+        # stage 2: encode docs and return scalar scores from workers.
+        doc_generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
+        for i, engine_prompt in enumerate(doc_prompts):
+            request_id_item = f"{request_id}-doc-{i}"
+            query_idx = 0 if len(query_prompts) == 1 else i
+            pooling_params = default_pooling_params.clone()
+            pooling_params.late_interaction_params = build_late_interaction_doc_params(
+                query_key=query_keys[query_idx]
+            )
 
-        # Split into query and document embeddings
-        emb_data_1: list[PoolingRequestOutput] = []
-        emb_data_2: list[PoolingRequestOutput] = []
+            self._log_inputs(
+                request_id_item,
+                engine_prompt,
+                params=pooling_params,
+                lora_request=lora_request,
+            )
 
-        for i in range(0, len(data_1)):
-            assert (emb := embeddings[i]) is not None
-            emb_data_1.append(emb)
+            doc_generators.append(
+                self.engine_client.encode(
+                    engine_prompt,
+                    pooling_params,
+                    request_id_item,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    priority=request.priority,
+                )
+            )
 
-        for i in range(len(data_1), len(embeddings)):
-            assert (emb := embeddings[i]) is not None
-            emb_data_2.append(emb)
+        doc_outputs: list[PoolingRequestOutput | None] = [None] * len(doc_prompts)
+        if doc_generators:
+            async for i, res in merge_async_iterators(*doc_generators):
+                doc_outputs[i] = res
 
-        # Expand queries if 1:N scoring
-        if len(emb_data_1) == 1:
-            emb_data_1 = emb_data_1 * len(emb_data_2)
-
-        # Compute MaxSim scores
-        from vllm.outputs import PoolingOutput
-
-        maxsim_scores = compute_maxsim_scores(
-            [emb.outputs.data for emb in emb_data_1],
-            [emb.outputs.data for emb in emb_data_2],
-            use_gpu_for_pooling_score=self.use_gpu_for_pooling_score,
-        )
+        assert all(res is not None for res in doc_outputs)
+        doc_results = [res for res in doc_outputs if res is not None]
 
         scores: list[PoolingRequestOutput] = []
         padding: list[int] = []
         if (pad_token_id := tokenizer.pad_token_id) is not None:
             padding = [pad_token_id]
 
-        for emb_1, emb_2, maxsim_score in zip(emb_data_1, emb_data_2, maxsim_scores):
-            tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids
+        if len(query_results) == 1:
+            query_results = query_results * len(doc_results)
+
+        for query_result, doc_result in zip(query_results, doc_results):
+            tokens = (
+                query_result.prompt_token_ids + padding + doc_result.prompt_token_ids
+            )
 
             scores.append(
                 PoolingRequestOutput(
-                    request_id=f"{emb_1.request_id}_{emb_2.request_id}",
-                    outputs=PoolingOutput(data=maxsim_score),
+                    request_id=f"{query_result.request_id}_{doc_result.request_id}",
+                    outputs=doc_result.outputs,
                     prompt_token_ids=tokens,
-                    num_cached_tokens=emb_1.num_cached_tokens + emb_2.num_cached_tokens,
+                    num_cached_tokens=(
+                        query_result.num_cached_tokens + doc_result.num_cached_tokens
+                    ),
                     finished=True,
                 )
             )
@@ -384,7 +413,7 @@ class ServingScores(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        default_pooling_params = request.to_pooling_params("score")
+        default_pooling_params = request.to_pooling_params("classify")
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"

@@ -70,6 +70,7 @@ class RequestState:
             dtype=torch.int64,
             device=device,
         )
+
         self.next_prefill_tokens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=device
         )

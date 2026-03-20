@@ -29,6 +29,81 @@ else:
         from torch.library import impl_abstract as register_fake
 
 
+# scaled_fp4_quant functional + out variant for torch.compile buffer management
+
+
+def create_fp4_scale_tensor(
+    m: int,
+    n: int,
+    device: torch.device,
+    is_sf_swizzled_layout: bool,
+) -> torch.Tensor:
+    """
+    Allocate the output scale tensor for scaled_fp4_quant.
+
+    When is_sf_swizzled_layout=True, we use rounded values to store the
+    swizzled scales. Due to the requirement of the Tensor Core, the minimum
+    tile is 128x4 for the scales. So, we first pad the scales to multiples
+    of 128 (rows) and 4 (cols). Then, the scales (in float8_e4m3fn) are
+    packed into an int32 for every 4 values. More:
+    https://docs.nvidia.com/cuda/parallel-thread-execution/
+    #tcgen05-mma-scale-factor-b-layout-4x
+    """
+    from vllm.utils.math_utils import round_up
+
+    block_size = 16
+    if is_sf_swizzled_layout:
+        rounded_m = round_up(m, 128)
+        scale_n = n // block_size
+        rounded_n = round_up(scale_n, 4)
+        return torch.empty(
+            (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
+        )
+    else:
+        return torch.empty((m, n // block_size), device=device, dtype=torch.uint8)
+
+
+def create_fp4_output_tensors(
+    m: int,
+    n: int,
+    device: torch.device,
+    is_sf_swizzled_layout: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Allocate both output tensors for scaled_fp4_quant:
+    (quantized_output, output_scale).
+
+    Must match the C++ scaled_fp4_quant_func allocation exactly.
+    """
+    output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
+    output_scale = create_fp4_scale_tensor(m, n, device, is_sf_swizzled_layout)
+    return output, output_scale
+
+
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
+
+    @register_fake("_C::scaled_fp4_quant")
+    def _scaled_fp4_quant_fake(
+        input: torch.Tensor,
+        input_scale: torch.Tensor,
+        is_sf_swizzled_layout: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        n = input.shape[-1]
+        m = input.numel() // n
+        return create_fp4_output_tensors(m, n, input.device, is_sf_swizzled_layout)
+
+    @register_fake("_C::scaled_fp4_quant.out")
+    def _scaled_fp4_quant_out_fake(
+        input: torch.Tensor,
+        input_scale: torch.Tensor,
+        is_sf_swizzled_layout: bool,
+        *,
+        output: torch.Tensor,
+        output_scale: torch.Tensor,
+    ) -> None:
+        return None
+
+
 # page attention ops
 def paged_attention_v1(
     out: torch.Tensor,
@@ -427,7 +502,7 @@ def rms_norm_dynamic_per_token_quant(
     scale_ub: torch.Tensor | None = None,
     residual: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    output = torch.empty_like(input, dtype=quant_dtype)
+    output = torch.empty(input.shape, dtype=quant_dtype, device=input.device)
     scales = torch.empty(
         (input.numel() // input.shape[-1], 1), device=input.device, dtype=torch.float32
     )
@@ -451,7 +526,7 @@ def rms_norm_per_block_quant(
     tma_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(group_size) == 2
-    output = torch.empty_like(input, dtype=quant_dtype)
+    output = torch.empty(input.shape, dtype=quant_dtype, device=input.device)
     if is_scale_transposed:
         if tma_alignment == 0:
             scales = torch.empty(
@@ -914,6 +989,7 @@ def get_cutlass_moe_mm_data(
     n: int,
     k: int,
     blockscale_offsets: torch.Tensor | None = None,
+    is_gated: bool = True,
 ):
     """
     Prepare data necessary to perform CUTLASS grouped matrix multiplications
@@ -937,6 +1013,8 @@ def get_cutlass_moe_mm_data(
                           its computation. The number of block scale rows
                           computed with expert E is blockscale_offsets[E + 1] -
                           blockscale_offsets[E]
+    - is_gated: Whether the activation is gated (gate + up). When True, the
+                first GEMM N dimension is 2*n; when False, it is n.
     """
     return torch.ops._C.get_cutlass_moe_mm_data(
         topk_ids,
@@ -949,6 +1027,7 @@ def get_cutlass_moe_mm_data(
         n,
         k,
         blockscale_offsets,
+        is_gated,
     )
 
 
@@ -1644,7 +1723,6 @@ def scaled_fp4_quant(
     input = input.reshape(other_dims, input.shape[-1])
     m, n = input.shape
     block_size = 16
-    device = input.device
 
     assert n % block_size == 0, f"last dim has to be multiple of 16, but got {n}."
     assert input.dtype in (torch.float16, torch.bfloat16), (
@@ -1658,26 +1736,16 @@ def scaled_fp4_quant(
             input, input_global_scale
         )
     else:
-        # Two fp4 values will be packed into an uint8.
-        output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
-        if is_sf_swizzled_layout:
-            # We use the rounded values to store the swizzled values. Due to the
-            # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
-            # So, we first pad the scales to multiples of 128 and 4. Then, the scales
-            # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
-            # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
-            round_up = lambda x, y: (x + y - 1) // y * y
-            rounded_m = round_up(m, 128)
-            scale_n = n // block_size
-            rounded_n = round_up(scale_n, 4)
-            output_scale = torch.empty(
-                (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
-            )
-        else:
-            output_scale = torch.empty((m, n // 16), device=device, dtype=torch.uint8)
-
-        torch.ops._C.scaled_fp4_quant(
-            output, input, output_scale, input_global_scale, is_sf_swizzled_layout
+        # Pre-allocate and call .out variant (same behavior as old in-place API)
+        output, output_scale = create_fp4_output_tensors(
+            m, n, input.device, is_sf_swizzled_layout
+        )
+        torch.ops._C.scaled_fp4_quant.out(
+            input,
+            input_global_scale,
+            is_sf_swizzled_layout,
+            output=output,
+            output_scale=output_scale,
         )
 
     output_scale = output_scale.view(torch.float8_e4m3fn)
@@ -2292,6 +2360,19 @@ def dsv3_router_gemm(
     return output
 
 
+def gpt_oss_router_gemm(
+    hidden_states: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
+) -> torch.Tensor:
+    output = torch.empty(
+        hidden_states.shape[0],
+        weight.shape[0],
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
+    torch.ops._moe_C.gpt_oss_router_gemm(output, hidden_states, weight, bias)
+    return output
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -2668,6 +2749,21 @@ def cp_gather_and_upconvert_fp8_kv_cache(
     torch.ops._C_cache_ops.cp_gather_and_upconvert_fp8_kv_cache(
         src_cache, dst, block_table, seq_lens, workspace_starts, batch_size
     )
+
+
+def concat_mla_q(
+    ql_nope: torch.Tensor,
+    q_pe: torch.Tensor,
+    q_out: torch.Tensor,
+) -> None:
+    """Concatenate query nope and rope for MLA/DSA attention.
+
+    Args:
+        ql_nope: Query nope component [num_tokens, num_heads, nope_dim]
+        q_pe: Query rope component [num_tokens, num_heads, rope_dim]
+        q_out: Output tensor [num_tokens, num_heads, nope_dim + rope_dim]
+    """
+    torch.ops._C_cache_ops.concat_mla_q(ql_nope, q_pe, q_out)
 
 
 def indexer_k_quant_and_cache(

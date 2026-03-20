@@ -9,6 +9,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
@@ -21,6 +22,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    MultipleOf,
     SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
@@ -77,7 +79,16 @@ def fetch_id_to_ragged_triton(
 
 class ROCMAiterMLASparseBackend(AttentionBackend):
     accept_output_buffer: bool = True
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "float16",
+        "bfloat16",
+    ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [1]
 
     @staticmethod
     def get_name() -> str:
@@ -106,21 +117,12 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         return (num_blocks, block_size, head_size)
 
     @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [576]
-
-    @classmethod
     def is_mla(cls) -> bool:
         return True
 
     @classmethod
     def is_sparse(cls) -> bool:
         return True
-
-    @classmethod
-    def supports_block_size(cls, block_size: int | None) -> bool:
-        # The only supported block_size is 1
-        return block_size is None or block_size == 1
 
 
 @dataclass
@@ -150,7 +152,9 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
 class ROCMAiterMLASparseMetadataBuilder(
     AttentionMetadataBuilder[ROCMAiterMLASparseMetadata]
 ):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
 
     def __init__(
         self,
