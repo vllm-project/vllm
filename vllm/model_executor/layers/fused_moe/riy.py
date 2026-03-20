@@ -125,16 +125,22 @@ class RiyState:
                 self._try_load_profile_from_config()
 
     def _try_load_profile_from_config(self):
-        """Load RIY profile if configured via CLI."""
+        """Load RIY profile from env var or CLI config."""
         self._profile_loaded = True
-        try:
-            from vllm.config import get_current_vllm_config
-            cfg = get_current_vllm_config()
-            profile_path = cfg.parallel_config.riy_expert_profile
-            if profile_path:
+        import os
+        profile_path = os.environ.get("RIY_EXPERT_PROFILE", "")
+        if not profile_path:
+            try:
+                from vllm.config import get_current_vllm_config
+                cfg = get_current_vllm_config()
+                profile_path = cfg.parallel_config.riy_expert_profile or ""
+            except Exception:
+                pass
+        if profile_path:
+            try:
                 self.load_profile(profile_path)
-        except Exception:
-            pass  # Config not available yet during early init
+            except Exception as e:
+                logger.warning("RIY profile load failed: %s", e)
 
     @property
     def enabled(self) -> bool:
@@ -316,6 +322,56 @@ class RiyState:
         # Weight magnitude: sum of routing weights per expert (on GPU)
         stats.weight_sum.scatter_add_(
             0, ids_flat, topk_weights.flatten().float())
+
+
+def build_riy_expert_map(
+    original_num_experts: int,
+    profile_path: str,
+) -> tuple[int, torch.Tensor, torch.Tensor]:
+    """Build expert map from RIY profile for sparse loading.
+
+    Reuses vLLM's Expert Parallel machinery: pruned experts get -1
+    in the map, kept experts get compact sequential indices.
+
+    Args:
+        original_num_experts: Total experts in the original model
+        profile_path: Path to RIY profile JSON
+
+    Returns:
+        (num_kept, expert_map, logit_mask)
+        - num_kept: number of kept experts
+        - expert_map: (original_num_experts,) int32, -1 for pruned
+        - logit_mask: (original_num_experts,) float32, 0.0 kept / -inf pruned
+    """
+    with open(profile_path) as f:
+        profile = json.load(f)
+
+    # Collect expert IDs pruned in ALL MoE layers
+    # An expert is only globally pruned if it appears in every layer
+    from collections import Counter
+    pruned_per_expert: Counter = Counter()
+    all_layers: set[int] = set()
+    for layer_idx, expert_idx in profile["pruned_experts"]:
+        pruned_per_expert[expert_idx] += 1
+        all_layers.add(layer_idx)
+    num_moe_layers = len(all_layers) if all_layers else 1
+    pruned_ids: set[int] = set(
+        eid for eid, count in pruned_per_expert.items()
+        if count >= num_moe_layers)
+
+    expert_map = torch.full((original_num_experts,), -1, dtype=torch.int32)
+    logit_mask = torch.zeros(original_num_experts, dtype=torch.float32)
+    compact_idx = 0
+    for i in range(original_num_experts):
+        if i not in pruned_ids:
+            expert_map[i] = compact_idx
+            compact_idx += 1
+        else:
+            logit_mask[i] = float("-inf")
+
+    logger.info("RIY expert map: %d/%d experts kept (%d pruned)",
+                compact_idx, original_num_experts, len(pruned_ids))
+    return compact_idx, expert_map, logit_mask
 
 
 def apply_riy_mask(topk_weights: torch.Tensor,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -280,7 +281,10 @@ def FusedMoE(
     # Extract layer index from prefix (e.g. "model.layers.5.mlp" → 5)
     import re
 
-    from vllm.model_executor.layers.fused_moe.riy import get_riy_state
+    from vllm.model_executor.layers.fused_moe.riy import (
+        build_riy_expert_map,
+        get_riy_state,
+    )
 
     layer_match = re.search(r"layers\.(\d+)\.", prefix)
     layer_idx = int(layer_match.group(1)) if layer_match else -1
@@ -292,6 +296,13 @@ def FusedMoE(
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
             quantization=quantization,
+        )
+
+    riy_logit_mask = None
+    riy_profile = os.environ.get("RIY_EXPERT_PROFILE", "")
+    if riy_profile and os.path.exists(riy_profile):
+        _, _, riy_logit_mask = build_riy_expert_map(
+            global_num_experts, riy_profile
         )
 
     # TODO(bnell): we should not have to create a router if the kernel is
@@ -334,6 +345,11 @@ def FusedMoE(
             zero_expert_type=zero_expert_type,
             num_logical_experts=logical_num_experts,
             hash_indices_table=hash_indices_table,
+        )
+
+    if riy_logit_mask is not None:
+        router.riy_logit_mask = riy_logit_mask.to(
+            vllm_config.device_config.device
         )
 
     if layer_idx >= 0:
