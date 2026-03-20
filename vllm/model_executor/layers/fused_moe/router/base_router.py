@@ -174,6 +174,23 @@ else:
     ) -> torch.Tensor:
         return topk_ids
 
+    def riy_record_stats_compiled(
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        freq_view: torch.Tensor,
+        weight_view: torch.Tensor,
+        collecting: torch.Tensor,
+    ) -> None:
+        # CPU fallback: plain scatter_add_
+        ids_flat = topk_ids.flatten().long()
+        gate = collecting.long()
+        freq_view.scatter_add_(
+            0, ids_flat,
+            torch.ones_like(ids_flat, dtype=torch.int64) * gate)
+        weight_view.scatter_add_(
+            0, ids_flat,
+            topk_weights.flatten().to(weight_view.dtype) * collecting.float())
+
 
 class BaseRouter(FusedMoERouter):
     """
@@ -202,6 +219,10 @@ class BaseRouter(FusedMoERouter):
         self.global_num_experts = global_num_experts
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
         self.layer_idx = layer_idx
+        # RIY compiled stats views (set by FusedMoE.__init__)
+        self.riy_freq_view: torch.Tensor | None = None
+        self.riy_weight_view: torch.Tensor | None = None
+        self.riy_collecting_flag: torch.Tensor | None = None
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
@@ -313,15 +334,20 @@ class BaseRouter(FusedMoERouter):
             hidden_states, router_logits, topk_indices_dtype, input_ids=input_ids
         )
 
-        # Step 3b: RIY — record stats and apply expert mask
-        # Skip entirely during CUDA Graph capture (non-graph ops
-        # would invalidate the capture stream).
+        # Step 3b: RIY — stats on registered buffers (graph-compatible)
+        if self.riy_freq_view is not None:
+            _ids = topk_ids.reshape(-1).long()
+            _cf = self.riy_collecting_flag.long().expand(_ids.shape[0])
+            self.riy_freq_view.scatter_add_(0, _ids, _cf)
+            _w = topk_weights.reshape(-1).to(self.riy_weight_view.dtype)
+            _cf_f = self.riy_collecting_flag.float().expand(_w.shape[0])
+            self.riy_weight_view.scatter_add_(0, _ids, _w * _cf_f)
+
+        # Step 3c: RIY — mask + HTTP server (Python-level, skipped during capture)
         if not _is_capturing():
             riy = get_riy_state()
             if riy.enabled and self.layer_idx >= 0:
                 riy.on_forward()
-                if riy.collecting:
-                    riy.record_stats(self.layer_idx, topk_ids, topk_weights)
                 mask_t = riy.get_mask_tensor(self.layer_idx)
                 if mask_t is not None:
                     mask_t = mask_t.to(topk_ids.device)

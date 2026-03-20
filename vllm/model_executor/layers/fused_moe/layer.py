@@ -336,6 +336,18 @@ def FusedMoE(
             hash_indices_table=hash_indices_table,
         )
 
+    if layer_idx >= 0:
+        riy = get_riy_state()
+        if riy.enabled:
+            if not riy._tensors_initialized:
+                riy.initialize_tensors(vllm_config.device_config.device)
+            freq_view = riy.get_freq_view(layer_idx)
+            weight_view = riy.get_weight_view(layer_idx)
+            if freq_view is not None:
+                router.riy_freq_view = freq_view
+                router.riy_weight_view = weight_view
+                router.riy_collecting_flag = riy._collecting_flag
+
     if params_dtype is None:
         params_dtype = torch.get_default_dtype()
 

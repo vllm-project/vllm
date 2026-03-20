@@ -81,6 +81,12 @@ class RiyState:
         self._hidden_size = 0
         self._intermediate_size = 0
         self._quantization = ""
+        # Pre-allocated GPU tensors for compiled stats (R2)
+        # Addresses must be stable — used by @torch.compile'd function
+        self._freq_pass: torch.Tensor | None = None       # (num_layers, num_experts)
+        self._weight_pass: torch.Tensor | None = None      # (num_layers, num_experts)
+        self._collecting_flag: torch.Tensor | None = None   # scalar, 0 or 1
+        self._tensors_initialized = False
 
     def initialize(self, num_layers: int, num_experts: int):
         """Called once during model init."""
@@ -136,18 +142,63 @@ class RiyState:
     def collecting(self) -> bool:
         return self._collecting
 
+    def initialize_tensors(self, device: torch.device):
+        """Allocate pre-sized GPU tensors for compiled stats.
+
+        Called once from FusedMoE.__init__ when the first layer registers.
+        Tensor addresses must remain stable for the @torch.compile'd graph.
+        """
+        if self._tensors_initialized:
+            return
+        with self._lock:
+            if self._tensors_initialized:
+                return
+            self._freq_pass = torch.zeros(
+                self._num_layers, self._num_experts,
+                dtype=torch.int64, device=device)
+            self._weight_pass = torch.zeros(
+                self._num_layers, self._num_experts,
+                dtype=torch.float32, device=device)
+            self._collecting_flag = torch.zeros(
+                (), dtype=torch.int32, device=device)
+            self._tensors_initialized = True
+            logger.info("RIY tensors allocated on %s: %d layers x %d experts",
+                        device, self._num_layers, self._num_experts)
+
+    def get_freq_view(self, layer_idx: int) -> torch.Tensor | None:
+        """Get 1D freq slice for a layer (stable address for compiled graph)."""
+        if self._freq_pass is not None and layer_idx < self._freq_pass.shape[0]:
+            return self._freq_pass[layer_idx]
+        return None
+
+    def get_weight_view(self, layer_idx: int) -> torch.Tensor | None:
+        """Get 1D weight_sum slice for a layer."""
+        if self._weight_pass is not None and layer_idx < self._weight_pass.shape[0]:
+            return self._weight_pass[layer_idx]
+        return None
+
     def start_collection(self):
         with self._lock:
             self._collecting = True
+            if self._collecting_flag is not None:
+                self._collecting_flag.fill_(1)
             logger.info("RIY stats collection started")
 
     def stop_collection(self):
         with self._lock:
             self._collecting = False
+            if self._collecting_flag is not None:
+                self._collecting_flag.fill_(0)
             logger.info("RIY stats collection stopped")
 
     def reset_stats(self):
         with self._lock:
+            # In-place zero — addresses must stay stable for compiled graph
+            if self._freq_pass is not None:
+                self._freq_pass.zero_()
+            if self._weight_pass is not None:
+                self._weight_pass.zero_()
+            # Also reset legacy per-layer stats
             for s in self._layer_stats:
                 s.reset()
             logger.info("RIY stats reset")
@@ -156,13 +207,18 @@ class RiyState:
         """Export raw statistics as dict."""
         with self._lock:
             layers = []
-            for i, s in enumerate(self._layer_stats):
+            for i in range(self._num_layers):
                 try:
-                    freq = s.freq.detach().cpu().tolist()
-                    wsum = s.weight_sum.detach().cpu().tolist()
+                    if self._freq_pass is not None:
+                        freq = self._freq_pass[i].detach().cpu().tolist()
+                        wsum = self._weight_pass[i].detach().cpu().tolist()
+                    else:
+                        s = self._layer_stats[i]
+                        freq = s.freq.detach().cpu().tolist()
+                        wsum = s.weight_sum.detach().cpu().tolist()
                 except Exception:
-                    freq = [0] * s.num_experts
-                    wsum = [0.0] * s.num_experts
+                    freq = [0] * self._num_experts
+                    wsum = [0.0] * self._num_experts
                 layers.append({
                     "layer": i,
                     "freq": freq,
@@ -219,11 +275,9 @@ class RiyState:
         return self._mask_tensors.get(layer_idx)
 
     def on_forward(self):
-        """Called on every MoE forward pass (before stats check).
+        """Called on every MoE forward pass (Python-level, not in graph).
 
-        Starts the HTTP server lazily in the real EngineCore worker
-        process — not in the parent that forks and dies.
-        Skips during CUDA Graph capture.
+        Starts the HTTP server lazily in the real EngineCore worker process.
         """
         ensure_riy_server()
 
@@ -269,6 +323,45 @@ def apply_riy_mask(topk_weights: torch.Tensor,
     denom = topk_weights.sum(dim=-1, keepdim=True).clamp(min=1e-9)
     topk_weights = topk_weights / denom
     return topk_weights
+
+
+# ── Custom op for graph-compatible stats recording ────────────────────────────
+
+def _riy_record_impl(
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    freq_view: torch.Tensor,
+    weight_view: torch.Tensor,
+    collecting: torch.Tensor,
+) -> None:
+    """Accumulate expert stats. Safe inside CUDA Graph capture + replay."""
+    _ids = topk_ids.reshape(-1).long()
+    _cf = collecting.long().expand(_ids.shape[0])
+    freq_view.scatter_add_(0, _ids, _cf)
+    _w = topk_weights.reshape(-1).to(weight_view.dtype)
+    _cf_f = collecting.float().expand(_w.shape[0])
+    weight_view.scatter_add_(0, _ids, _w * _cf_f)
+
+
+def _riy_record_fake(
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    freq_view: torch.Tensor,
+    weight_view: torch.Tensor,
+    collecting: torch.Tensor,
+) -> None:
+    """Fake impl for torch.compile tracing — no-op."""
+    pass
+
+
+# Register as vllm custom op
+from vllm.utils.torch_utils import direct_register_custom_op
+direct_register_custom_op(
+    op_name="riy_record",
+    op_func=_riy_record_impl,
+    mutates_args=["freq_view", "weight_view"],
+    fake_impl=_riy_record_fake,
+)
 
 
 # Global singleton
