@@ -17,29 +17,22 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import current_stream, direct_register_custom_op
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_device
 
 if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
-    _aux_stream: torch.cuda.Stream | None = None
+    _lora_aux_stream: torch.cuda.Stream | None = None
 
-    # aux_stream() is shared for:
-    #  - LoRA dual-stream: base linear and LoRA compute on different CUDA streams
-    def aux_stream() -> torch.cuda.Stream | None:
-        """
-        Returns the auxiliary CUDA stream for overlapping compute.
-        Initialized only once on CUDA-alike platforms.
-        """
-        global _aux_stream
+    def _get_lora_aux_stream() -> torch.cuda.Stream | None:
+        global _lora_aux_stream
+        if _lora_aux_stream is None and current_platform.is_cuda_alike():
+            _lora_aux_stream = torch.cuda.Stream()
+        return _lora_aux_stream
 
-        if _aux_stream is None and current_platform.is_cuda_alike():
-            _aux_stream = torch.cuda.Stream()
-
-        return _aux_stream
-
-    def lora_linear(
+    def lora_linear_async(
         layer_name: str,
         output_size: int,
         x: torch.Tensor,
@@ -49,7 +42,7 @@ if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
         self = forward_context.no_compile_layers[layer_name]
         return self._apply_async_impl(x, bias)
 
-    def lora_linear_fake(
+    def lora_linear_async_fake(
         layer_name: str,
         output_size: int,
         x: torch.Tensor,
@@ -63,9 +56,9 @@ if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
         )
 
     direct_register_custom_op(
-        op_name="lora_linear",
-        op_func=lora_linear,
-        fake_impl=lora_linear_fake,
+        op_name="lora_linear_async",
+        op_func=lora_linear_async,
+        fake_impl=lora_linear_async_fake,
     )
 
 
@@ -89,9 +82,15 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         if not self._enable_srteam:
             return
         vllm_config = get_current_vllm_config()
-        self._lora_stream = aux_stream()
+        self._lora_stream = _get_lora_aux_stream()
+
+        self._events = (
+            [torch.cuda.Event(), torch.cuda.Event()]
+            if current_platform.is_cuda_alike()
+            else [None, None]
+        )
         # lora_linear avoids prefix conflicts with the base layer
-        self.layer_name = self.base_layer.prefix + ".lora_linear"
+        self.layer_name = self.base_layer.prefix + ".lora_linear_async"
         compilation_config = vllm_config.compilation_config
         if self.layer_name in compilation_config.static_forward_context:
             raise ValueError("Duplicate layer name: {}".format(self.layer_name))
@@ -186,7 +185,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         if self._enable_srteam:
             output_size = sum(self.output_slices)
-            return torch.ops.vllm.lora_linear(self.layer_name, output_size, x, bias)
+            return torch.ops.vllm.lora_linear_async(
+                self.layer_name, output_size, x, bias
+            )
         else:
             return self._apply_sync(x, bias)
 
@@ -221,26 +222,24 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         """
-        Forward pass with base linear and LoRA on separate CUDA streams for overlap.
+        Forward pass with base linear and LoRA on separate CUDA streams
+        for overlap, using maybe_execute_in_parallel.
         Base layer runs on default stream; LoRA runs on aux stream.
         """
         assert envs.VLLM_LORA_ENABLE_DUAL_STREAM
-        assert isinstance(self._lora_stream, torch.cuda.Stream)  # Make mypy happy
-        self._lora_stream.wait_stream(current_stream())
-        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
-        # Pre-allocate buffer for LoRA-only output (add_inputs=False writes here).
-        # Infer shape from x and output_slices; avoid using output tensor.
         num_tokens = x.size(0) if x.ndim == 2 else x.size(1)
         output_size = sum(self.output_slices)
-
         lora_output = torch.empty(
             (num_tokens, output_size),
             device=self.device,
             dtype=x.dtype,
         )
-        lora_output.record_stream(self._lora_stream)
-        with torch.cuda.stream(self._lora_stream):
+
+        def base_fn() -> torch.Tensor:
+            return self.base_layer.quant_method.apply(self.base_layer, x, bias)
+
+        def lora_fn() -> torch.Tensor:
             self.punica_wrapper.add_lora_linear(
                 lora_output,
                 x,
@@ -250,8 +249,16 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 self.output_slices,
                 add_inputs=False,
             )
-        # Default stream waits for LoRA to complete before combining.
-        current_stream().wait_stream(self._lora_stream)
+            return lora_output
+
+        output, lora_result = maybe_execute_in_parallel(
+            base_fn,
+            lora_fn,
+            self._events[0],
+            self._events[1],
+            self._lora_stream,
+        )
+
         original_shape = output.shape if output.ndim == 3 else None
 
         # In transformers backend, x and output have extra batch dimension like
@@ -260,8 +267,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         if x.ndim == 3 and output.ndim == 3:
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
-        # We need to add op to get the final result.
-        output.add_(lora_output)
+
+        output.add_(lora_result)
 
         # Reshape the flattened output back to its original shape,
         # as some MM encoders cannot handle flattened inputs.
