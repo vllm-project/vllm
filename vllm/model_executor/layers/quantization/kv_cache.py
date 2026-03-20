@@ -56,8 +56,9 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             assert not hasattr(layer, "prob_scale")
             return
 
-        # INT8 KV cache: scales are computed dynamically per-token in the
-        # kernel at cache-write time.  Checkpoint scales are not used.
+        # Per-token quantized KV cache: scales are computed dynamically
+        # per-token in the kernel at cache-write time.  Checkpoint scales
+        # are not used.
         if (
             kv_cache_uses_per_token_scales(layer.kv_cache_dtype)
             and not layer.calculate_kv_scales

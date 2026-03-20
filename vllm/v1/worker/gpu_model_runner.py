@@ -6399,6 +6399,48 @@ class GPUModelRunner(
                         stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
                     )
 
+    def _allocate_auxiliary_buffers(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+    ) -> dict[str, dict[str, "torch.Tensor"]]:
+        """Allocate auxiliary buffers described by KVCacheSpec.
+
+        Iterates attention groups, reads ``auxiliary_buffer_specs`` from each
+        spec, and allocates ``(num_blocks, *spec.shape_per_block)`` tensors.
+
+        Returns:
+            Mapping of layer_name -> {buffer_name -> tensor}.
+        """
+        result: dict[str, dict[str, torch.Tensor]] = {}
+        for group in self._kv_cache_spec_attn_group_iterator():
+            kv_cache_spec = group.kv_cache_spec
+            if not isinstance(kv_cache_spec, AttentionSpec):
+                continue
+            aux_specs = kv_cache_spec.auxiliary_buffer_specs
+            if not aux_specs:
+                continue
+            for layer_name in group.layer_names:
+                if layer_name in self.runner_only_attn_layers:
+                    continue
+                kv_cache = kv_caches[layer_name]
+                # KV cache shape is backend-specific, but the first
+                # dimension after unbinding K/V is always num_blocks
+                # for flash-style layouts.  For shape (2, num_blocks, ...)
+                # use shape[1]; for (num_blocks, 2, ...) use shape[0].
+                if kv_cache.shape[0] == 2:
+                    num_blocks = kv_cache.shape[1]
+                else:
+                    num_blocks = kv_cache.shape[0]
+                buffers: dict[str, torch.Tensor] = {}
+                for aux in aux_specs:
+                    buffers[aux.name] = torch.zeros(
+                        (num_blocks, *aux.shape_per_block),
+                        dtype=aux.dtype,
+                        device=self.device,
+                    )
+                result[layer_name] = buffers
+        return result
+
     def initialize_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
     ) -> dict[str, torch.Tensor]:
@@ -6452,6 +6494,17 @@ class GPUModelRunner(
             self.kv_caches,
             num_attn_module,
         )
+
+        # Allocate and bind auxiliary buffers (e.g. per-token scale caches).
+        forward_context = self.compilation_config.static_forward_context
+        aux_buffers = self._allocate_auxiliary_buffers(kv_caches)
+        # Propagate auxiliary buffers to shared KV cache layers.
+        for layer_name, target in self.shared_kv_cache_layers.items():
+            if target in aux_buffers:
+                aux_buffers[layer_name] = aux_buffers[target]
+        for layer_name, buffers in aux_buffers.items():
+            forward_context[layer_name].impl.bind_auxiliary_buffers(buffers)
+
         return kv_caches
 
     def maybe_add_kv_sharing_layers_to_kv_cache_groups(

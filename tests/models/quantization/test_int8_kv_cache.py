@@ -4,7 +4,7 @@
 """End-to-end accuracy tests for INT8 KV cache quantization.
 
 Compares logprobs between a baseline bf16 model and the same model with
-kv_cache_dtype="int8" using the Triton attention backend. Since no
+kv_cache_dtype="int8_per_token" using the Triton attention backend. Since no
 pre-calibrated INT8 KV scale checkpoints exist yet, we test with
 calculate_kv_scales=True (dynamic per-head scales from the first batch).
 
@@ -75,7 +75,7 @@ def test_int8_kv_cache_accuracy(
             max_model_len=MAX_MODEL_LEN,
             tensor_parallel_size=tensor_parallel_size,
             enforce_eager=enforce_eager,
-            kv_cache_dtype="int8",
+            kv_cache_dtype="int8_per_token",
             calculate_kv_scales=True,
             attention_config={"backend": backend},
         ) as vllm_model:

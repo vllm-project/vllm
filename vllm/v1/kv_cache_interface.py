@@ -17,6 +17,20 @@ logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
+class AuxBufferSpec:
+    """Describes one auxiliary buffer allocated alongside the KV cache.
+
+    The model runner uses these specs to pre-allocate tensors of shape
+    ``(num_blocks, *shape_per_block)`` and bind them to the attention
+    implementation via ``AttentionImpl.bind_auxiliary_buffers()``.
+    """
+
+    name: str  # e.g. "k_scale_cache"
+    dtype: torch.dtype  # e.g. torch.float32
+    shape_per_block: tuple[int, ...]  # e.g. (block_size, num_kv_heads)
+
+
+@dataclass(frozen=True)
 class KVCacheSpec:
     """
     A base class for specifying the KV cache format of one layer.
@@ -45,16 +59,27 @@ class KVCacheSpec:
         raise NotImplementedError
 
     @property
+    def auxiliary_buffer_specs(self) -> list[AuxBufferSpec]:
+        """Structured descriptions of auxiliary buffers for this cache format.
+
+        Override in subclasses that need auxiliary buffers (e.g.
+        per-token quantization scale caches).  The model runner
+        allocates tensors of shape ``(num_blocks, *spec.shape_per_block)``
+        for each entry and binds them to the attention implementation.
+        """
+        return []
+
+    @property
     def auxiliary_memory_per_block(self) -> int:
         """Extra per-block memory not stored in the KV cache tensor itself.
 
-        Override in subclasses that allocate auxiliary buffers (e.g.
-        per-token quantization scale caches for INT8).
-        This is subtracted from available memory when computing how many
-        blocks fit, but is NOT included in page_size_bytes (which sizes
-        the KV cache tensor).
+        Derived from :attr:`auxiliary_buffer_specs`.  Factored into the
+        block count calculation but NOT into page_size_bytes.
         """
-        return 0
+        return sum(
+            prod(s.shape_per_block) * get_dtype_size(s.dtype)
+            for s in self.auxiliary_buffer_specs
+        )
 
     def copy_with_new_block_size(self, block_size: int) -> Self:
         """
@@ -89,18 +114,19 @@ class AttentionSpec(KVCacheSpec):
         return real_page_size
 
     @property
-    def auxiliary_memory_per_block(self) -> int:
-        """Per-block memory for auxiliary buffers allocated outside the KV
-        cache tensor (e.g. INT8 per-token scale caches).
+    def auxiliary_buffer_specs(self) -> list[AuxBufferSpec]:
+        """Auxiliary buffers for quantized KV cache formats.
 
-        This is factored into the block count calculation but NOT into
-        page_size_bytes, which must match the KV cache tensor layout
-        exactly for reshape/view to work.
+        For per-token quantization (e.g. int8_per_token): two float32 scale
+        caches of shape ``(block_size, num_kv_heads)`` each.
         """
         if self.dtype != torch.int8:
-            return 0
-        # Two scale buffers (K and V), each [block_size, num_kv_heads] f32.
-        return 2 * self.block_size * self.num_kv_heads * get_dtype_size(torch.float32)
+            return []
+        shape = (self.block_size, self.num_kv_heads)
+        return [
+            AuxBufferSpec("k_scale_cache", torch.float32, shape),
+            AuxBufferSpec("v_scale_cache", torch.float32, shape),
+        ]
 
     @property
     def real_page_size_bytes(self) -> int:

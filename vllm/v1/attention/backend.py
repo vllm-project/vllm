@@ -724,76 +724,50 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 
     Quantized KV Cache Contract
     ---------------------------
-    Backends that add a quantized KV dtype (e.g. ``"int8"``) to their
-    ``AttentionBackend.supported_kv_cache_dtypes`` must handle two paths:
+    Backends that add a quantized KV dtype (e.g. ``"int8_per_token"``) to
+    their ``AttentionBackend.supported_kv_cache_dtypes`` must handle two
+    paths:
 
     **Write path** (``do_kv_cache_update``):
-      * INT8 (``kv_quant_mode == KVQuantMode.INT8``): call
-        ``self.ensure_int8_scale_caches(key_cache)`` to get
-        ``(k_scale_cache, v_scale_cache)``, then quantize key/value into
-        the cache with dynamic per-(token, head) scales, writing scales
-        to the returned buffers.  Each backend provides its own
-        quantization kernel (C++/CUDA, Triton, etc.).
+      * Per-token quant (``kv_quant_mode == KVQuantMode.PER_TOKEN``):
+        use auxiliary scale caches bound via
+        ``bind_auxiliary_buffers()`` to write dynamic per-(token, head)
+        scales alongside quantized data.
       * FP8: use ``layer._k_scale`` / ``layer._v_scale`` (per-tensor).
 
     **Read path** (``forward``):
-      * If ``self._k_scale_cache is not None``: pass per-token scale
-        caches to the attention kernel for dequantization.
+      * If per-token scale caches are bound: pass them to the attention
+        kernel for dequantization.
       * If FP8: pass ``layer._k_scale`` / ``layer._v_scale``.
       * Otherwise: no scales needed.
 
-    Base-class infrastructure:
-      * ``ensure_int8_scale_caches(key_cache)`` — lazy allocation.
-      * ``_k_scale_cache`` / ``_v_scale_cache`` — ``None`` until first call.
+    Infrastructure:
+      * ``bind_auxiliary_buffers(buffers)`` — called by the model runner
+        after KV cache allocation to bind pre-allocated auxiliary
+        tensors (e.g. scale caches).  Override in subclasses.
       * ``kv_quant_mode`` property — avoids string matching on dtype.
       * Memory accounting is automatic via
-        ``AttentionSpec.auxiliary_memory_per_block``.
+        ``KVCacheSpec.auxiliary_buffer_specs``.
     """
 
     kv_cache_dtype: str
-
-    # INT8 per-(token, head) scale caches.  Lazily allocated by
-    # ensure_int8_scale_caches().
-    # Shape when allocated: [num_blocks, block_size, num_kv_heads], float32.
-    _k_scale_cache: torch.Tensor | None = None
-    _v_scale_cache: torch.Tensor | None = None
 
     @property
     def kv_quant_mode(self) -> "KVQuantMode":
         """Return the KV cache quantization mode for this layer."""
         return get_kv_quant_mode(self.kv_cache_dtype)
 
-    def ensure_int8_scale_caches(
-        self,
-        key_cache: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Lazily allocate INT8 per-(token, head) float32 scale caches.
+    def bind_auxiliary_buffers(
+        self, buffers: dict[str, torch.Tensor]
+    ) -> None:
+        """Bind pre-allocated auxiliary buffers (e.g. scale caches).
 
-        Call from ``do_kv_cache_update`` when
-        ``kv_quant_mode == KVQuantMode.INT8``.
+        Called by the model runner after KV cache allocation.  The
+        *buffers* dict maps ``AuxBufferSpec.name`` to a pre-allocated
+        tensor of shape ``(num_blocks, *spec.shape_per_block)``.
 
-        Args:
-            key_cache: The key cache tensor, used to infer shape and device.
-                       Expected shape:
-                       [num_blocks, block_size, num_kv_heads, head_size].
-
-        Returns:
-            (k_scale_cache, v_scale_cache) — both
-            [num_blocks, block_size, num_kv_heads] float32 tensors.
+        Override in subclasses that use auxiliary buffers.
         """
-        if self._k_scale_cache is None:
-            num_blocks, block_size, num_kv_heads = key_cache.shape[:3]
-            self._k_scale_cache = torch.empty(
-                (num_blocks, block_size, num_kv_heads),
-                dtype=torch.float32,
-                device=key_cache.device,
-            )
-            self._v_scale_cache = torch.empty(
-                (num_blocks, block_size, num_kv_heads),
-                dtype=torch.float32,
-                device=key_cache.device,
-            )
-        return self._k_scale_cache, self._v_scale_cache  # type: ignore[return-value]
 
     @abstractmethod
     def __init__(
@@ -1018,15 +992,15 @@ class KVQuantMode(IntEnum):
 
     NONE = 0
     FP8 = 1
-    INT8 = 2
+    PER_TOKEN = 2  # per-(token, head) dynamic quantization (e.g. int8)
 
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
     if kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8
-    if kv_cache_dtype.startswith("int8"):
-        return KVQuantMode.INT8
+    if kv_cache_dtype == "int8_per_token":
+        return KVQuantMode.PER_TOKEN
     return KVQuantMode.NONE
 
 
@@ -1036,7 +1010,7 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
 
 def kv_cache_uses_per_token_scales(kv_cache_dtype: str) -> bool:
     """Return True if *kv_cache_dtype* needs per-token scales."""
-    return get_kv_quant_mode(kv_cache_dtype) == KVQuantMode.INT8
+    return get_kv_quant_mode(kv_cache_dtype) == KVQuantMode.PER_TOKEN
 
 
 def subclass_attention_backend(

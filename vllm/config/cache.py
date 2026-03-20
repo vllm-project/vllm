@@ -20,7 +20,7 @@ CacheDType = Literal[
     "fp8_e5m2",
     "fp8_inc",
     "fp8_ds_mla",
-    "int8",
+    "int8_per_token",
 ]
 MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
@@ -230,7 +230,7 @@ class CacheConfig:
                 "scaling factor",
                 str(cache_dtype),
             )
-        elif cache_dtype.startswith("int8"):
+        elif cache_dtype == "int8_per_token":
             logger.info(
                 "Using %s data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "

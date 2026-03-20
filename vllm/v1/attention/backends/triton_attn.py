@@ -32,7 +32,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
-    triton_reshape_and_cache_flash_int8_per_token,
+    triton_reshape_and_cache_flash_per_token_quant,
 )
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -270,7 +270,7 @@ class TritonAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
-        "int8",
+        "int8_per_token",
     ]
 
     @staticmethod
@@ -358,6 +358,17 @@ class TritonAttentionBackend(AttentionBackend):
 
 
 class TritonAttentionImpl(AttentionImpl):
+    # Per-token scale caches, bound by the model runner via
+    # bind_auxiliary_buffers().  None when not using per-token quant.
+    _k_scale_cache: torch.Tensor | None = None
+    _v_scale_cache: torch.Tensor | None = None
+
+    def bind_auxiliary_buffers(
+        self, buffers: dict[str, torch.Tensor]
+    ) -> None:
+        self._k_scale_cache = buffers.get("k_scale_cache")
+        self._v_scale_cache = buffers.get("v_scale_cache")
+
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
 
@@ -476,8 +487,8 @@ class TritonAttentionImpl(AttentionImpl):
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
 
-        # INT8 KV cache: view as int8, use per-token scale caches.
-        if self.kv_quant_mode == KVQuantMode.INT8:
+        # Per-token quantized KV cache: view as int8, use per-token scale caches.
+        if self.kv_quant_mode == KVQuantMode.PER_TOKEN:
             if key_cache.dtype != torch.int8:
                 key_cache = key_cache.view(torch.int8)
                 value_cache = value_cache.view(torch.int8)
@@ -614,17 +625,16 @@ class TritonAttentionImpl(AttentionImpl):
 
         # Reshape the input keys and values and store them in the cache.
         quant_mode = self.kv_quant_mode
-        if quant_mode == KVQuantMode.INT8:
+        if quant_mode == KVQuantMode.PER_TOKEN:
             key_cache = key_cache.view(torch.int8)
             value_cache = value_cache.view(torch.int8)
-            k_sc, v_sc = self.ensure_int8_scale_caches(key_cache)
-            triton_reshape_and_cache_flash_int8_per_token(
+            triton_reshape_and_cache_flash_per_token_quant(
                 key,
                 value,
                 key_cache,
                 value_cache,
-                k_sc,
-                v_sc,
+                self._k_scale_cache,
+                self._v_scale_cache,
                 slot_mapping,
             )
             return
@@ -643,7 +653,7 @@ class TritonAttentionImpl(AttentionImpl):
         )
 
     def fused_rope_kvcache_supported(self):
-        if self.kv_quant_mode == KVQuantMode.INT8:
+        if self.kv_quant_mode == KVQuantMode.PER_TOKEN:
             return False
         return rocm_aiter_ops.is_enabled()
 

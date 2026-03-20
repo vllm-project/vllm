@@ -106,11 +106,11 @@ def kernel_unified_attention_2d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     USE_FP8: tl.constexpr,  # bool
-    # KV cache quantization: 0=none, 1=fp8, 2=int8
+    # KV cache quantization: 0=none, 1=fp8, 2=per-token
     KV_QUANT_MODE: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
-    # INT8 per-(token, head) scale caches (KV_QUANT_MODE == 2 only)
+    # Per-(token, head) scale caches (KV_QUANT_MODE == 2 only)
     k_scale_cache_ptr=None,
     v_scale_cache_ptr=None,
     stride_ks_blk=0,
@@ -276,7 +276,7 @@ def kernel_unified_attention_2d(
                 K = K_load
             else:
                 K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
-        elif KV_QUANT_MODE == 2:  # INT8 per-token
+        elif KV_QUANT_MODE == 2:  # per-token quant
             K = K_load.to(Q.dtype)
             k_scale_idx = (
                 physical_block_idx * stride_ks_blk
@@ -301,7 +301,7 @@ def kernel_unified_attention_2d(
                 V = V_load
             else:
                 V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
-        elif KV_QUANT_MODE == 2:  # INT8 per-token
+        elif KV_QUANT_MODE == 2:  # per-token quant
             V = V_load.to(Q.dtype)
             v_scale_idx = (
                 physical_block_idx * stride_vs_blk
@@ -352,7 +352,7 @@ def kernel_unified_attention_2d(
 
         S += scale * tl.dot(Q, K)
 
-        # INT8: apply k_scale after dot product.
+        # Per-token quant: apply k_scale after dot product.
         if KV_QUANT_MODE == 2:
             S *= k_token_scales[None, :]
 
@@ -417,7 +417,7 @@ def kernel_unified_attention_2d(
                 (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0
             )
 
-        # INT8: apply v_scale to P instead of V.
+        # Per-token quant: apply v_scale to P instead of V.
         if KV_QUANT_MODE == 2:
             P_v = (P * v_token_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
@@ -493,9 +493,9 @@ def kernel_unified_attention_3d(
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
-    # KV cache quantization: 0=none, 1=fp8, 2=int8
+    # KV cache quantization: 0=none, 1=fp8, 2=per-token
     KV_QUANT_MODE: tl.constexpr = 0,
-    # INT8 per-(token, head) scale caches (KV_QUANT_MODE == 2 only)
+    # Per-(token, head) scale caches (KV_QUANT_MODE == 2 only)
     k_scale_cache_ptr=None,
     v_scale_cache_ptr=None,
     stride_ks_blk=0,
@@ -670,7 +670,7 @@ def kernel_unified_attention_3d(
                 K = K_load
             else:
                 K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
-        elif KV_QUANT_MODE == 2:  # INT8 per-token
+        elif KV_QUANT_MODE == 2:  # per-token quant
             K = K_load.to(Q.dtype)
             k_scale_idx = (
                 physical_block_idx * stride_ks_blk
@@ -695,7 +695,7 @@ def kernel_unified_attention_3d(
                 V = V_load
             else:
                 V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
-        elif KV_QUANT_MODE == 2:  # INT8 per-token
+        elif KV_QUANT_MODE == 2:  # per-token quant
             V = V_load.to(Q.dtype)
             v_scale_idx = (
                 physical_block_idx * stride_vs_blk
@@ -745,7 +745,7 @@ def kernel_unified_attention_3d(
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
         S += scale * tl.dot(Q, K)
 
-        # INT8: apply k_scale after dot product.
+        # Per-token quant: apply k_scale after dot product.
         if KV_QUANT_MODE == 2:
             S *= k_token_scales[None, :]
 
@@ -810,7 +810,7 @@ def kernel_unified_attention_3d(
                 (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0
             )
 
-        # INT8: apply v_scale to P instead of V.
+        # Per-token quant: apply v_scale to P instead of V.
         if KV_QUANT_MODE == 2:
             P_v = (P * v_token_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
@@ -990,7 +990,7 @@ def unified_attention(
     # Optional tensor for prefix lengths (PrefixLM support)
     mm_prefix_range=None,
     use_alibi_sqrt=False,
-    # KV cache quantization mode and INT8 scale caches.
+    # KV cache quantization mode and per-token scale caches.
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
     k_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
@@ -1019,7 +1019,7 @@ def unified_attention(
     # This keeps backward compatibility with existing FP8 callers/tests.
     if kv_quant_mode == KVQuantMode.NONE:
         if k.dtype == torch.int8:
-            kv_quant_mode = KVQuantMode.INT8
+            kv_quant_mode = KVQuantMode.PER_TOKEN
         elif k.is_floating_point() and k.element_size() == 1:
             kv_quant_mode = KVQuantMode.FP8
 

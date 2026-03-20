@@ -64,8 +64,8 @@ class TestIsQuantizedKvCache:
         assert is_quantized_kv_cache("fp8_e4m3")
         assert is_quantized_kv_cache("fp8_e5m2")
 
-    def test_int8(self):
-        assert is_quantized_kv_cache("int8")
+    def test_int8_per_token(self):
+        assert is_quantized_kv_cache("int8_per_token")
 
     def test_auto(self):
         assert not is_quantized_kv_cache("auto")
@@ -90,9 +90,9 @@ def test_reshape_and_cache_int8_per_token(
     block_size: int,
     seed: int,
 ):
-    """Test triton_reshape_and_cache_flash_int8_per_token kernel."""
+    """Test triton_reshape_and_cache_flash_per_token_quant kernel."""
     from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-        triton_reshape_and_cache_flash_int8_per_token,
+        triton_reshape_and_cache_flash_per_token_quant,
     )
 
     set_random_seed(seed)
@@ -117,7 +117,7 @@ def test_reshape_and_cache_int8_per_token(
         random.sample(range(num_slots), num_tokens), dtype=torch.long
     )
 
-    triton_reshape_and_cache_flash_int8_per_token(
+    triton_reshape_and_cache_flash_per_token_quant(
         key,
         value,
         key_cache,
@@ -175,7 +175,7 @@ def test_int8_per_token_round_trip_accuracy(
     reference is exact, then compare dequantised outputs.
     """
     from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-        triton_reshape_and_cache_flash_int8_per_token,
+        triton_reshape_and_cache_flash_per_token_quant,
     )
 
     torch.set_default_device("cuda")
@@ -232,7 +232,7 @@ def test_int8_per_token_round_trip_accuracy(
 
     slot_mapping = torch.arange(num_tokens, dtype=torch.long)
 
-    triton_reshape_and_cache_flash_int8_per_token(
+    triton_reshape_and_cache_flash_per_token_quant(
         key,
         value,
         key_cache,
@@ -304,7 +304,7 @@ def test_int8_per_token_round_trip_accuracy(
 def test_int8_per_token_negative_slot_skipped():
     """Tokens with slot_mapping=-1 should leave the cache unchanged."""
     from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-        triton_reshape_and_cache_flash_int8_per_token,
+        triton_reshape_and_cache_flash_per_token_quant,
     )
 
     torch.set_default_device("cuda")
@@ -350,7 +350,7 @@ def test_int8_per_token_negative_slot_skipped():
     key_cache_before = key_cache.clone()
     val_cache_before = value_cache.clone()
 
-    triton_reshape_and_cache_flash_int8_per_token(
+    triton_reshape_and_cache_flash_per_token_quant(
         key,
         value,
         key_cache,
@@ -376,13 +376,13 @@ def test_int8_per_token_negative_slot_skipped():
 # ===========================================================================
 class TestProcessWeightsAfterLoadingInt8:
     """Unit tests for kv_cache.py BaseKVCacheMethod.process_weights_after_loading
-    when kv_cache_dtype='int8'.
+    when kv_cache_dtype='int8_per_token'.
 
-    INT8 uses dynamic per-token scales computed in the kernel.
+    Per-token quant uses dynamic per-token scales computed in the kernel.
     Checkpoint scales are not used — the method sets placeholders and returns.
     """
 
-    def _make_layer(self, kv_cache_dtype="int8"):
+    def _make_layer(self, kv_cache_dtype="int8_per_token"):
         """Create a mock attention layer with the required attributes."""
         layer = MagicMock()
         layer.kv_cache_dtype = kv_cache_dtype
@@ -405,7 +405,7 @@ class TestProcessWeightsAfterLoadingInt8:
         """INT8 should set _k_scale=1.0, _v_scale=1.0 and delete checkpoint attrs."""
         from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 
-        layer = self._make_layer("int8")
+        layer = self._make_layer("int8_per_token")
         method = BaseKVCacheMethod.__new__(BaseKVCacheMethod)
         method.quant_config = MagicMock()
 
