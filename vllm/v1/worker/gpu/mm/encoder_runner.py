@@ -3,11 +3,17 @@
 import numpy as np
 import torch
 
+from vllm.config import ModelConfig, VllmConfig
+from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.multimodal import MultiModalRegistry
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
+
+logger = init_logger(__name__)
 
 
 class EncoderRunner:
@@ -19,6 +25,8 @@ class EncoderRunner:
         encoder_cache: EncoderCache,
         dtype: torch.dtype,
         device: torch.device,
+        vllm_config: VllmConfig | None = None,
+        mm_registry: MultiModalRegistry | None = None,
     ):
         self.model = model
         self.max_num_tokens = max_num_tokens
@@ -26,6 +34,14 @@ class EncoderRunner:
         self.encoder_cache = encoder_cache
         self.dtype = dtype
         self.device = device
+        self.model_config: ModelConfig | None = (
+            vllm_config.model_config if vllm_config is not None else None
+        )
+        self.mm_registry = mm_registry
+
+        self.mm_budget: MultiModalBudget | None = None
+        if vllm_config is not None and mm_registry is not None:
+            self.mm_budget = MultiModalBudget(vllm_config, mm_registry)
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
@@ -148,3 +164,71 @@ class EncoderRunner:
         # Copy to the pre-allocated buffer for CUDA graphs.
         self.inputs_embeds[: x.shape[0]] = x
         return self.inputs_embeds
+
+    def _get_dummy_mm_batch(
+        self,
+        modality: str,
+        max_items: int,
+    ) -> list[tuple[str, MultiModalKwargsItem]]:
+        """Create dummy MM inputs for encoder profiling."""
+        assert self.mm_budget is not None
+        assert self.mm_registry is not None
+        assert self.model_config is not None
+
+        # Generate a single dummy item (avoid redundant computation).
+        dummy_mm_inputs = self.mm_registry.get_dummy_mm_inputs(
+            self.model_config,
+            mm_counts={modality: 1},
+            cache=self.mm_budget.cache,
+        )
+        dummy_mm_item = dummy_mm_inputs["mm_kwargs"][modality][0]
+        assert dummy_mm_item is not None, "Item should not already be cached"
+
+        return [(modality, dummy_mm_item)] * max_items
+
+    def profile_encoder(self) -> None:
+        """Profile the encoder to measure GPU memory usage."""
+        mm_budget = self.mm_budget
+        if mm_budget is None:
+            return
+
+        encoder_budget = mm_budget.get_encoder_budget()
+        if encoder_budget <= 0:
+            return
+
+        if not mm_budget.mm_max_toks_per_item:
+            # All modality limits are 0 — embedding-only mode.
+            logger.info(
+                "Skipping encoder profiling for embedding-only "
+                "mode (all modality limits=0 with "
+                "enable_mm_embeds=True).",
+            )
+            return
+
+        dummy_modality = mm_budget.get_modality_with_max_tokens()
+        max_mm_items = mm_budget.mm_max_items_per_batch[dummy_modality]
+
+        logger.info(
+            "Encoder cache will be initialized with a "
+            "budget of %s tokens, and profiled with "
+            "%s %s items of the maximum feature size.",
+            encoder_budget,
+            max_mm_items,
+            dummy_modality,
+        )
+
+        # Create dummy batch and run encoder.
+        dummy_batch = self._get_dummy_mm_batch(dummy_modality, max_mm_items)
+        encoder_outputs = self.execute_mm_encoder(dummy_batch)
+        sanity_check_mm_encoder_outputs(
+            encoder_outputs, expected_num_items=max_mm_items
+        )
+
+        # Cache outputs temporarily so memory is accounted for.
+        for i, output in enumerate(encoder_outputs):
+            self.encoder_cache.encoder_outputs[f"tmp_{i}"] = output
+
+    def reset_mm_cache(self) -> None:
+        """Clear the multi-modal processor cache used during profiling."""
+        if self.mm_budget is not None:
+            self.mm_budget.reset_cache()

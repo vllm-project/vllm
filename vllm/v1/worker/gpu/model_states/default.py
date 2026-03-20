@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -50,6 +51,8 @@ class DefaultModelState(ModelState):
                 encoder_cache=encoder_cache,
                 dtype=self.dtype,
                 device=self.device,
+                vllm_config=vllm_config,
+                mm_registry=MULTIMODAL_REGISTRY,
             )
 
         self.rope_state = get_rope_state(
@@ -60,6 +63,14 @@ class DefaultModelState(ModelState):
             max_model_len=self.max_model_len,
             device=self.device,
         )
+
+    def profile_encoder(self) -> None:
+        if self.supports_mm_inputs:
+            self.encoder_runner.profile_encoder()
+
+    def reset_mm_cache(self) -> None:
+        if self.supports_mm_inputs:
+            self.encoder_runner.reset_mm_cache()
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.rope_state is not None:
