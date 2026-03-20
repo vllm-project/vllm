@@ -243,6 +243,7 @@ fn sample_request(request_id: &str) -> ChatRequest {
         chat_options: ChatOptions::default(),
         tools: Vec::new(),
         tool_choice: ChatToolChoice::None,
+        decode_options: Default::default(),
     }
 }
 
@@ -624,7 +625,7 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
     let chat = connect_chat_llm(handshake_address, backend).await;
 
     let mut request = sample_request("chat-include-stop");
-    request.sampling_params.include_stop_str_in_output = true;
+    request.decode_options.include_stop_str_in_output = true;
     let mut stream = chat.chat(request).await.unwrap();
 
     assert!(matches!(stream.next().await, Some(Ok(ChatEvent::Start))));

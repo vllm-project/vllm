@@ -28,6 +28,7 @@ pub(crate) fn lower_chat_request(
         chat_options: _,
         tools: _,
         tool_choice: _,
+        decode_options: _,
     } = &request;
 
     let prompt_len = prompt_token_ids.len() as u32;
@@ -84,10 +85,8 @@ fn lower_sampling_params(
         frequency_penalty,
         presence_penalty,
         repetition_penalty,
-        include_stop_str_in_output: _,
         stop_token_ids,
         ignore_eos,
-        skip_special_tokens: _,
     } = sampling_params;
 
     // Mirrors the model-generation-config inheritance used by vLLM's OpenAI chat path:
@@ -197,6 +196,7 @@ mod tests {
             chat_options: ChatOptions::default(),
             tools: Vec::new(),
             tool_choice: ChatToolChoice::None,
+            decode_options: Default::default(),
         }
     }
 

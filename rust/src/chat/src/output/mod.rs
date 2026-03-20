@@ -10,7 +10,7 @@ use subenum::subenum;
 use tool_parser::ParserFactory as ToolParserFactory;
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 use vllm_llm::GenerateOutputStream;
-use vllm_text::output::{DecodedTextEvent, TextDecodeOptions, decoded_text_event_stream};
+use vllm_text::output::{DecodedTextEvent, decoded_text_event_stream};
 
 use self::reasoning::reasoning_event_stream;
 use self::tool::tool_event_stream;
@@ -143,18 +143,12 @@ pub(crate) fn output_stream(
                 .create_for_model(model_id)
         })
     };
-    // TODO: move these options out of `UserSamplingParams`.
-    let text_decode_options = TextDecodeOptions {
-        skip_special_tokens: request.sampling_params.skip_special_tokens,
-        include_stop_str_in_output: request.sampling_params.include_stop_str_in_output,
-    };
-
     // Chain the streams together.
     let decoded = decoded_text_event_stream(
         request.request_id.clone(),
         backend,
         raw_stream,
-        text_decode_options,
+        request.decode_options.clone(),
     )
     .map_err(Error::from);
     let reasoning = reasoning_event_stream(decoded, reasoning_parser);

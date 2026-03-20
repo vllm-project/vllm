@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
         chat_options: ChatOptions::default(),
         tools: Vec::new(),
         tool_choice: ChatToolChoice::None,
+        decode_options: Default::default(),
     };
 
     println!("request_id={request_id}");

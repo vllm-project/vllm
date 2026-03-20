@@ -646,6 +646,7 @@ async fn chat_harness_streams_text_events() {
             chat_options: Default::default(),
             tools: Vec::new(),
             tool_choice: ChatToolChoice::None,
+            decode_options: Default::default(),
         })
         .await
         .expect("submit chat request");

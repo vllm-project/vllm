@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use openai_protocol::common::{Function as OpenAiFunction, Tool as OpenAiTool};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use vllm_text::output::TextDecodeOptions;
 
 use crate::AssistantMessageExt;
 use crate::error::{Error, Result};
@@ -246,19 +247,13 @@ pub struct UserSamplingParams {
     pub presence_penalty: Option<f32>,
     /// Repetition penalty applied by the sampler. `None` means no explicit user override.
     pub repetition_penalty: Option<f32>,
-    /// If true, keep the terminal stop token in the decoded output text.
-    ///
-    /// This currently affects token-based stop handling only; string stop
-    /// sequences are still out of scope for the minimal Rust chat layer.
-    pub include_stop_str_in_output: bool,
     /// Explicit stop token IDs provided by the caller. `None` means no explicit user override.
     pub stop_token_ids: Option<Vec<u32>>,
     /// If true, do not stop on the model's primary EOS token.
     pub ignore_eos: bool,
-    /// If true, special tokens are skipped during incremental detokenization.
-    pub skip_special_tokens: bool,
 }
 
+#[allow(clippy::derivable_impls)] // more explicit
 impl Default for UserSamplingParams {
     fn default() -> Self {
         Self {
@@ -272,10 +267,8 @@ impl Default for UserSamplingParams {
             frequency_penalty: None,
             presence_penalty: None,
             repetition_penalty: None,
-            include_stop_str_in_output: false,
             stop_token_ids: None,
             ignore_eos: false,
-            skip_special_tokens: true,
         }
     }
 }
@@ -332,6 +325,8 @@ pub struct ChatRequest {
     pub tools: Vec<ChatTool>,
     /// Tool-choice behavior for this request.
     pub tool_choice: ChatToolChoice,
+    /// Text decode options for incremental detokenization.
+    pub decode_options: TextDecodeOptions,
 }
 
 impl ChatRequest {

@@ -53,10 +53,8 @@ pub fn prepare_chat_request(
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
             repetition_penalty: request.repetition_penalty,
-            include_stop_str_in_output: false,
             stop_token_ids: request.stop_token_ids.clone(),
             ignore_eos: request.ignore_eos,
-            skip_special_tokens: request.skip_special_tokens,
         },
         chat_options: ChatOptions {
             add_generation_prompt: !request.continue_final_message,
@@ -65,6 +63,10 @@ pub fn prepare_chat_request(
         },
         tools: convert_tools(request.tools.as_deref())?,
         tool_choice: convert_tool_choice(request.tool_choice.as_ref())?,
+        decode_options: vllm_text::output::TextDecodeOptions {
+            skip_special_tokens: request.skip_special_tokens,
+            include_stop_str_in_output: false,
+        },
     };
 
     Ok(PreparedRequest {
@@ -274,10 +276,8 @@ mod tests {
                     frequency_penalty: None,
                     presence_penalty: None,
                     repetition_penalty: None,
-                    include_stop_str_in_output: false,
                     stop_token_ids: None,
                     ignore_eos: false,
-                    skip_special_tokens: false,
                 },
                 chat_options: ChatOptions {
                     add_generation_prompt: false,
@@ -288,6 +288,10 @@ mod tests {
                 },
                 tools: [],
                 tool_choice: Auto,
+                decode_options: TextDecodeOptions {
+                    skip_special_tokens: false,
+                    include_stop_str_in_output: false,
+                },
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -321,10 +325,8 @@ mod tests {
                     frequency_penalty: None,
                     presence_penalty: None,
                     repetition_penalty: None,
-                    include_stop_str_in_output: false,
                     stop_token_ids: None,
                     ignore_eos: false,
-                    skip_special_tokens: false,
                 },
                 chat_options: ChatOptions {
                     add_generation_prompt: true,
@@ -333,6 +335,10 @@ mod tests {
                 },
                 tools: [],
                 tool_choice: Auto,
+                decode_options: TextDecodeOptions {
+                    skip_special_tokens: false,
+                    include_stop_str_in_output: false,
+                },
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -383,10 +389,8 @@ mod tests {
                     repetition_penalty: Some(
                         1.1,
                     ),
-                    include_stop_str_in_output: false,
                     stop_token_ids: None,
                     ignore_eos: false,
-                    skip_special_tokens: false,
                 },
                 chat_options: ChatOptions {
                     add_generation_prompt: true,
@@ -395,6 +399,10 @@ mod tests {
                 },
                 tools: [],
                 tool_choice: Auto,
+                decode_options: TextDecodeOptions {
+                    skip_special_tokens: false,
+                    include_stop_str_in_output: false,
+                },
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -473,10 +481,8 @@ mod tests {
                     frequency_penalty: None,
                     presence_penalty: None,
                     repetition_penalty: None,
-                    include_stop_str_in_output: false,
                     stop_token_ids: None,
                     ignore_eos: false,
-                    skip_special_tokens: false,
                 },
                 chat_options: ChatOptions {
                     add_generation_prompt: true,
@@ -485,6 +491,10 @@ mod tests {
                 },
                 tools: [],
                 tool_choice: Auto,
+                decode_options: TextDecodeOptions {
+                    skip_special_tokens: false,
+                    include_stop_str_in_output: false,
+                },
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -566,10 +576,8 @@ mod tests {
                     frequency_penalty: None,
                     presence_penalty: None,
                     repetition_penalty: None,
-                    include_stop_str_in_output: false,
                     stop_token_ids: None,
                     ignore_eos: false,
-                    skip_special_tokens: false,
                 },
                 chat_options: ChatOptions {
                     add_generation_prompt: true,
@@ -594,6 +602,10 @@ mod tests {
                     },
                 ],
                 tool_choice: None,
+                decode_options: TextDecodeOptions {
+                    skip_special_tokens: false,
+                    include_stop_str_in_output: false,
+                },
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);

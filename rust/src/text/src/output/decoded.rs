@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use futures_async_stream::try_stream;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 use vllm_llm::GenerateOutputStream;
@@ -10,10 +11,19 @@ use crate::error::Error;
 use crate::output::incremental::IncrementalTextDecoder;
 
 /// Request-neutral options for incremental text decoding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextDecodeOptions {
     pub skip_special_tokens: bool,
     pub include_stop_str_in_output: bool,
+}
+
+impl Default for TextDecodeOptions {
+    fn default() -> Self {
+        Self {
+            skip_special_tokens: true,
+            include_stop_str_in_output: false,
+        }
+    }
 }
 
 /// Internal decoded-text event emitted before higher-level assistant adaptation.

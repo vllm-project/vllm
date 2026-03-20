@@ -322,6 +322,7 @@ mod tests {
                 strict: None,
             }],
             tool_choice: ChatToolChoice::Auto,
+            decode_options: Default::default(),
         }
     }
 
