@@ -1,11 +1,56 @@
+import argparse
+import json
+import multiprocessing as mp
+import os
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Tuple
+from functools import lru_cache
+import vllm
 import torch
 import cuda.tile as ct
 from cuda.tile import kernel, ByTarget
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
-TILE_M, TILE_N, TILE_K = 128, 128, 128
 ConstInt = ct.Constant[int]
+DEVICE_NAME = current_platform.get_device_name().lower().replace(" ", "_")
+
+
+@lru_cache(maxsize=1)
+def _load_master_json():
+    vllm_root = os.path.dirname(vllm.__file__)
+    config_path = os.path.join(
+        vllm_root, "model_executor", "layers", "quantization", "utils", "configs", "cutile_w8a8.json"
+    )
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            return json.load(f)
+    return {}
+
+
+_CONFIG_INDEX = {}
+
+def initialize_registry():
+    global _CONFIG_INDEX
+    raw_data = _load_master_json() # Your existing JSON loader
+    
+    for device, configs in raw_data.items():
+        dev_key = device.lower().replace(" ", "_")
+        for key, data in configs.items():
+            # Index by the exact key: (device, "mperrank_1_n_...")
+            _CONFIG_INDEX[(dev_key, key)] = data
+            
+            # Index by the shape for fallback: (device, N, K)
+            parts = key.split("_")
+            if len(parts) >= 6:
+                try:
+                    n_val, k_val = int(parts[3]), int(parts[5])
+                    _CONFIG_INDEX[(dev_key, n_val, k_val)] = data
+                except: continue
+
+# Initialize immediately
+initialize_registry()
 
 # This function,(adapted from triton/cutile) maps a linear Block ID (bid) 
 # to a 2D tile coordinate (bid_m, bid_n).
@@ -38,10 +83,8 @@ def matmul_kernel(A, B, As, Bs, C,
                                  TILE_M: ConstInt, TILE_N: ConstInt, TILE_K: ConstInt,
                                  GROUP_SIZE_M:ConstInt = 1 ):
 
-    M = A.shape[0]
-    N = B.shape[1]
     bid_m, bid_n = map_block_to_tile_grouped(M, N, TILE_M, TILE_N, GROUP_SIZE_M)
-    num_tiles_k = ct.num_tiles(A, axis=1, shape=(TILE_M, TILE_K))
+    num_tiles_k = ct.cdiv(K, TILE_K)
 
     acc = ct.zeros((TILE_M, TILE_N), dtype=ct.float32)
     zero_pad = ct.PaddingMode.ZERO
@@ -71,7 +114,22 @@ def cutile_blockwise_mm(A: torch.Tensor, B: torch.Tensor, As: torch.Tensor, Bs: 
     Out: (M, N) in out_dtype, row-major (stride: (N, 1))
 
     """
+    M, K = A.size()
+    K_, N = B.size()
+    exact_key = f"mperrank_{M}_n_{N}_k_{K}"
+    config = _CONFIG_INDEX.get((DEVICE_NAME, exact_key))
+
+    # if config is None:
+    #     config = _CONFIG_INDEX.get((DEVICE_NAME, int(N), int(K)))
     
+    if config:
+        # Load tuned parameters
+        TILE_M, TILE_N, TILE_K, GROUP_SIZE_M = config["block_sizes"]
+        #print(f"Using tuned config: device={DEVICE_NAME}, M={M}, N={N}, K={K}, TILE_M={TILE_M}, TILE_N={TILE_N}, TILE_K={TILE_K}, GROUP_SIZE_M={GROUP_SIZE_M}")
+    else:
+        # Fallback to safe defaults if not tuned for this exact M
+        TILE_M, TILE_N, TILE_K, GROUP_SIZE_M = 128, 128, 128, 1
+        #print ("cuTile Default: No config found for this shape, using default TILE_M=128, TILE_N=128, TILE_K=128, GROUP_SIZE_M=1")
     #assert B.is_contiguous(), "B must be contiguous"
     #assert Bs.T.is_contiguous(), "Bs must be contiguous"
 
@@ -91,7 +149,7 @@ def cutile_blockwise_mm(A: torch.Tensor, B: torch.Tensor, As: torch.Tensor, Bs: 
     stream_ptr = torch.cuda.current_stream().cuda_stream
     
     ct.launch(stream_ptr, grid_1d, matmul_kernel, 
-              (A, B, As, Bs, C, M, N, K, TILE_M, TILE_N, TILE_K, 1))
+              (A, B, As, Bs, C, M, N, K, TILE_M, TILE_N, TILE_K, GROUP_SIZE_M))
     return C
 
 def cutile_scaled_mm_fake(self, A, B, As, Bs, out_dtype) -> torch.Tensor:

@@ -16,6 +16,7 @@ from vllm.benchmarks.lib.utils import default_vllm_config
     torch.float16
 ])
 @pytest.mark.parametrize("M, N, K", [
+    (1,12288,4096),
     (128, 512, 7168),
     (256, 256, 256),
 ])
@@ -53,3 +54,4 @@ def test_cutile_blockwise_fp8_kernel(out_dtype, M, N, K, default_vllm_config):
     out = torch.ops.vllm.cutile_scaled_mm(A_fp8_cutlass, B_fp8_t, As_cutlass, Bs.t(), out_dtype)
     rel_diff = torch.mean(torch.abs(out.float() - ref_out.float())) / torch.mean(torch.abs(ref_out.float()))
     assert rel_diff < 0.001
+    torch.testing.assert_close(out, ref_out, rtol=1e-2, atol=1e-2)
