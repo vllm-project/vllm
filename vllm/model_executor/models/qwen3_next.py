@@ -15,7 +15,6 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
     ModelConfig,
-    SpeculativeConfig,
     VllmConfig,
     get_current_vllm_config,
 )
@@ -80,7 +79,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import Qwen3NextConfig
+from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import (
@@ -401,11 +400,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
     def __init__(
         self,
         config: Qwen3NextConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        speculative_config: SpeculativeConfig | None = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
+        create_in_proj_qkvz: bool = True,
     ) -> None:
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -432,10 +429,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         )
 
         self.config = config
-        self.model_config = model_config
-        self.cache_config = cache_config
-        self.quant_config = quant_config
-        self.speculative_config = speculative_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        self.speculative_config = vllm_config.speculative_config
         self.num_spec = (
             self.speculative_config.num_speculative_tokens
             if self.speculative_config
@@ -455,13 +452,16 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # projection of the input hidden states
         # Qwen3-Next and Qwen3.5 has a different qkv_proj layout,
         # we need to create qkvz_proj adaptively here.
-        self.in_proj_qkvz = self.create_qkvz_proj(
-            hidden_size=self.hidden_size,
-            key_dim=self.key_dim,
-            value_dim=self.value_dim,
-            quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_qkvz",
-        )
+        # When create_in_proj_qkvz is False (e.g. LoRA enabled in Qwen3.5),
+        # the subclass creates in_proj_qkv and in_proj_z separately.
+        if create_in_proj_qkvz:
+            self.in_proj_qkvz = self.create_qkvz_proj(
+                hidden_size=self.hidden_size,
+                key_dim=self.key_dim,
+                value_dim=self.value_dim,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj_qkvz",
+            )
         # ba_proj doesn't support blockwise fp8 quantization.
         # Qwen3-Next and Qwen3.5 have different in_proj_ba checkpoint
         # layouts, so we use a factory method to create the projection.
@@ -660,8 +660,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         projected_states_qkvz, projected_states_ba = torch.ops.vllm.gdn_in_proj(
             hidden_states,
-            self.in_proj_qkvz.weight.shape[0],
-            self.in_proj_ba.weight.shape[0],
+            sum(self.in_proj_qkvz.output_sizes) // self.tp_size,
+            sum(self.in_proj_ba.output_sizes) // self.tp_size,
             self.prefix,
         )
         query, key, value, z, b, a = self.fix_query_key_value_ordering(
@@ -842,7 +842,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 a=a,
                 core_attn_out=core_attn_out,
                 attn_metadata=attn_metadata,
-                virtual_engine=forward_context.virtual_engine,
             )
 
         has_initial_state = attn_metadata.has_initial_state
@@ -853,7 +852,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+        self_kv_cache = self.kv_cache[0]
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -1036,13 +1035,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
         attn_metadata: GDNAttentionMetadata,
-        virtual_engine: int,
     ):
         """
         Core attention computation with a packed non-spec decode fast path.
         """
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        self_kv_cache = self.kv_cache[virtual_engine]
+        self_kv_cache = self.kv_cache[0]
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -1209,7 +1207,6 @@ class Qwen3NextDecoderLayer(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        speculative_config = vllm_config.speculative_config
 
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
@@ -1217,10 +1214,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         if self.layer_type == "linear_attention":
             self.linear_attn = Qwen3NextGatedDeltaNet(
                 config,
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                speculative_config=speculative_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
             )
         elif self.layer_type == "full_attention":

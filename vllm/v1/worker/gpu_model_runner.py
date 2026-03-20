@@ -420,8 +420,9 @@ class GPUModelRunner(
         self.is_multimodal_raw_input_only_model = (
             model_config.is_multimodal_raw_input_only_model
         )
-        # This will be overridden in load_model()
+        # These will be overridden in load_model()
         self.is_multimodal_pruning_enabled = False
+        self.requires_sequential_video_encoding = False
         # Set to True after init_routed_experts_capturer() completes.
         # Prevents routed experts code from running during profiling/dummy run.
         self.routed_experts_initialized = False
@@ -2625,17 +2626,23 @@ class GPUModelRunner(
         ):
             batch_outputs: MultiModalEmbeddings
 
-            # EVS-related change.
+            # EVS and dynamic res video related change.
             # (ekhvedchenia): Temporary hack to limit peak memory usage when
             # processing multimodal data. This solves the issue with scheduler
             # putting too many video samples into a single batch. Scheduler
             # uses pruned vision tokens count to compare it versus compute
             # budget which is incorrect (Either input media size or non-pruned
             # output vision tokens count should be considered)
+            # dynamic res video for nemotron temporarily uses this hack via
+            # requires_sequential_video_encoding
+            # because it doesn't yet support video batching.
             # TODO(ywang96): Fix memory profiling to take EVS into account and
             # remove this hack.
             if (
-                self.is_multimodal_pruning_enabled
+                (
+                    self.is_multimodal_pruning_enabled
+                    or self.requires_sequential_video_encoding
+                )
                 and modality == "video"
                 and num_items > 1
             ):
@@ -2827,15 +2834,7 @@ class GPUModelRunner(
         if not is_pooling_model(model):
             return []
 
-        supported_tasks = list(model.pooler.get_supported_tasks())
-
-        if "score" in supported_tasks:
-            num_labels = getattr(self.model_config.hf_config, "num_labels", 0)
-            if num_labels != 1:
-                supported_tasks.remove("score")
-                logger.debug_once("Score API is only enabled for num_labels == 1.")
-
-        return supported_tasks
+        return list(model.pooler.get_supported_tasks())
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks = list[SupportedTask]()
@@ -2928,7 +2927,10 @@ class GPUModelRunner(
 
         pooling_metadata = self.input_batch.get_pooling_metadata()
         pooling_metadata.build_pooling_cursor(
-            num_scheduled_tokens_np, seq_lens_cpu, device=hidden_states.device
+            num_scheduled_tokens_np,
+            seq_lens_cpu,
+            device=hidden_states.device,
+            query_start_loc_gpu=self.query_start_loc.gpu[: num_reqs + 1],
         )
 
         model = cast(VllmModelForPooling, self.model)
@@ -4606,6 +4608,9 @@ class GPUModelRunner(
             and mm_config is not None
             and mm_config.is_multimodal_pruning_enabled()
         )
+        self.requires_sequential_video_encoding = hasattr(
+            self.get_model(), "requires_sequential_video_encoding"
+        )  # Temporary hack for dynamic res video w/o support for bs>1 yet
 
         if (
             is_mixture_of_experts(self.model)

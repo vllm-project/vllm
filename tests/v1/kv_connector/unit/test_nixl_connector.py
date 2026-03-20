@@ -599,7 +599,6 @@ class TestNixlHandshake:
             dummy_ctx = ForwardContext(
                 no_compile_layers={},
                 attn_metadata={},
-                virtual_engine=0,
                 slot_mapping={},
             )
             _before_load = time.perf_counter()
@@ -672,7 +671,6 @@ class TestNixlHandshake:
             dummy_ctx = ForwardContext(
                 no_compile_layers={},
                 attn_metadata={},
-                virtual_engine=0,
                 slot_mapping={},
             )
             _before_load = time.perf_counter()
@@ -908,7 +906,6 @@ class TestNixlHandshake:
             dummy_ctx = ForwardContext(
                 no_compile_layers={},
                 attn_metadata={},
-                virtual_engine=0,
                 slot_mapping={},
             )
             _before_load = time.perf_counter()
@@ -1079,7 +1076,6 @@ def test_kv_connector_stats(default_vllm_config, dist_init):
     dummy_ctx = ForwardContext(
         no_compile_layers={},
         attn_metadata={},
-        virtual_engine=0,
         slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
@@ -1890,7 +1886,6 @@ def test_aborted_request_removed_from_worker_in_batch(default_vllm_config, dist_
     dummy_ctx = ForwardContext(
         no_compile_layers={},
         attn_metadata={},
-        virtual_engine=0,
         slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
@@ -2012,7 +2007,7 @@ def test_transfer_failure_logging(
     connector = NixlConnector(
         vllm_config,
         KVConnectorRole.WORKER,
-        make_kv_cache_config(block_size=16, hma_enabled=enable_hma),
+        make_kv_cache_config(block_size=16, swa_enabled=enable_hma),
     )
     connector.connector_worker = FakeNixlConnectorWorker(
         vllm_config,
@@ -2059,7 +2054,6 @@ def test_transfer_failure_logging(
     dummy_ctx = ForwardContext(
         no_compile_layers={},
         attn_metadata={},
-        virtual_engine=0,
         slot_mapping={},
     )
 
@@ -2162,7 +2156,6 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     dummy_ctx = ForwardContext(
         no_compile_layers={},
         attn_metadata={},
-        virtual_engine=0,
         slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
@@ -2215,7 +2208,6 @@ def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init)
     dummy_ctx = ForwardContext(
         no_compile_layers={},
         attn_metadata={},
-        virtual_engine=0,
         slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
