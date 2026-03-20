@@ -269,6 +269,7 @@ _LATE_INTERACTION_MODELS = {
     "HF_ColBERT": ("colbert", "ColBERTModel"),
     "ColBERTModernBertModel": ("colbert", "ColBERTModernBertModel"),
     "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
+    "ColBERTLfm2Model": ("colbert", "ColBERTLfm2Model"),
     # [Multimodal]
     "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
     "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
