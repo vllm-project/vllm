@@ -17,3 +17,5 @@ nvidia-cudnn-frontend>=1.13.0,<1.19.0
 # QuACK and Cutlass DSL for FA4 (cute-DSL implementation)
 nvidia-cutlass-dsl>=4.4.0.dev1
 quack-kernels>=0.2.7
+
+# this pr is to trigger for statistics
