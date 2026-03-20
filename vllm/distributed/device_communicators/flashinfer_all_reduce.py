@@ -62,15 +62,13 @@ def _create_workspace(
         if "multicast" in str(e).lower():
             logger.warning_once(
                 "Failed to initialize FlashInfer All Reduce workspace: %s. "
-                "AllReduce fusion pass will be disabled. This is expected "
-                "on GPUs without NVSwitch (e.g., NVLink bridge-only or "
-                "PCIe topologies).",
+                "This is expected on GPUs without NVSwitch (e.g., NVLink "
+                "bridge-only or PCIe topologies).",
                 e,
             )
         else:
             logger.warning_once(
-                "Failed to initialize FlashInfer All Reduce workspace: %s. "
-                "AllReduce fusion pass will be disabled.",
+                "Failed to initialize FlashInfer All Reduce workspace: %s.",
                 e,
             )
         return None

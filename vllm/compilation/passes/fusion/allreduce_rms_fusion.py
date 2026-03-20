@@ -768,9 +768,13 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             group=self.group,
         )
         if get_fi_ar_workspace(**workspace_kwargs) is None:
+            logger.warning_once(
+                "Failed to initialize Flashinfer allreduce workspace. "
+                "Flashinfer allreduce fusion will be disabled."
+            )
             return
 
-        self.supports_ar_quant_fusion = (
+        self.supports_quant_fusion = (
             get_fi_ar_quant_workspace(**workspace_kwargs) is not None
         )
 
@@ -785,7 +789,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
     @enable_fake_mode
     def register_patterns(self) -> None:
         for epsilon in [1e-5, 1e-6]:
-            if self.supports_ar_quant_fusion:
+            if self.supports_quant_fusion:
                 AllReduceFusedRMSNormStaticQuantFP8Pattern(
                     epsilon,
                     self.model_dtype,
