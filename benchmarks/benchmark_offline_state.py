@@ -25,12 +25,13 @@ Baselines:
 """
 
 import argparse
+import importlib.util
 import json
-import math
+import logging
 import os
 import random
 import sys
-import time
+import types
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
@@ -46,9 +47,6 @@ _VLLM_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, ".."))
 if _VLLM_ROOT not in sys.path:
     sys.path.insert(0, _VLLM_ROOT)
 
-import importlib.util
-import logging
-
 
 def _load_module(name, rel_path):
     full_path = os.path.join(_VLLM_ROOT, rel_path)
@@ -61,8 +59,6 @@ def _load_module(name, rel_path):
 
 
 # Stub vllm.logger to avoid triggering heavy imports
-import types
-
 vllm_pkg = types.ModuleType("vllm")
 vllm_pkg.__path__ = [os.path.join(_VLLM_ROOT, "vllm")]
 sys.modules.setdefault("vllm", vllm_pkg)
@@ -683,7 +679,7 @@ def generate_plots(
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, "01_hitrate_vs_zipf.png"), dpi=150)
     plt.close(fig)
-    print(f"  Saved 01_hitrate_vs_zipf.png")
+    print("  Saved 01_hitrate_vs_zipf.png")
 
     # ---- Plot 2: Discovery latency vs Zipf theta ----
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -700,7 +696,7 @@ def generate_plots(
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, "02_latency_vs_zipf.png"), dpi=150)
     plt.close(fig)
-    print(f"  Saved 02_latency_vs_zipf.png")
+    print("  Saved 02_latency_vs_zipf.png")
 
     # ---- Plot 3: Hit rate vs cluster size ----
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -721,7 +717,7 @@ def generate_plots(
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, "03_hitrate_vs_cluster.png"), dpi=150)
     plt.close(fig)
-    print(f"  Saved 03_hitrate_vs_cluster.png")
+    print("  Saved 03_hitrate_vs_cluster.png")
 
     # ---- Plot 4: Discovery latency vs cluster size ----
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -741,7 +737,7 @@ def generate_plots(
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, "04_latency_vs_cluster.png"), dpi=150)
     plt.close(fig)
-    print(f"  Saved 04_latency_vs_cluster.png")
+    print("  Saved 04_latency_vs_cluster.png")
 
     # ---- Plot 5: Bloom filter size vs cluster scale ----
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
@@ -774,7 +770,7 @@ def generate_plots(
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, "05_bloom_sizing.png"), dpi=150)
     plt.close(fig)
-    print(f"  Saved 05_bloom_sizing.png")
+    print("  Saved 05_bloom_sizing.png")
 
     # ---- Plot 6: FPR vs sync interval ----
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
@@ -800,7 +796,7 @@ def generate_plots(
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, "06_sync_interval.png"), dpi=150)
     plt.close(fig)
-    print(f"  Saved 06_sync_interval.png")
+    print("  Saved 06_sync_interval.png")
 
     # ---- Plot 7: Hit rate breakdown (stacked bar) ----
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -837,7 +833,7 @@ def generate_plots(
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, "07_hitrate_breakdown.png"), dpi=150)
     plt.close(fig)
-    print(f"  Saved 07_hitrate_breakdown.png")
+    print("  Saved 07_hitrate_breakdown.png")
 
     print(f"\nAll plots saved to {output_dir}/")
 

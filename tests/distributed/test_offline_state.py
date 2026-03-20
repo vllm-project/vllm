@@ -12,11 +12,9 @@ Uses direct module loading to avoid importing the full vLLM dependency chain.
 """
 
 import importlib.util
-import math
 import os
 import random
 import sys
-import time
 
 import pytest
 
@@ -501,7 +499,7 @@ class TestOfflineStateSimulation:
         )
         assert local_rate + peer_rate > 0.30, (
             f"Combined local+peer rate {local_rate + peer_rate:.2%} "
-            f"doesn't show significant server bypass"
+            "doesn't show significant server bypass"
         )
 
     def test_bloom_filter_scales_with_nodes(self):
@@ -520,5 +518,5 @@ class TestOfflineStateSimulation:
         ratio = results[64] / results[4]
         assert ratio < 10, (
             f"Bloom filter scaling ratio {ratio:.1f}x for 64/4 nodes "
-            f"is too high (expected < 10x due to sqrt scaling)"
+            "is too high (expected < 10x due to sqrt scaling)"
         )
