@@ -292,8 +292,14 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_host=kv_transfer_params["remote_host"],
             remote_port=kv_transfer_params["remote_port"],
-            remote_handshake_port=kv_transfer_params["remote_handshake_port"],
-            remote_notify_port=kv_transfer_params["remote_notify_port"],
+            remote_handshake_port=kv_transfer_params.get(
+                "remote_handshake_port",
+                int(MoRIIOConstants.DEFAULT_HANDSHAKE_PORT),
+            ),
+            remote_notify_port=kv_transfer_params.get(
+                "remote_notify_port",
+                int(MoRIIOConstants.DEFAULT_NOTIFY_PORT),
+            ),
             tp_size=kv_transfer_params.get("tp_size", 1),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
         )
