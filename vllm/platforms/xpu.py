@@ -118,7 +118,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_supported_bitmask_backends(cls) -> list[str]:
-        return ["auto", "cpu"]
+        return ["auto", "triton", "cpu"]
 
     @classmethod
     def get_bitmask_backend(cls, backend: str = "auto") -> str:
