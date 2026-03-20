@@ -347,7 +347,7 @@ def disable_inplace() -> bool:
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-def _pack_topk_ids_weights(
+def trtllm_moe_pack_topk_ids_weights(
     topk_ids: torch.Tensor, topk_weights: torch.Tensor
 ) -> torch.Tensor:
     """
