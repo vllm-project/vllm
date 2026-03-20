@@ -839,6 +839,11 @@ class SpeculativeConfig:
             # For draft model-based speculation, we need one new slot per request
             # Since we do not slice the draft tokens
             slots_per_req += 1
+        elif self.use_eagle():
+            # For EAGLE/MTP methods, we need one new slot per request for draft
+            # tokens when not parallel drafting
+            if not self.parallel_drafting:
+                slots_per_req += 1
         return slots_per_req
 
     def use_eagle(self) -> bool:
