@@ -628,6 +628,11 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"architectures": ["ColBERTJinaRobertaModel"]},
     ),
+    "ColBERTLfm2Model": _HfExamplesInfo(
+        "LiquidAI/LFM2-ColBERT-350M",
+        trust_remote_code=True,
+        hf_overrides={"architectures": ["ColBERTLfm2Model"]},
+    ),
     # [Multimodal]
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
