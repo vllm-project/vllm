@@ -6,6 +6,64 @@
 
 ---
 
+## 日期：2026-03-21 (第二天)
+
+### 🌅 07:37 晨间检查
+
+**PR 状态:**
+| PR # | 标题 | 状态 | 评论 | 行动 |
+|------|------|------|------|------|
+| #37621 | [Bugfix] JAIS: Only apply ALiBi when position_embedding_type is alibi | open | 0 | 等待中 |
+| #37578 | [Bugfix] Fix unclean shutdown from Ctrl-C with AR Fusion | open | 1 (bot) | 等待 CI |
+
+**Bot 评论分析:**
+- PR #37578 只有 gemini-code-assist[bot] 的评论：无法 review 文件类型
+- 无需行动，等待 CI 结果
+
+### 📚 学习的 Merge PR 经验 (2026-03-20)
+
+| PR # | 作者 | 标题 | 改动 | 学习点 |
+|------|------|------|------|--------|
+| #37645 | WoosukKwon | [MRV2] Avoid recompilation of _gather_block_tables_kernel | ±1, 1 file | 核心维护者，小改动解决编译问题 |
+| #37683 | xyang16 | [Perf] Eliminate redundant SparseMatrix creation... | +73/-4, 2 files | 性能优化，基于 profiling 发现 |
+| #37661 | chaunceyjiang | [Misc] Use logger.info_once for auto tool choice log message | ±1, 1 file | 小改进，减少日志噪音 |
+| #37685 | hmellor | Fix attribute error in `isaac_patch_hf_runner` | - | 修复属性错误 |
+| #37693 | DarkLight1337 | [Model] Update Kimi-K25 and Isaac processors to fit HF-style | - | 模型配置更新 |
+
+**标题格式总结:**
+- `[标签] 描述` 或 `[标签][子标签] 描述`
+- 常用标签：`[Bugfix]`, `[Perf]`, `[MRV2]`, `[ROCm]`, `[CI]`, `[Test]`, `[Misc]`, `[Model]`, `[Feature]`
+- 描述简洁，直接说明问题/方案
+
+**改动大小观察:**
+- 小修复：±1-5 行，1-2 文件
+- 性能优化：±50-100 行，2-5 文件
+- 核心维护者 (WoosukKwon) 也做小改动，不追求大 PR
+
+### 👀 izhuhaoran 动态 (2026-03-20)
+
+**新建 PRs (5 个):**
+- #37723: [ROCm][CI] Stabilize ROCm speech-to-text translation test with ROCM_EXTRA_ARGS
+- #37722: quick fix for 37665
+- #37721: [ROCm][CI] Update GSM8K eval config to use fp8-and-mixed models list (MI355)
+- #37719: [Test] Only Run MLA model when user explicitly set for batch invariance
+- #37718: [Bug] Fix fp8 deepgemm batch invariant
+
+**观察:**
+- 专注 ROCm CI 和 Bugfix 领域
+- 标题格式规范：`[标签][子标签] 描述`
+- 频率：一天 5 个 PR（较高，可能是集中修复）
+
+### 🎯 今天计划 (2026-03-21)
+
+- [ ] 09:00 后检查 PR 状态更新
+- [ ] 学习 10+ merge PRs
+- [ ] 推进新开发（KVCache 或 Qwen 模型方向）
+- [ ] 准备第二个 PR（如果 #37621 有进展）
+- [ ] 更新 DAILY_LEARNINGS.md
+
+---
+
 ## 日期：2026-03-20 (第一天)
 
 ### ✅ 昨天完成
