@@ -1,0 +1,96 @@
+name: New PR Bot
+
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  update-description:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update PR description
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr_number = context.issue.number;
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: pr_number,
+            });
+
+            let body = pr.body || '';
+            const original = body;
+
+            // Remove markdown comments (<!-- ... -->)
+            body = body.replace(/^<!--.*-->$/gm, '');
+
+            // Remove "PLEASE FILL IN THE PR DESCRIPTION HERE ..."
+            body = body.replace(/^PLEASE FILL IN THE PR DESCRIPTION HERE.*$/gm, '');
+
+            // Remove all lines after and including "**BEFORE SUBMITTING, PLEASE READ ..."
+            body = body.replace(/\*\*BEFORE SUBMITTING, PLEASE READ.*\*\*[\s\S]*$/, '');
+
+            // Remove <details> section containing "PR Checklist (Click to Expand)"
+            body = body.replace(/(---\n\n)?<details>[\s\S]*?<summary>[\s\S]*?PR Checklist \(Click to Expand\)[\s\S]*?<\/summary>[\s\S]*?<\/details>/g, '');
+
+            if (body !== original) {
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: pr_number,
+                body,
+              });
+              console.log('Updated PR body');
+            } else {
+              console.log('No changes needed');
+            }
+
+  reminder-comment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post welcome comment for first-time contributors
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const prAuthor = context.payload.pull_request.user.login;
+
+            const { data: searchResults } = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${owner}/${repo} type:pr author:${prAuthor}`,
+              per_page: 1,
+            });
+
+            const authorPRCount = searchResults.total_count;
+            console.log(`Found ${authorPRCount} PRs by ${prAuthor}`);
+
+            if (authorPRCount === 1) {
+              console.log(`Posting welcome comment for first-time contributor: ${prAuthor}`);
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: context.issue.number,
+                body: [
+                  '\u{1f44b} Hi! Thank you for contributing to the vLLM project.',
+                  '',
+                  '\u{1f4ac} Join our developer Slack at https://slack.vllm.ai to discuss your PR in #pr-reviews, coordinate on features in #feat- channels, or join special interest groups in #sig- channels.',
+                  '',
+                  'Just a reminder: PRs would not trigger full CI run by default.',
+                  '',
+                  'Once the PR is approved and ready to go, your PR reviewer(s) can run CI to test the changes comprehensively before merging.',
+                  '',
+                  'To run CI, PR reviewers can either: Add `ready` label to the PR or enable auto-merge.',
+                  '',
+                  'If you have any questions, please reach out to us on Slack at https://slack.vllm.ai.',
+                  '',
+                  '\u{1f680}',
+                ].join('\n'),
+              });
+            } else {
+              console.log(`Skipping comment for ${prAuthor} - not their first PR (${authorPRCount} PRs found)`);
+            }
