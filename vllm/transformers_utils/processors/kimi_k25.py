@@ -19,7 +19,6 @@ class KimiK25Processor(ProcessorMixin):
         self.media_token_id = media_token_id
         assert self.media_token_id is not None
 
-    # We do not support str input for text here
     def __call__(
         self,
         vision_chunks: list[VisionChunk] | None = None,
