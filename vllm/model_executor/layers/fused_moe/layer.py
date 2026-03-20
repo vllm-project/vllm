@@ -243,10 +243,6 @@ def maybe_roundup_hidden_size(
         hidden_size, act_dtype, moe_parallel_config
     )
 
-    # MXFP4-specific rounding is now handled in the MXFP4 oracle
-    # (mxfp4_round_up_hidden_size_and_intermediate_size) called from
-    # Mxfp4MoEMethod.__init__().
-
     return hidden_size
 
 
