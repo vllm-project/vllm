@@ -99,11 +99,10 @@ class QuarkConfig(QuantizationConfig):
 
         quant_config = getattr(hf_config, "quantization_config", None)
         if quant_config is not None:
-            quant_dtype = quant_config["global_quant_config"]["weight"]["dtype"]
+            quant_dtype = quant_config.get("global_quant_config", {}).get("weight", {}).get("dtype")
             if quant_dtype == "fp4":
-                logger.info("override dynamic_mxfp4_quant to True")
+                logger.info("QuarkConfig.maybe_update_config: override dynamic_mxfp4_quant to True")
                 self.dynamic_mxfp4_quant = True
-
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
