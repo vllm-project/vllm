@@ -14,6 +14,7 @@ import requests
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 
+from vllm import envs
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
@@ -150,14 +151,19 @@ class IPCWeightTransferEngine(
         ``ipc_handles`` before constructing the typed dataclass, keeping
         serialization concerns out of the dataclass itself.
 
-        The pickled payload contains only rebuild_cuda_tensor argument
-        tuples (ints, bytes, strings) — no arbitrary callables — so
-        deserialization is safe without special flags.
+        Requires ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` because the
+        payload is deserialized via ``pickle.loads``.
         """
         if "ipc_handles_pickled" in update_dict:
             if "ipc_handles" in update_dict:
                 raise ValueError(
                     "Cannot specify both `ipc_handles` and `ipc_handles_pickled`"
+                )
+
+            if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+                raise ValueError(
+                    "Refusing to deserialize `ipc_handles_pickled` without "
+                    "VLLM_ALLOW_INSECURE_SERIALIZATION=1"
                 )
 
             pickled = update_dict.pop("ipc_handles_pickled")
