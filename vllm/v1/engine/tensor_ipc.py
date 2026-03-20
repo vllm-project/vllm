@@ -134,7 +134,7 @@ class TensorIpcReceiver:
         """
 
         # Create lookup key from handle
-        lookup_key = (meta["request_id"], meta["tensor_id"])
+        lookup_key = (meta.get("request_id"), meta["tensor_id"])
 
         # Drain all available tensors. We save them regardless if this is
         # the one we're waiting for as they may arrive out of order from
