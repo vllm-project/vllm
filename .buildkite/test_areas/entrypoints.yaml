@@ -10,7 +10,7 @@ steps:
   - tests/entrypoints/
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
-  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/serve/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
 
 - label: Entrypoints Integration (LLM)
   timeout_in_minutes: 40
@@ -48,11 +48,11 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/rpc
-  - tests/entrypoints/instrumentator
+  - tests/entrypoints/serve/instrumentator
   - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/instrumentator
+  - pytest -v -s entrypoints/serve/instrumentator
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 

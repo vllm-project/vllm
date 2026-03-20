@@ -55,7 +55,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "OvisConfig": "vllm.transformers_utils.configs.ovis",
     "PixelShuffleSiglip2VisionConfig": "vllm.transformers_utils.configs.isaac",
     "RadioConfig": "vllm.transformers_utils.configs.radio",
-    "SpeculatorsConfig": "vllm.transformers_utils.configs.speculators.base",
+    "SpeculatorsConfig": "vllm.transformers_utils.configs.speculators",
     "UltravoxConfig": "vllm.transformers_utils.configs.ultravox",
     "Step3VLConfig": "vllm.transformers_utils.configs.step3_vl",
     "Step3VisionEncoderConfig": "vllm.transformers_utils.configs.step3_vl",
