@@ -811,12 +811,12 @@ class Dashboard:
                 expert_bytes = self._estimate_expert_bytes()
                 mask_count = len(self.mask)
                 if mask_count > 0:
-                    mask_pct = round(mask_count * 100 / max(len(stats.experts), 1))
+                    mask_pct = mask_count * 100 / max(len(stats.experts), 1)
                     if expert_bytes > 0:
                         savings_gb = mask_count * expert_bytes / (1024**3)
-                        prune_info = f"  ACTIVE: {mask_pct}% ({mask_count} exp, ~{savings_gb:.1f}GB)"
+                        prune_info = f"  ACTIVE: {mask_pct:.2f}% ({mask_count} exp, ~{savings_gb:.1f}GB)"
                     else:
-                        prune_info = f"  ACTIVE: {mask_pct}% ({mask_count} exp)"
+                        prune_info = f"  ACTIVE: {mask_pct:.2f}% ({mask_count} exp)"
                 else:
                     prune_info = ""
                 prune_label = f" prunable: [{bar}] {pct*100:.0f}%{prune_info}"
