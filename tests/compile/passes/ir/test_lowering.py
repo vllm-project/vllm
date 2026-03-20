@@ -11,6 +11,7 @@ from vllm.compilation.passes.ir.lowering_pass import (
 )
 from vllm.config import get_current_vllm_config
 from vllm.ir import ops
+from vllm.platforms import current_platform
 
 from ...backend import TestBackend
 
@@ -35,7 +36,7 @@ class Model(nn.Module):
 
 @pytest.mark.parametrize("rms_provider", ops.rms_norm.supported_providers())
 def test_lowering_rms_norm(rms_provider, default_vllm_config):
-    torch.set_default_device("cuda")
+    torch.set_default_device(current_platform.device_type)
 
     lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
     backend = TestBackend(lowering_pass)
