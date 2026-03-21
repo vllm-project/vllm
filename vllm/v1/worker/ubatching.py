@@ -219,8 +219,9 @@ def make_ubatch_contexts(
     Create a context manager for micro-batching synchronization.
     """
     cpu_events = [threading.Event() for _ in range(num_micro_batches)]
-    gpu_comm_done_events = [torch.Event() for _ in range(num_micro_batches)]
-    gpu_compute_done_events = [torch.Event() for _ in range(num_micro_batches)]
+    device = compute_stream.device
+    gpu_comm_done_events = [torch.Event(device=device) for _ in range(num_micro_batches)]
+    gpu_compute_done_events = [torch.Event(device=device) for _ in range(num_micro_batches)]
 
     ctxs = []
     for i in range(num_micro_batches):
