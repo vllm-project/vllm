@@ -741,19 +741,6 @@ class GPUModelRunner(
 
         self.uniform_decode_query_len = 1 + self.num_spec_tokens
 
-        # When spec decode is active, the mamba backend classifies requests
-        # with query_len <= reorder_batch_threshold as "decodes". Prefill
-        # chunks that fall under this threshold get processed via the decode
-        # path, which stores intermediate states at sequential slots. We must
-        # set num_accepted_tokens to the chunk's query_len for those requests
-        # so the next iteration reads from the correct final-state slot.
-        # Prefills that went through the actual prefill path should keep the
-        # default value of 1 (the prefill path stores state at slot 0 only).
-        self.needs_prefill_as_decode_slots: bool = False
-        self.prefill_as_decode_num_tokens = self._make_buffer(
-            self.max_num_reqs, dtype=torch.int32
-        )
-
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
 
@@ -1381,16 +1368,6 @@ class GPUModelRunner(
             .int()
             .argmax(-1)
         )
-        spec_decode_active = bool(scheduler_output.scheduled_spec_decode_tokens)
-        if self.needs_prefill_as_decode_slots and spec_decode_active:
-            mamba_utils.update_accepted_tokens_for_prefill_as_decode(
-                self.input_batch,
-                self.prefill_as_decode_num_tokens,
-                self.num_accepted_tokens.gpu,
-                scheduler_output,
-                self.reorder_batch_threshold,
-                num_reqs,
-            )
 
         if self.cache_config.mamba_cache_mode == "align":
             for i, num_tokens in enumerate(
@@ -1994,14 +1971,23 @@ class GPUModelRunner(
             attn_gid = self.routed_experts_attn_gid
             slot_mapping_attn = slot_mappings[attn_gid]
             self.slot_mapping = slot_mapping_attn[:num_tokens].cpu().numpy()
+        # Compute is_prefilling: True if request is still in prefill phase
+        # (num_computed_tokens < num_prompt_tokens). Used by mamba backends to
+        # distinguish actual decodes from short extends.
+        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+            :num_reqs_padded
+        ]
+        num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
+            :num_reqs_padded
+        ]
+        is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
+
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
             seq_lens=self.seq_lens.gpu[:num_reqs_padded],
             _seq_lens_cpu=self.seq_lens.cpu[:num_reqs_padded],
-            _num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[
-                :num_reqs_padded
-            ],
+            _num_computed_tokens_cpu=num_computed_tokens_cpu,
             num_reqs=num_reqs_padded,
             num_actual_tokens=num_tokens_padded,
             max_query_len=max_query_len,
@@ -2009,6 +1995,7 @@ class GPUModelRunner(
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
             causal=True,
+            is_prefilling=is_prefilling,
         )
 
         if self.dcp_world_size > 1:
@@ -2060,8 +2047,6 @@ class GPUModelRunner(
                 else 0
             )
 
-            if isinstance(builder, Mamba2AttentionMetadataBuilder):
-                self.needs_prefill_as_decode_slots = True
             extra_attn_metadata_args = {}
             if use_spec_decode and isinstance(
                 builder, (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder)
@@ -2846,15 +2831,7 @@ class GPUModelRunner(
         if not is_pooling_model(model):
             return []
 
-        supported_tasks = list(model.pooler.get_supported_tasks())
-
-        if "score" in supported_tasks:
-            num_labels = getattr(self.model_config.hf_config, "num_labels", 0)
-            if num_labels != 1:
-                supported_tasks.remove("score")
-                logger.debug_once("Score API is only enabled for num_labels == 1.")
-
-        return supported_tasks
+        return list(model.pooler.get_supported_tasks())
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks = list[SupportedTask]()
