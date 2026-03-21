@@ -23,8 +23,14 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 def get_test_models():
     """Get list of models to test based on PyTorch version"""
-    # TODO "Qwen/Qwen3-4B-Instruct-2507" fails Fix issue and support it.
-    return ["gpt2", "Qwen/Qwen2-7B-Instruct", "meta-llama/Llama-3.1-8B"]
+    models = [
+        "gpt2",
+        "Qwen/Qwen2-7B-Instruct",
+        "meta-llama/Llama-3.1-8B",
+    ]
+    if is_torch_equal_or_newer("2.12.0"):
+        models.append("Qwen/Qwen3-4B-Instruct-2507")
+    return models
 
 
 @pytest.mark.parametrize("model_name", get_test_models())
@@ -39,9 +45,7 @@ def get_test_models():
 @pytest.mark.parametrize("use_aot_compile", ["0", "1"])
 @pytest.mark.parametrize("use_bytecode_hook", [True, False])
 @pytest.mark.parametrize("evaluate_guards", [False, True])
-@pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
-)
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_dynamic_shapes_compilation(
     monkeypatch,
     model_name,
@@ -77,6 +81,7 @@ def test_dynamic_shapes_compilation(
                 "evaluate_guards": evaluate_guards,
             },
         },
+        max_model_len=1024,
     )
 
     output = model.generate(prompt)
@@ -100,8 +105,8 @@ def test_dynamic_shapes_compilation(
     # Clean up GPU memory
     del model
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+    torch.accelerator.empty_cache()
+    torch.accelerator.synchronize()
     print("GPU memory cleared")
 
 

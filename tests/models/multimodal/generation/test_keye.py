@@ -8,7 +8,7 @@ from PIL.Image import Image
 from transformers import AutoProcessor
 
 from vllm import LLM, EngineArgs, SamplingParams
-from vllm.multimodal.utils import encode_image_base64
+from vllm.multimodal.utils import encode_image_url
 
 MODEL_NAME = "Kwai-Keye/Keye-VL-8B-Preview"
 
@@ -24,17 +24,10 @@ class ModelRequestData(NamedTuple):
     sampling_params: SamplingParams | None = None
 
 
-@pytest.mark.core_model
 @pytest.mark.parametrize("question", [QUESTION])
-def test_keye_vl(
-    image_assets,
-    question: str,
-):
+def test_keye_vl(image_assets, question: str):
     images = [asset.pil_image for asset in image_assets]
-
-    image_urls = [
-        f"data:image/jpeg;base64,{encode_image_base64(image)}" for image in images
-    ]
+    image_urls = [encode_image_url(image) for image in images]
 
     engine_args = EngineArgs(
         model=MODEL_NAME,

@@ -121,10 +121,6 @@ VLM_TEST_SETTINGS = {
         ),
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
-        dtype="bfloat16",
-        marks=[
-            pytest.mark.skip(reason="vLLM does not support PrefixLM attention mask")
-        ],
     ),
     "qwen2_5_vl": VLMTestInfo(
         models=["Qwen/Qwen2.5-VL-3B-Instruct"],
@@ -177,6 +173,9 @@ VLM_TEST_SETTINGS = {
         marks=[
             pytest.mark.core_model,
         ],
+        vllm_runner_kwargs={"attention_backend": "TRITON_ATTN"}
+        if current_platform.is_rocm()
+        else {},
     ),
     "ultravox": VLMTestInfo(
         models=["fixie-ai/ultravox-v0_5-llama-3_2-1b"],
@@ -207,9 +206,7 @@ VLM_TEST_SETTINGS = {
             "model_impl": "transformers",
             "default_torch_num_threads": 1,
         },
-        # FIXME: Investigate why the test hangs
-        # when processing the 3rd prompt in vLLM
-        marks=[pytest.mark.core_model, pytest.mark.skip(reason="Test hangs")],
+        marks=[pytest.mark.core_model],
     ),
     # Gemma3 has bidirectional mask on images
     "gemma3-transformers": VLMTestInfo(
@@ -223,7 +220,10 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={
             "model_impl": "transformers",
         },
-        marks=[pytest.mark.core_model],
+        marks=[
+            pytest.mark.core_model,
+            *([large_gpu_mark(min_gb=80)] if current_platform.is_rocm() else []),
+        ],
     ),
     "idefics3-transformers": VLMTestInfo(
         models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
@@ -253,8 +253,19 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.2, 0.15)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
+            # TODO: [ROCm] Revert this once issue #30167 is resolved
+            **(
+                {
+                    "mm_processor_kwargs": {
+                        "min_pixels": 256 * 28 * 28,
+                        "max_pixels": 1280 * 28 * 28,
+                    },
+                }
+                if current_platform.is_rocm()
+                else {}
+            ),
         },
-        marks=[large_gpu_mark(min_gb=32)],
+        marks=[large_gpu_mark(min_gb=80 if current_platform.is_rocm() else 32)],
     ),
     #### Extended model tests
     "aria": VLMTestInfo(
@@ -363,7 +374,7 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
         num_logprobs=10,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "gemma3": VLMTestInfo(
@@ -382,6 +393,14 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
         patch_hf_runner=model_utils.gemma3_patch_hf_runner,
+    ),
+    "granite_vision": VLMTestInfo(
+        models=["ibm-granite/granite-vision-3.3-2b"],
+        test_type=(VLMTestType.IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}\n<|assistant|>\n",
+        max_model_len=8192,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
     ),
     "glm4v": VLMTestInfo(
         models=["zai-org/glm-4v-9b"],
@@ -415,7 +434,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
         num_logprobs=10,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         auto_cls=AutoModelForImageTextToText,
         marks=[large_gpu_mark(min_gb=32)],
     ),
@@ -434,6 +453,20 @@ VLM_TEST_SETTINGS = {
                 limit_mm_per_prompt={"video": 1},
             )
         ],
+        marks=[large_gpu_mark(min_gb=32)],
+    ),
+    "glm_ocr": VLMTestInfo(
+        models=["zai-org/GLM-OCR"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"[gMASK]<|user|>\n{img_prompt}<|assistant|>\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|begin_of_image|><|image|><|end_of_image|>",
+        video_idx_to_prompt=lambda idx: "<|begin_of_video|><|video|><|end_of_video|>",
+        max_model_len=2048,
+        max_num_seqs=2,
+        get_stop_token_ids=lambda tok: [151329, 151336, 151338],
+        num_logprobs=10,
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        auto_cls=AutoModelForImageTextToText,
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "h2ovl": VLMTestInfo(
@@ -495,6 +528,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
+        num_logprobs=10 if current_platform.is_rocm() else 5,
     ),
     "intern_vl-hf": VLMTestInfo(
         models=["OpenGVLab/InternVL3-1B-hf"],
@@ -509,6 +543,34 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         use_tokenizer_eos=True,
         auto_cls=AutoModelForImageTextToText,
+    ),
+    "isaac": VLMTestInfo(
+        models=[
+            "PerceptronAI/Isaac-0.1",
+            "PerceptronAI/Isaac-0.2-2B-Preview",
+        ],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: (
+            f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        ),
+        img_idx_to_prompt=lambda idx: "<image>",
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<vlm_image>Please describe the image shortly.",
+                "cherry_blossom": "<vlm_image>Please infer the season with reason.",
+            }
+        ),
+        multi_image_prompt=(
+            "Picture 1: <vlm_image>\n"
+            "Picture 2: <vlm_image>\n"
+            "Describe these two images with one paragraph respectively."
+        ),
+        enforce_eager=False,
+        max_model_len=4096,
+        max_num_seqs=2,
+        hf_model_kwargs={"device_map": "auto"},
+        patch_hf_runner=model_utils.isaac_patch_hf_runner,
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
     ),
     "kimi_vl": VLMTestInfo(
         models=["moonshotai/Kimi-VL-A3B-Instruct"],
@@ -645,7 +707,17 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc=model_utils.minimax_vl_01_hf_output,
         patch_hf_runner=model_utils.minimax_vl_01_patch_hf_runner,
         auto_cls=AutoModelForImageTextToText,
-        marks=[large_gpu_mark(min_gb=80)],
+        marks=[
+            large_gpu_mark(min_gb=80),
+            # TODO: [ROCm] Fix pickle issue with ROCm spawn and tp>1
+            pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason=(
+                    "ROCm: Model too large for single GPU; "
+                    "multi-GPU blocked by HF _LazyConfigMapping pickle issue with spawn"
+                ),
+            ),
+        ],
     ),
     "molmo": VLMTestInfo(
         models=["allenai/Molmo-7B-D-0924"],
@@ -708,6 +780,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForCausalLM,
+        patch_hf_runner=model_utils.paddleocr_vl_patch_hf_runner,
         image_size_factors=[(0.25,)],
         marks=[
             pytest.mark.skipif(
@@ -884,12 +957,6 @@ VLM_TEST_SETTINGS = {
                     formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
                 ),
                 limit_mm_per_prompt={"image": 4},
-            )
-        ],
-        marks=[
-            pytest.mark.skipif(
-                Version(TRANSFORMERS_VERSION) == Version("4.57.1"),
-                reason="This model is broken in Transformers v4.57.1",
             )
         ],
     ),

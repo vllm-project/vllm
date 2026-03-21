@@ -51,7 +51,6 @@ class InputBatch:
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
-        self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_computed_tokens_cpu_tensor = torch.zeros(
@@ -200,9 +199,6 @@ class InputBatch:
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
         self.token_ids_cpu[req_index, start_idx:end_idx] = request.output_token_ids
-        # Number of token ids in token_ids_cpu.
-        # NOTE(woosuk): This may include spec decode tokens.
-        self.num_tokens[req_index] = request.num_tokens
         # Number of tokens without spec decode tokens.
         self.num_tokens_no_spec[req_index] = request.num_tokens
 
@@ -344,10 +340,6 @@ class InputBatch:
             self.req_id_to_index[old_id_i2],
             self.req_id_to_index[old_id_i1],
         )
-        self.num_tokens[i1], self.num_tokens[i2] = (
-            self.num_tokens[i2],
-            self.num_tokens[i1],
-        )
         self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] = (
             self.num_tokens_no_spec[i2],
             self.num_tokens_no_spec[i1],
@@ -448,11 +440,10 @@ class InputBatch:
             self.req_output_token_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
 
-            num_tokens = self.num_tokens[last_req_index]
+            num_tokens = self.num_tokens_no_spec[last_req_index]
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
                 last_req_index, :num_tokens
             ]
-            self.num_tokens[empty_index] = num_tokens
             self.num_tokens_no_spec[empty_index] = self.num_tokens_no_spec[
                 last_req_index
             ]

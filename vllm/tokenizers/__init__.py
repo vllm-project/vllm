@@ -7,7 +7,6 @@ from .registry import (
     cached_get_tokenizer,
     cached_tokenizer_from_config,
     get_tokenizer,
-    init_tokenizer_from_config,
 )
 
 __all__ = [
@@ -16,5 +15,4 @@ __all__ = [
     "cached_get_tokenizer",
     "get_tokenizer",
     "cached_tokenizer_from_config",
-    "init_tokenizer_from_config",
 ]

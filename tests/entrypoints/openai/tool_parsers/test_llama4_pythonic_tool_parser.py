@@ -5,11 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.entrypoints.openai.tool_parsers.utils import (
+from tests.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
 )
-from vllm.entrypoints.openai.protocol import FunctionCall
+from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
@@ -193,7 +193,7 @@ TEST_CASES = [
     pytest.param(
         False,
         "<|python_start|>[get_weather(city='LA', metric='C'), "
-        + "register_user(name='Doe', age=9)]",
+        "register_user(name='Doe', age=9)]",
         [
             SIMPLE_FUNCTION_CALL,
             FunctionCall(name="register_user", arguments='{"name": "Doe", "age": 9}'),

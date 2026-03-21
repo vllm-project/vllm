@@ -24,7 +24,7 @@ class LRUOffloadingManager(OffloadingManager):
         self.blocks: OrderedDict[BlockHash, BlockStatus] = OrderedDict()
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
 
-    def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
+    def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
         hit_count = 0
         for block_hash in block_hashes:
             block = self.blocks.get(block_hash)
@@ -57,9 +57,13 @@ class LRUOffloadingManager(OffloadingManager):
     def prepare_store(
         self, block_hashes: Iterable[BlockHash]
     ) -> PrepareStoreOutput | None:
+        block_hashes_list = list(block_hashes)
+
         # filter out blocks that are already stored
         block_hashes_to_store = [
-            block_hash for block_hash in block_hashes if block_hash not in self.blocks
+            block_hash
+            for block_hash in block_hashes_list
+            if block_hash not in self.blocks
         ]
 
         num_blocks_to_evict = (
@@ -69,8 +73,11 @@ class LRUOffloadingManager(OffloadingManager):
         # build list of blocks to evict
         to_evict = []
         if num_blocks_to_evict > 0:
+            # Blocks from the original input are excluded from eviction candidates:
+            # a block that was already stored must remain in the cache after this call.
+            protected = set(block_hashes_list)
             for block_hash, block in self.blocks.items():
-                if block.ref_cnt == 0:
+                if block.ref_cnt == 0 and block_hash not in protected:
                     to_evict.append(block_hash)
                     num_blocks_to_evict -= 1
                     if num_blocks_to_evict == 0:

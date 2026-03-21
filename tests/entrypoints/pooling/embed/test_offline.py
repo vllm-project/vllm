@@ -11,11 +11,6 @@ from vllm import LLM, PoolingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 
-if current_platform.is_rocm():
-    pytest.skip(
-        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
-    )
-
 MODEL_NAME = "intfloat/multilingual-e5-small"
 
 prompts = ["The chef prepared a delicious meal."]
@@ -23,6 +18,12 @@ prompts = ["The chef prepared a delicious meal."]
 
 @pytest.fixture(scope="module")
 def llm():
+    # ROCm: Use FLEX_ATTENTION backend as it's the only attention backend
+    # that supports encoder-only models on ROCm.
+    attention_config = None
+    if current_platform.is_rocm():
+        attention_config = {"backend": "FLEX_ATTENTION"}
+
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm = LLM(
@@ -32,6 +33,7 @@ def llm():
         gpu_memory_utilization=0.75,
         enforce_eager=True,
         seed=0,
+        attention_config=attention_config,
     )
 
     yield weakref.proxy(llm)
@@ -51,7 +53,9 @@ def test_token_embed(llm: LLM):
 def test_pooling_params(llm: LLM):
     def get_outputs(normalize):
         outputs = llm.embed(
-            prompts, pooling_params=PoolingParams(normalize=normalize), use_tqdm=False
+            prompts,
+            pooling_params=PoolingParams(use_activation=normalize),
+            use_tqdm=False,
         )
         return torch.tensor([x.outputs.embedding for x in outputs])
 

@@ -20,7 +20,7 @@ We currently support `/v1/chat/completions`, `/v1/embeddings`, and `/v1/score` e
 
 * The examples in this document use `meta-llama/Meta-Llama-3-8B-Instruct`.
     * Create a [user access token](https://huggingface.co/docs/hub/en/security-tokens)
-    * Install the token on your machine (Run `huggingface-cli login`).
+    * Install the token on your machine (Run `hf auth login`).
     * Get access to the gated model by [visiting the model card](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) and agreeing to the terms and conditions.
 
 ## Example 1: Running with a local file
@@ -255,8 +255,8 @@ cat results.jsonl
 Add score requests to your batch file. The following is an example:
 
 ```text
-{"custom_id": "request-1", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "text_1": "What is the capital of France?", "text_2": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
-{"custom_id": "request-2", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "text_1": "What is the capital of France?", "text_2": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
+{"custom_id": "request-1", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "queries": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
+{"custom_id": "request-2", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "queries": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
 ```
 
 You can mix chat completion, embedding, and score requests in the batch file, as long as the model you are using supports them all (note that all requests must use the same model).

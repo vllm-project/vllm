@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
 from itertools import accumulate
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 import numpy as np
 import torch
@@ -15,13 +15,11 @@ from einops import rearrange
 from timm.layers import LayerNorm, LayerNorm2d
 from timm.models.regnet import RegStage
 from transformers import BatchFeature, CLIPVisionConfig, SiglipVisionConfig
-from transformers.modeling_utils import no_init_weights
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -29,13 +27,12 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -50,7 +47,6 @@ from .utils import (
 )
 from .vision import get_vision_encoder_info
 
-EOT = "<|endofturn|>"
 IMAGE_TOKEN: str = "<|dummy3|>"
 VIDEO_TOKEN: str = "<|_unuse_missing_100270|>"
 
@@ -166,7 +162,7 @@ class HCXVisionDummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -174,8 +170,8 @@ class HCXVisionDummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionProcessingInfo
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = 32
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
         return {
             "image": self._get_dummy_images(
@@ -327,7 +323,7 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
+        fields = dict(
             pixel_values_images=MultiModalFieldConfig.batched("image"),
             image_sizes_images=MultiModalFieldConfig.batched("image"),
             vision_query_lengths_images=MultiModalFieldConfig.batched("image"),
@@ -335,27 +331,7 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
             vision_query_lengths_videos=MultiModalFieldConfig.batched("video"),
         )
 
-
-def _build_hcxvision_hf_info(
-    ctx: InputProcessingContext,
-) -> HCXVisionProcessingInfo:
-    return HCXVisionProcessingInfo(ctx)
-
-
-def _build_hcxvision_hf_processor(
-    info: HCXVisionProcessingInfo,
-    dummy_inputs: BaseDummyInputsBuilder[HCXVisionProcessingInfo],
-    *,
-    cache: BaseMultiModalProcessorCache | None = None,
-) -> BaseMultiModalProcessor:
-    if isinstance(info, HCXVisionProcessingInfo):
-        return HCXVisionMultiModalProcessor(
-            info,
-            dummy_inputs,  # type: ignore
-            cache=cache,
-        )
-
-    raise NotImplementedError(type(info))
+        return fields
 
 
 def init_vision_tower_for_hcxvision(
@@ -587,11 +563,20 @@ class HCXVisionCAbstractor(nn.Module):
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    _build_hcxvision_hf_processor,
-    info=_build_hcxvision_hf_info,
+    HCXVisionMultiModalProcessor,
+    info=HCXVisionProcessingInfo,
     dummy_inputs=HCXVisionDummyInputsBuilder,
 )
 class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+    """
+    HyperCLOVAX-SEED Vision-Language Model (V1 architecture).
+
+    Supports:
+    - HyperCLOVAX-SEED-Vision-Instruct-3B
+
+    Uses CLIP/SigLIP as the vision encoder with C-Abstractor projector.
+    """
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -602,7 +587,6 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         *,
         vllm_config: VllmConfig,
         prefix: str = "",
-        **kwargs: Any | None,
     ) -> None:
         super().__init__()
 
@@ -627,37 +611,37 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             config, vision_config
         )
 
-        # init models & parameters
-        with no_init_weights():  # weight will be loaded in from_pretrained
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_model = init_vision_tower_for_hcxvision(
                 vision_config,
-                quant_config,
+                quant_config=quant_config,
                 use_nth_layer=getattr(config, "use_nth_layer", -1),
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
-        self.mm_projector = self._init_mm_projector(config, text_config, vision_config)
+            self.mm_projector = self._init_mm_projector(
+                config, text_config, vision_config
+            )
 
-        self.lm_head_vocab_size = getattr(
-            text_config, "padded_vocab_size", text_config.vocab_size
-        )
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+            if config.anyres:
+                self.image_newline = nn.Parameter(
+                    torch.empty(text_config.hidden_size, dtype=self.dtype)
+                )
 
-        if config.anyres:
-            self.image_newline = nn.Parameter(
-                torch.empty(text_config.hidden_size, dtype=self.dtype)
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
             )
 
         self.config = config
         self.vision_config = vision_config
         self.text_config = text_config
 
-        # use_sum_loss = bool(kwargs.pop("use_sum_loss", False))
-        # self.reduction = self._init_reduction_type(use_sum_loss)
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -727,9 +711,6 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         return modalities
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(
         self,
         **kwargs: object,
@@ -758,7 +739,7 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

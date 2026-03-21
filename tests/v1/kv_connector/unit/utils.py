@@ -5,12 +5,13 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import chain, count
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
 from vllm import SamplingParams
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     DeviceConfig,
     KVTransferConfig,
@@ -30,11 +31,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # 
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
@@ -94,6 +98,8 @@ def create_vllm_config(
     dtype: str = "float16",
     cache_dtype: str = "auto",
     hf_overrides: dict[str, Any] | None = None,
+    attention_backend: str | None = None,
+    kv_load_failure_policy: Literal["recompute", "fail"] = "fail",
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
@@ -114,7 +120,6 @@ def create_vllm_config(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype=cache_dtype,
         enable_prefix_caching=True,
     )
@@ -123,33 +128,48 @@ def create_vllm_config(
         kv_role="kv_both",
         enable_permute_local_kv=enable_permute_local_kv,
         kv_connector_extra_config=kv_connector_extra_config or {},
+        kv_load_failure_policy=kv_load_failure_policy,
     )
+    attention_config = AttentionConfig(backend=attention_backend)
     return VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
         device_config=DeviceConfig("cpu"),
+        attention_config=attention_config,
     )
 
 
 def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
-) -> Scheduler:
+    kv_cache_config: KVCacheConfig | None = None,
+) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
-    kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,  # A large number of blocks to hold all requests
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"], FullAttentionSpec(block_size, 1, 1, torch.float32, False)
-            )
-        ],
-    )
+    if kv_cache_config is None:
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,  # A large number of blocks to hold all requests
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                )
+            ],
+        )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
-    return Scheduler(
+
+    scheduler_cls = (
+        AsyncScheduler if vllm_config.scheduler_config.async_scheduling else Scheduler
+    )
+    return scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         log_stats=True,
@@ -202,6 +222,7 @@ def create_request(
 
     max_tokens = 1 if do_remote_decode else max_tokens
     sampling_params = SamplingParams(max_tokens=max_tokens)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
 
     common_prefix = [1] * common_prefix_len if common_prefix_len > 0 else []
     suffix = [i * request_id for i in range(num_tokens - common_prefix_len)]
@@ -213,7 +234,6 @@ def create_request(
         sampling_params=sampling_params,
         pooling_params=None,
         mm_features=None,
-        eos_token_id=EOS_TOKEN_ID,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
     )
     req.kv_transfer_params = kv_transfer_params
@@ -400,3 +420,65 @@ KVConnectorFactory.register_connector(
 KVConnectorFactory.register_connector(
     "MockKVConnector", __name__, MockKVConnector.__name__
 )
+
+
+def make_kv_cache_config(
+    block_size: int,
+    swa_enabled: bool = False,
+    mamba_enabled: bool = False,
+    sw_size: int = 128,
+    num_blocks: int = 100,
+) -> KVCacheConfig:
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["layer0", "layer2"],
+            FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=4,
+                head_size=16,
+                dtype=torch.float16,
+            ),
+        )
+    ]
+    if swa_enabled:
+        kv_cache_groups.append(
+            KVCacheGroupSpec(
+                ["layer1", "layer3"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                    sliding_window=sw_size,
+                ),
+            )
+        )
+    if mamba_enabled:
+        kv_cache_groups.append(
+            KVCacheGroupSpec(
+                ["mamba0", "mamba1"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((16,), (16,)),
+                    dtypes=(torch.float16,),
+                ),
+            )
+        )
+    return KVCacheConfig(
+        num_blocks=num_blocks, kv_cache_tensors=[], kv_cache_groups=kv_cache_groups
+    )
+
+
+def make_nixl_scheduler(has_mamba: bool = False, is_hma_required: bool = False):
+    """Create a NixlConnectorScheduler via __new__ (skipping __init__).
+
+    Only sets the two flags needed by the N-1 prefill logic.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+        NixlConnectorScheduler,
+    )
+
+    sched = object.__new__(NixlConnectorScheduler)
+    sched._has_mamba = has_mamba
+    sched._is_hma_required = is_hma_required
+    return sched
