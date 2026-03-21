@@ -46,6 +46,8 @@ class AttentionConfig(VerifyAndUpdateConfig):
             block_size=cache_config.block_size
             if cache_config.block_size is not None
             else 16,
+            use_mla=model_config.use_mla,
+            use_sparse=hasattr(model_config.hf_config, "index_topk"),
         )
         backend_cls = _cached_get_attn_backend(
             backend=attention_config.backend,
