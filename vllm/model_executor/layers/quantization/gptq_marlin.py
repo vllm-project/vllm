@@ -181,7 +181,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 75
+        return 60
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
