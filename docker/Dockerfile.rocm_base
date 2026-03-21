@@ -44,7 +44,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
 RUN apt-get update -y \
-    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev \
+    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config \
     && for i in 1 2 3; do \
         add-apt-repository -y ppa:deadsnakes/ppa && break || \
         { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
