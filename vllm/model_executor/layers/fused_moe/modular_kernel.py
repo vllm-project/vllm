@@ -654,9 +654,8 @@ class FusedMoEExperts(ABC):
     def _supports_batch_invariance() -> bool:
         """
         Whether the kernel supports batch invariance, i.e. the output does not
-        depend on the order of the tokens in the input batch. This is relevant
-        for some routing methods (e.g. GroupedTopK) and some kernels that have
-        optimizations that break batch invariance.
+        depend on the order of the tokens in the input batch. This is useful
+        for determining if the kernel can used with VLLM_BATCH_INVARIANT=1.
         """
         return False
 
