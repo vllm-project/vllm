@@ -50,7 +50,7 @@ def test_select_default_backend_by_platform(
         )
 
         assert selected_backend == expected_backend
-        if expected_backend == [
+        if expected_backend in [
             UnquantizedMoeBackend.CPU,
             UnquantizedMoeBackend.OOT,
             UnquantizedMoeBackend.TPU,
