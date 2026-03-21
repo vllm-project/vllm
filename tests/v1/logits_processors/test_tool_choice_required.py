@@ -18,7 +18,6 @@ from vllm.v1.sample.logits_processor.builtin import (
 )
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
-    MoveDirectionality,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -27,9 +26,9 @@ DEVICE = torch.device("cpu")
 VOCAB_SIZE = 256
 
 # Token IDs for testing
-THINK_END = 100    # </think>
-IM_END = 101       # <|im_end|>
-EOS_TOKEN = 102    # [EOS]
+THINK_END = 100  # </think>
+IM_END = 101  # <|im_end|>
+EOS_TOKEN = 102  # [EOS]
 TOOL_CALL_END = 103  # <|tool_call_end|>
 
 
@@ -62,7 +61,6 @@ def _make_batch_update(added=None, removed=None, moved=None, batch_size=4):
 
 
 class TestAddRequest:
-
     def test_returns_none_without_extra_args(self):
         """Normal requests without extra_args → processor not activated."""
         params = _make_params()
@@ -71,18 +69,22 @@ class TestAddRequest:
 
     def test_returns_none_with_partial_extra_args(self):
         """Only think_end without stop → not activated."""
-        params = _make_params(extra_args={
-            "tool_choice_required_think_end": THINK_END,
-        })
+        params = _make_params(
+            extra_args={
+                "tool_choice_required_think_end": THINK_END,
+            }
+        )
         result = ToolChoiceRequiredLogitsProcessor.add_request(params, None, [])
         assert result is None
 
     def test_collects_stop_token(self):
         """Basic activation with stop token."""
-        params = _make_params(extra_args={
-            "tool_choice_required_think_end": THINK_END,
-            "tool_choice_required_stop": IM_END,
-        })
+        params = _make_params(
+            extra_args={
+                "tool_choice_required_think_end": THINK_END,
+                "tool_choice_required_stop": IM_END,
+            }
+        )
         stop_toks, release, out_ids = ToolChoiceRequiredLogitsProcessor.add_request(
             params, None, []
         )
@@ -124,23 +126,20 @@ class TestAddRequest:
 
     def test_section_end_sets_release_token(self):
         """section_end sets the release token."""
-        params = _make_params(extra_args={
-            "tool_choice_required_think_end": THINK_END,
-            "tool_choice_required_stop": IM_END,
-            "tool_choice_required_section_end": TOOL_CALL_END,
-        })
-        _, release, _ = ToolChoiceRequiredLogitsProcessor.add_request(
-            params, None, []
+        params = _make_params(
+            extra_args={
+                "tool_choice_required_think_end": THINK_END,
+                "tool_choice_required_stop": IM_END,
+                "tool_choice_required_section_end": TOOL_CALL_END,
+            }
         )
+        _, release, _ = ToolChoiceRequiredLogitsProcessor.add_request(params, None, [])
         assert release == TOOL_CALL_END
 
 
 class TestUpdateStateAndApply:
-
     def _make_processor(self):
-        return ToolChoiceRequiredLogitsProcessor(
-            _make_vllm_config(), DEVICE, False
-        )
+        return ToolChoiceRequiredLogitsProcessor(_make_vllm_config(), DEVICE, False)
 
     def test_no_op_when_inactive(self):
         """When no requests have extra_args, apply is a no-op."""
@@ -162,7 +161,7 @@ class TestUpdateStateAndApply:
         proc = self._make_processor()
         logits = torch.zeros(4, VOCAB_SIZE)
 
-        out_ids = []  # Empty — no tokens generated yet
+        out_ids: list[int] = []  # Empty — no tokens generated yet
         params = _make_params(
             extra_args={
                 "tool_choice_required_think_end": THINK_END,
@@ -189,7 +188,7 @@ class TestUpdateStateAndApply:
         """After release token appears in output_tok_ids, suppression lifts."""
         proc = self._make_processor()
 
-        out_ids = []
+        out_ids: list[int] = []
         params = _make_params(
             extra_args={
                 "tool_choice_required_think_end": THINK_END,
@@ -239,24 +238,26 @@ class TestUpdateStateAndApply:
         """Multiple active requests each get their stop tokens suppressed."""
         proc = self._make_processor()
 
-        out_ids_0 = []
+        out_ids_0: list[int] = []
         params_0 = _make_params(
             extra_args={
                 "tool_choice_required_think_end": THINK_END,
                 "tool_choice_required_stop": IM_END,
             },
         )
-        out_ids_1 = []
+        out_ids_1: list[int] = []
         params_1 = _make_params(
             extra_args={
                 "tool_choice_required_think_end": THINK_END,
                 "tool_choice_required_stop": 150,  # Different stop token
             },
         )
-        update = _make_batch_update(added=[
-            (0, params_0, None, out_ids_0),
-            (2, params_1, None, out_ids_1),
-        ])
+        update = _make_batch_update(
+            added=[
+                (0, params_0, None, out_ids_0),
+                (2, params_1, None, out_ids_1),
+            ]
+        )
         proc.update_state(update)
 
         logits = torch.zeros(4, VOCAB_SIZE)
@@ -271,7 +272,7 @@ class TestUpdateStateAndApply:
         """Removed request no longer suppressed."""
         proc = self._make_processor()
 
-        out_ids = []
+        out_ids: list[int] = []
         params = _make_params(
             extra_args={
                 "tool_choice_required_think_end": THINK_END,

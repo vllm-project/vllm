@@ -23,8 +23,9 @@ def _make_tokenizer(vocab: dict[str, int]):
     return tok
 
 
-def _make_responses_request(*, tools=None, tool_choice="required", reasoning=None,
-                            vllm_xargs=None):
+def _make_responses_request(
+    *, tools=None, tool_choice="required", reasoning=None, vllm_xargs=None
+):
     """Create a mock ResponsesRequest."""
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
@@ -46,7 +47,6 @@ def _make_responses_request(*, tools=None, tool_choice="required", reasoning=Non
 
 
 class TestAdjustRequestResponses:
-
     def test_thinking_model_uses_logits_processor(self):
         """Model with </think> + <|im_end|> + reasoning enabled → sets vllm_xargs."""
         vocab = {
