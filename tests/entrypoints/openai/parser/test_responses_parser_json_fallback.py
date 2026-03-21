@@ -34,11 +34,13 @@ def _make_parser(*, tool_choice="required", has_tool_parser=False):
     tool_parser_cls = None
     if has_tool_parser:
         tool_parser = MagicMock()
-        tool_parser.extract_tool_calls = MagicMock(return_value=MagicMock(
-            tools_called=False,
-            tool_calls=[],
-            content=None,
-        ))
+        tool_parser.extract_tool_calls = MagicMock(
+            return_value=MagicMock(
+                tools_called=False,
+                tool_calls=[],
+                content=None,
+            )
+        )
         tool_parser_cls = MagicMock(return_value=tool_parser)
 
     request = MagicMock()
@@ -66,13 +68,14 @@ def _make_output(text: str) -> CompletionOutput:
 
 
 class TestJsonFallbackParsing:
-
     def test_fallback_parses_json_array(self):
         """tool_choice=required + content is JSON array → parse as function_calls."""
         parser = _make_parser(tool_choice="required")
-        content = json.dumps([
-            {"name": "get_weather", "parameters": {"city": "NYC"}},
-        ])
+        content = json.dumps(
+            [
+                {"name": "get_weather", "parameters": {"city": "NYC"}},
+            ]
+        )
         output = _make_output(content)
         parser.process(output)
 
@@ -89,15 +92,20 @@ class TestJsonFallbackParsing:
     def test_fallback_parses_multiple_tools(self):
         """JSON array with multiple tool calls."""
         parser = _make_parser(tool_choice="required")
-        content = json.dumps([
-            {"name": "fn_a", "parameters": {"x": 1}},
-            {"name": "fn_b", "parameters": {"y": 2}},
-        ])
+        content = json.dumps(
+            [
+                {"name": "fn_a", "parameters": {"x": 1}},
+                {"name": "fn_b", "parameters": {"y": 2}},
+            ]
+        )
         output = _make_output(content)
         parser.process(output)
 
-        func_calls = [m for m in parser.response_messages
-                      if isinstance(m, ResponseFunctionToolCall)]
+        func_calls = [
+            m
+            for m in parser.response_messages
+            if isinstance(m, ResponseFunctionToolCall)
+        ]
         assert len(func_calls) == 2
         assert func_calls[0].name == "fn_a"
         assert func_calls[1].name == "fn_b"
@@ -110,8 +118,11 @@ class TestJsonFallbackParsing:
         parser.process(output)
 
         # Should be a text message, not a function call
-        func_calls = [m for m in parser.response_messages
-                      if isinstance(m, ResponseFunctionToolCall)]
+        func_calls = [
+            m
+            for m in parser.response_messages
+            if isinstance(m, ResponseFunctionToolCall)
+        ]
         assert len(func_calls) == 0
 
     def test_fallback_skipped_when_native_parser_succeeds(self):
@@ -120,7 +131,7 @@ class TestJsonFallbackParsing:
         # Override the mock to return a tool call
         mock_tool_call = MagicMock()
         mock_tool_call.function.name = "native_fn"
-        mock_tool_call.function.arguments = '{}'
+        mock_tool_call.function.arguments = "{}"
         parser.tool_parser_instance.extract_tool_calls.return_value = MagicMock(
             tools_called=True,
             tool_calls=[mock_tool_call],
@@ -132,8 +143,11 @@ class TestJsonFallbackParsing:
         parser.process(output)
 
         # Should have the native call, not the fallback
-        func_calls = [m for m in parser.response_messages
-                      if isinstance(m, ResponseFunctionToolCall)]
+        func_calls = [
+            m
+            for m in parser.response_messages
+            if isinstance(m, ResponseFunctionToolCall)
+        ]
         assert len(func_calls) == 1
         assert func_calls[0].name == "native_fn"
 
@@ -144,8 +158,11 @@ class TestJsonFallbackParsing:
         output = _make_output(content)
         parser.process(output)
 
-        func_calls = [m for m in parser.response_messages
-                      if isinstance(m, ResponseFunctionToolCall)]
+        func_calls = [
+            m
+            for m in parser.response_messages
+            if isinstance(m, ResponseFunctionToolCall)
+        ]
         assert len(func_calls) == 0
         # Content preserved as text message
         assert len(parser.response_messages) == 1
@@ -157,8 +174,11 @@ class TestJsonFallbackParsing:
         output = _make_output(content)
         parser.process(output)
 
-        func_calls = [m for m in parser.response_messages
-                      if isinstance(m, ResponseFunctionToolCall)]
+        func_calls = [
+            m
+            for m in parser.response_messages
+            if isinstance(m, ResponseFunctionToolCall)
+        ]
         assert len(func_calls) == 0
 
     def test_fallback_skipped_when_content_is_none(self):
@@ -172,3 +192,40 @@ class TestJsonFallbackParsing:
         parser.process(output)
 
         assert len(parser.response_messages) == 0
+
+    def test_fallback_atomic_rejects_partial_invalid(self):
+        """If any item in the JSON array is invalid, all are rejected."""
+        parser = _make_parser(tool_choice="required")
+        content = json.dumps(
+            [
+                {"name": "fn_a", "parameters": {"x": 1}},
+                {"name": "", "parameters": {}},  # invalid: empty name
+            ]
+        )
+        output = _make_output(content)
+        parser.process(output)
+
+        # No function calls — atomic rejection
+        func_calls = [
+            m
+            for m in parser.response_messages
+            if isinstance(m, ResponseFunctionToolCall)
+        ]
+        assert len(func_calls) == 0
+        # Content preserved as text message
+        assert len(parser.response_messages) == 1
+
+    def test_fallback_rejects_non_dict_items(self):
+        """JSON array with non-dict items → rejected, becomes text."""
+        parser = _make_parser(tool_choice="required")
+        content = json.dumps(["not_a_dict", {"name": "fn", "parameters": {}}])
+        output = _make_output(content)
+        parser.process(output)
+
+        func_calls = [
+            m
+            for m in parser.response_messages
+            if isinstance(m, ResponseFunctionToolCall)
+        ]
+        assert len(func_calls) == 0
+        assert len(parser.response_messages) == 1

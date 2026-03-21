@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import json
 import logging
 from collections.abc import Callable
@@ -111,13 +110,24 @@ class ResponsesParser:
         # Completions handling (engine/serving.py line 905-919).
         tool_choice = getattr(self.request, "tool_choice", None)
         if not function_calls and tool_choice == "required" and content:
-            with contextlib.suppress(Exception):
+            try:
                 parsed = json.loads(content)
                 if isinstance(parsed, list):
+                    temp_calls = []
                     for item in parsed:
-                        name = item.get("name", "")
+                        if not isinstance(item, dict):
+                            raise TypeError("Tool call item must be a dictionary.")
+                        name = item.get("name")
+                        if not isinstance(name, str) or not name:
+                            raise TypeError(
+                                "Tool call 'name' must be a non-empty string."
+                            )
                         params = item.get("parameters", {})
-                        function_calls.append(
+                        if not isinstance(params, dict):
+                            raise TypeError(
+                                "Tool call 'parameters' must be a dictionary."
+                            )
+                        temp_calls.append(
                             ResponseFunctionToolCall(
                                 id=f"fc_{random_uuid()}",
                                 call_id=f"call_{random_uuid()}",
@@ -127,8 +137,10 @@ class ResponsesParser:
                                 arguments=json.dumps(params, ensure_ascii=False),
                             )
                         )
-                    if function_calls:
-                        content = None
+                    function_calls.extend(temp_calls)
+                    content = None
+            except (json.JSONDecodeError, TypeError):
+                pass
 
         if content:
             self.response_messages.append(
