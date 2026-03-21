@@ -57,6 +57,15 @@ from vllm.utils.system_utils import (
     set_process_title,
 )
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.engine.utils import (
+    STARTUP_FAILURE,
+    STARTUP_READY,
+    FailedProcessInfo,
+    WorkerStartupMessage,
+    build_startup_error_payload,
+    build_startup_failure_exception,
+    merge_failed_processes,
+)
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
@@ -533,7 +542,6 @@ class WorkerProcHandle:
 class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
-    READY_STR = "READY"
     rpc_broadcast_mq: MessageQueue | None
     worker_response_mq: MessageQueue | None
 
@@ -707,33 +715,85 @@ class WorkerProc:
     def wait_for_ready(
         unready_proc_handles: list[UnreadyWorkerProcHandle],
     ) -> list[WorkerProcHandle]:
-        e = Exception(
-            "WorkerProc initialization failed due to an exception in a "
-            "background process. See stack trace for root cause."
-        )
-
         pipes = {handle.ready_pipe: handle for handle in unready_proc_handles}
         ready_proc_handles: list[WorkerProcHandle | None] = [None] * len(
             unready_proc_handles
         )
+
+        def get_failed_worker_processes(
+            failed_handle: UnreadyWorkerProcHandle | None = None,
+            response: WorkerStartupMessage | None = None,
+        ) -> list[FailedProcessInfo]:
+            failed_processes = [
+                FailedProcessInfo(
+                    name=handle.proc.name,
+                    pid=handle.proc.pid,
+                    exitcode=handle.proc.exitcode,
+                )
+                for handle in unready_proc_handles
+                if handle.proc.exitcode is not None
+            ]
+            if failed_handle is not None:
+                failed_processes = merge_failed_processes(
+                    failed_processes,
+                    response.error if response is not None else None,
+                )
+                candidate = FailedProcessInfo(
+                    name=failed_handle.proc.name,
+                    pid=failed_handle.proc.pid,
+                    exitcode=failed_handle.proc.exitcode,
+                )
+                if candidate not in failed_processes:
+                    failed_processes.insert(0, candidate)
+            return failed_processes
+
         while pipes:
             ready = multiprocessing.connection.wait(pipes.keys())
-            for pipe in ready:
-                assert isinstance(pipe, Connection)
+            for ready_pipe in ready:
+                pipe = cast(Connection, ready_pipe)
                 try:
                     # Wait until the WorkerProc is ready.
                     unready_proc_handle = pipes.pop(pipe)
-                    response: dict[str, Any] = pipe.recv()
-                    if response["status"] != "READY":
-                        raise e
+                    raw_response = pipe.recv()
+                    if isinstance(raw_response, WorkerStartupMessage):
+                        response = raw_response
+                    else:
+                        raw_response = cast(dict[str, Any], raw_response)
+                        response = WorkerStartupMessage(
+                            status=raw_response["status"],
+                            handle=raw_response.get("handle"),
+                            peer_response_handles=raw_response.get(
+                                "peer_response_handles"
+                            ),
+                            error=raw_response.get("error"),
+                        )
+                    if response.status != STARTUP_READY:
+                        raise build_startup_failure_exception(
+                            "WorkerProc initialization failed.",
+                            error=response.error,
+                            failed_processes=get_failed_worker_processes(
+                                unready_proc_handle, response
+                            ),
+                            failed_processes_label="Failed worker proc(s)",
+                        )
 
                     idx = unready_proc_handle.rank % len(ready_proc_handles)
                     ready_proc_handles[idx] = WorkerProc.wait_for_response_handle_ready(
-                        response, unready_proc_handle
+                        {
+                            "handle": response.handle,
+                            "peer_response_handles": response.peer_response_handles
+                            or [],
+                        },
+                        unready_proc_handle,
                     )
                 except EOFError:
-                    e.__suppress_context__ = True
-                    raise e from None
+                    raise build_startup_failure_exception(
+                        "WorkerProc initialization failed.",
+                        failed_processes=get_failed_worker_processes(
+                            unready_proc_handle
+                        ),
+                        failed_processes_label="Failed worker proc(s)",
+                    ) from None
 
                 finally:
                     # Close connection.
@@ -803,6 +863,7 @@ class WorkerProc:
         worker = None
         ready_writer = kwargs.pop("ready_pipe")
         death_pipe = kwargs.pop("death_pipe", None)
+        rank = kwargs.get("rank", 0)
 
         # Close inherited pipes from parent (incl. other worker pipes)
         # Explicitly passing in existing pipes and closing them makes the pipe
@@ -816,7 +877,6 @@ class WorkerProc:
 
         try:
             # Initialize tracer
-            rank = kwargs.get("rank", 0)
             maybe_init_worker_tracer(
                 instrumenting_module_name="vllm.worker",
                 process_kind="worker",
@@ -830,11 +890,11 @@ class WorkerProc:
 
             # Send READY once we know everything is loaded
             ready_writer.send(
-                {
-                    "status": WorkerProc.READY_STR,
-                    "handle": worker.worker_response_mq.export_handle(),
-                    "peer_response_handles": worker.peer_response_handles,
-                }
+                WorkerStartupMessage(
+                    status=STARTUP_READY,
+                    handle=worker.worker_response_mq.export_handle(),
+                    peer_response_handles=worker.peer_response_handles,
+                )
             )
 
             # Ensure message queues are ready. Will deadlock if re-ordered.
@@ -847,13 +907,26 @@ class WorkerProc:
 
             worker.worker_busy_loop()
 
-        except Exception:
+        except Exception as exc:
             # NOTE: if an Exception arises in busy_loop, we send
             # a FAILURE message over the MQ RPC to notify the Executor,
             # which triggers system shutdown.
             # TODO(rob): handle case where the MQ itself breaks.
 
             if ready_writer is not None:
+                startup_error = build_startup_error_payload(
+                    exc,
+                    source_process=multiprocessing.current_process().name,
+                    source_rank=rank,
+                    pid=os.getpid(),
+                )
+                with suppress(Exception):
+                    ready_writer.send(
+                        WorkerStartupMessage(
+                            status=STARTUP_FAILURE,
+                            error=startup_error,
+                        )
+                    )
                 logger.exception("WorkerProc failed to start.")
             elif shutdown_requested.is_set():
                 logger.info("WorkerProc shutting down.")

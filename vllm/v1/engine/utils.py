@@ -4,14 +4,15 @@
 import contextlib
 import os
 import threading
+import traceback
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import msgspec
@@ -34,6 +35,10 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 STARTUP_POLL_PERIOD_MS = 10000
+STARTUP_HELLO = "HELLO"
+STARTUP_READY = "READY"
+STARTUP_FAILURE = "FAILURE"
+_STARTUP_ERROR_ATTR = "_vllm_startup_error"
 
 
 class CoreEngineState(Enum):
@@ -77,6 +82,170 @@ class EngineHandshakeMetadata:
 
     addresses: EngineZmqAddresses
     parallel_config: dict[str, int | str | list[int]]
+
+
+class StartupErrorPayload(
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    error_type: str
+    message: str
+    traceback: str
+    source_process: str
+    source_rank: int | None = None
+    pid: int | None = None
+    is_fatal: bool = True
+
+
+@dataclass
+class FailedProcessInfo:
+    name: str
+    pid: int | None = None
+    exitcode: int | None = None
+
+
+@dataclass
+class WorkerStartupMessage:
+    status: str
+    handle: Any = None
+    peer_response_handles: list[Any] | None = None
+    error: StartupErrorPayload | None = None
+
+
+class EngineStartupMessage(
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    status: str
+    local: bool
+    headless: bool
+    num_gpu_blocks: int | None = None
+    dp_stats_address: str | None = None
+    parallel_config_hash: str | None = None
+    error: StartupErrorPayload | None = None
+
+
+def build_startup_error_payload(
+    exc: BaseException,
+    *,
+    source_process: str,
+    source_rank: int | None = None,
+    pid: int | None = None,
+    is_fatal: bool = True,
+) -> StartupErrorPayload:
+    return StartupErrorPayload(
+        error_type=type(exc).__name__,
+        message=str(exc),
+        traceback="".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        ).rstrip(),
+        source_process=source_process,
+        source_rank=source_rank,
+        pid=pid,
+        is_fatal=is_fatal,
+    )
+
+
+def attach_startup_error(
+    exc: Exception, error: StartupErrorPayload | None
+) -> Exception:
+    if error is not None:
+        setattr(exc, _STARTUP_ERROR_ATTR, error)
+    return exc
+
+
+def get_startup_error(exc: BaseException) -> StartupErrorPayload | None:
+    return getattr(exc, _STARTUP_ERROR_ATTR, None)
+
+
+def _format_failed_process(info: FailedProcessInfo) -> str:
+    parts = []
+    if info.pid is not None:
+        parts.append(f"pid={info.pid}")
+    if info.exitcode is not None:
+        if info.exitcode < 0:
+            parts.append(f"signal={-info.exitcode}")
+        else:
+            parts.append(f"exitcode={info.exitcode}")
+    if not parts:
+        return info.name
+    return f"{info.name}({', '.join(parts)})"
+
+
+def format_failed_processes(failed_processes: Sequence[FailedProcessInfo]) -> str:
+    if not failed_processes:
+        return "none"
+    return ", ".join(_format_failed_process(proc) for proc in failed_processes)
+
+
+def merge_failed_processes(
+    failed_processes: Iterable[FailedProcessInfo],
+    error: StartupErrorPayload | None = None,
+) -> list[FailedProcessInfo]:
+    merged = list(failed_processes)
+    if error is None:
+        return merged
+
+    candidate = FailedProcessInfo(name=error.source_process, pid=error.pid)
+    if candidate not in merged:
+        merged.insert(0, candidate)
+    return merged
+
+
+def format_startup_failure(
+    context: str,
+    *,
+    error: StartupErrorPayload | None = None,
+    failed_processes: Sequence[FailedProcessInfo] = (),
+    failed_processes_label: str = "Failed proc(s)",
+) -> str:
+    lines = [context]
+    if failed_processes:
+        lines.append(
+            f"{failed_processes_label}: {format_failed_processes(failed_processes)}"
+        )
+    if error is None:
+        return "\n".join(lines)
+
+    source = error.source_process
+    details = []
+    if error.source_rank is not None:
+        details.append(f"rank={error.source_rank}")
+    if error.pid is not None:
+        details.append(f"pid={error.pid}")
+    if details:
+        source = f"{source} ({', '.join(details)})"
+
+    lines.extend(
+        (
+            f"Source: {source}",
+            f"Root cause: {error.error_type}: {error.message}",
+            "Child traceback:",
+            error.traceback,
+        )
+    )
+    return "\n".join(lines)
+
+
+def build_startup_failure_exception(
+    context: str,
+    *,
+    error: StartupErrorPayload | None = None,
+    failed_processes: Sequence[FailedProcessInfo] = (),
+    failed_processes_label: str = "Failed proc(s)",
+) -> RuntimeError:
+    exc = RuntimeError(
+        format_startup_failure(
+            context,
+            error=error,
+            failed_processes=failed_processes,
+            failed_processes_label=failed_processes_label,
+        )
+    )
+    attach_startup_error(exc, error)
+    return exc
 
 
 class CoreEngineProcManager:
@@ -164,13 +333,17 @@ class CoreEngineProcManager:
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
 
-    def finished_procs(self) -> dict[str, int]:
-        """Returns dict of proc name -> exit code for any finished procs."""
-        return {
-            proc.name: proc.exitcode
+    def finished_procs(self) -> list[FailedProcessInfo]:
+        """Returns info for any engine processes that have already exited."""
+        return [
+            FailedProcessInfo(
+                name=proc.name,
+                pid=proc.pid,
+                exitcode=proc.exitcode,
+            )
             for proc in self.processes
             if proc.exitcode is not None
-        }
+        ]
 
 
 class SignalCallback:
@@ -1035,6 +1208,19 @@ def wait_for_engine_startup(
             poller.register(sentinel, zmq.POLLIN)
     if coord_process is not None:
         poller.register(coord_process.sentinel, zmq.POLLIN)
+
+    def get_failed_processes() -> list[FailedProcessInfo]:
+        failed = list(proc_manager.finished_procs()) if proc_manager else []
+        if coord_process is not None and coord_process.exitcode is not None:
+            failed.append(
+                FailedProcessInfo(
+                    name=coord_process.name,
+                    pid=coord_process.pid,
+                    exitcode=coord_process.exitcode,
+                )
+            )
+        return failed
+
     while any(conn_pending) or any(start_pending):
         events = poller.poll(STARTUP_POLL_PERIOD_MS)
         if not events:
@@ -1049,15 +1235,12 @@ def wait_for_engine_startup(
                     *start_pending,
                 )
             continue
-        if len(events) > 1 or events[0][0] != handshake_socket:
-            # One of the local core processes exited.
-            finished = proc_manager.finished_procs() if proc_manager else {}
-            if coord_process is not None and coord_process.exitcode is not None:
-                finished[coord_process.name] = coord_process.exitcode
-            raise RuntimeError(
-                "Engine core initialization failed. "
-                "See root cause above. "
-                f"Failed core proc(s): {finished}"
+        event_targets = {target for target, _ in events}
+        if handshake_socket not in event_targets:
+            raise build_startup_failure_exception(
+                "Engine core initialization failed.",
+                failed_processes=get_failed_processes(),
+                failed_processes_label="Failed core proc(s)",
             )
 
         # Receive HELLO and READY messages from the input socket.
@@ -1068,8 +1251,8 @@ def wait_for_engine_startup(
             raise RuntimeError(
                 f"Message from engine with unexpected data parallel rank: {eng_index}"
             )
-        msg = msgspec.msgpack.decode(ready_msg_bytes)
-        status, local, headless = msg["status"], msg["local"], msg["headless"]
+        msg = msgspec.msgpack.decode(ready_msg_bytes, type=EngineStartupMessage)
+        status, local, headless = msg.status, msg.local, msg.headless
         if local != engine.local:
             raise RuntimeError(
                 f"{status} message from "
@@ -1093,7 +1276,17 @@ def wait_for_engine_startup(
                     f"dp lb mode"
                 )
 
-        if status == "HELLO" and engine.state == CoreEngineState.NEW:
+        if status == STARTUP_FAILURE:
+            raise build_startup_failure_exception(
+                "Engine core initialization failed.",
+                error=msg.error,
+                failed_processes=merge_failed_processes(
+                    get_failed_processes(), msg.error
+                ),
+                failed_processes_label="Failed core proc(s)",
+            )
+
+        if status == STARTUP_HELLO and engine.state == CoreEngineState.NEW:
             # Send init message with DP config info.
             init_message = msgspec.msgpack.encode(
                 EngineHandshakeMetadata(
@@ -1115,11 +1308,11 @@ def wait_for_engine_startup(
             conn_pending[0 if local else 1] -= 1
             start_pending[0 if local else 1] += 1
             engine.state = CoreEngineState.CONNECTED
-        elif status == "READY" and engine.state == CoreEngineState.CONNECTED:
+        elif status == STARTUP_READY and engine.state == CoreEngineState.CONNECTED:
             # Setup KV cache config with initialization state from
             # engine core process. Sum values from all engines in DP case.
             num_gpu_blocks = cache_config.num_gpu_blocks or 0
-            num_gpu_blocks += msg["num_gpu_blocks"]
+            num_gpu_blocks += msg.num_gpu_blocks or 0
             cache_config.num_gpu_blocks = num_gpu_blocks
 
             # In external DP LB mode, the coordinator address that the
@@ -1127,11 +1320,11 @@ def wait_for_engine_startup(
             # one of the engine handshakes, and passed to the local
             # front-end process in the response from the other.
             if addresses.frontend_stats_publish_address is None:
-                addresses.frontend_stats_publish_address = msg.get("dp_stats_address")
+                addresses.frontend_stats_publish_address = msg.dp_stats_address
 
             # Validate config hash consistency across DP workers for MoE models.
             if coordinated_dp:
-                worker_config_hash = msg.get("parallel_config_hash")
+                worker_config_hash = msg.parallel_config_hash
                 expected_hash = parallel_config.compute_hash()
                 if worker_config_hash != expected_hash:
                     raise RuntimeError(

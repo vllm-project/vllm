@@ -19,11 +19,18 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
+from vllm.platforms import current_platform
+
+if not current_platform.is_cuda_alike():
+    pytest.skip(
+        reason="V1 currently only supported on CUDA-alike platforms.",
+        allow_module_level=True,
+    )
+
 from tests.utils import multi_gpu_test
 from vllm import SamplingParams
 from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublisher
 from vllm.engine.arg_utils import EngineArgs
-from vllm.platforms import current_platform
 from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -44,12 +51,6 @@ from vllm.v1.pool.late_interaction import (
 
 from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
-
-if not current_platform.is_cuda_alike():
-    pytest.skip(
-        reason="V1 currently only supported on CUDA-alike platforms.",
-        allow_module_level=True,
-    )
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -1146,7 +1147,12 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
             log_stats=True,
         )
 
-    assert "Engine core initialization failed" in str(e_info.value)
+    error_message = str(e_info.value)
+    assert "Engine core initialization failed" in error_message
+    assert "Failed core proc(s):" in error_message
+    assert "{}" not in error_message
+    assert "pid=" in error_message
+    assert "signal=" in error_message or "exitcode=" in error_message
 
 
 @create_new_process_for_each_test()

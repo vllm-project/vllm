@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import multiprocessing
 import os
 import queue
 import signal
@@ -8,7 +9,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
@@ -62,10 +63,16 @@ from vllm.v1.engine import (
 )
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
+    STARTUP_FAILURE,
+    STARTUP_HELLO,
+    STARTUP_READY,
     EngineHandshakeMetadata,
+    EngineStartupMessage,
     EngineZmqAddresses,
     SignalCallback,
+    build_startup_error_payload,
     get_device_indices,
+    get_startup_error,
 )
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -968,33 +975,51 @@ class EngineCoreProc(EngineCore):
             linger=5000,
             bind=False,
         ) as handshake_socket:
-            # Register engine with front-end.
-            addresses = self.startup_handshake(
-                handshake_socket, local_client, headless, parallel_config_to_update
-            )
-            yield addresses
-
-            # Send ready message.
-            num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
-            # We pass back the coordinator stats update address here for the
-            # external LB case for our colocated front-end to use (coordinator
-            # only runs with rank 0).
-            dp_stats_address = self.frontend_stats_publish_address
-
-            # Include config hash for DP configuration validation
-            ready_msg = {
-                "status": "READY",
-                "local": local_client,
-                "headless": headless,
-                "num_gpu_blocks": num_gpu_blocks,
-                "dp_stats_address": dp_stats_address,
-            }
-            if vllm_config.parallel_config.data_parallel_size > 1:
-                ready_msg["parallel_config_hash"] = (
-                    vllm_config.parallel_config.compute_hash()
+            try:
+                # Register engine with front-end.
+                addresses = self.startup_handshake(
+                    handshake_socket, local_client, headless, parallel_config_to_update
                 )
+                yield addresses
+            except Exception as exc:
+                startup_error = get_startup_error(exc)
+                if startup_error is None:
+                    startup_error = build_startup_error_payload(
+                        exc,
+                        source_process=multiprocessing.current_process().name,
+                        source_rank=self.engine_index,
+                        pid=os.getpid(),
+                    )
+                failure_msg = EngineStartupMessage(
+                    status=STARTUP_FAILURE,
+                    local=local_client,
+                    headless=headless,
+                    error=startup_error,
+                )
+                with suppress(zmq.ZMQError):
+                    handshake_socket.send(msgspec.msgpack.encode(failure_msg))
+                raise
+            else:
+                # Send ready message.
+                num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
+                # We pass back the coordinator stats update address here for the
+                # external LB case for our colocated front-end to use (coordinator
+                # only runs with rank 0).
+                dp_stats_address = self.frontend_stats_publish_address
 
-            handshake_socket.send(msgspec.msgpack.encode(ready_msg))
+                ready_msg = EngineStartupMessage(
+                    status=STARTUP_READY,
+                    local=local_client,
+                    headless=headless,
+                    num_gpu_blocks=num_gpu_blocks,
+                    dp_stats_address=dp_stats_address,
+                )
+                if vllm_config.parallel_config.data_parallel_size > 1:
+                    ready_msg.parallel_config_hash = (
+                        vllm_config.parallel_config.compute_hash()
+                    )
+
+                handshake_socket.send(msgspec.msgpack.encode(ready_msg))
 
     @staticmethod
     def startup_handshake(
@@ -1006,11 +1031,11 @@ class EngineCoreProc(EngineCore):
         # Send registration message.
         handshake_socket.send(
             msgspec.msgpack.encode(
-                {
-                    "status": "HELLO",
-                    "local": local_client,
-                    "headless": headless,
-                }
+                EngineStartupMessage(
+                    status=STARTUP_HELLO,
+                    local=local_client,
+                    headless=headless,
+                )
             )
         )
 
