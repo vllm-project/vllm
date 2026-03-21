@@ -254,7 +254,7 @@ response = client.responses.create(
 
 ## Limitations
 
-- The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`).
+- The reasoning content is only available for online serving's chat completion and responses endpoints (`/v1/chat/completions` and `/v1/responses`).
 
 ## How to support a new reasoning model
 
