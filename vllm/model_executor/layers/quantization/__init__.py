@@ -107,7 +107,8 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     # lazy import to avoid triggering `torch.compile` too early
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
-    from .awq_marlin import AWQConfig, AWQMarlinConfig
+    from .awq import AWQConfig
+    from .awq_marlin import AWQMarlinConfig
     from .bitsandbytes import BitsAndBytesConfig
     from .compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
