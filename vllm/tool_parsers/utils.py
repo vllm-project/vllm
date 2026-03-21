@@ -224,8 +224,7 @@ def get_json_schema_from_tools(
         # such as WebSearchTool do not have a JSON schema and would crash
         # _get_json_schema_from_tools.
         func_tools = [
-            t for t in tools
-            if isinstance(t, (FunctionTool, ChatCompletionToolsParam))
+            t for t in tools if isinstance(t, (FunctionTool, ChatCompletionToolsParam))
         ]
         if not func_tools:
             return None

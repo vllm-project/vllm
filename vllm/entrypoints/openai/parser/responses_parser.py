@@ -124,8 +124,7 @@ class ResponsesParser:
                                 type="function_call",
                                 status="completed",
                                 name=name,
-                                arguments=json.dumps(
-                                    params, ensure_ascii=False),
+                                arguments=json.dumps(params, ensure_ascii=False),
                             )
                         )
                     if function_calls:
