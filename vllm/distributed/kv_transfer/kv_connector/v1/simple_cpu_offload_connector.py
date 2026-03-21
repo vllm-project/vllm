@@ -59,7 +59,6 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             extra_config.get("cpu_bytes_to_use", DEFAULT_CPU_CAPACITY_BYTES)
         )
         lazy_offload = bool(extra_config.get("lazy_offload", False))
-        min_lookahead_blocks = int(extra_config.get("min_lookahead_blocks", 8))
 
         self.scheduler_manager: SimpleCPUOffloadScheduler | None = None
         self.worker_handler: SimpleCPUOffloadWorker | None = None
@@ -85,7 +84,6 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 kv_cache_config,
                 cpu_capacity_bytes,
                 lazy_offload=lazy_offload,
-                min_lookahead_blocks=min_lookahead_blocks,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(

@@ -10,12 +10,14 @@ from typing import TYPE_CHECKING, Any
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     KVCacheCoordinator,
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 
@@ -64,7 +66,6 @@ class SimpleCPUOffloadScheduler:
         kv_cache_config: "KVCacheConfig | None",
         cpu_capacity_bytes: int,
         lazy_offload: bool = False,
-        min_lookahead_blocks: int = 8,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -115,8 +116,22 @@ class SimpleCPUOffloadScheduler:
 
         # Store metadata
         self._lazy_mode = lazy_offload
-        # Lazy store mode only
-        self._min_lookahead_blocks = min_lookahead_blocks
+        # Lazy mode: cursor-based offloading
+        self._cursor: KVCacheBlock | None = None
+        if self._lazy_mode and kv_cache_config is not None:
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            target = 0
+            for g in kv_cache_config.kv_cache_groups:
+                spec = g.kv_cache_spec
+                if isinstance(spec, MambaSpec):
+                    target += 2
+                elif isinstance(spec, SlidingWindowSpec):
+                    target += cdiv(spec.sliding_window, spec.block_size) + 1
+                else:
+                    target += cdiv(max_tokens, spec.block_size)
+            self._target_free = target
+        else:
+            self._target_free = 0
         self._store_event_to_blocks: dict[int, TransferMeta] = {}
         # Eager mode only
         self._reqs_to_store: dict[str, RequestState] = {}
@@ -220,7 +235,7 @@ class SimpleCPUOffloadScheduler:
         )
         num_computed_tokens = num_computed_gpu_blocks * self.block_size
         skipped = num_computed_tokens // self.block_size
-        hashes_to_load = request.block_hashes[skipped:skipped + num_blocks_to_load]
+        hashes_to_load = request.block_hashes[skipped : skipped + num_blocks_to_load]
 
         # Find CPU cached blocks across all groups.
         max_hit_len = len(hashes_to_load) * self.block_size
@@ -343,52 +358,69 @@ class SimpleCPUOffloadScheduler:
     def _prepare_lazy_store_specs(
         self,
     ) -> tuple[list[int], list[int], list[str]]:
-        """Pick LRU-front GPU eviction candidates, allocate CPU slots.
+        """Single-pass cursor walk: offload cached GPU blocks near eviction.
 
-        Touches GPU blocks (ref_cnt 0->1) to prevent eviction during async copy.
-        On completion, update_connector_output decrements back to 0.
-
-        Returns:
-            (gpu_block_ids, cpu_block_ids, req_ids) for the store event.
+        Walks the GPU free queue from the cursor, counting blocks that are
+        free-or-offloaded (safe for the allocator to evict). Stops when
+        target_free blocks are covered or CPU capacity is reached.
         """
-        total_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
-        n_lookahead = max(total_tokens // self.block_size, self._min_lookahead_blocks)
-        if self._gpu_block_pool is None or n_lookahead <= 0:
+        gpu_pool = self._gpu_block_pool
+        if gpu_pool is None or self._target_free <= 0:
             return [], [], []
 
+        free_queue = gpu_pool.free_block_queue
+        cpu_pool = self.cpu_block_pool
+        num_cpu_free = cpu_pool.get_num_free_blocks()
+
+        # Validate cursor: stale if block was removed from free queue.
+        if self._cursor is not None and self._cursor.ref_cnt > 0:
+            self._cursor = None
+
+        # Determine start node.
+        if self._cursor is None:
+            node = free_queue.fake_free_list_head.next_free_block
+        else:
+            node = self._cursor.next_free_block
+
+        tail = free_queue.fake_free_list_tail
         gpu_ids: list[int] = []
         block_hashes: list[bytes] = []
+        covered = 0
+        last_visited = self._cursor
 
-        num_free = self.cpu_block_pool.get_num_free_blocks()
-
-        candidates = self._gpu_block_pool.get_eviction_candidates(n_lookahead)
-        for gpu_block in candidates:
-            bhash_with_group = gpu_block.block_hash
-            if bhash_with_group is None:
-                continue
-            if (
-                self.cpu_block_pool.cached_block_hash_to_block.get_one_block(
-                    bhash_with_group
-                )
-                is not None
-            ):
-                continue
-            if num_free <= 0:
+        while node is not None and node is not tail:
+            if covered >= self._target_free:
                 break
-            num_free -= 1
-            gpu_ids.append(gpu_block.block_id)
-            block_hashes.append(bhash_with_group)
+            if len(gpu_ids) >= num_cpu_free:
+                break
 
-        # Batch allocate CPU blocks and stamp their hashes ahead of time.
+            last_visited = node
+            bhash = node.block_hash
+
+            if bhash is None or node.is_null:
+                # Uncached/null free block — safe to evict, no offload needed.
+                covered += 1
+            elif cpu_pool.cached_block_hash_to_block.get_one_block(bhash) is not None:
+                # Already offloaded to CPU.
+                covered += 1
+            else:
+                # Needs offloading.
+                gpu_ids.append(node.block_id)
+                block_hashes.append(bhash)
+                covered += 1
+
+            node = node.next_free_block
+
+        self._cursor = last_visited
+
+        # Batch-allocate CPU blocks and stamp hashes.
         if gpu_ids:
-            cpu_blocks_alloc = self.cpu_block_pool.get_new_blocks(len(gpu_ids))
-            cpu_ids = [blk.block_id for blk in cpu_blocks_alloc]
-            for cpu_blk, bhash in zip(cpu_blocks_alloc, block_hashes):
+            cpu_blocks = cpu_pool.get_new_blocks(len(gpu_ids))
+            cpu_ids = [blk.block_id for blk in cpu_blocks]
+            for cpu_blk, bhash in zip(cpu_blocks, block_hashes):
                 cpu_blk._block_hash = bhash
-            # Touch GPU blocks to prevent freeing during async copy
-            self._gpu_block_pool.touch(
-                [self._gpu_block_pool.blocks[bid] for bid in gpu_ids]
-            )
+            # Touch GPU blocks to prevent eviction during async copy.
+            gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
         else:
             cpu_ids = []
 
