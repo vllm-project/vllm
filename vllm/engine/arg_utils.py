@@ -442,7 +442,7 @@ class EngineArgs:
     )
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
-    riy_expert_profile: Optional[str] = ParallelConfig.riy_expert_profile
+    riy_expert_profile: str | None = ParallelConfig.riy_expert_profile
     expert_placement_strategy: ExpertPlacementStrategy = (
         ParallelConfig.expert_placement_strategy
     )
