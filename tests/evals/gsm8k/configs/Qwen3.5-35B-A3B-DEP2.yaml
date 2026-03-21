@@ -4,5 +4,5 @@ num_questions: 1319
 num_fewshot: 5
 server_args: >-
   --max-model-len 4096
-  --data-parallel-size 2
+  --tensor-parallel-size 2
   --enable-expert-parallel
