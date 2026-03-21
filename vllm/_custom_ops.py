@@ -1181,6 +1181,38 @@ def cutlass_fp4_moe_mm(
     )
 
 
+def cutlass_mxfp4_moe_mm(
+    out_tensors: torch.Tensor,
+    a_tensors: torch.Tensor,
+    b_tensors: torch.Tensor,
+    a_scales: torch.Tensor,
+    b_scales: torch.Tensor,
+    problem_sizes: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    sf_offsets: torch.Tensor,
+):
+    """
+    An MXFP4 Blockscaled Group Gemm for MoE (MXFP4 x MXFP4).
+
+    Uses mx_float4_t types with E8M0 scale factors and 32-element blocks.
+    - a/b_tensors: MXFP4 packed activations/weights (uint8, 2 E2M1 per byte)
+    - a_/b_scales: E8M0 blockscales (uint8, stored in swizzled layout)
+    - Epilogue uses scalar alpha=1, beta=0 inside the CUDA op (no global scales).
+    - expert_offsets/sf_offsets: expert boundary indices
+    - problem_sizes: (num_experts, 3) with (M, N, K) per expert
+    """
+    return torch.ops._C.cutlass_mxfp4_group_mm(
+        out_tensors,
+        a_tensors,
+        b_tensors,
+        a_scales,
+        b_scales,
+        problem_sizes,
+        expert_offsets,
+        sf_offsets,
+    )
+
+
 def mxfp8_experts_quant(
     input_tensor: torch.Tensor,
     problem_sizes: torch.Tensor,
@@ -1876,6 +1908,109 @@ def silu_and_mul_scaled_fp4_experts_quant(
         blockscale_offsets,
     )
     output_scales = output_scales.view(torch.float8_e4m3fn)
+    return output, output_scales
+
+
+def mxfp4_experts_quant(
+    input_tensor: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    n_experts: int,
+    topk: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Quantize input tensor to MXFP4 for packed MoE inputs.
+    Uses 32-element blocks with E8M0 (power-of-two) scale factors.
+    MXFP4 has no global scale - only block-level E8M0 scale factors.
+
+    Args:
+        input_tensor: [m_topk, k] BF16/FP16 activations
+        expert_offsets: [n_experts+1] token boundaries per expert
+        blockscale_offsets: [n_experts+1] SF row boundaries per expert
+        n_experts: number of experts
+        topk: number of top-k experts
+    Returns:
+        output: [m_topk, k//2] packed E2M1 values (uint8)
+        output_scales: E8M0 blockscales in swizzled layout (uint8 view)
+    """
+    assert not current_platform.is_rocm()
+    assert input_tensor.ndim == 2
+
+    MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
+    m_numtopk, k = input_tensor.shape
+
+    assert m_numtopk <= MAX_TOKENS_PER_EXPERT * topk, (
+        f"m_numtopk must be less than MAX_TOKENS_PER_EXPERT("
+        f"{MAX_TOKENS_PER_EXPERT})"
+        f" for cutlass_moe_mxfp4, observed m_numtopk = {m_numtopk}. Use"
+        f" VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE to set this value."
+    )
+    scales_k = k // 32
+    padded_k = (scales_k + (4 - 1)) // 4
+
+    output = torch.empty(
+        m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
+    )
+    output_scales = torch.empty(
+        MAX_TOKENS_PER_EXPERT * topk,
+        padded_k,
+        dtype=torch.int32,
+        device=input_tensor.device,
+    )
+    torch.ops._C.mxfp4_experts_quant(
+        output,
+        output_scales,
+        input_tensor,
+        expert_offsets,
+        blockscale_offsets,
+        n_experts,
+    )
+    # E8M0 SFs are stored as uint8
+    output_scales = output_scales.view(torch.uint8)
+    return output, output_scales
+
+
+def silu_and_mul_mxfp4_experts_quant(
+    input_tensor: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    n_experts: int,
+    topk: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused SiLU+Mul+MXFP4 quantization for MoE intermediate activations.
+    MXFP4 has no global scale - only block-level E8M0 scale factors.
+    """
+    assert not current_platform.is_rocm()
+    assert input_tensor.ndim == 2
+
+    MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
+    m_numtopk, k_times_2 = input_tensor.shape
+    assert k_times_2 % 2 == 0, "input width must be even (gate || up layout)"
+    k = k_times_2 // 2
+
+    assert m_numtopk <= MAX_TOKENS_PER_EXPERT * topk
+    scales_k = k // 32
+    padded_k = (scales_k + (4 - 1)) // 4
+
+    output = torch.empty(
+        m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
+    )
+    output_scales = torch.empty(
+        MAX_TOKENS_PER_EXPERT * topk,
+        padded_k,
+        dtype=torch.int32,
+        device=input_tensor.device,
+    )
+    torch.ops._C.silu_and_mul_mxfp4_experts_quant(
+        output,
+        output_scales,
+        input_tensor,
+        expert_offsets,
+        blockscale_offsets,
+        n_experts,
+    )
+    output_scales = output_scales.view(torch.uint8)
     return output, output_scales
 
 

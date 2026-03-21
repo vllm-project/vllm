@@ -423,6 +423,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()");
   // conditionally compiled so impl registration is in source file
 
+  // cutlass mxfp4 block scaled group GEMM (MXFP4 x MXFP4 MoE)
+  ops.def(
+      "cutlass_mxfp4_group_mm(Tensor! out, Tensor a, Tensor b,"
+      " Tensor a_blockscale, Tensor b_blockscales,"
+      " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()");
+  // conditionally compiled so impl registration is in source file
+
   // Expert-specialization mxfp8 blockscaled grouped quantization (SM100+).
   ops.def(
       "mxfp8_experts_quant("
@@ -592,6 +599,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor output_scale_offset_by_experts) -> ()");
   ops.impl("silu_and_mul_scaled_fp4_experts_quant", torch::kCUDA,
            &silu_and_mul_scaled_fp4_experts_quant);
+
+  // Compute MXFP4 experts quantization (32-element blocks, E8M0 SFs).
+  ops.def(
+      "mxfp4_experts_quant(Tensor! output, Tensor! output_scale,"
+      "Tensor input, Tensor input_offset_by_experts,"
+      "Tensor output_scale_offset_by_experts, int n_experts) -> ()");
+  ops.impl("mxfp4_experts_quant", torch::kCUDA, &mxfp4_experts_quant);
+
+  // Fused SiLU+Mul+MXFP4 experts quantization.
+  ops.def(
+      "silu_and_mul_mxfp4_experts_quant(Tensor! output, Tensor! "
+      "output_scale,"
+      "Tensor input, Tensor input_offset_by_experts,"
+      "Tensor output_scale_offset_by_experts, int n_experts) -> ()");
+  ops.impl("silu_and_mul_mxfp4_experts_quant", torch::kCUDA,
+           &silu_and_mul_mxfp4_experts_quant);
 
   // Check if cutlass_scaled_mm_fp4 is supported for CUDA devices
   // of the given capability
