@@ -378,7 +378,6 @@ class RocmPlatform(Platform):
         "fbgemm_fp8",
         "gguf",
         "quark",
-        "ptpc_fp8",
         "mxfp4",
         "petit_nvfp4",
         "torchao",

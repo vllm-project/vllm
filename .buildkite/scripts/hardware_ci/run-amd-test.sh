@@ -327,8 +327,7 @@ apply_rocm_test_overrides() {
     cmds="${cmds} \
     --ignore=kernels/moe/test_moe.py \
     --ignore=kernels/moe/test_cutlass_moe.py \
-    --ignore=kernels/moe/test_triton_moe_ptpc_fp8.py"
-  fi
+    fi
 
   # --- Entrypoint ignores ---
   if [[ $cmds == *" entrypoints/openai "* ]]; then
