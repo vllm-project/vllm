@@ -388,6 +388,8 @@ class ParsableContext(ConversationContext):
         """Return true if the last message is a builtin tool call
         that the request has enabled."""
         self._ensure_final_parse()
+        if not self.parser.response_messages:
+            return False
         last_message = self.parser.response_messages[-1]
         if last_message.type != "function_call":
             return False

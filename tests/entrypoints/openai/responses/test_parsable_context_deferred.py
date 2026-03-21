@@ -8,7 +8,7 @@ This avoids feeding partial deltas to ResponsesParser.process() which
 expects complete output text.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -65,7 +65,6 @@ def _make_context():
 
 
 class TestDeferredParsing:
-
     def test_append_output_accumulates_text(self):
         """Multiple append_output calls accumulate text without parsing."""
         ctx = _make_context()
@@ -82,8 +81,9 @@ class TestDeferredParsing:
         """_ensure_final_parse triggers parse exactly once."""
         ctx = _make_context()
 
-        ctx.append_output(_make_output(
-            "<think>reasoning</think>tool call", finish_reason="stop"))
+        ctx.append_output(
+            _make_output("<think>reasoning</think>tool call", finish_reason="stop")
+        )
 
         ctx._ensure_final_parse()
         assert ctx._final_parsed
@@ -175,3 +175,15 @@ class TestDeferredParsing:
         assert ctx.parser.process.call_count == 2
         second_call = ctx.parser.process.call_args_list[1][0][0]
         assert second_call.text == "turn2"
+
+    def test_need_builtin_tool_call_empty_messages(self):
+        """need_builtin_tool_call returns False when no messages parsed."""
+        ctx = _make_context()
+        ctx.append_output(_make_output("some text", finish_reason="stop"))
+        # parser.response_messages is empty (mock default)
+        ctx.parser.response_messages = []
+
+        result = ctx.need_builtin_tool_call()
+
+        assert ctx._final_parsed
+        assert result is False
