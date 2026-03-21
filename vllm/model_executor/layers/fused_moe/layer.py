@@ -501,6 +501,11 @@ class FusedMoE(CustomOp):
         # 4. Weight loader: skips pruned (expert_map returns -1)
         import os as _os
         _riy_profile = _os.environ.get("RIY_EXPERT_PROFILE", "")
+        if not _riy_profile:
+            try:
+                _riy_profile = vllm_config.parallel_config.riy_expert_profile or ""
+            except Exception:
+                pass
         if _riy_profile and _os.path.exists(_riy_profile) and _layer_idx >= 0:
             from vllm.model_executor.layers.fused_moe.riy import (
                 build_riy_prune_map,
