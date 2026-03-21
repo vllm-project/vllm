@@ -363,9 +363,7 @@ class ToolChoiceRequiredLogitsProcessor(LogitsProcessor):
         ).to(device=self.device, non_blocking=True)
 
     def update_state(self, batch_update: BatchUpdate | None):
-        needs_update = process_dict_updates(
-            self.reqs, batch_update, self.add_request
-        )
+        process_dict_updates(self.reqs, batch_update, self.add_request)
 
         reqs_to_suppress: list[int] = []
         toks_to_suppress: list[int] = []
