@@ -506,7 +506,8 @@ class FusedMoE(CustomOp):
                 _riy_profile = vllm_config.parallel_config.riy_expert_profile or ""
             except Exception:
                 pass
-        if _riy_profile and _os.path.exists(_riy_profile) and _layer_idx >= 0:
+        _is_drafter = "mtp" in prefix.lower() or "drafter" in prefix.lower()
+        if _riy_profile and _os.path.exists(_riy_profile) and _layer_idx >= 0 and not _is_drafter:
             from vllm.model_executor.layers.fused_moe.riy import (
                 build_riy_prune_map,
             )
