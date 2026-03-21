@@ -4,6 +4,7 @@ from copy import deepcopy
 from math import lcm
 from typing import TYPE_CHECKING
 
+from vllm.config.vllm import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
@@ -129,10 +130,11 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         # Get actual kernel block alignment from selected backend(s).
-        backends = get_current_attn_backends(vllm_config)
-        kernel_block_alignment_size = select_common_block_size(
-            cache_config.block_size, backends
-        )
+        with set_current_vllm_config(vllm_config):
+            backends = get_current_attn_backends(vllm_config)
+            kernel_block_alignment_size = select_common_block_size(
+                cache_config.block_size, backends
+            )
         # get attention page size (for 1 token)
         # Attention backend constraints:
         # - FlashAttention (FA) requires block size to be multiple of 16
