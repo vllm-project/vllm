@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     KVCacheCoordinator,
@@ -113,11 +112,6 @@ class SimpleCPUOffloadScheduler:
         # Inverse map: load_event_idx -> req_ids. Keyed by load_event_idx because
         # the worker reports completions by event index, not request id.
         self._load_event_to_reqs: dict[int, list[str]] = {}
-        # FIXME (yifan): This is a hack to get num_local_computed_tokens without
-        # modifying the connector API. But this could cause potential memory leaks.
-        # Temporarily stores num_computed_tokens per request between
-        # get_num_new_matched_tokens() and update_state_after_alloc().
-        self._req_local_computed: dict[str, int] = {}
 
         # Store metadata
         self._lazy_mode = lazy_offload
@@ -183,13 +177,6 @@ class SimpleCPUOffloadScheduler:
         )
 
         if hit_length > 0:
-            # Save for update_state_after_alloc to avoid recomputing skipped blocks.
-            self._req_local_computed[request.request_id] = num_computed_tokens
-            logger.debug(
-                "Request %s: CPU cache hit, %d external tokens can be loaded",
-                request.request_id,
-                hit_length,
-            )
             return hit_length, True
 
         return 0, False
@@ -228,9 +215,12 @@ class SimpleCPUOffloadScheduler:
         num_blocks_to_load = num_external_tokens // self.block_size
         assert num_blocks_to_load > 0
 
-        num_computed_tokens = self._req_local_computed.pop(req_id, 0)
+        num_computed_gpu_blocks = sum(
+            blk.block_hash is not None for blk in blocks.blocks[0]
+        )
+        num_computed_tokens = num_computed_gpu_blocks * self.block_size
         skipped = num_computed_tokens // self.block_size
-        hashes_to_load = request.block_hashes[skipped : skipped + num_blocks_to_load]
+        hashes_to_load = request.block_hashes[skipped:skipped + num_blocks_to_load]
 
         # Find CPU cached blocks across all groups.
         max_hit_len = len(hashes_to_load) * self.block_size
@@ -450,6 +440,10 @@ class SimpleCPUOffloadScheduler:
 
                 for gpu_block_id in group_gpu_ids[already_stored_g:]:
                     gpu_block = gpu_block_pool.blocks[gpu_block_id]
+                    if gpu_block.is_null:
+                        advanced_per_group[g] += 1
+                        continue
+
                     bhash_with_group = gpu_block.block_hash
                     if bhash_with_group is None:
                         break
@@ -617,10 +611,6 @@ class SimpleCPUOffloadScheduler:
                     store_state.finished = True  # Defer: stores in-flight
                 else:
                     self._cleanup_store_request(req_id)
-
-        # FIXME (yifan): remove this after the connector API is modified.
-        if req_id in self._req_local_computed:
-            del self._req_local_computed[req_id]
 
         return False, None
 
