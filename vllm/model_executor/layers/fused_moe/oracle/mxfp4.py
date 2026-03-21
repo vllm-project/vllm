@@ -875,7 +875,7 @@ def backend_to_kernel_cls(
     return _oracle.backend_to_kernel_cls(backend)
 
 
-def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
+def map_mxfp4_backend(runner_backend: MoEBackend) -> Mxfp4MoeBackend:
     """Map user's moe_backend string to Mxfp4MoeBackend."""
     return _oracle.map_backend(runner_backend)
 
