@@ -28,7 +28,7 @@ def _build_full_attn_spec(
     num_kv_heads: int,
     head_size: int,
     dtype: torch.dtype,
-    group_size: int,
+    pack_size: int,
 ) -> FullAttentionSpec:
     # Minimal valid FullAttentionSpec for layout tests.
     return FullAttentionSpec(
@@ -37,7 +37,7 @@ def _build_full_attn_spec(
         head_size=head_size,
         head_size_v=head_size,
         dtype=dtype,
-        group_size=group_size,
+        pack_size=pack_size,
     )
 
 
@@ -56,7 +56,7 @@ def _compute_layout_ref(
     """
     dtype = kv_cache_spec.dtype
     block_size = kv_cache_spec.block_size
-    attn_group_size = kv_cache_spec.group_size
+    attn_pack_size = kv_cache_spec.pack_size
 
     num_blocks_per_kv_block = block_size // kernel_block_size
     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
@@ -88,17 +88,17 @@ def _compute_layout_ref(
     base_stride = list(torch.empty(kv_cache_shape).stride())
 
     storage_offset = 0
-    if attn_group_size > 1:
+    if attn_pack_size > 1:
         # Match the original `_reshape_kv_cache_tensors` logic.
         kernel_blocks_idx = kv_cache_shape.index(kernel_num_blocks)
-        base_stride[kernel_blocks_idx] *= attn_group_size
+        base_stride[kernel_blocks_idx] *= attn_pack_size
         dtype_size = get_dtype_size(dtype)
         num_element_per_page = kv_cache_spec.page_size_bytes // dtype_size
-        num_element_per_attn_group = (
-            num_element_per_page // num_blocks_per_kv_block // attn_group_size
+        num_element_per_attn_pack = (
+            num_element_per_page // num_blocks_per_kv_block // attn_pack_size
         )
-        attn_group_idx = layer_idx % attn_group_size
-        storage_offset = attn_group_idx * num_element_per_attn_group
+        attn_pack_idx = layer_idx % attn_pack_size
+        storage_offset = attn_pack_idx * num_element_per_attn_pack
 
     # Logical KV tensor after the initial reshape.
     kv = torch.empty_strided(
@@ -116,11 +116,11 @@ def _compute_layout_ref(
         and kv.shape[0] == 2
     ):
         hidden_size = prod(kv.shape[2:])
-        attn_group_size_for_layout = kv_cache_spec.group_size
+        attn_pack_size_for_layout = kv_cache_spec.pack_size
         kv_stride = kv.stride()
         kv_stride = (
             hidden_size,
-            2 * hidden_size * attn_group_size_for_layout,
+            2 * hidden_size * attn_pack_size_for_layout,
             *kv_stride[2:],
         )
         return kv.shape, kv_stride, storage_offset
@@ -211,17 +211,17 @@ def _compute_layout_new(
         TreeAttentionBackend,
     ],
 )
-@pytest.mark.parametrize("group_size", [1, 2, 4])
+@pytest.mark.parametrize("pack_size", [1, 2, 4])
 @pytest.mark.parametrize("enable_hybrid_attn_mamba_layout", [False, True])
 @pytest.mark.parametrize("cache_layout", ["NHD", "HND"])
 def test_hybrid_attention_mamba_layout_matches_reference(
     backend_cls: type[AttentionBackend],
     cache_layout: str,
-    group_size: int,
+    pack_size: int,
     enable_hybrid_attn_mamba_layout: bool,
 ):
-    if (not enable_hybrid_attn_mamba_layout) and group_size > 1:
-        pytest.skip("group_size > 1 only occurs when hybrid attention+mamba is enabled")
+    if (not enable_hybrid_attn_mamba_layout) and pack_size > 1:
+        pytest.skip("pack_size > 1 only occurs when hybrid attention+mamba is enabled")
     # Explicitly test both cache layouts for backends that depend on it
     # (FlashAttentionBackend / FlashInferBackend). Other backends ignore
     # this setting, but it is harmless to apply globally.
@@ -244,7 +244,7 @@ def test_hybrid_attention_mamba_layout_matches_reference(
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=dtype,
-        group_size=group_size,
+        pack_size=pack_size,
     )
 
     backend = backend_cls
@@ -270,7 +270,7 @@ def test_hybrid_attention_mamba_layout_matches_reference(
     assert ref_shape == new_shape
     assert ref_stride == new_stride
     # storage_offset only differs from zero when group_size > 1.
-    if group_size > 1:
+    if pack_size > 1:
         assert new_offset == ref_offset
     else:
         assert ref_offset == 0

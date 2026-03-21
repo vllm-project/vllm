@@ -295,7 +295,7 @@ def get_hybrid_attention_mamba_layout(
     target_stride_list = list(kv_cache_stride)
     storage_offset = 0
 
-    attn_group_size = kv_cache_spec.group_size
+    attn_pack_size = kv_cache_spec.pack_size
     kernel_blocks_idx = kv_cache_shape.index(kernel_num_blocks)
     if kv_cache_shape[0] == 2:
         # Hybrid attention+mamba uses (2, num_blocks, ...) logical shape but
@@ -309,14 +309,14 @@ def get_hybrid_attention_mamba_layout(
         hidden_size = prod(kv_cache_shape[2:])
         target_stride_list[0] = hidden_size
         target_stride_list[1] = 2 * hidden_size
-    if attn_group_size > 1:
-        target_stride_list[kernel_blocks_idx] *= attn_group_size
+    if attn_pack_size > 1:
+        target_stride_list[kernel_blocks_idx] *= attn_pack_size
         dtype_size = get_dtype_size(kv_cache_spec.dtype)
         num_element_per_page = kv_cache_spec.page_size_bytes // dtype_size
         num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
-        num_element_per_attn_group = (
-            num_element_per_page // num_blocks_per_kv_block // attn_group_size
+        num_element_per_attn_pack = (
+            num_element_per_page // num_blocks_per_kv_block // attn_pack_size
         )
-        attn_group_idx = layer_idx % attn_group_size
-        storage_offset = attn_group_idx * num_element_per_attn_group
+        attn_pack_idx = layer_idx % attn_pack_size
+        storage_offset = attn_pack_idx * num_element_per_attn_pack
     return tuple(target_stride_list), storage_offset

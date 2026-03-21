@@ -112,7 +112,7 @@ def new_kv_cache_spec(
     page_size_padded=None,
     sliding_window=None,
     attention_chunk_size=None,
-    group_size=1,
+    pack_size=1,
 ):
     return FullAttentionSpec(
         block_size=block_size,
@@ -122,7 +122,7 @@ def new_kv_cache_spec(
         page_size_padded=page_size_padded,
         sliding_window=sliding_window,
         attention_chunk_size=attention_chunk_size,
-        group_size=group_size,
+        pack_size=pack_size,
     )
 
 
@@ -2144,7 +2144,7 @@ def test_unify_hybrid_kv_cache_specs():
 
 
 def test_merge_layers_from_attn_grouping():
-    attn_group_size = 2
+    attn_pack_size = 2
 
     hybrid_kv_cache_specs = {
         "layer_1": new_mamba_spec(),
@@ -2152,11 +2152,11 @@ def test_merge_layers_from_attn_grouping():
         "layer_3": new_kv_cache_spec(head_size=32),
     }
     merged_kv_cache_specs = _merge_layers_from_attn_grouping(
-        attn_group_size, hybrid_kv_cache_specs
+        attn_pack_size, hybrid_kv_cache_specs
     )
     assert merged_kv_cache_specs == {
         "layer_1": new_mamba_spec(),
-        "layer_2+layer_3": new_kv_cache_spec(head_size=32, group_size=2),
+        "layer_2+layer_3": new_kv_cache_spec(head_size=32, pack_size=2),
     }
 
     hybrid_kv_cache_specs = {
@@ -2166,17 +2166,17 @@ def test_merge_layers_from_attn_grouping():
         "layer_4": new_kv_cache_spec(head_size=32),
     }
     merged_kv_cache_specs = _merge_layers_from_attn_grouping(
-        attn_group_size, hybrid_kv_cache_specs
+        attn_pack_size, hybrid_kv_cache_specs
     )
     assert merged_kv_cache_specs == {
         "layer_1": new_mamba_spec(),
-        "layer_2+layer_3": new_kv_cache_spec(head_size=32, group_size=2),
-        "layer_4": new_kv_cache_spec(head_size=32, group_size=2),
+        "layer_2+layer_3": new_kv_cache_spec(head_size=32, pack_size=attn_pack_size),
+        "layer_4": new_kv_cache_spec(head_size=32, pack_size=attn_pack_size),
     }
 
 
 def test_split_layers_from_attn_grouping():
-    attn_group_size = 2
+    attn_pack_size = 2
     expected_page_size = new_mamba_spec().page_size_bytes
 
     kv_cache_config = KVCacheConfig(
@@ -2191,12 +2191,12 @@ def test_split_layers_from_attn_grouping():
             KVCacheGroupSpec(["layer_1"], new_mamba_spec()),
             KVCacheGroupSpec(
                 ["layer_2+layer_3"],
-                new_kv_cache_spec(head_size=32, group_size=2),
+                new_kv_cache_spec(head_size=32, pack_size=2),
             ),
         ],
     )
     split_kv_cache_config = _split_layers_from_attn_grouping(
-        attn_group_size, kv_cache_config
+        attn_pack_size, kv_cache_config
     )
 
     assert split_kv_cache_config == KVCacheConfig(
@@ -2211,7 +2211,7 @@ def test_split_layers_from_attn_grouping():
             KVCacheGroupSpec(["layer_1"], new_mamba_spec()),
             KVCacheGroupSpec(
                 ["layer_2", "layer_3"],
-                new_kv_cache_spec(head_size=32, group_size=2),
+                new_kv_cache_spec(head_size=32, pack_size=attn_pack_size),
             ),
         ],
     )
@@ -2289,7 +2289,7 @@ def test_get_kv_cache_configs_with_mamba():
             KVCacheGroupSpec(["layer_1"], new_mamba_spec()),
             KVCacheGroupSpec(
                 ["layer_2", "layer_3"],
-                new_kv_cache_spec(head_size=32, group_size=2),
+                new_kv_cache_spec(head_size=32, pack_size=2),
             ),
         ],
     )
@@ -2326,11 +2326,11 @@ def test_get_kv_cache_configs_with_mamba():
             KVCacheGroupSpec(["layer_1", "layer_2"], new_mamba_spec()),
             KVCacheGroupSpec(
                 ["layer_3", "layer_4", "layer_7"],
-                new_kv_cache_spec(head_size=32, group_size=2),
+                new_kv_cache_spec(head_size=32, pack_size=2),
             ),
             KVCacheGroupSpec(
                 ["layer_5", "layer_6"],
-                new_kv_cache_spec(head_size=32, group_size=2),
+                new_kv_cache_spec(head_size=32, pack_size=2),
             ),
         ],
     )

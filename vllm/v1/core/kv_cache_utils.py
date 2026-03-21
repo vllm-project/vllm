@@ -1507,7 +1507,7 @@ def _project_kv_cache_groups_to_worker(
 
 
 def _merge_layers_from_attn_grouping(
-    attn_group_size: int,
+    attn_pack_size: int,
     kv_cache_specs: dict[str, KVCacheSpec],
 ) -> dict[str, KVCacheSpec]:
     merged_kv_cache_specs: dict[str, KVCacheSpec] = {}
@@ -1524,12 +1524,12 @@ def _merge_layers_from_attn_grouping(
         layer_names, layer_specs = layers
         num_layers = len(layer_names)
         assert num_layers == len(layer_specs)
-        for start in range(0, num_layers, attn_group_size):
-            end = min(num_layers, start + attn_group_size)
+        for start in range(0, num_layers, attn_pack_size):
+            end = min(num_layers, start + attn_pack_size)
             grouped_layer_names = "+".join(layer_names[start:end])
             try:
                 merged_kv_spec = layer_specs[start].merge_from_grouping(
-                    layer_specs[start:end], attn_group_size
+                    layer_specs[start:end], attn_pack_size
                 )
             except AssertionError as e:
                 raise ValueError(
@@ -1541,7 +1541,7 @@ def _merge_layers_from_attn_grouping(
 
 
 def _split_layers_from_attn_grouping(
-    attn_group_size: int,
+    attn_pack_size: int,
     kv_cache_config: KVCacheConfig,
 ) -> KVCacheConfig:
     grouped_layers: dict[str, list[str]] = {}
@@ -1551,8 +1551,8 @@ def _split_layers_from_attn_grouping(
         split_layer_names = []
         for i, layer_name in enumerate(group.layer_names):
             layer_names = layer_name.split("+")
-            assert len(layer_names) == attn_group_size or (
-                0 < len(layer_names) < attn_group_size
+            assert len(layer_names) == attn_pack_size or (
+                0 < len(layer_names) < attn_pack_size
                 and i == len(group.layer_names) - 1
             ), f"Invalid layer name {layer_name} for attention grouping split"
             grouped_layers[layer_name] = layer_names
@@ -1605,12 +1605,12 @@ def get_kv_cache_configs(
         The generated KVCacheConfigs for each worker.
     """
 
-    attn_group_size = vllm_config.cache_config.mamba_num_attn_pages
+    attn_pack_size = vllm_config.cache_config.mamba_num_attn_pages
     # TODO: add comments
-    if attn_group_size > 1:
+    if attn_pack_size > 1:
         for i in range(len(kv_cache_specs)):
             kv_cache_specs[i] = _merge_layers_from_attn_grouping(
-                attn_group_size,
+                attn_pack_size,
                 kv_cache_specs[i],
             )
 
@@ -1688,10 +1688,10 @@ def get_kv_cache_configs(
         if len(kv_cache_config.kv_cache_groups) > 0:
             _report_kv_cache_config(vllm_config, kv_cache_config)
 
-    if attn_group_size > 1:
+    if attn_pack_size > 1:
         for i in range(len(kv_cache_configs)):
             kv_cache_configs[i] = _split_layers_from_attn_grouping(
-                attn_group_size,
+                attn_pack_size,
                 kv_cache_configs[i],
             )
 

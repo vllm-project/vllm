@@ -67,7 +67,7 @@ class AttentionSpec(KVCacheSpec):
     head_size: int
     dtype: torch.dtype
     page_size_padded: int | None = None
-    group_size: int = 1
+    pack_size: int = 1
     """
     The size of a group of attention layers.
     It's used for Mamba models to group more than one FullAttn layers to one page.
@@ -78,8 +78,8 @@ class AttentionSpec(KVCacheSpec):
         real_page_size = self.real_page_size_bytes
         if self.page_size_padded is not None:
             assert self.page_size_padded >= real_page_size
-            return self.page_size_padded * self.group_size
-        return real_page_size * self.group_size
+            return self.page_size_padded * self.pack_size
+        return real_page_size * self.pack_size
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -92,8 +92,8 @@ class AttentionSpec(KVCacheSpec):
         )
 
     @classmethod
-    def merge_from_grouping(cls, specs: list[Self], group_size: int) -> Self:
-        return replace(cls.merge(specs), group_size=group_size)
+    def merge_from_grouping(cls, specs: list[Self], pack_size: int) -> Self:
+        return replace(cls.merge(specs), pack_size=pack_size)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -169,7 +169,7 @@ class FullAttentionSpec(AttentionSpec):
             head_size_v=specs[0].head_size_v,
             dtype=specs[0].dtype,
             page_size_padded=specs[0].page_size_padded,
-            group_size=specs[0].group_size,
+            pack_size=specs[0].pack_size,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )
@@ -231,7 +231,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
             page_size_padded=specs[0].page_size_padded,
-            group_size=specs[0].group_size,
+            pack_size=specs[0].pack_size,
             cache_dtype_str=cache_dtype_str_set.pop(),
         )
 
