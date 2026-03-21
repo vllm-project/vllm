@@ -92,9 +92,33 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
     # --- Worker-side methods ---
 
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        # When prefix caching is disabled, the connector is inactive.
+        if self.worker_handler is None and self.scheduler_manager is None:
+            return False
+        if self._kv_cache_config is None:
+            return False
+        from vllm.v1.kv_cache_interface import MambaSpec
+
+        if any(
+            isinstance(group.kv_cache_spec, MambaSpec)
+            for group in self._kv_cache_config.kv_cache_groups
+        ):
+            return False
+        return len(self._kv_cache_config.kv_cache_groups) == 1
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self.worker_handler is not None:
             self.worker_handler.register_kv_caches(kv_caches)
+
+    def register_cross_layers_kv_cache(
+        self,
+        kv_cache: torch.Tensor,
+        attn_backend: "type[Any]",
+    ) -> None:
+        if self.worker_handler is not None:
+            self.worker_handler.register_kv_caches({"ALL_LAYERS": kv_cache})
 
     def bind_connector_metadata(
         self,
