@@ -26,6 +26,7 @@ class SymmMemCommunicator:
     _WORLD_SIZES_MULTIMEM = {
         "9.0": [4, 6, 8],
         "10.0": [6, 8],
+        "10.3": [6, 8],
     }
 
     def __init__(
@@ -48,7 +49,7 @@ class SymmMemCommunicator:
             device = torch.device(f"cuda:{device}")
         elif isinstance(device, str):
             device = torch.device(device)
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
         self.dtype = torch.bfloat16
         self.device = device
         self.group = group

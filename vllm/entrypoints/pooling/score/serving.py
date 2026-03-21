@@ -69,16 +69,15 @@ class ServingScores(OpenAIServing):
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
-        self.is_cross_encoder = self.model_config.is_cross_encoder
-        self.is_multimodal_model = self.model_config.is_multimodal_model
+        self.score_type = self.model_config.score_type
         self.architecture = self.model_config.architecture
-        self.is_late_interaction = self.model_config.is_late_interaction
+        self.is_multimodal_model = self.model_config.is_multimodal_model
 
-        if self.is_cross_encoder:
+        if self.score_type == "cross-encoder":
             self._score_func = self._cross_encoding_score
-        elif self.is_late_interaction:
+        elif self.score_type == "late-interaction":
             self._score_func = self._late_interaction_score
-        else:
+        else:  # "bi-encoder"
             self._score_func = self._embedding_score
 
     async def _embedding_score(
@@ -414,7 +413,7 @@ class ServingScores(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        default_pooling_params = request.to_pooling_params("score")
+        default_pooling_params = request.to_pooling_params("classify")
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
