@@ -1506,10 +1506,27 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
-def _merge_layers_from_attn_grouping(
+def _merge_attn_layers_into_pack(
     attn_pack_size: int,
     kv_cache_specs: dict[str, KVCacheSpec],
 ) -> dict[str, KVCacheSpec]:
+    """
+    Merge attention layers into packs based on attn_pack_size.
+
+    When mamba_num_attn_pages > 1, consecutive attention layers are packed
+    together to share a KV-block, with the block partitioned across layers.
+    This function packs every attn_pack_size consecutive attention layers
+    into a group, using "+" as a delimiter to join their layer names into a
+    new key.
+
+    Args:
+        attn_pack_size: The number of layers in each attention pack.
+        kv_cache_specs: A dictionary mapping layer names to their KV cache specs.
+
+    Returns:
+        A merged KV cache spec dictionary where consecutive attention layers
+        are packed together.
+    """
     merged_kv_cache_specs: dict[str, KVCacheSpec] = {}
     att_groups: defaultdict[AttentionSpec, tuple[list[str], list[AttentionSpec]]] = (
         defaultdict(lambda: ([], []))
@@ -1540,10 +1557,27 @@ def _merge_layers_from_attn_grouping(
     return merged_kv_cache_specs
 
 
-def _split_layers_from_attn_grouping(
+def _split_attn_layers_from_pack(
     attn_pack_size: int,
     kv_cache_config: KVCacheConfig,
 ) -> KVCacheConfig:
+    """
+    Split attention layer packs back to individual layers.
+
+    This is the reverse operation of _merge_attn_layers_into_pack. Once
+    the KV cache configuration is generated with packed layers, this
+    function splits them back to individual layer names so that each
+    physical layer can be properly initialized.
+
+    Args:
+        attn_pack_size: The number of layers in each attention pack (same as
+            used in _merge_attn_layers_into_pack).
+        kv_cache_config: The KV cache configuration with packed layers.
+
+    Returns:
+        The KV cache configuration with layer packs split back to individual
+        layers.
+    """
     grouped_layers: dict[str, list[str]] = {}
     for group in kv_cache_config.kv_cache_groups:
         if not isinstance(group.kv_cache_spec, AttentionSpec):
@@ -1583,17 +1617,21 @@ def get_kv_cache_configs(
     workers may have different memory available, and different type of layers
     (when pipeline parallel is enabled). To handle the difference between
     workers, the current implementation is:
-    1. Merge the KV cache specs of all workers to get the KVCacheSpecs for
+    1. If attn_pack_size > 1 (for Mamba models), pack attention layers into
+       groups to share a KV-block before processing.
+    2. Merge the KV cache specs of all workers to get the KVCacheSpecs for
        the whole model.
-    2. Generate the KV cache groups based on the layer ratio of the whole model.
+    3. Generate the KV cache groups based on the layer ratio of the whole model.
        This also handles spec unification for hybrid models.
-    3. Handle auto-fit max_model_len and memory checks using per-worker
+    4. Handle auto-fit max_model_len and memory checks using per-worker
        projected groups to account for PP sharding.
-    4. Generate the KV cache configs for each worker based on the KV cache
+    5. Generate the KV cache configs for each worker based on the KV cache
        grouping strategy. (This is reasonable because the layer ratio of
        different PP stages are similar.)
-    5. Change the num_blocks of each worker to the smallest among all workers
+    6. Change the num_blocks of each worker to the smallest among all workers
        and shrink tensor sizes proportionally to avoid allocating unused memory.
+    7. If attn_pack_size > 1 (for Mamba models), split packed layers back
+       to individual layers after generating configs.
 
     Args:
         vllm_config: The global VllmConfig
@@ -1606,10 +1644,11 @@ def get_kv_cache_configs(
     """
 
     attn_pack_size = vllm_config.cache_config.mamba_num_attn_pages
-    # TODO: add comments
+    # When attn_pack_size > 1 (for Mamba models), pack attention layers together
+    # to share a KV-block.
     if attn_pack_size > 1:
         for i in range(len(kv_cache_specs)):
-            kv_cache_specs[i] = _merge_layers_from_attn_grouping(
+            kv_cache_specs[i] = _merge_attn_layers_into_pack(
                 attn_pack_size,
                 kv_cache_specs[i],
             )
@@ -1688,9 +1727,11 @@ def get_kv_cache_configs(
         if len(kv_cache_config.kv_cache_groups) > 0:
             _report_kv_cache_config(vllm_config, kv_cache_config)
 
+    # When attn_pack_size > 1 (for Mamba models), split packed layers back
+    # to individual layers after generating configs.
     if attn_pack_size > 1:
         for i in range(len(kv_cache_configs)):
-            kv_cache_configs[i] = _split_layers_from_attn_grouping(
+            kv_cache_configs[i] = _split_attn_layers_from_pack(
                 attn_pack_size,
                 kv_cache_configs[i],
             )
