@@ -81,13 +81,14 @@ launch_baseline() {
       --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
       --dtype float16 \
       --enforce-eager"
-  echo ${BASELINE_BASE_CMD}      
+  echo "${BASELINE_BASE_CMD}"      
   bash -c "${BASELINE_BASE_CMD}" &
   sleep 10
-  wait_for_server ${BASELINE_HOST} ${BASELINE_PORT}
+  wait_for_server "${BASELINE_HOST}" "${BASELINE_PORT}"
 }
 
 launch_pd() {
+  # shellcheck disable=SC2089  # backslashes in string are intentional for bash -c
   PREFILL_BASE_CMD="
   ZE_AFFINITY_MASK=${PREFILLER_ZE_AFFINITY_MASK} \
   VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S=200 \
@@ -106,7 +107,7 @@ launch_pd() {
       --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
       --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\"}'"
 
-
+  # shellcheck disable=SC2089  # backslashes in string are intentional for bash -c
   DECODE_BASE_CMD="
   ZE_AFFINITY_MASK=${DECODER_ZE_AFFINITY_MASK} \
   VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S=200 \
@@ -123,17 +124,19 @@ launch_pd() {
       --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
       --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\"}'"
 
-  echo ${PREFILL_BASE_CMD}
-  echo ${DECODE_BASE_CMD}
+  # shellcheck disable=SC2090  # echoing for debug; quotes in string are intentional for bash -c
+  echo "${PREFILL_BASE_CMD}"
+  # shellcheck disable=SC2090  # echoing for debug; quotes in string are intentional for bash -c
+  echo "${DECODE_BASE_CMD}"
   sleep 2
 
   # execute on hosts
   bash -c "${PREFILL_BASE_CMD}" &
   bash -c "${DECODE_BASE_CMD}" &
   sleep 1
-  wait_for_server ${PREFILL_HOST} ${PREFILL_PORT}
+  wait_for_server "${PREFILL_HOST}" "${PREFILL_PORT}"
   sleep 1
-  wait_for_server ${DECODE_HOST} ${DECODE_PORT}
+  wait_for_server "${DECODE_HOST}" "${DECODE_PORT}"
   sleep 1
 }
 
@@ -143,7 +146,8 @@ launch_pd_proxy(){
   --prefiller-host ${PREFILL_HOST} --prefiller-port ${PREFILL_PORT} \
   --decoder-host ${DECODE_HOST} --decoder-port ${DECODE_PORT} \
   --host=${PROXY_HOST} --port ${PROXY_PORT}"
-  echo ${PROXY_BASE_CMD} 
+  # shellcheck disable=SC2090  # echoing for debug; quotes in string are intentional for bash -c
+  echo "${PROXY_BASE_CMD}"
   bash -c "${PROXY_BASE_CMD}" &
   sleep 2
 }
@@ -151,7 +155,7 @@ launch_pd_proxy(){
 run_tests(){
   local service_url=$1
   local mode=$2
-  python3 ${EXP_ROOT}/test_disagg_accuracy.py --service_url=${service_url} --model_name=${MODEL_NAME} --mode=${mode} --file_name=${OUTPUT_FILE}
+  python3 "${EXP_ROOT}/test_disagg_accuracy.py" --service_url="${service_url}" --model_name="${MODEL_NAME}" --mode="${mode}" --file_name="${OUTPUT_FILE}"
 }
 
 
@@ -168,7 +172,7 @@ launch_pd_proxy
 run_tests "http://${PROXY_HOST}:${PROXY_PORT}" "disagg"
 echo "-----P/D success----"
 
-rm ${OUTPUT_FILE}
+rm "${OUTPUT_FILE}"
 cleanup
 
 exit 0
