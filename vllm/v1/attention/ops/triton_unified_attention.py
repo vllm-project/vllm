@@ -993,13 +993,16 @@ def unified_attention(
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
 
-    # Auto-detect quant mode from tensor dtype if caller didn't specify.
-    # This keeps backward compatibility with existing FP8 callers/tests.
-    # NOTE: When fp8_per_token is added, both per-tensor and per-token FP8
-    # will share the same torch dtype, so the caller *must* pass
-    # kv_quant_mode explicitly in that case.
+    # Auto-detect quant mode when the caller didn't specify it.
+    # Production paths (e.g. TritonAttentionImpl.forward) always pass
+    # kv_quant_mode explicitly.  This fallback exists for backward
+    # compatibility with tests that call unified_attention() directly.
     if kv_quant_mode == KVQuantMode.NONE:
-        if k.dtype == torch.int8:
+        if k_scale_cache is not None:
+            # Per-token scale caches provided → per-token quant,
+            # regardless of whether the cache dtype is int8 or fp8.
+            kv_quant_mode = KVQuantMode.PER_TOKEN
+        elif k.dtype == torch.int8:
             kv_quant_mode = KVQuantMode.PER_TOKEN
         elif k.is_floating_point() and k.element_size() == 1:
             kv_quant_mode = KVQuantMode.FP8
