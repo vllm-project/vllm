@@ -916,11 +916,21 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight, layer.w2_weight_scale, num_warps
             )
 
+            from vllm.model_executor.layers.batch_invariant import (
+                vllm_is_batch_invariant,
+            )
+
+            batch_invariant = vllm_is_batch_invariant()
+
             self.w13_precision_config = PrecisionConfig(
-                weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
+                weight_scale=w13_scale,
+                flex_ctx=FlexCtx(rhs_data=w13_flex),
+                enforce_bitwise_invariance=batch_invariant,
             )
             self.w2_precision_config = PrecisionConfig(
-                weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
+                weight_scale=w2_scale,
+                flex_ctx=FlexCtx(rhs_data=w2_flex),
+                enforce_bitwise_invariance=batch_invariant,
             )
             self.w13_weight = w13_weight
             self.w2_weight = w2_weight
