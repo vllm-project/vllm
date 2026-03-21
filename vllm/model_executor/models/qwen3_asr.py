@@ -37,6 +37,7 @@ from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -268,8 +269,27 @@ class Qwen3ASRForConditionalGeneration(
     SupportsPP,
     SupportsMRoPE,
     SupportsTranscription,
+    SupportsLoRA,
 ):
     supported_languages = ISO639_1_SUPPORTED_LANGS
+
+    # LoRA support - delegate to underlying Qwen3ForCausalLM
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    embedding_modules = {
+        "language_model.model.embed_tokens": "input_embeddings",
+        "language_model.lm_head": "output_embeddings",
+    }
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
