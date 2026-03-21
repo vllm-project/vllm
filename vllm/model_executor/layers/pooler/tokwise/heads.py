@@ -68,24 +68,22 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
 
         if self.head_dtype is not None:
             pooled_data = pooled_data.to(self.head_dtype)
-        # pooled_data shape: [n_tokens, hidden_size]
+        # pooled_data shape: [n_tokens, hidden_dimension]
 
         # Apply ST projector
         if self.projector is not None:
-            embeddings = self.projector(pooled_data)
-        else:
-            embeddings = pooled_data
-        # embeddings shape: [n_tokens, embedding_size]
+            pooled_data = self.projector(pooled_data)
+        # pooled_data shape: [n_tokens, embedding_dimension]
 
         # for matryoshka representation
-        embeddings = embeddings[..., : pooling_param.dimensions]
+        pooled_data = pooled_data[..., : pooling_param.dimensions]
 
         # for normalize
         if self.activation is not None and pooling_param.use_activation:
-            embeddings = self.activation(embeddings)
+            pooled_data = self.activation(pooled_data)
 
-        # embeddings shape: [n_tokens, embedding_size]
-        return embeddings
+        # pooled_data shape: [n_tokens, embedding_dimension]
+        return pooled_data
 
 
 class TokenClassifierPoolerHead(TokenPoolerHead):
@@ -120,16 +118,16 @@ class TokenClassifierPoolerHead(TokenPoolerHead):
         # hidden_states shape: [n_token, hidden_size]
 
         if self.classifier is not None:
-            logits = self.classifier(pooled_data)
+            scores = self.classifier(pooled_data)
         else:
-            logits = pooled_data
-        # logits shape: [n_token, num_labels]
+            scores = pooled_data
+        # scores shape: [n_token, num_labels]
 
         if self.logit_bias is not None:
-            logits -= self.logit_bias
+            scores -= self.logit_bias
 
         if self.activation is not None and pooling_param.use_activation:
-            logits = self.activation(logits)
+            scores = self.activation(scores)
 
-        # logits shape: [n_token, num_labels]
-        return logits
+        # scores shape: [n_token, num_labels]
+        return scores

@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
@@ -155,9 +155,7 @@ async def build_async_engine_client_from_engine_args(
 
 
 def build_app(
-    args: Namespace,
-    supported_tasks: tuple["SupportedTask", ...] | None = None,
-    model_config: ModelConfig | None = None,
+    args: Namespace, supported_tasks: tuple["SupportedTask", ...] | None = None
 ) -> FastAPI:
     if supported_tasks is None:
         warnings.warn(
@@ -193,7 +191,7 @@ def build_app(
         attach_router as register_sagemaker_api_router,
     )
 
-    register_sagemaker_api_router(app, supported_tasks, model_config)
+    register_sagemaker_api_router(app, supported_tasks)
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.openai.generate.api_router import (
@@ -244,7 +242,7 @@ def build_app(
     if any(task in POOLING_TASKS for task in supported_tasks):
         from vllm.entrypoints.pooling import register_pooling_api_routers
 
-        register_pooling_api_routers(app, supported_tasks, model_config)
+        register_pooling_api_routers(app, supported_tasks)
 
     app.root_path = args.root_path
     app.add_middleware(
@@ -585,10 +583,8 @@ async def build_and_serve(
         uvicorn_kwargs["log_config"] = log_config
 
     supported_tasks = await engine_client.get_supported_tasks()
-    model_config = engine_client.model_config
-
     logger.info("Supported tasks: %s", supported_tasks)
-    app = build_app(args, supported_tasks, model_config)
+    app = build_app(args, supported_tasks)
     await init_app_state(engine_client, app.state, args, supported_tasks)
 
     logger.info("Starting vLLM server on %s", listen_address)

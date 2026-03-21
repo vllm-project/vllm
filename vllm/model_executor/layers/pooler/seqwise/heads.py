@@ -56,31 +56,29 @@ class EmbeddingPoolerHead(SequencePoolerHead):
 
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
-        # pooled_data shape: [batchsize, hidden_size]
+        # pooled_data shape: [batchsize, hidden_dimension]
 
         if self.head_dtype is not None:
             pooled_data = pooled_data.to(self.head_dtype)
 
         # Apply ST projector
         if self.projector is not None:
-            embeddings = self.projector(pooled_data)
-        else:
-            embeddings = pooled_data
-        # embeddings shape: [batchsize, embedding_size]
+            pooled_data = self.projector(pooled_data)
+        # pooled_data shape: [batchsize, embedding_dimension]
 
         # for matryoshka representation
         dimensions_list = [pooling_param.dimensions for pooling_param in pooling_params]
         if any(d is not None for d in dimensions_list):
             # change the output dimension
-            assert len(embeddings) == len(dimensions_list)
-            if len(set(dimensions_list)) == 1 and not isinstance(embeddings, list):
+            assert len(pooled_data) == len(dimensions_list)
+            if len(set(dimensions_list)) == 1 and not isinstance(pooled_data, list):
                 # if all dimensions are the same
                 d = dimensions_list[0]
-                embeddings = embeddings[..., :d]
+                pooled_data = pooled_data[..., :d]
             else:
-                embeddings = [
+                pooled_data = [
                     vecs if d is None else vecs[..., :d]
-                    for vecs, d in zip(embeddings, dimensions_list)
+                    for vecs, d in zip(pooled_data, dimensions_list)
                 ]
 
         # for normalize
@@ -88,15 +86,15 @@ class EmbeddingPoolerHead(SequencePoolerHead):
             flags = [p.use_activation for p in pooling_params]
             if len(set(flags)) == 1:
                 if flags[0]:
-                    embeddings = self.activation(embeddings)
+                    pooled_data = self.activation(pooled_data)
             else:
-                embeddings = [
+                pooled_data = [
                     self.activation(vecs) if f else vecs
-                    for vecs, f in zip(embeddings, flags)
+                    for vecs, f in zip(pooled_data, flags)
                 ]
 
-        # embeddings shape: [batchsize, embedding_size]
-        return embeddings
+        # pooled_data shape: [batchsize, embedding_dimension]
+        return pooled_data
 
 
 class ClassifierPoolerHead(SequencePoolerHead):
@@ -115,7 +113,7 @@ class ClassifierPoolerHead(SequencePoolerHead):
         self.activation = activation
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"classify"}
+        return {"classify", "score"}
 
     def forward(
         self,
@@ -133,23 +131,21 @@ class ClassifierPoolerHead(SequencePoolerHead):
             pooled_data = pooled_data.to(self.head_dtype)
 
         if self.classifier is not None:
-            logits = self.classifier(pooled_data)
-        else:
-            logits = pooled_data
+            pooled_data = self.classifier(pooled_data)
+        # pooled_data shape: [batchsize, num_labels]
 
-        # logits shape: [batchsize, num_labels]
         if self.logit_bias is not None:
-            logits -= self.logit_bias
+            pooled_data -= self.logit_bias
 
         if self.activation is not None:
             flags = [p.use_activation for p in pooling_params]
             if len(set(flags)) == 1:
-                logits = self.activation(logits) if flags[0] else logits
+                pooled_data = self.activation(pooled_data) if flags[0] else pooled_data
             else:
-                logits = [
+                pooled_data = [
                     self.activation(vecs) if f else vecs
-                    for vecs, f in zip(logits, flags)
+                    for vecs, f in zip(pooled_data, flags)
                 ]
 
-        # logits shape: [batchsize, num_labels]
-        return logits
+        # pooled_data shape: [batchsize, num_labels]
+        return pooled_data

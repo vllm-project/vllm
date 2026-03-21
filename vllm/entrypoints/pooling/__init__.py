@@ -5,9 +5,6 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
-from vllm.config import ModelConfig
-from vllm.logger import init_logger
-
 if TYPE_CHECKING:
     from argparse import Namespace
 
@@ -20,30 +17,9 @@ else:
     RequestLogger = object
     SupportedTask = object
 
-logger = init_logger(__name__)
-
-
-def enable_scoring_api(
-    supported_tasks: tuple["SupportedTask", ...],
-    model_config: ModelConfig | None = None,
-) -> bool:
-    if any(t in supported_tasks for t in ("embed", "token_embed")):
-        return True
-
-    if model_config is not None and "classify" in supported_tasks:
-        num_labels = getattr(model_config.hf_config, "num_labels", 0)
-        if num_labels != 1:
-            logger.debug_once("Score API is only enabled for num_labels == 1.")
-            return False
-        return True
-
-    return False
-
 
 def register_pooling_api_routers(
-    app: FastAPI,
-    supported_tasks: tuple["SupportedTask", ...],
-    model_config: ModelConfig | None = None,
+    app: FastAPI, supported_tasks: tuple["SupportedTask", ...]
 ):
     from vllm.entrypoints.pooling.pooling.api_router import router as pooling_router
 
@@ -61,7 +37,11 @@ def register_pooling_api_routers(
 
         app.include_router(embed_router)
 
-    if enable_scoring_api(supported_tasks, model_config):
+    # Score API handles score/rerank for:
+    # - "score" task (score_type: cross-encoder models)
+    # - "embed" task (score_type: bi-encoder models)
+    # - "token_embed" task (score_type: late interaction models)
+    if any(t in supported_tasks for t in ("score", "embed", "token_embed")):
         from vllm.entrypoints.pooling.score.api_router import router as score_router
 
         app.include_router(score_router)
@@ -80,8 +60,6 @@ def init_pooling_state(
     from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
     from vllm.entrypoints.pooling.score.serving import ServingScores
     from vllm.tasks import POOLING_TASKS
-
-    model_config = engine_client.model_config
 
     resolved_chat_template = load_chat_template(args.chat_template)
 
@@ -124,6 +102,10 @@ def init_pooling_state(
         if "classify" in supported_tasks
         else None
     )
+    # Score API handles score/rerank for:
+    # - "score" task (score_type: cross-encoder models)
+    # - "embed" task (score_type: bi-encoder models)
+    # - "token_embed" task (score_type: late interaction models)
     state.serving_scores = (
         ServingScores(
             engine_client,
@@ -132,6 +114,6 @@ def init_pooling_state(
             score_template=resolved_chat_template,
             log_error_stack=args.log_error_stack,
         )
-        if enable_scoring_api(supported_tasks, model_config)
+        if any(t in supported_tasks for t in ("embed", "score", "token_embed"))
         else None
     )

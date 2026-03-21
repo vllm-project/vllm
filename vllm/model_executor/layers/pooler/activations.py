@@ -16,22 +16,25 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 logger = init_logger(__name__)
 
 
-def get_act_fn(
+def get_classification_act_fn(
     config: PretrainedConfig,
-    static_num_labels: bool = True,
 ) -> "PoolerActivation":
-    # get classification act_fn
     # Implement alignment with transformers ForSequenceClassificationLoss
     # https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92
     problem_type = getattr(config, "problem_type", "")
     if problem_type == "regression":
         return PoolerIdentity()
     if problem_type == "single_label_classification":
-        return PoolerClassify(static_num_labels=static_num_labels)
+        return PoolerClassify()
     if problem_type == "multi_label_classification":
         return PoolerMultiLabelClassify()
 
-    # get cross_encoder act_fn
+    return PoolerClassify()
+
+
+def get_cross_encoder_act_fn(
+    config: PretrainedConfig,
+) -> "PoolerActivation":
     function_name: str | None = None
     if (
         hasattr(config, "sentence_transformers")
@@ -52,16 +55,24 @@ def get_act_fn(
         fn = resolve_obj_by_qualname(function_name)()
         return PoolerActivation.wraps(fn)
 
-    return PoolerClassify(static_num_labels=static_num_labels)
+    return PoolerClassify()
 
 
 def resolve_classifier_act_fn(
     model_config: ModelConfig,
     static_num_labels: bool = True,
-    act_fn: "PoolerActivation | None" = None,
+    act_fn: "PoolerActivation | str | None" = None,
 ):
+    if isinstance(act_fn, str):
+        if act_fn == "classify":
+            return get_classification_act_fn(model_config.hf_config)
+        if act_fn == "score":
+            return get_cross_encoder_act_fn(model_config.hf_config)
+
+        raise ValueError(f"act_fn [{act_fn=}] not supported.")
+
     if act_fn is None:
-        return get_act_fn(model_config.hf_config, static_num_labels)
+        return PoolerClassify(static_num_labels=static_num_labels)
 
     assert callable(act_fn)
     return act_fn
@@ -86,8 +97,9 @@ class PoolerActivation(nn.Module, ABC):
 
     def forward(self, pooled_data: _T) -> _T:
         # shape:
-        # classify -> (batch_size, num_classes)
-        # embed -> (batch_size, embedding_size) or list(embedding_size)
+        # classify (& score) -> (batch_size, num_classes)
+        # embed -> (batch_size, embedding_dim) or list(embedding_dim)
+        #          (batch_size, dimensions) or list(dimensions) if using MRL
         if isinstance(pooled_data, list):
             return [self.forward_chunk(data) for data in pooled_data]
 

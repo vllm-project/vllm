@@ -52,6 +52,13 @@ class DispatchPooler(Pooler):
                     pooler_config,
                     pooling=pooling,
                     classifier=classifier,
+                    act_fn="classify",
+                ),
+                "score": pooler_for_classify(
+                    pooler_config,
+                    pooling=pooling,
+                    classifier=classifier,
+                    act_fn="score",
                 ),
             }
         )
@@ -108,7 +115,7 @@ class DispatchPooler(Pooler):
 
 class IdentityPooler(Pooler):
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"plugin"}
+        return {"plugin", "score"}
 
     def forward(
         self,

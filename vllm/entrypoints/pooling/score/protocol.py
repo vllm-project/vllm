@@ -35,7 +35,7 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
             max_total_tokens_param="max_model_len",
         )
 
-    def to_pooling_params(self, task: PoolingTask = "classify"):
+    def to_pooling_params(self, task: PoolingTask = "score"):
         return PoolingParams(
             task=task,
             use_activation=self.use_activation,
@@ -111,7 +111,7 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
             max_total_tokens_param="max_model_len",
         )
 
-    def to_pooling_params(self, task: PoolingTask = "classify"):
+    def to_pooling_params(self, task: PoolingTask = "score"):
         return PoolingParams(
             task=task,
             use_activation=self.use_activation,

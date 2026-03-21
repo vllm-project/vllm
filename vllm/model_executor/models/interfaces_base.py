@@ -194,18 +194,18 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
     [vllm.config.model.ModelConfig.score_type][]
     to use by default.
     
-    Scoring API handles score/rerank for:\n
-    - "classify" task (score_type: cross-encoder models)\n
-    - "embed" task (score_type: bi-encoder models)\n
-    - "token_embed" task (score_type: late interaction models)\n
+    Score API handles score/rerank for:
+    - "score" task (score_type: cross-encoder models)
+    - "embed" task (score_type: bi-encoder models)
+    - "token_embed" task (score_type: late interaction models)
     
-    score_type defaults to bi-encoder, then the Score API uses the "embed" task.\n
+    score_type defaults to bi-encoder, then the Score API uses the "embed" task.
     If you set score_type to cross-encoder via 
     [vllm.model_executor.models.interfaces.SupportsCrossEncoding][], 
-    then the Score API uses the "score" task.\n
+    then the Score API uses the "score" task.
     If you set score_type to late-interaction via 
     [vllm.model_executor.models.interfaces.SupportsLateInteraction][], 
-    then the Score API uses the "token_embed" task.\n
+    then the Score API uses the "token_embed" task.    
     """
 
     pooler: Pooler

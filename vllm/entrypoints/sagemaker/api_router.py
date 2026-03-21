@@ -10,11 +10,9 @@ import pydantic
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.pooling import enable_scoring_api
 from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.entrypoints.serve.instrumentator.basic import base
 from vllm.entrypoints.serve.instrumentator.health import health
@@ -27,10 +25,7 @@ GetHandlerFn = Callable[[Request], OpenAIServing | PoolingServing | None]
 EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
 
 
-def get_invocation_types(
-    supported_tasks: tuple["SupportedTask", ...],
-    model_config: ModelConfig | None = None,
-):
+def get_invocation_types(supported_tasks: tuple["SupportedTask", ...]):
     # NOTE: Items defined earlier take higher priority
     INVOCATION_TYPES: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = []
 
@@ -75,7 +70,7 @@ def get_invocation_types(
             (ClassificationRequest, (classify, create_classify)),
         ]
 
-    if enable_scoring_api(supported_tasks, model_config):
+    if "score" in supported_tasks:
         from vllm.entrypoints.pooling.score.api_router import do_rerank, rerank
         from vllm.entrypoints.pooling.score.protocol import RerankRequest
 
@@ -83,6 +78,7 @@ def get_invocation_types(
             (RerankRequest, (rerank, do_rerank)),
         ]
 
+    if "score" in supported_tasks or "embed" in supported_tasks:
         from vllm.entrypoints.pooling.score.api_router import create_score, score
         from vllm.entrypoints.pooling.score.protocol import ScoreRequest
 
@@ -101,15 +97,11 @@ def get_invocation_types(
     return INVOCATION_TYPES
 
 
-def attach_router(
-    app: FastAPI,
-    supported_tasks: tuple["SupportedTask", ...],
-    model_config: ModelConfig | None = None,
-):
+def attach_router(app: FastAPI, supported_tasks: tuple["SupportedTask", ...]):
     router = APIRouter()
 
     # NOTE: Construct the TypeAdapters only once
-    INVOCATION_TYPES = get_invocation_types(supported_tasks, model_config)
+    INVOCATION_TYPES = get_invocation_types(supported_tasks)
     INVOCATION_VALIDATORS = [
         (pydantic.TypeAdapter(request_type), (get_handler, endpoint))
         for request_type, (get_handler, endpoint) in INVOCATION_TYPES
