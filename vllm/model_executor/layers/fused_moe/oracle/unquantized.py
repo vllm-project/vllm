@@ -252,7 +252,8 @@ def select_unquantized_moe_backend(
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
         if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
-            AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
+            if UnquantizedMoeBackend.AITER in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
         else:
             backend = UnquantizedMoeBackend.AITER
             return _return_or_raise(backend, moe_config, activation_format)
