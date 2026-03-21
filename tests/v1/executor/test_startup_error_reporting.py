@@ -3,11 +3,13 @@
 
 import multiprocessing
 import os
+from types import SimpleNamespace
 
 import pytest
 
 from vllm.v1.engine.utils import (
     STARTUP_FAILURE,
+    StartupErrorPayload,
     WorkerStartupMessage,
     build_startup_error_payload,
 )
@@ -60,3 +62,49 @@ def test_worker_startup_failure_surfaces_root_cause():
     finally:
         ready_reader.close()
         proc.join(timeout=10)
+
+
+class FakeReadyPipe:
+    def __init__(self, response: WorkerStartupMessage):
+        self.response = response
+
+    def recv(self) -> WorkerStartupMessage:
+        return self.response
+
+    def close(self) -> None:
+        pass
+
+
+def test_worker_startup_failure_dedupes_and_preserves_exitcode(monkeypatch):
+    ready_pipe = FakeReadyPipe(
+        WorkerStartupMessage(
+            status=STARTUP_FAILURE,
+            error=StartupErrorPayload(
+                error_type="ValueError",
+                message="simulated worker startup failure",
+                traceback="Traceback line 1\nTraceback line 2",
+                source_process="VllmWorker-7",
+                source_rank=7,
+                pid=4321,
+            ),
+        )
+    )
+    handle = UnreadyWorkerProcHandle(
+        proc=SimpleNamespace(name="VllmWorker-7", pid=4321, exitcode=1),
+        rank=7,
+        ready_pipe=ready_pipe,
+    )
+    monkeypatch.setattr(
+        multiprocessing.connection,
+        "wait",
+        lambda _pipes: [ready_pipe],
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        WorkerProc.wait_for_ready([handle])
+
+    message = str(exc_info.value)
+    assert message.count("VllmWorker-7(") == 1
+    assert "Failed worker proc(s): VllmWorker-7(pid=4321, exitcode=1)" in message
+    assert "Source: VllmWorker-7 (rank=7, pid=4321)" in message
+    assert "Root cause: ValueError: simulated worker startup failure" in message

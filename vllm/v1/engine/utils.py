@@ -180,18 +180,57 @@ def format_failed_processes(failed_processes: Sequence[FailedProcessInfo]) -> st
     return ", ".join(_format_failed_process(proc) for proc in failed_processes)
 
 
+def _failed_processes_match(
+    existing: FailedProcessInfo, candidate: FailedProcessInfo
+) -> bool:
+    if existing.pid is not None and candidate.pid is not None:
+        return existing.pid == candidate.pid
+    return existing.name == candidate.name
+
+
+def _merge_failed_process_info(
+    existing: FailedProcessInfo, candidate: FailedProcessInfo
+) -> FailedProcessInfo:
+    return FailedProcessInfo(
+        name=existing.name,
+        pid=existing.pid if existing.pid is not None else candidate.pid,
+        exitcode=(
+            existing.exitcode if existing.exitcode is not None else candidate.exitcode
+        ),
+    )
+
+
+def merge_failed_process_info(
+    failed_processes: Iterable[FailedProcessInfo],
+    candidate: FailedProcessInfo,
+    *,
+    prepend: bool = False,
+) -> list[FailedProcessInfo]:
+    merged = list(failed_processes)
+    for idx, existing in enumerate(merged):
+        if _failed_processes_match(existing, candidate):
+            merged[idx] = _merge_failed_process_info(existing, candidate)
+            return merged
+
+    if prepend:
+        merged.insert(0, candidate)
+    else:
+        merged.append(candidate)
+    return merged
+
+
 def merge_failed_processes(
     failed_processes: Iterable[FailedProcessInfo],
     error: StartupErrorPayload | None = None,
 ) -> list[FailedProcessInfo]:
-    merged = list(failed_processes)
     if error is None:
-        return merged
+        return list(failed_processes)
 
-    candidate = FailedProcessInfo(name=error.source_process, pid=error.pid)
-    if candidate not in merged:
-        merged.insert(0, candidate)
-    return merged
+    return merge_failed_process_info(
+        failed_processes,
+        FailedProcessInfo(name=error.source_process, pid=error.pid),
+        prepend=True,
+    )
 
 
 def format_startup_failure(

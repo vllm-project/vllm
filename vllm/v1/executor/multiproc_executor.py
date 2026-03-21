@@ -64,6 +64,7 @@ from vllm.v1.engine.utils import (
     WorkerStartupMessage,
     build_startup_error_payload,
     build_startup_failure_exception,
+    merge_failed_process_info,
     merge_failed_processes,
 )
 from vllm.v1.executor.abstract import Executor, FailureCallback
@@ -734,17 +735,19 @@ class WorkerProc:
                 if handle.proc.exitcode is not None
             ]
             if failed_handle is not None:
+                failed_processes = merge_failed_process_info(
+                    failed_processes,
+                    FailedProcessInfo(
+                        name=failed_handle.proc.name,
+                        pid=failed_handle.proc.pid,
+                        exitcode=failed_handle.proc.exitcode,
+                    ),
+                    prepend=True,
+                )
                 failed_processes = merge_failed_processes(
                     failed_processes,
                     response.error if response is not None else None,
                 )
-                candidate = FailedProcessInfo(
-                    name=failed_handle.proc.name,
-                    pid=failed_handle.proc.pid,
-                    exitcode=failed_handle.proc.exitcode,
-                )
-                if candidate not in failed_processes:
-                    failed_processes.insert(0, candidate)
             return failed_processes
 
         while pipes:

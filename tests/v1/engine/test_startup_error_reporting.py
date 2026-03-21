@@ -128,3 +128,62 @@ def test_wait_for_engine_startup_formats_failed_process_summary(monkeypatch):
     message = str(exc_info.value)
     assert "Engine core initialization failed." in message
     assert "Failed core proc(s): EngineCore(pid=1234, signal=9)" in message
+
+
+def test_wait_for_engine_startup_dedupes_failed_process_for_error_source(
+    monkeypatch,
+):
+    handshake_socket = FakeHandshakeSocket(
+        [
+            (
+                (0).to_bytes(2, "little"),
+                msgspec.msgpack.encode(
+                    EngineStartupMessage(
+                        status=STARTUP_FAILURE,
+                        local=True,
+                        headless=False,
+                        error=StartupErrorPayload(
+                            error_type="RuntimeError",
+                            message="bad config",
+                            traceback="Traceback line 1\nTraceback line 2",
+                            source_process="EngineCore",
+                            pid=1234,
+                        ),
+                    )
+                ),
+            )
+        ]
+    )
+    proc_manager = SimpleNamespace(
+        sentinels=lambda: [],
+        finished_procs=lambda: [
+            FailedProcessInfo(name="EngineCore", pid=1234, exitcode=-9)
+        ],
+    )
+    monkeypatch.setattr(
+        zmq,
+        "Poller",
+        lambda: FakePoller([[(handshake_socket, zmq.POLLIN)]]),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        wait_for_engine_startup(
+            handshake_socket=handshake_socket,
+            addresses=SimpleNamespace(frontend_stats_publish_address=None),
+            core_engines=[CoreEngine(index=0, local=True)],
+            parallel_config=SimpleNamespace(
+                data_parallel_size_local=1,
+                data_parallel_hybrid_lb=False,
+                data_parallel_external_lb=False,
+            ),
+            coordinated_dp=False,
+            cache_config=SimpleNamespace(num_gpu_blocks=0),
+            proc_manager=proc_manager,
+            coord_process=None,
+        )
+
+    message = str(exc_info.value)
+    assert message.count("EngineCore(") == 1
+    assert "Failed core proc(s): EngineCore(pid=1234, signal=9)" in message
+    assert "Source: EngineCore (pid=1234)" in message
+    assert "Root cause: RuntimeError: bad config" in message
