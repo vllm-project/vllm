@@ -41,9 +41,9 @@ if current_platform.is_cuda_alike():
             DeepEPLLPrepareAndFinalize,
         )
     if has_mori():
-        from .prepare_finalize.mori_prepare_finalize import MoriPrepareAndFinalize
+        from .prepare_finalize.mori import MoriPrepareAndFinalize
     if has_nixl_ep():
-        from .prepare_finalize.nixl_ep_prepare_finalize import (
+        from .prepare_finalize.nixl_ep import (
             NIXL_EP_QUANT_BLOCK_SHAPE,
             NixlEPPrepareAndFinalize,
         )
