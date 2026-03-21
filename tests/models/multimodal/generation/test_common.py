@@ -206,9 +206,7 @@ VLM_TEST_SETTINGS = {
             "model_impl": "transformers",
             "default_torch_num_threads": 1,
         },
-        # FIXME: Investigate why the test hangs
-        # when processing the 3rd prompt in vLLM
-        marks=[pytest.mark.core_model, pytest.mark.skip(reason="Test hangs")],
+        marks=[pytest.mark.core_model],
     ),
     # Gemma3 has bidirectional mask on images
     "gemma3-transformers": VLMTestInfo(
@@ -222,7 +220,10 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={
             "model_impl": "transformers",
         },
-        marks=[pytest.mark.core_model],
+        marks=[
+            pytest.mark.core_model,
+            *([large_gpu_mark(min_gb=80)] if current_platform.is_rocm() else []),
+        ],
     ),
     "idefics3-transformers": VLMTestInfo(
         models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
@@ -779,6 +780,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForCausalLM,
+        patch_hf_runner=model_utils.paddleocr_vl_patch_hf_runner,
         image_size_factors=[(0.25,)],
         marks=[
             pytest.mark.skipif(

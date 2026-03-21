@@ -217,12 +217,13 @@ class ModelConfig:
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
     model does not support sliding window, this argument is ignored."""
-    disable_cascade_attn: bool = False
+    disable_cascade_attn: bool = True
     """Disable cascade attention for V1. While cascade attention does not
     change the mathematical correctness, disabling it could be useful for
-    preventing potential numerical issues. Note that even if this is set to
-    False, cascade attention will be only used when the heuristic tells that
-    it's beneficial."""
+    preventing potential numerical issues. This defaults to True, so users
+    must opt in to cascade attention by setting this to False. Even when this
+    is set to False, cascade attention will only be used when the heuristic
+    tells that it's beneficial."""
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -530,6 +531,24 @@ class ModelConfig:
         self._model_info = model_info
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
+
+        # Set default tokenizer modes based on model architecture
+        if self.tokenizer_mode == "auto":
+            if arch == "Grok1ForCausalLM":
+                self.tokenizer_mode = "grok2"
+            elif arch == "MoonshotKimiaForCausalLM":
+                self.tokenizer_mode = "kimi_audio"
+            elif arch == "QwenVLForConditionalGeneration":
+                self.tokenizer_mode = "qwen_vl"
+            elif arch == "DeepseekV32ForCausalLM":
+                self.tokenizer_mode = "deepseek_v32"
+
+            if self.tokenizer_mode != "auto":
+                logger.info(
+                    "Defaulting to tokenizer_mode=%r for %s",
+                    self.tokenizer_mode,
+                    arch,
+                )
 
         # Init pooler config if needed
         if self.runner_type == "pooling":
@@ -1123,6 +1142,7 @@ class ModelConfig:
             return bool(self.hf_config.is_mm_prefix_lm)
         # fallback to list of known models
         MM_PREFIX_LM_MODELS = (
+            "bagel",
             "gemma3",
             "molmo2",
             "paligemma",
@@ -1415,10 +1435,10 @@ class ModelConfig:
     @property
     def score_type(self) -> ScoreType:
         """
-        Score API handles score/rerank for:
-        - "score" task (score_type: cross-encoder models)
-        - "embed" task (score_type: bi-encoder models)
-        - "token_embed" task (score_type: late interaction models)
+        Scoring API handles score/rerank for:\n
+        - "classify" task (score_type: cross-encoder models)\n
+        - "embed" task (score_type: bi-encoder models)\n
+        - "token_embed" task (score_type: late interaction models)\n
         """
         # fixme: self._model_info.score_type is the score type before
         #  as_seq_cls_model, which is "bi-encoder", rather than the
@@ -2001,6 +2021,15 @@ def _get_and_verify_max_len(
 
                 if rope_type == "yarn":
                     derived_max_model_len = rp["original_max_position_embeddings"]
+        if scaling_factor is None:
+            # Fallback the factor to 1.0 if a user assigned `null`
+            logger.warning_once(
+                "The model's RoPE configuration has a null scaling "
+                "factor which is unexpected. This likely indicates a bug "
+                "in the model's HuggingFace config.json. Please notify the "
+                "model vendor. Falling back the value to 1.0. "
+            )
+            scaling_factor = 1.0
         # Do this outside loop since all layer types should have the same scaling
         derived_max_model_len *= scaling_factor
 
