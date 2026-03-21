@@ -240,6 +240,18 @@ response = client.chat.completions.create(
 )
 ```
 
+The same `chat_template_kwargs` override is also supported on the `/v1/responses`
+endpoint:
+
+```python
+response = client.responses.create(
+    model=model,
+    input="Compute 23 * 17 and explain briefly.",
+    reasoning={"effort": "low"},
+    extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+)
+```
+
 ## Limitations
 
 - The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`).

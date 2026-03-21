@@ -273,8 +273,9 @@ class ParsableContext(ConversationContext):
         *,
         response_messages: list[ResponseInputOutputItem],
         tokenizer: TokenizerLike,
-        reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser] | None,
+        reasoning_parser_cls: Callable[..., ReasoningParser] | None,
         request: ResponsesRequest,
+        chat_template_kwargs: dict[str, Any] | None,
         available_tools: list[str] | None,
         tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
         chat_template: str | None,
@@ -295,6 +296,7 @@ class ParsableContext(ConversationContext):
             reasoning_parser_cls=reasoning_parser_cls,
             response_messages=response_messages,
             request=request,
+            chat_template_kwargs=chat_template_kwargs,
             tool_parser_cls=tool_parser_cls,
         )
         self.tool_parser_cls = tool_parser_cls

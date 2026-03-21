@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import AsyncExitStack
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -617,6 +617,138 @@ def _make_serving_instance_with_reasoning():
         reasoning_parser="qwen3",
     )
     return serving
+
+
+@pytest.mark.asyncio
+async def test_make_request_passes_default_chat_template_kwargs():
+    engine_client = MagicMock()
+    model_config = MagicMock()
+    model_config.max_model_len = 100
+    model_config.hf_config.model_type = "test"
+    model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config = model_config
+    engine_client.input_processor = MagicMock()
+    engine_client.io_processor = MagicMock()
+    engine_client.renderer = MagicMock()
+
+    openai_serving_render = MagicMock()
+    openai_serving_render.preprocess_chat = AsyncMock(return_value=([], [object()]))
+
+    serving = OpenAIServingResponses(
+        engine_client=engine_client,
+        models=MagicMock(),
+        openai_serving_render=openai_serving_render,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        default_chat_template_kwargs={"enable_thinking": False},
+    )
+
+    request = ResponsesRequest(
+        input="hi",
+        tools=[],
+        chat_template_kwargs={"enable_thinking": True},
+    )
+
+    await serving._make_request(request, None)
+
+    assert openai_serving_render.preprocess_chat.await_count == 1
+    assert openai_serving_render.preprocess_chat.await_args.kwargs[
+        "default_template_kwargs"
+    ] == {"enable_thinking": False}
+
+
+@pytest.mark.asyncio
+async def test_reasoning_parser_receives_merged_chat_template_kwargs():
+    serving = _make_serving_instance_with_reasoning()
+    serving.default_chat_template_kwargs = {"enable_thinking": False}
+
+    mock_parser = MagicMock()
+    mock_parser.count_reasoning_tokens.return_value = 0
+    serving.parser = MagicMock()
+    serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
+    serving.parser.tool_parser_cls = None
+
+    tokenizer = MagicMock()
+    context = SimpleContext()
+    completion = CompletionOutput(
+        index=0,
+        text="final",
+        token_ids=[20],
+        cumulative_logprob=0.0,
+        logprobs=None,
+        finish_reason="stop",
+        stop_reason=None,
+    )
+    req_output = RequestOutput(
+        request_id="req",
+        prompt="hi",
+        prompt_token_ids=[7, 8],
+        prompt_logprobs=None,
+        outputs=[completion],
+        finished=True,
+        num_cached_tokens=0,
+    )
+    context.append_output(req_output)
+
+    async def dummy_result_generator():
+        yield None
+
+    request = ResponsesRequest(
+        input="hi",
+        tools=[],
+        stream=False,
+        chat_template_kwargs={"enable_thinking": True},
+    )
+    sampling_params = SamplingParams(max_tokens=16)
+    metadata = RequestResponseMetadata(request_id="req")
+
+    await serving.responses_full_generator(
+        request=request,
+        sampling_params=sampling_params,
+        result_generator=dummy_result_generator(),
+        context=context,
+        model_name="test-model",
+        tokenizer=tokenizer,
+        request_metadata=metadata,
+    )
+
+    serving.parser.reasoning_parser_cls.assert_called_once_with(
+        tokenizer,
+        chat_template_kwargs={"enable_thinking": True},
+    )
+
+
+def test_make_response_output_items_passes_merged_chat_template_kwargs():
+    serving = _make_serving_instance_with_reasoning()
+    serving.default_chat_template_kwargs = {"enable_thinking": False}
+
+    mock_parser = MagicMock()
+    mock_parser.extract_response_outputs.return_value = []
+    serving.parser = MagicMock(return_value=mock_parser)
+
+    request = ResponsesRequest(
+        input="hi",
+        tools=[],
+        chat_template_kwargs={"enable_thinking": True},
+    )
+    final_output = CompletionOutput(
+        index=0,
+        text="final",
+        token_ids=[20],
+        cumulative_logprob=0.0,
+        logprobs=None,
+        finish_reason="stop",
+        stop_reason=None,
+    )
+    tokenizer = MagicMock()
+
+    serving._make_response_output_items(request, final_output, tokenizer)
+
+    serving.parser.assert_called_once_with(
+        tokenizer,
+        chat_template_kwargs={"enable_thinking": True},
+    )
 
 
 def _identity_increment(event):

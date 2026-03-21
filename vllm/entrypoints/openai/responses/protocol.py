@@ -181,6 +181,13 @@ class ResponsesRequest(OpenAIBaseModel):
             "and vLLM will ignore it."
         ),
     )
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the template renderer. "
+            "Will be accessible by the chat template."
+        ),
+    )
 
     # --8<-- [start:responses-extra-params]
     request_id: str = Field(
@@ -276,7 +283,7 @@ class ResponsesRequest(OpenAIBaseModel):
             chat_template=default_template,
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=merge_kwargs(  # To remove unset values
-                {},
+                self.chat_template_kwargs,
                 dict(
                     add_generation_prompt=not continue_final,
                     continue_final_message=continue_final,

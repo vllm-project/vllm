@@ -36,9 +36,10 @@ class ResponsesParser:
         self,
         *,
         tokenizer: TokenizerLike,
-        reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
+        reasoning_parser_cls: Callable[..., ReasoningParser],
         response_messages: list[ResponseInputOutputItem],
         request: ResponsesRequest,
+        chat_template_kwargs: dict | None,
         tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
     ):
         self.response_messages: list[ResponseInputOutputItem] = (
@@ -49,7 +50,10 @@ class ResponsesParser:
         self.tokenizer = tokenizer
         self.request = request
 
-        self.reasoning_parser_instance = reasoning_parser_cls(tokenizer)
+        self.reasoning_parser_instance = reasoning_parser_cls(
+            tokenizer,
+            chat_template_kwargs=chat_template_kwargs,
+        )
         self.tool_parser_instance = None
         if tool_parser_cls is not None:
             self.tool_parser_instance = tool_parser_cls(tokenizer)
@@ -159,9 +163,10 @@ class ResponsesParser:
 def get_responses_parser_for_simple_context(
     *,
     tokenizer: TokenizerLike,
-    reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
+    reasoning_parser_cls: Callable[..., ReasoningParser],
     response_messages: list[ResponseInputOutputItem],
     request: ResponsesRequest,
+    chat_template_kwargs: dict | None,
     tool_parser_cls,
 ) -> ResponsesParser:
     """Factory function to create a ResponsesParser with
@@ -175,5 +180,6 @@ def get_responses_parser_for_simple_context(
         reasoning_parser_cls=reasoning_parser_cls,
         response_messages=response_messages,
         request=request,
+        chat_template_kwargs=chat_template_kwargs,
         tool_parser_cls=tool_parser_cls,
     )
