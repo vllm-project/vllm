@@ -33,9 +33,9 @@ from vllm.platforms import current_platform
 
 def test_compile_config_repr_succeeds():
     # setup: VllmBackend mutates the config object
-    # Note: VllmBackend.__init__ already calls configure_post_pass()
     config = VllmConfig()
-    _ = VllmBackend(config)
+    backend = VllmBackend(config)
+    backend.configure_post_pass()
 
     # test that repr(config) succeeds
     val = repr(config)
