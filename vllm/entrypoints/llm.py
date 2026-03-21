@@ -1,5 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+vLLM 的主入口模块 - LLM 类
+
+本模块提供了 vLLM 的高级 API，用于离线批处理推理。
+LLM 类封装了：
+- Tokenizer（分词器）
+- 语言模型（可能分布在多个 GPU 上）
+- KV Cache（用于加速注意力计算的中间状态缓存）
+- 智能批处理机制和高效的内存管理
+
+主要功能：
+1. 文本生成 (generate, chat)
+2. Embedding 向量生成 (embed)
+3. 分类任务 (classify)
+4. 相似度打分 (score)
+5. Reward 模型 (reward)
+6. Beam Search 搜索
+"""
 
 import itertools
 from collections.abc import Callable, Iterable, Sequence
@@ -12,12 +30,14 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, overload
 
+# Beam Search 相关导入
 from vllm.beam_search import (
     BeamSearchInstance,
     BeamSearchOutput,
     BeamSearchSequence,
     create_sort_beams_key_function,
 )
+# 配置相关导入
 from vllm.config import (
     AttentionConfig,
     CompilationConfig,
@@ -34,17 +54,20 @@ from vllm.config.model import (
     RunnerOption,
     TokenizerMode,
 )
+# 分布式权重传输（用于 RL 训练）
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
 from vllm.engine.arg_utils import EngineArgs
+# Chat 工具
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateConfig,
     ChatTemplateContentFormatOption,
     load_chat_template,
 )
+# Pooling 任务相关（embedding、分类等）
 from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_processors
 from vllm.entrypoints.pooling.score.utils import (
     ScoreData,
@@ -57,6 +80,7 @@ from vllm.entrypoints.pooling.score.utils import (
     validate_score_input,
 )
 from vllm.entrypoints.utils import log_non_default_args
+# 输入数据类型
 from vllm.inputs.data import (
     DataPrompt,
     ProcessorInputs,
@@ -66,8 +90,10 @@ from vllm.inputs.data import (
     TokensPrompt,
 )
 from vllm.logger import init_logger
+# LoRA 低秩适配
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
+# 输出类型
 from vllm.outputs import (
     ClassificationRequestOutput,
     EmbeddingRequestOutput,
@@ -91,6 +117,7 @@ from vllm.utils.counter import Counter
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.tqdm_utils import maybe_tqdm
 from vllm.v1.engine import PauseMode
+# 核心引擎
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
@@ -99,119 +126,63 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# 类型变量定义，用于泛型编程
+# _O: 输出类型，可以是 RequestOutput 或 PoolingRequestOutput
 _O = TypeVar(
     "_O",
     bound=RequestOutput | PoolingRequestOutput,
     default=RequestOutput | PoolingRequestOutput,
 )
+# _P: 参数类型，SamplingParams 或 PoolingParams
 _P = TypeVar("_P", bound=SamplingParams | PoolingParams | None)
+# _R: 通用返回类型
 _R = TypeVar("_R", default=Any)
 
 
 class LLM:
-    """An LLM for generating texts from given prompts and sampling parameters.
+    """
+    vLLM 的核心类，用于从给定的提示和采样参数生成文本。
 
-    This class includes a tokenizer, a language model (possibly distributed
-    across multiple GPUs), and GPU memory space allocated for intermediate
-    states (aka KV cache). Given a batch of prompts and sampling parameters,
-    this class generates texts from the model, using an intelligent batching
-    mechanism and efficient memory management.
+    该类包含：
+    - 一个 tokenizer（分词器）
+    - 一个语言模型（可能分布在多个 GPU 上）
+    - 为中间状态分配的 GPU 内存空间（即 KV cache）
 
-    Args:
-        model: The name or path of a HuggingFace Transformers model.
-        tokenizer: The name or path of a HuggingFace Transformers tokenizer.
-        tokenizer_mode: The tokenizer mode. "auto" will use the fast tokenizer
-            if available, and "slow" will always use the slow tokenizer.
-        skip_tokenizer_init: If true, skip initialization of tokenizer and
-            detokenizer. Expect valid prompt_token_ids and None for prompt
-            from the input.
-        trust_remote_code: Trust remote code (e.g., from HuggingFace) when
-            downloading the model and tokenizer.
-        allowed_local_media_path: Allowing API requests to read local images
-            or videos from directories specified by the server file system.
-            This is a security risk. Should only be enabled in trusted
-            environments.
-        allowed_media_domains: If set, only media URLs that belong to this
-            domain can be used for multi-modal inputs.
-        tensor_parallel_size: The number of GPUs to use for distributed
-            execution with tensor parallelism.
-        dtype: The data type for the model weights and activations. Currently,
-            we support `float32`, `float16`, and `bfloat16`. If `auto`, we use
-            the `dtype` attribute of the Transformers model's config. However,
-            if the `dtype` in the config is `float32`, we will use `float16` instead.
-        quantization: The method used to quantize the model weights. Currently,
-            we support "awq", "gptq", and "fp8" (experimental).
-            If None, we first check the `quantization_config` attribute in the
-            model config file. If that is None, we assume the model weights are
-            not quantized and use `dtype` to determine the data type of
-            the weights.
-        revision: The specific model version to use. It can be a branch name,
-            a tag name, or a commit id.
-        tokenizer_revision: The specific tokenizer version to use. It can be a
-            branch name, a tag name, or a commit id.
-        chat_template: The chat template to apply.
-        seed: The seed to initialize the random number generator for sampling.
-        gpu_memory_utilization: The ratio (between 0 and 1) of GPU memory to
-            reserve for the model weights, activations, and KV cache. Higher
-            values will increase the KV cache size and thus improve the model's
-            throughput. However, if the value is too high, it may cause out-of-
-            memory (OOM) errors.
-        kv_cache_memory_bytes: Size of KV Cache per GPU in bytes. By default,
-            this is set to None and vllm can automatically infer the kv cache
-            size based on gpu_memory_utilization. However, users may want to
-            manually specify the kv cache memory size. kv_cache_memory_bytes
-            allows more fine-grain control of how much memory gets used when
-            compared with using gpu_memory_utilization. Note that
-            kv_cache_memory_bytes (when not-None) ignores
-            gpu_memory_utilization
-        cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
-            the model weights. This virtually increases the GPU memory space
-            you can use to hold the model weights, at the cost of CPU-GPU data
-            transfer for every forward pass.
-        offload_group_size: Prefetch offloading: Group every N layers
-            together. Offload last `offload_num_in_group` layers of each group.
-            Default is 0 (disabled).
-        offload_num_in_group: Prefetch offloading: Number of layers to
-            offload per group. Default is 1.
-        offload_prefetch_step: Prefetch offloading: Number of layers to
-            prefetch ahead. Higher values hide more latency but use more GPU
-            memory. Default is 1.
-        offload_params: Prefetch offloading: Set of parameter name segments
-            to selectively offload. Only parameters whose names contain one of
-            these segments will be offloaded (e.g., {"gate_up_proj", "down_proj"}
-            for MLP weights, or {"w13_weight", "w2_weight"} for MoE expert
-            weights). If None or empty, all parameters are offloaded.
-        enforce_eager: Whether to enforce eager execution. If True, we will
-            disable CUDA graph and always execute the model in eager mode.
-            If False, we will use CUDA graph and eager execution in hybrid.
-        enable_return_routed_experts: Whether to return routed experts.
-        disable_custom_all_reduce: See
-            [ParallelConfig][vllm.config.ParallelConfig].
-        hf_token: The token to use as HTTP bearer authorization for remote files
-            . If `True`, will use the token generated when running
-            `hf auth login` (stored in `~/.cache/huggingface/token`).
-        hf_overrides: If a dictionary, contains arguments to be forwarded to the
-            HuggingFace config. If a callable, it is called to update the
-            HuggingFace config.
-        mm_processor_kwargs: Arguments to be forwarded to the model's processor
-            for multi-modal data, e.g., image processor. Overrides for the
-            multi-modal processor obtained from `AutoProcessor.from_pretrained`.
-            The available overrides depend on the model that is being run.
-            For example, for Phi-3-Vision: `{"num_crops": 4}`.
-        pooler_config: Initialize non-default pooling config for the pooling model,
-            e.g., `PoolerConfig(seq_pooling_type="MEAN", use_activation=False)`.
-        compilation_config: Either an integer or a dictionary. If it is an
-            integer, it is used as the mode of compilation optimization. If it
-            is a dictionary, it can specify the full compilation configuration.
-        attention_config: Configuration for attention mechanisms. Can be a
-            dictionary or an AttentionConfig instance. If a dictionary, it will
-            be converted to an AttentionConfig. Allows specifying the attention
-            backend and other attention-related settings.
-        **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
+    给定一批 prompts 和采样参数，该类使用智能批处理机制和高效的内存管理
+    来生成文本。
 
-    Note:
-        This class is intended to be used for offline inference. For online
-        serving, use the [AsyncLLMEngine][vllm.AsyncLLMEngine] class instead.
+    【使用示例】
+    ```python
+    from vllm import LLM, SamplingParams
+
+    # 初始化 LLM
+    llm = LLM(model="facebook/opt-125m")
+
+    # 定义采样参数
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
+    # 生成文本
+    prompts = ["Hello, my name is", "The capital of France is"]
+    outputs = llm.generate(prompts, sampling_params)
+    ```
+
+    参数:
+        model: HuggingFace Transformers 模型的名称或路径
+        tokenizer: 分词器的名称或路径
+        tokenizer_mode: 分词器模式，"auto" 使用快速分词器（如果可用），"slow" 总是使用慢速分词器
+        skip_tokenizer_init: 如果为 True，跳过分词器和 detokenizer 的初始化
+        trust_remote_code: 是否信任远程代码（来自 HuggingFace）
+        tensor_parallel_size: 用于张量并行的 GPU 数量
+        dtype: 模型权重和激活的数据类型，支持 float32、float16、bfloat16
+        quantization: 量化方法，支持 "awq"、"gptq"、"fp8" 等
+        gpu_memory_utilization: GPU 内存保留比例 (0-1)，用于模型权重、激活和 KV cache
+        kv_cache_memory_bytes: 每个 GPU 的 KV cache 大小（字节），比 gpu_memory_utilization 更精细的控制
+        cpu_offload_gb: 用于卸载模型权重的 CPU 内存大小 (GiB)
+        seed: 随机数生成器的种子
+        enforce_eager: 是否强制使用 eager 模式（禁用 CUDA graph）
+
+    注意:
+        该类设计用于离线推理。对于在线服务，请使用 AsyncLLMEngine 类。
     """
 
     def __init__(
@@ -256,12 +227,21 @@ class LLM:
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
         **kwargs: Any,
     ) -> None:
-        """LLM constructor."""
+        """
+        LLM 构造函数。
 
+        初始化流程：
+        1. 处理废弃参数和特殊参数
+        2. 将字典参数转换为配置对象
+        3. 创建 EngineArgs 配置
+        4. 初始化 LLMEngine（核心推理引擎）
+        5. 初始化各种处理器和配置
+        """
+
+        # ========== 1. 处理废弃参数 ==========
         if "swap_space" in kwargs:
             kwargs.pop("swap_space")
             import warnings
-
             warnings.warn(
                 "The 'swap_space' parameter is deprecated and ignored. "
                 "It will be removed in a future version.",
@@ -269,16 +249,19 @@ class LLM:
                 stacklevel=2,
             )
 
+        # 默认禁用日志统计
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
 
+        # ========== 2. 处理 worker 类（用于自定义 worker） ==========
         if "worker_cls" in kwargs:
             worker_cls = kwargs["worker_cls"]
-            # if the worker_cls is not qualified string name,
-            # we serialize it using cloudpickle to avoid pickling issues
+            # 如果 worker_cls 不是字符串形式的类名，使用 cloudpickle 序列化
+            # 这样可以避免 pickle 问题
             if isinstance(worker_cls, type):
                 kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
 
+        # ========== 3. 处理 KV 传输配置（用于分布式推理） ==========
         if "kv_transfer_config" in kwargs and isinstance(
             kwargs["kv_transfer_config"], dict
         ):
@@ -294,22 +277,23 @@ class LLM:
                     raw_config_dict,
                     e,
                 )
-                # Consider re-raising a more specific vLLM error or ValueError
-                # to provide better context to the user.
                 raise ValueError(f"Invalid 'kv_transfer_config' provided: {e}") from e
 
         if hf_overrides is None:
             hf_overrides = {}
 
+        # ========== 4. 辅助函数：将 dict/None/实例 转换为配置对象 ==========
         def _make_config(value: Any, cls: type[_R]) -> _R:
-            """Convert dict/None/instance to a config instance."""
+            """将 dict/None/实例 转换为配置类实例"""
             if value is None:
                 return cls()
             if isinstance(value, dict):
-                return cls(**{k: v for k, v in value.items() if is_init_field(cls, k)})  # type: ignore[arg-type]
+                return cls(**{k: v for k, v in value.items() if is_init_field(cls, k)})
             return value
 
+        # ========== 5. 处理各个配置对象 ==========
         if isinstance(compilation_config, int):
+            # 如果是整数，作为编译模式
             compilation_config_instance = CompilationConfig(
                 mode=CompilationMode(compilation_config)
             )
@@ -324,7 +308,8 @@ class LLM:
         profiler_config_instance = _make_config(profiler_config, ProfilerConfig)
         attention_config_instance = _make_config(attention_config, AttentionConfig)
 
-        # warn about single-process data parallel usage.
+        # ========== 6. 数据并行警告 ==========
+        # 检查是否使用了单进程数据并行（不推荐）
         _dp_size = int(kwargs.get("data_parallel_size", 1))
         _distributed_executor_backend = kwargs.get("distributed_executor_backend")
         if (
@@ -339,6 +324,8 @@ class LLM:
                 "'examples/offline_inference/data_parallel.py'."
             )
 
+        # ========== 7. 创建 EngineArgs ==========
+        # EngineArgs 包含了引擎运行所需的所有配置参数
         engine_args = EngineArgs(
             model=model,
             runner=runner,
@@ -377,49 +364,60 @@ class LLM:
             **kwargs,
         )
 
+        # 记录非默认参数（用于调试和日志）
         log_non_default_args(engine_args)
 
+        # ========== 8. 初始化核心引擎 LLMEngine ==========
+        # 这是整个 LLM 类的核心，所有的推理工作都由 LLMEngine 完成
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args=engine_args, usage_context=UsageContext.LLM_CLASS
         )
         self.engine_class = type(self.llm_engine)
 
+        # ========== 9. 初始化请求计数器 ==========
+        # 用于生成唯一的请求 ID
         self.request_counter = Counter()
         self.default_sampling_params: dict[str, Any] | None = None
 
+        # ========== 10. 获取支持的任务类型 ==========
+        # 例如："generate"（文本生成）、"embed"（嵌入）、"classify"（分类）等
         supported_tasks = self.llm_engine.get_supported_tasks()
         logger.info("Supported tasks: %s", supported_tasks)
         self.supported_tasks = supported_tasks
 
+        # ========== 11. 缓存常用配置和处理器 ==========
         self.model_config = self.llm_engine.model_config
         self.renderer = self.llm_engine.renderer
         self.chat_template = load_chat_template(chat_template)
         self.io_processor = self.llm_engine.io_processor
         self.input_processor = self.llm_engine.input_processor
         self.chat_template_config = ChatTemplateConfig(chat_template=self.chat_template)
+
+        # 初始化 pooling 任务的 IO 处理器（用于 embedding、分类等任务）
         self.pooling_io_processors = init_pooling_io_processors(
             supported_tasks=supported_tasks,
             model_config=self.model_config,
             renderer=self.renderer,
             chat_template_config=self.chat_template_config,
         )
-        # Cache for __repr__ to avoid repeated collective_rpc calls
+
+        # 缓存 __repr__ 结果，避免重复调用 collective_rpc
         self._cached_repr: str | None = None
 
     def get_tokenizer(self) -> TokenizerLike:
+        """获取分词器"""
         return self.llm_engine.get_tokenizer()
 
     def get_world_size(self, include_dp: bool = True) -> int:
-        """Get the world size from the parallel config.
+        """
+        获取并行世界大小（GPU 总数）。
 
-        Args:
-            include_dp: If True (default), returns the world size including
-                data parallelism (TP * PP * DP). If False, returns the world
-                size without data parallelism (TP * PP).
+        参数:
+            include_dp: 如果为 True（默认），返回包括数据并行的世界大小 (TP * PP * DP)
+                       如果为 False，返回不包括数据并行的世界大小 (TP * PP)
 
-        Returns:
-            The world size (tensor_parallel_size * pipeline_parallel_size),
-            optionally multiplied by data_parallel_size if include_dp is True.
+        返回:
+            世界大小（GPU 总数）
         """
         parallel_config = self.llm_engine.vllm_config.parallel_config
         if include_dp:
@@ -427,10 +425,17 @@ class LLM:
         return parallel_config.world_size
 
     def reset_mm_cache(self) -> None:
+        """重置多模态缓存"""
         self.renderer.clear_mm_cache()
         self.llm_engine.reset_mm_cache()
 
     def get_default_sampling_params(self) -> SamplingParams:
+        """
+        获取模型默认的采样参数。
+
+        某些模型在 generation_config.json 中定义了默认的采样参数，
+        该方法会返回这些默认参数。
+        """
         if self.default_sampling_params is None:
             self.default_sampling_params = self.model_config.get_diff_sampling_param()
         if self.default_sampling_params:
@@ -447,37 +452,39 @@ class LLM:
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[RequestOutput]:
-        """Generates the completions for the input prompts.
-
-        This class automatically batches the given prompts, considering
-        the memory constraint. For the best performance, put all of your prompts
-        into a single list and pass it to this method.
-
-        Args:
-            prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompt.
-            sampling_params: The sampling parameters for text generation. If
-                None, we use the default sampling parameters.
-                When it is a single value, it is applied to every prompt.
-                When it is a list, the list must have the same length as the
-                prompts and it is paired one by one with the prompt.
-            use_tqdm: If `True`, shows a tqdm progress bar.
-                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
-                it is used to create the progress bar.
-                If `False`, no progress bar is created.
-            lora_request: LoRA request to use for generation, if any.
-            priority: The priority of the requests, if any.
-                Only applicable when priority scheduling policy is enabled.
-                If provided, must be a list of integers matching the length
-                of `prompts`, where each priority value corresponds to the prompt
-                at the same index.
-            tokenization_kwargs: Overrides for `tokenizer.encode`.
-
-        Returns:
-            A list of `RequestOutput` objects containing the
-            generated completions in the same order as the input prompts.
         """
+        为输入提示生成补全文本。
+
+        这是最常用的离线推理方法。该类会自动批处理给定的提示，
+        考虑内存限制。为了最佳性能，建议将所有提示放入一个列表中传递。
+
+        【使用示例】
+        ```python
+        from vllm import LLM, SamplingParams
+
+        llm = LLM(model="facebook/opt-125m")
+        sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+        prompts = ["Hello, my name is", "The capital of France is"]
+        outputs = llm.generate(prompts, sampling_params)
+
+        for output in outputs:
+            print(f"Prompt: {output.prompt!r}, Generated: {output.outputs[0].text!r}")
+        ```
+
+        参数:
+            prompts: 提示列表，可以是字符串或 token IDs。
+                    支持批量推理，详见 [PromptType][vllm.inputs.PromptType]
+            sampling_params: 采样参数。如果为 None，使用默认采样参数。
+                           如果是单个值，应用于所有提示；如果是列表，必须与 prompts 长度相同
+            use_tqdm: 如果为 True，显示 tqdm 进度条
+            lora_request: LoRA 请求（如果使用 LoRA 微调）
+            priority: 请求优先级列表（仅在启用优先级调度时使用）
+            tokenization_kwargs: tokenizer.encode 的覆盖参数
+
+        返回:
+            RequestOutput 对象列表，包含生成的文本，顺序与输入提示相同
+        """
+        # 检查模型类型是否为生成式模型
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
             raise ValueError(
@@ -486,9 +493,11 @@ class LLM:
                 "generative model."
             )
 
+        # 如果未提供采样参数，使用默认参数
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
 
+        # 调用内部完成推理方法
         return self._run_completion(
             prompts=prompts,
             params=sampling_params,
@@ -508,22 +517,24 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[str]:
-        """Enqueue prompts for generation without waiting for completion.
+        """
+        将提示加入生成队列，但不等待完成。
 
-        This method adds requests to the engine queue but does not start
-        processing them. Use wait_for_completion() to process the queued
-        requests and get results.
+        该方法将请求添加到引擎队列，但不会立即处理它们。
+        需要调用 wait_for_completion() 来获取结果。
 
-        Args:
-            prompts: The prompts to the LLM. See generate() for details.
-            sampling_params: The sampling parameters for text generation.
-            lora_request: LoRA request to use for generation, if any.
-            priority: The priority of the requests, if any.
-            use_tqdm: If True, shows a tqdm progress bar while adding requests.
-            tokenization_kwargs: Overrides for `tokenizer.encode`.
+        适用于需要异步处理的场景。
 
-        Returns:
-            A list of request IDs for the enqueued requests.
+        参数:
+            prompts: 提示列表，见 generate()
+            sampling_params: 采样参数
+            lora_request: LoRA 请求
+            priority: 请求优先级
+            use_tqdm: 是否显示进度条
+            tokenization_kwargs: tokenizer.encode 的覆盖参数
+
+        返回:
+            已加入请求的 ID 列表
         """
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
@@ -562,17 +573,18 @@ class LLM:
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
     ) -> list[Any]:
-        """Wait for all enqueued requests to complete and return results.
+        """
+        等待所有已加入队列的请求完成并返回结果。
 
-        This method processes all requests currently in the engine queue
-        and returns their outputs. Use after enqueue() to get results.
+        该方法处理引擎队列中的所有请求并返回它们的输出。
+        在 enqueue() 后调用此方法获取结果。
 
-        Args:
-            output_type: The expected output type, defaults to RequestOutput.
-            use_tqdm: If True, shows a tqdm progress bar.
+        参数:
+            output_type: 期望的输出类型，默认为 RequestOutput
+            use_tqdm: 是否显示进度条
 
-        Returns:
-            A list of output objects for all completed requests.
+        返回:
+            所有已完成请求的输出对象列表
         """
         if output_type is None:
             output_type = (RequestOutput, PoolingRequestOutput)
@@ -1723,20 +1735,34 @@ class LLM:
         """
         return self.llm_engine.get_metrics()
 
+    # ========== 辅助方法：参数序列化处理 ==========
+
     def _params_to_seq(
         self,
         params: _P | Sequence[_P],
         num_requests: int,
     ) -> Sequence[_P]:
+        """
+        将参数转换为序列格式。
+
+        如果参数是单个值，复制 num_requests 份；
+        如果参数已是序列，验证长度是否匹配。
+
+        参数:
+            params: 单个参数或参数序列
+            num_requests: 请求数量
+
+        返回:
+            参数序列
+        """
         if isinstance(params, Sequence):
             if len(params) != num_requests:
                 raise ValueError(
                     f"The lengths of prompts ({params}) "
                     f"and params ({len(params)}) must be the same."
                 )
-
             return params
-
+        # 单个参数广播到所有请求
         return [params] * num_requests
 
     def _lora_request_to_seq(
@@ -1744,15 +1770,23 @@ class LLM:
         lora_request: LoRARequest | None | Sequence[LoRARequest | None],
         num_requests: int,
     ) -> Sequence[LoRARequest | None]:
+        """
+        将 LoRA 请求转换为序列格式。
+
+        参数:
+            lora_request: 单个 LoRA 请求或请求序列
+            num_requests: 请求数量
+
+        返回:
+            LoRA 请求序列
+        """
         if isinstance(lora_request, Sequence):
             if len(lora_request) != num_requests:
                 raise ValueError(
                     f"The lengths of prompts ({num_requests}) "
                     f"and lora_request ({len(lora_request)}) must be the same."
                 )
-
             return lora_request
-
         return [lora_request] * num_requests
 
     def _priority_to_seq(
@@ -1760,16 +1794,27 @@ class LLM:
         priority: list[int] | None,
         num_requests: int,
     ) -> Sequence[int]:
+        """
+        将优先级转换为序列格式。
+
+        参数:
+            priority: 优先级列表或 None
+            num_requests: 请求数量
+
+        返回:
+            优先级序列，默认为全 0
+        """
         if priority is not None:
             if len(priority) != num_requests:
                 raise ValueError(
                     f"The lengths of prompts ({num_requests}) "
                     f"and priority ({len(priority)}) must be the same."
                 )
-
             return priority
-
+        # 默认优先级为 0
         return [0] * num_requests
+
+    # ========== 内部方法：完成请求处理流程 ==========
 
     def _add_completion_requests(
         self,
@@ -1783,13 +1828,36 @@ class LLM:
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[str]:
+        """
+        添加完成请求到引擎队列。
+
+        流程：
+        1. 将 prompts 转换为序列格式
+        2. 将参数、LoRA 请求、优先级转换为序列格式
+        3. 预处理每个 prompt（分词、应用模板等）
+        4. 调用 _render_and_add_requests 添加到引擎
+
+        参数:
+            prompts: 原始提示
+            params: 采样参数或 pooling 参数
+            use_tqdm: 是否显示进度条
+            lora_request: LoRA 请求
+            priority: 优先级
+            tokenization_kwargs: tokenizer.encode 的覆盖参数
+
+        返回:
+            已添加请求的 ID 列表
+        """
+        # 转换为序列格式
         seq_prompts = prompt_to_seq(prompts)
         seq_params = self._params_to_seq(params, len(seq_prompts))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
         seq_priority = self._priority_to_seq(priority, len(prompts))
 
+        # 渲染并添加请求
         return self._render_and_add_requests(
             prompts=(
+                # 预处理每个 prompt（分词等）
                 self._preprocess_cmpl_one(prompt, tokenization_kwargs)
                 for prompt in maybe_tqdm(
                     seq_prompts,
@@ -1815,6 +1883,28 @@ class LLM:
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ):
+        """
+        运行完整的完成推理流程。
+
+        这是 generate() 方法调用的核心内部方法。
+
+        流程：
+        1. 调用 _add_completion_requests 将请求加入队列
+        2. 调用 _run_engine 执行推理直到完成
+
+        参数:
+            prompts: 原始提示
+            params: 采样参数或 pooling 参数
+            output_type: 输出类型
+            use_tqdm: 是否显示进度条
+            lora_request: LoRA 请求
+            priority: 优先级
+            tokenization_kwargs: tokenizer.encode 的覆盖参数
+
+        返回:
+            推理输出列表
+        """
+        # 添加请求到队列
         self._add_completion_requests(
             prompts=prompts,
             params=params,
@@ -1823,6 +1913,7 @@ class LLM:
             priority=priority,
             tokenization_kwargs=tokenization_kwargs,
         )
+        # 运行引擎直到所有请求完成
         return self._run_engine(use_tqdm=use_tqdm, output_type=output_type)
 
     def _run_chat(
@@ -1874,6 +1965,8 @@ class LLM:
             use_tqdm=use_tqdm,
         )
 
+    # ========== 内部方法：渲染和添加请求 ==========
+
     def _render_and_run_requests(
         self,
         prompts: Iterable[ProcessorInputs],
@@ -1884,6 +1977,27 @@ class LLM:
         priorities: Sequence[int] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
     ):
+        """
+        渲染提示并运行请求。
+
+        流程：
+        1. 渲染提示（应用模板、分词等）
+        2. 调用 _render_and_add_requests 添加到引擎
+        3. 调用 _run_engine 执行推理
+
+        参数:
+            prompts: 已预处理的提示迭代器
+            params: 参数序列
+            output_type: 输出类型
+            lora_requests: LoRA 请求序列
+            priorities: 优先级序列
+            use_tqdm: 是否显示进度条
+
+        返回:
+            推理输出列表
+        """
+        # 如果 prompts 是列表或元组，发出警告
+        # 因为这样会降低效率（无法边渲染边执行）
         if isinstance(prompts, (list, tuple)):
             logger.warning_once(
                 "Rendering all prompts before adding them to the engine "
@@ -1894,6 +2008,7 @@ class LLM:
                 "the next prompt."
             )
 
+        # 添加请求到引擎
         self._render_and_add_requests(
             prompts=prompts,
             params=params,
@@ -1901,6 +2016,7 @@ class LLM:
             priorities=priorities,
         )
 
+        # 运行引擎直到完成
         return self._run_engine(output_type, use_tqdm=use_tqdm)
 
     def _render_and_add_requests(
@@ -1911,9 +2027,25 @@ class LLM:
         lora_requests: Sequence[LoRARequest | None] | None = None,
         priorities: Sequence[int] | None = None,
     ) -> list[str]:
+        """
+        渲染提示并添加到引擎队列。
+
+        该方法遍历所有提示，逐个添加到引擎队列。
+        如果中途出错，会中止已添加的所有请求。
+
+        参数:
+            prompts: 已预处理的提示迭代器
+            params: 参数序列
+            lora_requests: LoRA 请求序列
+            priorities: 优先级序列
+
+        返回:
+            已添加请求的 ID 列表
+        """
         added_request_ids: list[str] = []
 
         try:
+            # 逐个添加请求
             for i, prompt in enumerate(prompts):
                 request_id = self._add_request(
                     prompt,
@@ -1926,6 +2058,7 @@ class LLM:
                 )
                 added_request_ids.append(request_id)
         except Exception as e:
+            # 如果出错，中止已添加的所有请求
             if added_request_ids:
                 self.llm_engine.abort_request(added_request_ids, internal=True)
             raise e
@@ -1939,12 +2072,35 @@ class LLM:
         lora_request: LoRARequest | None = None,
         priority: int = 0,
     ) -> str:
+        """
+        添加单个请求到引擎。
+
+        这是将请求提交给 LLMEngine 的核心方法。
+
+        流程：
+        1. 如果是采样参数，设置输出类型为 FINAL_ONLY（只关心最终输出）
+        2. 生成唯一的请求 ID
+        3. 调用 LLMEngine.add_request 将请求加入引擎队列
+
+        参数:
+            prompt: 处理后的提示（ProcessorInputs 格式）
+            params: 采样参数或 pooling 参数
+            lora_request: LoRA 请求
+            priority: 请求优先级
+
+        返回:
+            请求 ID 字符串
+        """
         if isinstance(params, SamplingParams):
-            # We only care about the final output
+            # 我们只关心最终输出，不需要中间结果
+            # 这样可以减少内存占用和通信开销
             params.output_kind = RequestOutputKind.FINAL_ONLY
 
+        # 生成唯一的请求 ID
         request_id = str(next(self.request_counter))
 
+        # 将请求添加到引擎队列
+        # LLMEngine 负责调度、批处理和执行
         return self.llm_engine.add_request(
             request_id,
             prompt,
@@ -1959,7 +2115,27 @@ class LLM:
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
     ) -> list[_O]:
-        # Initialize tqdm.
+        """
+        运行引擎直到所有请求完成。
+
+        这是推理执行的核心循环。它不断调用 engine.step() 来处理请求，
+        直到所有请求都完成。
+
+        流程：
+        1. 初始化 tqdm 进度条（如果启用）
+        2. 循环调用 engine.step() 执行推理
+        3. 收集已完成的请求输出
+        4. 更新进度条和速度统计
+        5. 按请求 ID 排序输出（因为有些请求可能提前完成）
+
+        参数:
+            output_type: 期望的输出类型
+            use_tqdm: 是否显示进度条
+
+        返回:
+            按请求 ID 排序的输出列表
+        """
+        # ========== 1. 初始化 tqdm 进度条 ==========
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
             tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
@@ -1970,27 +2146,37 @@ class LLM:
                 postfix=(f"est. speed input: {0:.2f} toks/s, output: {0:.2f} toks/s"),
             )
 
-        # Run the engine.
+        # ========== 2. 运行引擎主循环 ==========
         outputs: list[_O] = []
-        total_in_toks = 0
-        total_out_toks = 0
+        total_in_toks = 0  # 累计输入 token 数
+        total_out_toks = 0  # 累计输出 token 数
+
+        # 主循环：直到所有请求都完成
         while self.llm_engine.has_unfinished_requests():
+            # step() 执行一次调度迭代
+            # 它会根据可用资源调度请求，执行模型前向传播，返回输出
             step_outputs = self.llm_engine.step()
+
             for output in step_outputs:
                 assert isinstance(output, output_type)
                 if output.finished:
+                    # 请求已完成，添加到输出列表
                     outputs.append(output)  # type: ignore[arg-type]
+
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
-                            # Calculate tokens only for RequestOutput
+                            # 只计算 RequestOutput 的 token 数
                             n = len(output.outputs)
                             assert output.prompt_token_ids is not None
+                            # 累计输入 token（prompt token * 输出数量）
                             total_in_toks += len(output.prompt_token_ids) * n
                             in_spd = total_in_toks / pbar.format_dict["elapsed"]
+                            # 累计输出 token
                             total_out_toks += sum(
                                 len(stp.token_ids) for stp in output.outputs
                             )
                             out_spd = total_out_toks / pbar.format_dict["elapsed"]
+                            # 更新速度显示
                             pbar.postfix = (
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s"
@@ -2001,11 +2187,12 @@ class LLM:
                         if pbar.n == num_requests:
                             pbar.refresh()
 
+        # ========== 3. 清理和排序 ==========
         if use_tqdm:
             pbar.close()
-        # Sort the outputs by request ID.
-        # This is necessary because some requests may be finished earlier than
-        # its previous requests.
+
+        # 按请求 ID 排序输出
+        # 因为有些请求可能比前面的请求先完成，需要恢复原始顺序
         return sorted(outputs, key=lambda x: int(x.request_id))
 
     def init_weight_transfer_engine(
