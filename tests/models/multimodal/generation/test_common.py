@@ -220,7 +220,10 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={
             "model_impl": "transformers",
         },
-        marks=[pytest.mark.core_model],
+        marks=[
+            pytest.mark.core_model,
+            *([large_gpu_mark(min_gb=80)] if current_platform.is_rocm() else []),
+        ],
     ),
     "idefics3-transformers": VLMTestInfo(
         models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
