@@ -65,6 +65,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.metrics.utils import create_metric_per_engine
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -572,6 +573,10 @@ class NixlConnectorScheduler:
                 for g in kv_cache_config.kv_cache_groups
             )
         )
+        self._has_mamba = any(
+            isinstance(g.kv_cache_spec, MambaSpec)
+            for g in kv_cache_config.kv_cache_groups
+        )
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
@@ -717,6 +722,39 @@ class NixlConnectorScheduler:
                     logger.warning("Connection listener got unexpected message %s", msg)
                 sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
 
+    def _mamba_prefill_token_count(self, num_prompt_tokens: int) -> int:
+        """D-side only. Returns N-1 for Mamba models since the decoder
+        always recomputes the last token and must start from h(N-1)."""
+        if self._has_mamba and num_prompt_tokens > 1:
+            return num_prompt_tokens - 1
+        return num_prompt_tokens
+
+    def _truncate_mamba_request_for_prefill(self, request: "Request") -> None:
+        """P-side only: drop the last prompt token so the prefiller computes
+        h(N-1) instead of h(N). The decoder recomputes the last token to
+        derive h(N) correctly.
+
+        Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
+        request is preempted and rescheduled."""
+        params = request.kv_transfer_params
+        if (
+            params is not None
+            # Guard against repeated truncation after preemption/reschedule.
+            and not params.get("_p_side_truncated")
+            and request.num_prompt_tokens > 1
+        ):
+            if request.prompt_token_ids is not None:
+                request.prompt_token_ids.pop()
+            elif request.prompt_embeds is not None:
+                request.prompt_embeds = request.prompt_embeds[:-1]
+            else:
+                return
+
+            request._all_token_ids.pop()
+            request.num_prompt_tokens -= 1
+            request.max_tokens = 1
+            params["_p_side_truncated"] = True
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
@@ -746,9 +784,13 @@ class NixlConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             token_ids = request.prompt_token_ids or []
-            count = len(token_ids) - num_computed_tokens
+            actual = self._mamba_prefill_token_count(len(token_ids))
+            count = actual - num_computed_tokens
             if count > 0:
                 return count, True
+
+        if params is not None and params.get("do_remote_decode") and self._has_mamba:
+            self._truncate_mamba_request_for_prefill(request)
 
         # No remote prefill for this request.
         return 0, False
@@ -3016,7 +3058,9 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             buckets=buckets[1:],
             labelnames=labelnames,
         )
-        self.nixl_histogram_xfer_time = self.make_per_engine(nixl_histogram_xfer_time)
+        self.nixl_histogram_xfer_time = create_metric_per_engine(
+            nixl_histogram_xfer_time, self.per_engine_labelvalues
+        )
         nixl_histogram_post_time = self._histogram_cls(
             name="vllm:nixl_post_time_seconds",
             documentation="Histogram of transfer post time for NIXL KV"
@@ -3024,7 +3068,9 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             buckets=buckets,
             labelnames=labelnames,
         )
-        self.nixl_histogram_post_time = self.make_per_engine(nixl_histogram_post_time)
+        self.nixl_histogram_post_time = create_metric_per_engine(
+            nixl_histogram_post_time, self.per_engine_labelvalues
+        )
         # uniform 2kb to 16gb range
         buckets = [2 ** (10 + i) for i in range(1, 25, 2)]
         nixl_histogram_bytes_transferred = self._histogram_cls(
@@ -3033,8 +3079,8 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             buckets=buckets,
             labelnames=labelnames,
         )
-        self.nixl_histogram_bytes_transferred = self.make_per_engine(
-            nixl_histogram_bytes_transferred
+        self.nixl_histogram_bytes_transferred = create_metric_per_engine(
+            nixl_histogram_bytes_transferred, self.per_engine_labelvalues
         )
         buckets = [
             10,
@@ -3059,24 +3105,24 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             buckets=buckets,
             labelnames=labelnames,
         )
-        self.nixl_histogram_num_descriptors = self.make_per_engine(
-            nixl_histogram_num_descriptors
+        self.nixl_histogram_num_descriptors = create_metric_per_engine(
+            nixl_histogram_num_descriptors, self.per_engine_labelvalues
         )
         counter_nixl_num_failed_transfers = self._counter_cls(
             name="vllm:nixl_num_failed_transfers",
             documentation="Number of failed NIXL KV Cache transfers.",
             labelnames=labelnames,
         )
-        self.counter_nixl_num_failed_transfers = self.make_per_engine(
-            counter_nixl_num_failed_transfers
+        self.counter_nixl_num_failed_transfers = create_metric_per_engine(
+            counter_nixl_num_failed_transfers, self.per_engine_labelvalues
         )
         counter_nixl_num_failed_notifications = self._counter_cls(
             name="vllm:nixl_num_failed_notifications",
             documentation="Number of failed NIXL KV Cache notifications.",
             labelnames=labelnames,
         )
-        self.counter_nixl_num_failed_notifications = self.make_per_engine(
-            counter_nixl_num_failed_notifications
+        self.counter_nixl_num_failed_notifications = create_metric_per_engine(
+            counter_nixl_num_failed_notifications, self.per_engine_labelvalues
         )
 
         counter_nixl_num_kv_expired_reqs = self._counter_cls(
@@ -3085,8 +3131,8 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             "NOTE: This metric is tracked on the P instance.",
             labelnames=labelnames,
         )
-        self.counter_nixl_num_kv_expired_reqs = self.make_per_engine(
-            counter_nixl_num_kv_expired_reqs
+        self.counter_nixl_num_kv_expired_reqs = create_metric_per_engine(
+            counter_nixl_num_kv_expired_reqs, self.per_engine_labelvalues
         )
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):

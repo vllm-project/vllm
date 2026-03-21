@@ -995,8 +995,6 @@ class VllmConfig:
                 "--kv-sharing-fast-prefill requires changes on model side for "
                 "correctness and to realize prefill savings."
             )
-        # TODO: Move after https://github.com/vllm-project/vllm/pull/26847 lands
-        self._set_compile_ranges()
 
         if (
             self.model_config
@@ -1031,6 +1029,10 @@ class VllmConfig:
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
+
+        # Re-compute compile ranges after platform-specific config updates
+        # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
+        self._set_compile_ranges()
 
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (
