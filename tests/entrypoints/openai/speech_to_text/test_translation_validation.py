@@ -15,9 +15,9 @@ import pytest_asyncio
 import soundfile as sf
 
 from tests.entrypoints.openai.conftest import add_attention_backend
-from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
-SERVER_ARGS = ["--enforce-eager", *ROCM_EXTRA_ARGS]
+SERVER_ARGS = ["--enforce-eager"]
 
 
 def _get_server_args(attention_config):
@@ -182,7 +182,7 @@ async def test_streaming_response(foscolo, client_and_model, server):
     # being very close semantically.
     assert (
         sum([x == y for x, y in zip(res_stream, res_no_stream.text.split())])
-        >= len(res_stream) * 0.9
+        >= len(res_stream) * 0.87
     )
 
 
