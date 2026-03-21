@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kMxfp4Static,
 )
 
 
@@ -201,6 +202,8 @@ def rocm_aiter_fused_experts(
         activation_method = ActivationMethod.SILU
     elif activation == MoEActivation.GELU:
         activation_method = ActivationMethod.GELU
+    elif activation == MoEActivation.SWIGLUOAI:
+        activation_method = rocm_aiter_ops.get_aiter_activation_type("swiglu")
     else:
         raise ValueError(f"Unsupported activation: {activation}")
 
@@ -247,8 +250,8 @@ def rocm_aiter_fused_experts(
 
     else:
         quant_method = QuantMethod.NO.value
-        # quark moe for mxfp4 w_dtype mxfp4 a_dtype
-        if quant_config.use_mxfp4_w4a4:
+        # mxfp4: both w4a4 (quark) and w4a16 (oracle CK) use BLOCK_1X32
+        if quant_config.use_mxfp4_w4a4 or quant_config.use_mxfp4_w4a16:
             quant_method = QuantMethod.BLOCK_1X32.value
         # w8a8 block-scaled
         if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
@@ -289,6 +292,8 @@ def rocm_aiter_fused_experts(
             doweight_stage1=apply_router_weight_on_input,
             num_local_tokens=num_local_tokens,
             output_dtype=output_dtype,
+            bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
+            bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
         )
 
 
@@ -319,21 +324,23 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # TODO(rob): AITER also supports MXFP4, which is not
-        # yet supported via an Oracle. Once it is, we will add
-        # MXFP4 to this list.
         SUPPORTED_W_A = [
             (None, None),
             (kFp8Static128BlockSym, kFp8Dynamic128Sym),
             (kFp8StaticTensorSym, kFp8StaticTensorSym),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
             (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+            (kMxfp4Static, None),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [MoEActivation.SILU, MoEActivation.GELU]
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.SWIGLUOAI,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
