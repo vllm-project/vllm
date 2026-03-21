@@ -114,15 +114,38 @@ class SimpleCPUOffloadWorker:
             if ptr not in seen_ptrs:
                 seen_ptrs[ptr] = (name, tensor)
 
-        # Reconstruct [num_blocks, page_size_bytes] int8 views from storage
-        # so stride(0) gives page_size_bytes for the block copy op.
+        # Build [num_blocks, block_bytes] int8 views from each unique
+        # storage so that stride(0) gives block_bytes for the copy op.
+        #
+        # The physical layout varies across attention backends:
+        #   FlashAttn/ROCm:  (2, num_blocks, ...) -> K/V outermost, 2 segments
+        #   FlashInfer/MLA:  (num_blocks, ...)    -> blocks outermost, 1 segment
+        # We detect this from the tensor's strides, mirroring KVBlockZeroer.
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         for name, tensor in seen_ptrs.values():
             storage = tensor.untyped_storage()
             raw = torch.empty(0, dtype=torch.int8, device=self.device).set_(
                 storage, 0, (storage.nbytes(),)
             )
-            unique_gpu_caches[name] = raw.view(num_blocks, -1)
+            # Find the num_blocks dimension
+            block_dim = next(
+                d for d in range(tensor.ndim) if tensor.shape[d] == num_blocks
+            )
+            el = tensor.element_size()
+            block_stride_bytes = tensor.stride(block_dim) * el
+            # Dims before block_dim with larger stride are "outer" (e.g. K/V).
+            outer_dims = [
+                d
+                for d in range(block_dim)
+                if tensor.stride(d) * el > block_stride_bytes
+            ]
+            if not outer_dims:  # no outer dimensions, so all blocks are contiguous
+                unique_gpu_caches[name] = raw.view(num_blocks, -1)
+            else:  # outer dimensions exist, so blocks are segmented
+                for idx in range(tensor.shape[outer_dims[0]]):
+                    offset = idx * tensor.stride(outer_dims[0]) * el
+                    chunk = raw[offset : offset + num_blocks * block_stride_bytes]
+                    unique_gpu_caches[f"{name}.{idx}"] = chunk.view(num_blocks, -1)
 
         # Compute per-tensor bytes_per_block. Tensors may have different
         # page_size_bytes (e.g., UniformTypeKVCacheSpecs with varying head_size).
@@ -299,6 +322,12 @@ class SimpleCPUOffloadWorker:
             stream = self.load_stream
 
         assert stream is not None and batch_params is not None
+
+        if is_store:
+            # Await for GPU blocks to be populated. Current stream could be from either
+            # the default stream or CUDA graph stream, but the model runner guarantees
+            # no stream switches between model()/replay() and get_finished().
+            stream.wait_stream(torch.cuda.current_stream(self.device))
 
         self._copy_queue.put(
             (src_blocks, dst_blocks, batch_params, stream, event_idx, is_store)
