@@ -987,7 +987,8 @@ class CompilationConfig:
         # NOTE: this function needs to be called only when mode is
         # CompilationMode.VLLM_COMPILE
         assert self.mode == CompilationMode.VLLM_COMPILE, (
-            "set_splitting_ops_for_v1 should only be called when mode is "
+            "set_splitting_ops_for_v1 should only be called when "
+            "mode is CompilationMode.VLLM_COMPILE"
         )
 
         if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
