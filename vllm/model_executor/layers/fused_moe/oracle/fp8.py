@@ -128,7 +128,7 @@ def backend_to_kernel_cls(
         return [TritonOrDeepGemmExperts]
 
     elif backend == Fp8MoeBackend.BATCHED_DEEPGEMM:
-        from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
             BatchedDeepGemmExperts,
         )
 
