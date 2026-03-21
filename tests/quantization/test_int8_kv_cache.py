@@ -19,7 +19,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backend import is_quantized_kv_cache
+from vllm.v1.attention.backend import KVQuantMode, is_quantized_kv_cache
 
 # Skip entire module if no CUDA/ROCm GPU available
 pytestmark = [
@@ -537,6 +537,7 @@ def test_triton_unified_attention_int8_per_tensor(
         softmax_segm_output=softmax_segm_output,
         softmax_segm_max=softmax_segm_max,
         softmax_segm_expsum=softmax_segm_expsum,
+        kv_quant_mode=KVQuantMode.FP8,
     )
 
     # BF16 reference (using dequantized cache to account for quantization noise)
