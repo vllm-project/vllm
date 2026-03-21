@@ -4,6 +4,7 @@
 import dataclasses
 import importlib
 import pickle
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from functools import partial
 from inspect import isclass
@@ -52,9 +53,23 @@ MMF_CLASS_TO_FACTORY: dict[type[BaseMultiModalField], str] = {
 
 bytestr: TypeAlias = bytes | bytearray | memoryview | zmq.Frame
 
-# tensor ->  metadata
-# returns None to reject the tensor (falls back to regular serialization)
-OOBTensorConsumer = Callable[[torch.Tensor], dict | None]
+
+class OOBTensorConsumer(ABC):
+    @abstractmethod
+    def __call__(self, tensor: torch.Tensor) -> dict | None:
+        """
+        Called with tensors for the current message.
+        Returns None to reject the tensor (falls back to regular serialization),
+        otherwise a dict with arbitrary placeholder data to be included
+        in the serialized message.
+        """
+        return None
+
+    @abstractmethod
+    def new_message(self) -> None:
+        """Called at the start of each new encoded message."""
+        pass
+
 
 # dtype, shape, metadata -> tensor
 OOBTensorProvider = Callable[[str, tuple[int, ...], dict], torch.Tensor]
@@ -150,6 +165,8 @@ class MsgpackEncoder:
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
+            if self.oob_tensor_consumer is not None:
+                self.oob_tensor_consumer.new_message()
             self.aux_buffers = bufs = [b""]
             bufs[0] = self.encoder.encode(obj)
             # This `bufs` list allows us to collect direct pointers to backing
@@ -162,6 +179,8 @@ class MsgpackEncoder:
 
     def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
         try:
+            if self.oob_tensor_consumer is not None:
+                self.oob_tensor_consumer.new_message()
             self.aux_buffers = [buf]
             bufs = self.aux_buffers
             self.encoder.encode_into(obj, buf)

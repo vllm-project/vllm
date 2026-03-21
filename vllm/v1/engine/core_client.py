@@ -558,11 +558,9 @@ class MPClient(EngineCoreClient):
                 mm_tensor_ipc = vllm_config.model_config.multimodal_config.mm_tensor_ipc
 
             # Create TensorIpcSender when IPC is enabled and queues available
-            self.tensor_ipc_sender: TensorIpcSender | None = None
             oob_tensor_consumer: OOBTensorConsumer | None = None
             if mm_tensor_ipc == "torch_shm" and tensor_queue:
-                self.tensor_ipc_sender = TensorIpcSender(tensor_queue)
-                oob_tensor_consumer = self.tensor_ipc_sender.send_tensor
+                oob_tensor_consumer = TensorIpcSender(tensor_queue)
 
             self.encoder = MsgpackEncoder(oob_tensor_consumer=oob_tensor_consumer)
             self.decoder = MsgpackDecoder(EngineCoreOutputs)

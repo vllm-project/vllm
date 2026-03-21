@@ -806,9 +806,9 @@ class EngineCoreProc(EngineCore):
         self.shutdown_state = EngineShutdownState.RUNNING
 
         # Receiver for tensor IPC cleanup (set by process_input_sockets thread)
-        self.tensor_ipc_receiver: TensorIpcReceiver | None = None
+        self.oob_tensor_provider: OOBTensorProvider | None = None
         if tensor_queue is not None:
-            self.tensor_ipc_receiver = TensorIpcReceiver(tensor_queue)
+            self.oob_tensor_provider = TensorIpcReceiver(tensor_queue)
             logger.info("Using tensor IPC queue for multimodal tensor sharing")
 
         with self._perform_handshakes(
@@ -844,9 +844,6 @@ class EngineCoreProc(EngineCore):
                     vllm_config=vllm_config,
                 )
             self._init_data_parallel(vllm_config)
-
-            if self.tensor_ipc_receiver is not None:
-                self.tensor_ipc_receiver.max_senders = len(addresses.inputs)
 
             super().__init__(
                 vllm_config,
@@ -1352,15 +1349,11 @@ class EngineCoreProc(EngineCore):
     ):
         """Input socket IO thread."""
 
-        oob_tensor_provider: OOBTensorProvider | None = None
-        if self.tensor_ipc_receiver is not None:
-            oob_tensor_provider = self.tensor_ipc_receiver.recv_tensor
-
         # Msgpack serialization decoding with tensor IPC receiver.
         add_request_decoder = MsgpackDecoder(
-            EngineCoreRequest, oob_tensor_provider=oob_tensor_provider
+            EngineCoreRequest, oob_tensor_provider=self.oob_tensor_provider
         )
-        generic_decoder = MsgpackDecoder(oob_tensor_provider=oob_tensor_provider)
+        generic_decoder = MsgpackDecoder(oob_tensor_provider=self.oob_tensor_provider)
 
         with ExitStack() as stack, zmq.Context() as ctx:
             input_sockets = [

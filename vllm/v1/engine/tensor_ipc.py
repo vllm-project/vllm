@@ -18,6 +18,7 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
+from vllm.v1.serial_utils import OOBTensorConsumer
 
 logger = init_logger(__name__)
 
@@ -33,11 +34,13 @@ class TensorIpcData:
     shared in memory (GPU or CPU) for efficient inter-process communication.
     """
 
-    tensor_id: str
+    sender_id: str
+    message_id: int
+    tensor_id: int
     tensor: torch.Tensor
 
 
-class TensorIpcSender:
+class TensorIpcSender(OOBTensorConsumer):
     """Send-side logic for tensor IPC via torch.multiprocessing.Queue.
 
     Uses a single queue targeting rank 0 (the only rank that consumes
@@ -47,7 +50,8 @@ class TensorIpcSender:
     def __init__(self, queue: TensorIpcQueue):
         self.queue = queue
         self._tensor_id_counter = 0
-        self._sender_id = uuid.uuid4().hex
+        self._message_counter = 0
+        self._sender_id = uuid.uuid4().hex[:8]
 
     def set_target_engine(self, target_engine: int) -> None:
         if target_engine != 0:
@@ -56,30 +60,40 @@ class TensorIpcSender:
                 f"got target engine {target_engine}"
             )
 
-    def send_tensor(self, tensor: torch.Tensor) -> dict[str, Any] | None:
+    def new_message(self) -> None:
+        self._message_counter += 1
+        self._tensor_id_counter = 0
+
+    def __call__(self, tensor: torch.Tensor) -> dict[str, Any] | None:
         """Send tensor via queue, return its handle. Returns None if failed."""
         try:
-            tensor_id = f"{self._sender_id}_{self._tensor_id_counter}"
-            self._tensor_id_counter += 1
-
             # Move tensor to shared memory for IPC
             # This is required for proper inter-process communication
             if not tensor.is_shared():
                 tensor = tensor.share_memory_()
 
-            ipc_data = TensorIpcData(tensor_id=tensor_id, tensor=tensor)
+            metadata = {
+                "sender_id": self._sender_id,
+                "message_id": self._message_counter,
+                "tensor_id": self._tensor_id_counter,
+            }
+
+            self._tensor_id_counter += 1
+
+            ipc_data = TensorIpcData(**metadata, tensor=tensor)  # type: ignore[arg-type]
+
             # Use a timeout to avoid blocking indefinitely
             self.queue.put(ipc_data, timeout=10.0)
 
             logger.debug(
                 "Sent tensor %s for (shape=%s, device=%s) "
                 "via IPC queue (shared memory)",
-                tensor_id,
+                metadata,
                 tensor.shape,
                 tensor.device,
             )
 
-            return {"tensor_id": tensor_id, "device": str(tensor.device)}
+            return metadata
         except Exception as e:
             logger.warning(
                 "Failed to send tensor via IPC queue: %s. "
@@ -95,13 +109,11 @@ class TensorIpcReceiver:
     Wraps the queue receive logic previously embedded in MsgpackDecoder.
     """
 
-    def __init__(self, queue: TensorIpcQueue, max_senders: int = 1):
+    def __init__(self, queue: TensorIpcQueue):
         self.queue = queue
-        self.max_senders = max_senders
-        self._tensor_buffer: dict[str, tuple[int, torch.Tensor]] = {}
-        self._counter = 0
+        self._tensor_buffers = dict[str, tuple[int, dict[int, torch.Tensor]]]()
 
-    def recv_tensor(
+    def __call__(
         self, dtype: str, shape: tuple[int, ...], meta: dict[str, Any]
     ) -> torch.Tensor:
         """Retrieve a tensor from torch.multiprocessing.Queue.
@@ -112,38 +124,48 @@ class TensorIpcReceiver:
         """
 
         # Create lookup key from handle
-        lookup_key = meta["tensor_id"]
+        sender_id: str = meta["sender_id"]
+        message_id: int = meta["message_id"]
+        tensor_id: int = meta["tensor_id"]
 
         # Drain all available tensors. We save them regardless if this is
         # the one we're waiting for as they may arrive out of order from
         # multiple producers.
         while True:
-            _, tensor = self._tensor_buffer.pop(lookup_key, (None, None))
-            if tensor is not None:
-                logger.debug(
-                    "Received tensor %s for (shape=%s, device=%s) "
-                    "via IPC queue (shared memory)",
-                    meta["tensor_id"],
-                    tensor.shape,
-                    tensor.device,
-                )
-                return tensor
-
-            # Clear out any stale tensors from the buffer. This should only occur if
-            # there was some error sending the main message.
-            while self._tensor_buffer:
-                next_id, (next_count, _) = next(iter(self._tensor_buffer.items()))
-                if self._counter - next_count < self.max_senders:
-                    break
-                logger.warning(
-                    "Discarding stale tensor from buffer with id %s", next_id
-                )
-                self._tensor_buffer.pop(next_id)
+            current_message_id, tensors = self._tensor_buffers.get(sender_id, (-1, {}))
+            if message_id < current_message_id:
+                raise RuntimeError(f"Missing IPC tensor: {meta}")
+            if message_id == current_message_id:
+                tensor = tensors.pop(tensor_id, None)
+                if tensor is not None:
+                    logger.debug(
+                        "Received tensor %s from sender %s for (shape=%s, device=%s) "
+                        "via IPC queue (shared memory)",
+                        (message_id, tensor_id),
+                        sender_id,
+                        tensor.shape,
+                        tensor.device,
+                    )
+                    return tensor
 
             # Release lock while waiting on queue (important to avoid
             # blocking cleanup)
             ipc_data: TensorIpcData = self.queue.get(timeout=10.0)
 
             # Store tensor
-            self._tensor_buffer[ipc_data.tensor_id] = (self._counter, ipc_data.tensor)
-            self._counter += 1
+            current_message_id, tensors = self._tensor_buffers.get(
+                ipc_data.sender_id, (-1, {})
+            )
+            if current_message_id != ipc_data.message_id:
+                if tensors:
+                    logger.warning(
+                        "Discarding %d stale tensors from sender %s",
+                        len(tensors),
+                        ipc_data.sender_id,
+                    )
+                self._tensor_buffers[ipc_data.sender_id] = (
+                    ipc_data.message_id,
+                    {ipc_data.tensor_id: ipc_data.tensor},
+                )
+            else:
+                tensors[ipc_data.tensor_id] = ipc_data.tensor
