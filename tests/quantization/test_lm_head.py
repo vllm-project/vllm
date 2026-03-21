@@ -8,8 +8,7 @@ Run `pytest tests/quantization/test_quant_lm_head_true.py --forked`.
 import pytest
 import torch
 
-from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
-from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinLinearMethod
+from vllm.model_executor.layers.quantization.gptq import GPTQMarlinLinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
@@ -40,7 +39,7 @@ def test_lm_head(
             if lm_head_quantized:
                 assert isinstance(
                     lm_head_layer.quant_method,
-                    (GPTQLinearMethod, GPTQMarlinLinearMethod),
+                    GPTQMarlinLinearMethod,
                 )
             else:
                 assert isinstance(

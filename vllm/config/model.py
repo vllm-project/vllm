@@ -890,6 +890,14 @@ class ModelConfig:
         return convert_type
 
     def _verify_quantization(self) -> None:
+        # Convert deprecated gptq_marlin to gptq
+        if self.quantization == "gptq_marlin":
+            logger.warning(
+                "quantization=%s is deprecated. Use quantization=gptq instead.",
+                self.quantization,
+            )
+            self.quantization = cast(me_quant.QuantizationMethods, "gptq")
+
         supported_quantization = me_quant.QUANTIZATION_METHODS
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods, self.quantization)
@@ -903,7 +911,6 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
-                "gptq_marlin",
                 "awq_marlin",
                 "inc",
                 "moe_wna16",
