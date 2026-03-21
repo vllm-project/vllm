@@ -6,6 +6,123 @@
 
 ---
 
+## 日期：2026-03-21 (第三天)
+
+### 🌅 09:43 晨间检查
+
+**simpx PR 状态确认:**
+
+| PR # | 标题 | 状态 | 评论 | 行动 |
+|------|------|------|------|------|
+| #37621 | [Bugfix] JAIS: Only apply ALiBi when position_embedding_type is alibi | open | 0 | 等待维护者 review |
+| #37578 | [Bugfix] Fix unclean shutdown from Ctrl-C with AR Fusion | open | 1 (bot) | 等待维护者 review |
+
+**评论详情：**
+- PR #37621：无评论，创建约 33 小时，静默等待中
+- PR #37578：仅 gemini-code-assist[bot] 评论（无法 review 文件类型），创建约 41 小时
+
+**决策：** 无维护者评论需要回复，继续等待。
+
+### 👀 izhuhaoran 动态 (2026-03-21 凌晨)
+
+**新建 PRs (今天 01:00-01:20 UTC / 09:00-09:20 HKT):**
+| PR # | 标题 | 时间 |
+|------|------|------|
+| #37728 | Fix Mamba state corruption from stale CUDA graph block table entries | 01:19 UTC |
+| #37727 | [Bugfix] Fix Responses API instructions leaking through previous_response_id | 01:09 UTC |
+| #37726 | Revert "[Model] Deprecate the score task..." | 01:05 UTC |
+
+**观察：**
+- izhuhaoran 今天继续活跃，凌晨时段提交 3 个新 PR
+- 领域覆盖：Mamba、Responses API、Model deprecation
+- PR #37725 有维护者互动（RobTand 测试反馈 + johnnynubez 回复）
+- **学习点**：PR 描述中引用用户测试反馈可以增加可信度
+
+### 📚 学习的 Merge PR 经验 (2026-03-20)
+
+| PR # | 作者 | 标题 | 学习点 |
+|------|------|------|--------|
+| #37711 | AndreasKaratzas | [ROCm][CI] Setting some mi325_4 tests back to optional | CI 配置调整，已 merged ✅ |
+| #37693 | DarkLight1337 | [Model] Update Kimi-K25 and Isaac processors to fit HF-style | 模型兼容性更新 |
+| #37685 | hmellor | Fix attribute error in `isaac_patch_hf_runner` | 核心贡献者，快速 merge |
+| #37683 | xyang16 | [Perf] Eliminate redundant SparseMatrix creation in gpt_oss_triton_kernels | 性能优化 |
+| #37681 | hmellor | Fix various config related issues for Transformers v5 | 批量修复相关问题 |
+
+**标题格式总结:**
+- `[标签] 描述` 或 `[标签][子标签] 描述`
+- 常用标签：`[Bugfix]`, `[Perf]`, `[MRV2]`, `[ROCm]`, `[CI]`, `[Test]`, `[Misc]`, `[Model]`, `[Feature]`
+- 描述简洁，直接说明问题/方案
+- 核心贡献者（hmellor）有时不用标签，直接描述
+
+**改动大小观察:**
+- 小修复：±1-5 行，1-2 文件
+- 性能优化：±50-100 行，2-5 文件
+- CI/测试类 PR 容易先 merge
+
+---
+
+### 🎯 今日计划 (2026-03-21 周六)
+
+| 时间 | 任务 | 优先级 |
+|------|------|--------|
+| 09:43-10:00 | 完成状态检查，更新 DAILY_LEARNINGS.md | 高 |
+| 10:00-11:00 | 学习社区 merge 的 PRs 模式 | 中 |
+| 11:00-12:00 | 研究候选 issue（#37223 Qwen3 ASR LoRA 或 good first issue） | 中 |
+| 14:00-16:00 | 本地复现/测试，准备新 PR | 中 |
+| 16:00-17:00 | 如测试通过，提交第二个 PR（上限 2/天） | 中 |
+
+**今日决策：**
+- ✅ 现有 PRs 无维护者评论，无需回复
+- ✅ 今日 PR 上限重置为 2 个（新的一天）
+- ✅ 优先等待现有 PRs 进展，如长时间无反馈可开新 PR
+- ✅ 候选方向：Qwen 模型（#37223）或 torch.compile KVCache
+
+---
+
+### 📝 待办事项
+
+- [ ] 检查 good first issues 列表
+- [ ] 研究 #37223（Add LoRA support for Qwen3ASRForConditionalGeneration）
+- [ ] 如现有 PRs 无进展，准备新 PR
+
+---
+
+### 📝 待确认事项
+
+1. ✅ **simpx 的 PRs 已确认** — #37621 和 #37578
+2. ✅ **评论状态已确认** — 无维护者评论，无需回复
+3. **今天的工作重点** — 学习 > 提交
+
+---
+
+### ✅ 08:45 更新：状态确认完成
+
+**simpx 的 PRs (2 个，全部 open):**
+- #37621: [Bugfix] JAIS: Only apply ALiBi when position_embedding_type is alibi — 无评论
+- #37578: [Bugfix] Fix unclean shutdown from Ctrl-C with AR Fusion — 仅 bot 评论
+
+**决策：**
+- ✅ 无维护者评论需要回复
+- ✅ 今天不提交新 PR（等待现有 PRs 的 review）
+- ✅ 专注学习社区 merge 模式和 izhuhaoran 的 PR 风格
+
+**今日产出目标：**
+- 📚 学习 10+ merged PRs
+- 📝 更新 DAILY_LEARNINGS.md
+- 👀 跟踪 izhuhaoran 今日动态
+- ⏸️ 新 PR：0（等待 review）
+- **学习点**：高产出贡献者也会等待 merge，不是一次性全部 merge；CI/测试类 PR 容易先 merge
+
+### 🎯 今天计划 (2026-03-22)
+
+- [ ] 庆祝第一个 PR merge (#37711) 🎉
+- [ ] 检查其他 PR 的 review 状态
+- [ ] 学习社区 merge PR 模式
+- [ ] 推进新开发（KVCache 或 Qwen 模型方向）
+- [ ] 准备新 PR（如现有 PR 有进展）
+
+---
+
 ## 日期：2026-03-21 (第二天)
 
 ### 🌅 07:37 晨间检查
