@@ -316,9 +316,8 @@ class MsgpackDecoder:
     Note that unlike vanilla `msgspec` Decoders, this interface is generally
     not thread-safe when encoding tensors / numpy arrays.
 
-    For multimodal tensors sent via torch.multiprocessing.Queue (when IPC
-    is enabled), they will be retrieved via the ``oob_tensor_provider``
-    during decoding. Works for both CUDA and CPU tensors.
+    ``oob_tensor_provider`` must be used when an OOBTensorConsumer is used on the
+    encoder side.
     """
 
     def __init__(

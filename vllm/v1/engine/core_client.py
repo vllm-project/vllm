@@ -55,12 +55,7 @@ from vllm.v1.engine.utils import (
 )
 from vllm.v1.executor import Executor
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
-from vllm.v1.serial_utils import (
-    MsgpackDecoder,
-    MsgpackEncoder,
-    OOBTensorConsumer,
-    bytestr,
-)
+from vllm.v1.serial_utils import MsgpackDecoder, MsgackEncoder, bytestr
 
 logger = init_logger(__name__)
 
@@ -387,7 +382,6 @@ class BackgroundResources:
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
     shutdown_path: str | None = None
-    tensor_queue: Queue | None = None
 
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
@@ -551,17 +545,16 @@ class MPClient(EngineCoreClient):
                     )
 
             # Serialization setup with tensor queues for multimodal tensor IPC.
-            oob_tensor_consumer: OOBTensorConsumer | None = None
+            tensor_ipc_sender: TensorIpcSender | None = None
             model_config = getattr(vllm_config, "model_config", None)
             if model_config is not None and model_config.multimodal_config is not None:
                 mm_tensor_ipc = model_config.multimodal_config.mm_tensor_ipc
                 if mm_tensor_ipc == "torch_shm" and tensor_queue is not None:
-                    oob_tensor_consumer = TensorIpcSender(tensor_queue)
+                    tensor_ipc_sender = TensorIpcSender(tensor_queue)
 
-            self.encoder = MsgpackEncoder(oob_tensor_consumer=oob_tensor_consumer)
+            self.encoder = MsgpackEncoder(oob_tensor_consumer=tensor_ipc_sender)
             self.decoder = MsgpackDecoder(EngineCoreOutputs)
-            # Store tensor queues for routing
-            self.resources.tensor_queue = tensor_queue
+
             dp_size = parallel_config.data_parallel_size
             dp_rank = parallel_config.data_parallel_index
             dp_local_size = parallel_config.data_parallel_size_local

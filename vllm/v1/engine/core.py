@@ -72,7 +72,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, OOBTensorProvider
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
@@ -805,10 +805,10 @@ class EngineCoreProc(EngineCore):
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
 
-        # Receiver for tensor IPC cleanup (set by process_input_sockets thread)
-        self.oob_tensor_provider: OOBTensorProvider | None = None
+        # Receiver for tensor IPC
+        self.tensor_ipc_receiver: TensorIpcReceiver | None = None
         if tensor_queue is not None:
-            self.oob_tensor_provider = TensorIpcReceiver(tensor_queue)
+            self.tensor_ipc_receiver = TensorIpcReceiver(tensor_queue)
             logger.info("Using tensor IPC queue for multimodal tensor sharing")
 
         with self._perform_handshakes(
@@ -1349,11 +1349,11 @@ class EngineCoreProc(EngineCore):
     ):
         """Input socket IO thread."""
 
-        # Msgpack serialization decoding with tensor IPC receiver.
+        # Msgpack serialization decoding with optional tensor IPC receiver.
         add_request_decoder = MsgpackDecoder(
-            EngineCoreRequest, oob_tensor_provider=self.oob_tensor_provider
+            EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
         )
-        generic_decoder = MsgpackDecoder(oob_tensor_provider=self.oob_tensor_provider)
+        generic_decoder = MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver)
 
         with ExitStack() as stack, zmq.Context() as ctx:
             input_sockets = [
