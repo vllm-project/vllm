@@ -18,6 +18,7 @@ from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+from .sequence_parallelism import is_sp_applicable_for_range
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -409,10 +410,7 @@ class AsyncTPPass(VllmPatternMatcherPass):
         # This pass is applied on top of the sequence parallelism pass.
         # It inherits the same applicability condition as `SequenceParallelismPass`.
         # See `SequenceParallelismPass.is_applicable` for more details.
-        return (
-            not self.compilation_config.splitting_ops
-            or self.compilation_config.use_inductor_graph_partition
-        )
+        return is_sp_applicable_for_range(self.config, compile_range)
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
