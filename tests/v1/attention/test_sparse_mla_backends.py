@@ -848,16 +848,16 @@ def test_sparse_backend_prefill_correctness(
                 perm = torch.randperm(ctx_len, device=device)[:actual_topk]
                 sparse_indices[global_tok_idx, :actual_topk] = perm.to(torch.int32)
 
-            # Compute reference: SDPA over (topk context + causal new tokens)
-            # Gather the KV entries this query should attend to
-            attend_indices = []
-            # Topk context entries
-            if actual_topk > 0:
-                attend_indices.append(perm.long())
-            # Causal new tokens: positions ctx_len..ctx_len+j (inclusive)
-            new_tok_range = torch.arange(ctx_len, ctx_len + j + 1, device=device)
-            attend_indices.append(new_tok_range)
-            attend_indices = torch.cat(attend_indices)
+            # Compute reference: SDPA over topk context entries only
+            # (causal self-attention for new tokens is handled by forward_mqa)
+            if actual_topk == 0:
+                # No context to attend to; output zeros
+                reference_outputs.append(
+                    torch.zeros(1, num_heads * v_head_dim, dtype=dtype, device=device)
+                )
+                global_tok_idx += 1
+                continue
+            attend_indices = perm.long()
 
             q_tok = q_mha[j : j + 1]  # (1, H, D_qk)
             k_attend = k_all[attend_indices]  # (N, H, D_qk)
@@ -878,8 +878,8 @@ def test_sparse_backend_prefill_correctness(
         all_q.append(q_mha)
         all_kv_c_new.append(kv_c_full[ctx_len:])
         all_k_pe_new.append(k_pe_full[ctx_len:])
-        kv_c_contexts.append(kv_c_full[: ctx_len + 1])
-        k_pe_contexts.append(k_pe_full[: ctx_len + 1])
+        kv_c_contexts.append(kv_c_full)
+        k_pe_contexts.append(k_pe_full)
 
     query_cat = torch.cat(all_q, dim=0)
     kv_c_cat = torch.cat(all_kv_c_new, dim=0)
