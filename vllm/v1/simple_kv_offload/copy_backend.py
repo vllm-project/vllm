@@ -106,19 +106,25 @@ class KernelCopyBackend(CopyBackend):
         assert params is not None and stream is not None
         assert src_caches is not None and dst_caches is not None
 
-        block_mapping = torch.tensor(
-            list(zip(src_blocks, dst_blocks)),
-            dtype=torch.int64,
-            device=self._device,
-        )
-
         with torch.cuda.stream(stream):
+            # block_mapping must be created on the copy stream so the
+            # Triton kernel (also on this stream) doesn't read it before
+            # the GPU allocation/copy from the default stream completes.
+            block_mapping = torch.tensor(
+                list(zip(src_blocks, dst_blocks)),
+                dtype=torch.int64,
+                device=self._device,
+            )
             copy_ops_kernel.copy_blocks(
                 src_caches,
                 dst_caches,
                 block_mapping,
                 launch_params=params,
             )
+            # Prevent the caching allocator from recycling block_mapping
+            # after it goes out of scope — the kernel is still reading it
+            # asynchronously on the copy stream.
+            block_mapping.record_stream(stream)
 
         event = torch.Event()
         event.record(stream)

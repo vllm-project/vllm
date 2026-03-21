@@ -54,6 +54,9 @@ class SimpleCPUOffloadWorker:
         # Metadata for the current step
         self._connector_metadata: SimpleCPUOffloadMetadata | None = None
 
+        # Deferred store: stash blocks and store them later in the next step.
+        self._deferred_store: tuple[list[int], list[int], int] | None = None
+
         # Pending event index sets, populated in bind_connector_metadata
         self._pending_load_event_indices: set[int] = set()
         self._pending_store_event_indices: set[int] = set()
@@ -83,18 +86,12 @@ class SimpleCPUOffloadWorker:
         # deduplication. For attention layers the value is already a tensor;
         # for Mamba layers it is a list of tensors that all share the same
         # underlying raw storage, so we take the first one.
-        def _representative_tensor(
-            v: torch.Tensor | list[torch.Tensor],
-        ) -> torch.Tensor:
-            if isinstance(v, torch.Tensor):
-                return v
-            elif isinstance(v, list):
-                return v[0]
-            else:
-                raise ValueError(f"Unsupported type: {type(v)}")
+        def _repr_tensor(v: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
+            assert isinstance(v, torch.Tensor | list[torch.Tensor])
+            return v if isinstance(v, torch.Tensor) else v[0]
 
-        first_tensor = _representative_tensor(next(iter(kv_caches.values())))
-        self.device = first_tensor.device
+        any_tensor = _repr_tensor(next(iter(kv_caches.values())))
+        self.device = any_tensor.device
 
         assert self.kv_cache_config is not None
         num_blocks = self.kv_cache_config.num_blocks
@@ -102,7 +99,7 @@ class SimpleCPUOffloadWorker:
         # Deduplicate: multiple layers may share the same backing storage.
         seen_ptrs: dict[int, tuple[str, torch.Tensor]] = {}
         for name, value in kv_caches.items():
-            tensor = _representative_tensor(value)
+            tensor = _repr_tensor(value)
             ptr = tensor.untyped_storage().data_ptr()
             if ptr not in seen_ptrs:
                 seen_ptrs[ptr] = (name, tensor)
@@ -221,19 +218,32 @@ class SimpleCPUOffloadWorker:
         """
         # (1) Submit deferred transfers (if any)
         metadata = self._connector_metadata
-        if metadata is not None and self._is_initialized:
-            self._launch_copy_kernel(
-                metadata.load_cpu_blocks,
-                metadata.load_gpu_blocks,
-                metadata.load_event,
-                is_store=False,
-            )
-            self._launch_copy_kernel(
-                metadata.store_gpu_blocks,
-                metadata.store_cpu_blocks,
-                metadata.store_event,
-                is_store=True,
-            )
+        if self._is_initialized:
+            # Flush the store deferred from the *previous* step.  By now the
+            # model forward pass that produced those KV values has completed,
+            # so the copy is safe without wait_stream.
+            if self._deferred_store is not None:
+                src, dst, eidx = self._deferred_store
+                self._deferred_store = None
+                self._launch_copy_kernel(src, dst, eidx, is_store=True)
+
+            if metadata is not None:
+                # Launch loads immediately (CPU->GPU, no dependency on compute).
+                self._launch_copy_kernel(
+                    metadata.load_cpu_blocks,
+                    metadata.load_gpu_blocks,
+                    metadata.load_event,
+                    is_store=False,
+                )
+                # Stash the store for next step: the scheduler may include
+                # blocks whose block_hash was set at scheduling time but
+                # whose KV cache is being written by this step's forward pass.
+                if metadata.store_gpu_blocks:
+                    self._deferred_store = (
+                        metadata.store_gpu_blocks,
+                        metadata.store_cpu_blocks,
+                        metadata.store_event,
+                    )
 
         # (2) Track completed transfer events
         finished_recving: set[str] = set()
@@ -259,6 +269,12 @@ class SimpleCPUOffloadWorker:
 
     def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
         """Sync all in-flight transfers before preempted blocks are reused."""
+        # Flush deferred store so its event can be awaited below.
+        if self._deferred_store is not None:
+            src, dst, event_idx = self._deferred_store
+            self._deferred_store = None
+            self._launch_copy_kernel(src, dst, event_idx, is_store=True)
+
         for event_idx, event in self._load_events:
             event.synchronize()
             self._load_hwm = event_idx
@@ -278,11 +294,6 @@ class SimpleCPUOffloadWorker:
     ) -> None:
         if not src_blocks:
             return
-
-        if is_store:
-            assert self.store_stream is not None
-            # Await for GPU blocks to be populated.
-            self.store_stream.wait_stream(torch.cuda.current_stream(self.device))
 
         events = self._store_events if is_store else self._load_events
         self._backend.launch_copy(
