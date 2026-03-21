@@ -545,8 +545,12 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
     ),
     "isaac": VLMTestInfo(
+        # NOTE: PerceptronAI/Isaac-0.1 removed because the upstream HF
+        # repo has a stale model.safetensors.index.json that references
+        # shard files which no longer exist (consolidated into a single
+        # model.safetensors on 2026-03-20). Re-add once upstream fixes
+        # the index file.
         models=[
-            "PerceptronAI/Isaac-0.1",
             "PerceptronAI/Isaac-0.2-2B-Preview",
         ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -571,12 +575,6 @@ VLM_TEST_SETTINGS = {
         hf_model_kwargs={"device_map": "auto"},
         patch_hf_runner=model_utils.isaac_patch_hf_runner,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
-        marks=[
-            pytest.mark.skip(
-                reason="PerceptronAI/Isaac-0.1 HF repo has stale "
-                "safetensors index referencing removed shards",
-            )
-        ],
     ),
     "kimi_vl": VLMTestInfo(
         models=["moonshotai/Kimi-VL-A3B-Instruct"],
