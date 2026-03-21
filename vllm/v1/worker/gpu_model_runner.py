@@ -6285,12 +6285,10 @@ class GPUModelRunner(
         kv_caches: dict[str, torch.Tensor] = {}
 
         # Pre-scan to determine whether there are attn / mamba layers.
-        has_attn, has_mamba = False, False
+        has_mamba = False
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
-            if isinstance(kv_cache_spec, AttentionSpec):
-                has_attn = True
-            elif isinstance(kv_cache_spec, MambaSpec):
+            if isinstance(kv_cache_spec, MambaSpec):
                 has_mamba = True
 
         for group in self._kv_cache_spec_attn_group_iterator():
@@ -6383,9 +6381,6 @@ class GPUModelRunner(
                 else:
                     raise NotImplementedError
 
-        if has_attn and has_mamba:
-            self._update_hybrid_attention_mamba_layout(kv_caches)
-
         return kv_caches
 
     def _get_hybrid_attention_mamba_layout(
@@ -6438,42 +6433,6 @@ class GPUModelRunner(
             attn_group_idx = layer_idx % attn_group_size
             storage_offset = attn_group_idx * num_element_per_attn_group
         return tuple(target_stride_list), storage_offset
-
-    def _update_hybrid_attention_mamba_layout(
-        self, kv_caches: dict[str, torch.Tensor]
-    ) -> None:
-        """
-        Update the layout of attention layers from (2, num_blocks, ...) to
-        (num_blocks, 2, ...).
-
-        Args:
-            kv_caches: The KV cache buffer of each layer.
-        """
-
-        for group in self._kv_cache_spec_attn_group_iterator():
-            kv_cache_spec = group.kv_cache_spec
-            for layer_name in group.layer_names:
-                kv_cache = kv_caches[layer_name]
-                if isinstance(kv_cache_spec, AttentionSpec) and kv_cache.shape[0] == 2:
-                    assert kv_cache.shape[1] != 2, (
-                        "Fail to determine whether the layout is "
-                        "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
-                        f"a tensor of shape {kv_cache.shape}"
-                    )
-                    hidden_size = kv_cache.shape[2:].numel()
-                    attn_group_size = (
-                        kv_cache_spec.group_size
-                        if isinstance(kv_cache_spec, FullAttentionSpec)
-                        else 1
-                    )
-                    kv_cache.as_strided_(
-                        size=kv_cache.shape,
-                        stride=(
-                            hidden_size,
-                            2 * hidden_size * attn_group_size,
-                            *kv_cache.stride()[2:],
-                        ),
-                    )
 
     def initialize_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
