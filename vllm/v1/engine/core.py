@@ -1694,6 +1694,8 @@ class DPEngineCoreProc(EngineCoreProc):
             if self.eep_scaling_state is not None:
                 _ = self.eep_scaling_state.progress()
                 if self.eep_scaling_state.is_complete():
+                    if self.eep_scaling_state.worker_type == "removing":
+                        raise SystemExit
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
 
@@ -1857,20 +1859,7 @@ class DPEngineCoreProc(EngineCoreProc):
             scale_type="scale_up",
             reconfig_request=None,
         )
-        self.model_executor.collective_rpc("init_device")
-        self.model_executor.collective_rpc("load_model")
-        self._eep_send_engine_core_notification(
-            EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY
-        )
-        self.model_executor.collective_rpc(
-            "elastic_ep_execute", args=("receive_weights",)
-        )
-        self.available_gpu_memory_for_kv_cache = (
-            ParallelConfig.sync_kv_cache_memory_size(self.dp_group, -1)
-        )
-        self.model_executor.collective_rpc(
-            "elastic_ep_execute", args=("prepare_new_worker",)
-        )
+        self.eep_scaling_state.run_pre_kv_init_states()
         self.process_input_queue_block = False
 
 
