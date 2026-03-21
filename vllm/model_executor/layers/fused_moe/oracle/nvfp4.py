@@ -65,10 +65,6 @@ def is_global_sf_supported_for_nvfp4_backend(backend: NvFp4MoeBackend) -> bool:
 
 
 class NvFp4MoEKernelOracle(MoEKernelOracle[NvFp4MoeBackend]):
-    @property
-    def quant_type_name(self) -> str:
-        return "NvFp4"
-
     def backend_to_kernel_cls(
         self,
         backend: NvFp4MoeBackend,
@@ -187,7 +183,7 @@ class NvFp4MoEKernelOracle(MoEKernelOracle[NvFp4MoeBackend]):
             activation_key: QuantKey | None,
             activation_format: mk.FusedMoEActivationFormat,
         ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
-            for k_cls in backend_to_kernel_cls(backend):
+            for k_cls in self.backend_to_kernel_cls(backend):
                 supported, reason = k_cls.is_supported_config(
                     k_cls, config, weight_key, activation_key, activation_format
                 )
@@ -200,7 +196,7 @@ class NvFp4MoEKernelOracle(MoEKernelOracle[NvFp4MoeBackend]):
         # Handle explicit moe_backend from user.
         runner_backend = config.moe_backend
         if runner_backend != "auto":
-            requested_backend = map_nvfp4_backend(runner_backend)
+            requested_backend = self.map_backend(runner_backend)
             return _return_or_raise(
                 requested_backend, config, weight_key, activation_key, activation_format
             )
@@ -220,7 +216,7 @@ class NvFp4MoEKernelOracle(MoEKernelOracle[NvFp4MoeBackend]):
             else:
                 # If the user is not explicit about the backend, try each.
                 for backend in FLASHINFER_NVFP4_MOE_BACKENDS:
-                    for k_cls in backend_to_kernel_cls(backend):
+                    for k_cls in self.backend_to_kernel_cls(backend):
                         supported, reason = k_cls.is_supported_config(
                             k_cls,
                             config,
@@ -249,7 +245,7 @@ class NvFp4MoEKernelOracle(MoEKernelOracle[NvFp4MoeBackend]):
 
         # Select kernels in order of backend.
         for backend in AVAILABLE_BACKENDS:
-            for k_cls in backend_to_kernel_cls(backend):
+            for k_cls in self.backend_to_kernel_cls(backend):
                 supported, reason = k_cls.is_supported_config(
                     k_cls,
                     config,

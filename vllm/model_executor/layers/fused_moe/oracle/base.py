@@ -24,13 +24,15 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         - ``convert_to_kernel_format`` – shuffle weights for a backend
         - ``make_quant_config`` – build a ``FusedMoEQuantConfig``
         - ``make_kernel`` – construct the ``FusedMoEKernel``
-    """
 
-    @property
-    @abstractmethod
-    def quant_type_name(self) -> str:
-        """Human-readable quantization type name (e.g. 'Fp8', 'NvFp4')."""
-        ...
+    Note: Method signatures intentionally vary across subclasses because
+    each quantization type requires different weight/scale parameters.
+    This ABC provides structural guarantees (every oracle implements the
+    same set of operations) rather than call-site polymorphism.
+    Optional methods (convert_to_kernel_format, make_quant_config,
+    make_kernel) raise NotImplementedError by default for oracles that
+    delegate these operations (e.g. MXFP8 reuses FP8's kernel logic).
+    """
 
     @abstractmethod
     def backend_to_kernel_cls(
@@ -60,8 +62,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         NotImplementedError.
         """
         raise NotImplementedError(
-            f"{self.quant_type_name} oracle does not implement "
-            "convert_to_kernel_format."
+            f"{type(self).__name__} does not implement convert_to_kernel_format."
         )
 
     def make_quant_config(self, *args, **kwargs):
@@ -71,7 +72,7 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         raises NotImplementedError.
         """
         raise NotImplementedError(
-            f"{self.quant_type_name} oracle does not implement make_quant_config."
+            f"{type(self).__name__} does not implement make_quant_config."
         )
 
     def make_kernel(self, *args, **kwargs):
@@ -81,5 +82,5 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         NotImplementedError.
         """
         raise NotImplementedError(
-            f"{self.quant_type_name} oracle does not implement make_kernel."
+            f"{type(self).__name__} does not implement make_kernel."
         )

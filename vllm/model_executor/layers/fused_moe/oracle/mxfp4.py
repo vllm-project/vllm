@@ -7,6 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
+from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -109,10 +110,6 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
 class Mxfp4MoEKernelOracle(MoEKernelOracle[Mxfp4MoeBackend]):
     """Oracle for MXFP4 MoE kernel selection."""
 
-    @property
-    def quant_type_name(self) -> str:
-        return "Mxfp4"
-
     def backend_to_kernel_cls(
         self,
         backend: Mxfp4MoeBackend,
@@ -181,7 +178,7 @@ class Mxfp4MoEKernelOracle(MoEKernelOracle[Mxfp4MoeBackend]):
         else:
             raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
-    def map_backend(self, runner_backend: str) -> Mxfp4MoeBackend:
+    def map_backend(self, runner_backend: MoEBackend) -> Mxfp4MoeBackend:
         """Map user's moe_backend string to Mxfp4MoeBackend."""
         mapping: dict[str, Mxfp4MoeBackend] = {
             "flashinfer_trtllm": Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
@@ -218,11 +215,11 @@ class Mxfp4MoEKernelOracle(MoEKernelOracle[Mxfp4MoeBackend]):
                 raise NotImplementedError("Mxfp4 LoRA only supported on CUDA Platform.")
             if envs.VLLM_MXFP4_USE_MARLIN is False and triton_kernels_supported:
                 logger.info_once("Using Triton backend for mxfp4 lora")
-                return Mxfp4MoeBackend.TRITON_UNFUSED, backend_to_kernel_cls(
+                return Mxfp4MoeBackend.TRITON_UNFUSED, self.backend_to_kernel_cls(
                     Mxfp4MoeBackend.TRITON_UNFUSED
                 )[0]
             logger.info_once("Using Marlin backend for mxfp4 lora")
-            return Mxfp4MoeBackend.MARLIN, backend_to_kernel_cls(
+            return Mxfp4MoeBackend.MARLIN, self.backend_to_kernel_cls(
                 Mxfp4MoeBackend.MARLIN
             )[0]
 
@@ -254,7 +251,7 @@ class Mxfp4MoEKernelOracle(MoEKernelOracle[Mxfp4MoeBackend]):
             activation_format: mk.FusedMoEActivationFormat,
         ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
             reason: str | None = None
-            for k_cls in backend_to_kernel_cls(backend):
+            for k_cls in self.backend_to_kernel_cls(backend):
                 supported, reason = k_cls.is_supported_config(
                     k_cls, config, weight_key, activation_key, activation_format
                 )
@@ -265,7 +262,7 @@ class Mxfp4MoEKernelOracle(MoEKernelOracle[Mxfp4MoeBackend]):
 
         runner_backend = config.moe_backend
         if runner_backend != "auto":
-            requested_backend = map_mxfp4_backend(runner_backend)
+            requested_backend = self.map_backend(runner_backend)
             if (
                 activation_format == mk.FusedMoEActivationFormat.BatchedExperts
                 and requested_backend == Mxfp4MoeBackend.MARLIN
@@ -348,7 +345,7 @@ class Mxfp4MoEKernelOracle(MoEKernelOracle[Mxfp4MoeBackend]):
 
         for backend in AVAILABLE_BACKENDS:
             activation_key = _backend_activation_key(backend)
-            for k_cls in backend_to_kernel_cls(backend):
+            for k_cls in self.backend_to_kernel_cls(backend):
                 supported, reason = k_cls.is_supported_config(
                     k_cls, config, kMxfp4Static, activation_key, activation_format
                 )

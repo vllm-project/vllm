@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
@@ -30,17 +31,13 @@ _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
 class Mxfp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
     """Oracle for MXFP8 MoE kernel selection."""
 
-    @property
-    def quant_type_name(self) -> str:
-        return "MxFp8"
-
     def backend_to_kernel_cls(
         self,
         backend: Fp8MoeBackend,
     ) -> list[type[mk.FusedMoEExperts]]:
         return backend_to_kernel_cls(backend)
 
-    def map_backend(self, runner_backend: str) -> Fp8MoeBackend:
+    def map_backend(self, runner_backend: MoEBackend) -> Fp8MoeBackend:
         backend = _BACKEND_NAME_MAP.get(runner_backend)
         if backend is None:
             raise ValueError(
@@ -50,7 +47,7 @@ class Mxfp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
             )
         return backend
 
-    def _select_kernel_cls(
+    def select_kernel_cls(
         self,
         backend: Fp8MoeBackend,
         config: FusedMoEConfig,
@@ -102,12 +99,12 @@ class Mxfp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
                 "Using '%s' MxFp8 MoE backend (user-requested).",
                 backend.value,
             )
-            return backend, self._select_kernel_cls(backend, config)
+            return backend, self.select_kernel_cls(backend, config)
 
         # Auto-select: pick the first supported backend.
         for backend in _SUPPORTED_BACKENDS:
             logger.info_once("Using '%s' MxFp8 MoE backend.", backend.value)
-            return backend, self._select_kernel_cls(backend, config)
+            return backend, self.select_kernel_cls(backend, config)
 
         raise ValueError("No MXFP8 MoE backends available.")
 
@@ -115,12 +112,12 @@ class Mxfp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
 _oracle = Mxfp8MoEKernelOracle()
 
 
-def _select_kernel_cls(
+def select_kernel_cls(
     backend: Fp8MoeBackend,
     config: FusedMoEConfig,
 ) -> type[mk.FusedMoEExperts]:
     """Select the first supported expert class for the MXFP8 config."""
-    return _oracle._select_kernel_cls(backend, config)
+    return _oracle.select_kernel_cls(backend, config)
 
 
 def select_mxfp8_moe_backend(

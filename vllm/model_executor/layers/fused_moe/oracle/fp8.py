@@ -106,10 +106,6 @@ def _get_priority_backends(
 class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
     """Oracle for FP8 MoE kernel selection."""
 
-    @property
-    def quant_type_name(self) -> str:
-        return "Fp8"
-
     def backend_to_kernel_cls(
         self,
         backend: Fp8MoeBackend,
@@ -226,7 +222,8 @@ class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
         """
 
         if config.is_lora_enabled:
-            return Fp8MoeBackend.TRITON, backend_to_kernel_cls(Fp8MoeBackend.TRITON)[0]
+            triton_cls = self.backend_to_kernel_cls(Fp8MoeBackend.TRITON)
+            return Fp8MoeBackend.TRITON, triton_cls[0]
 
         # NOTE: the kernels are selected in the following order.
         AVAILABLE_BACKENDS = _get_priority_backends(config, weight_key, activation_key)
@@ -266,7 +263,7 @@ class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
             activation_key: QuantKey | None,
             activation_format: mk.FusedMoEActivationFormat,
         ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
-            for k_cls in backend_to_kernel_cls(backend):
+            for k_cls in self.backend_to_kernel_cls(backend):
                 supported, reason = k_cls.is_supported_config(
                     k_cls, config, weight_key, activation_key, activation_format
                 )
@@ -278,7 +275,7 @@ class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
         # Handle explicit moe_backend from user.
         runner_backend = config.moe_backend
         if runner_backend != "auto":
-            requested_backend = map_fp8_backend(runner_backend)
+            requested_backend = self.map_backend(runner_backend)
             # For batched activation format, use batched variants if available.
             if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
                 if requested_backend == Fp8MoeBackend.DEEPGEMM:
@@ -322,7 +319,7 @@ class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
                     raise ValueError(
                         f"FlashInfer MOE backend {fi_backend} does not support FP8 MoE."
                     )
-                k_cls = backend_to_kernel_cls(backend)[0]
+                k_cls = self.backend_to_kernel_cls(backend)[0]
                 return _return_or_raise(
                     backend, config, weight_key, activation_key, activation_format
                 )
@@ -332,7 +329,7 @@ class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
                     Fp8MoeBackend.FLASHINFER_TRTLLM,
                     Fp8MoeBackend.FLASHINFER_CUTLASS,
                 ]:
-                    for k_cls in backend_to_kernel_cls(backend):
+                    for k_cls in self.backend_to_kernel_cls(backend):
                         supported, reason = k_cls.is_supported_config(
                             k_cls,
                             config,
@@ -392,7 +389,7 @@ class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
 
         # Select kernels in order of backend.
         for backend in AVAILABLE_BACKENDS:
-            for k_cls in backend_to_kernel_cls(backend):
+            for k_cls in self.backend_to_kernel_cls(backend):
                 supported, reason = k_cls.is_supported_config(
                     k_cls,
                     config,

@@ -56,10 +56,6 @@ UNSUPPORTED_BACKEND = [
 class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
     """Oracle for unquantized MoE kernel selection."""
 
-    @property
-    def quant_type_name(self) -> str:
-        return "Unquantized"
-
     def backend_to_kernel_cls(
         self,
         backend: UnquantizedMoeBackend,
@@ -183,7 +179,7 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
                 backend = UnquantizedMoeBackend.AITER
             else:
                 backend = UnquantizedMoeBackend.TRITON
-        if current_platform.is_cuda():
+        elif current_platform.is_cuda():
             if flashinfer_trtllm_moe_enabled:
                 backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
             elif flashinfer_cutlass_moe_enabled:
@@ -217,14 +213,18 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
                         scope="local",
                     )
                 backend = UnquantizedMoeBackend.TRITON
-        if current_platform.is_xpu():
+        elif current_platform.is_xpu():
             backend = UnquantizedMoeBackend.XPU
-        if current_platform.is_cpu():
+        elif current_platform.is_cpu():
             backend = UnquantizedMoeBackend.CPU
-        if current_platform.is_tpu():
+        elif current_platform.is_tpu():
             backend = UnquantizedMoeBackend.TPU
-        if current_platform.is_out_of_tree():
+        elif current_platform.is_out_of_tree():
             backend = UnquantizedMoeBackend.OOT
+        else:
+            raise NotImplementedError(
+                "No unquantized MoE backend supports the current platform."
+            )
 
         logger.info_once(_make_log_backend(backend), scope="local")
         return backend
@@ -305,6 +305,8 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
                 ),
                 inplace=not moe_config.disable_inplace,
             )
+        else:
+            raise ValueError(f"Unsupported unquantized MoE backend: {backend.value}")
         return kernel
 
 
