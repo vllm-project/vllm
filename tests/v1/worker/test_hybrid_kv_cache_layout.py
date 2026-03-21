@@ -19,8 +19,8 @@ from vllm.v1.attention.backends.utils import (
     get_kv_cache_layout,
     set_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.kv_cache_interface import AttentionSpec, FullAttentionSpec
+from vllm.v1.worker import mamba_utils
 
 
 def _build_full_attn_spec(
@@ -43,7 +43,7 @@ def _build_full_attn_spec(
 
 def _compute_layout_ref(
     backend: AttentionBackend,
-    kv_cache_spec: FullAttentionSpec,
+    kv_cache_spec: AttentionSpec,
     layer_idx: int,
     kernel_block_size: int,
     num_blocks: int,
@@ -112,7 +112,7 @@ def _compute_layout_ref(
     # without actually changing the underlying storage.
     if (
         enable_hybrid_attn_mamba_layout
-        and isinstance(kv_cache_spec, FullAttentionSpec)
+        and isinstance(kv_cache_spec, AttentionSpec)
         and kv.shape[0] == 2
     ):
         hidden_size = prod(kv.shape[2:])
@@ -130,7 +130,7 @@ def _compute_layout_ref(
 
 def _compute_layout_new(
     backend: AttentionBackend,
-    kv_cache_spec: FullAttentionSpec,
+    kv_cache_spec: AttentionSpec,
     layer_idx: int,
     kernel_block_size: int,
     num_blocks: int,
@@ -167,10 +167,8 @@ def _compute_layout_new(
     kv_cache_stride = tuple(torch.empty(kv_cache_shape).stride())
     storage_offset = 0
 
-    # We only need the method body; GPUModelRunner state is unused.
-    runner = object.__new__(GPUModelRunner)
     if enable_hybrid_attn_mamba_layout:
-        kv_cache_stride, storage_offset = runner._get_hybrid_attention_mamba_layout(
+        kv_cache_stride, storage_offset = mamba_utils.get_hybrid_attention_mamba_layout(
             kv_cache_shape=kv_cache_shape,
             kv_cache_stride=kv_cache_stride,
             kv_cache_spec=kv_cache_spec,
