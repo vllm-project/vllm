@@ -65,9 +65,8 @@ def _make_message(text: str) -> ResponseOutputMessage:
 
 
 class TestConsecutiveFunctionCallMerge:
-
     def test_two_consecutive_calls_merged(self):
-        """Two consecutive function_call items → 1 assistant message with 2 tool_calls."""
+        """Two consecutive function_call items merge into one message."""
         items = [
             _make_function_call("get_weather", '{"city": "NYC"}', "1"),
             _make_function_call("get_weather", '{"city": "LA"}', "2"),
@@ -86,7 +85,7 @@ class TestConsecutiveFunctionCallMerge:
         assert msg["tool_calls"][1]["id"] == "call_2"
 
     def test_three_consecutive_calls_merged(self):
-        """Three consecutive function_call items → 1 assistant message with 3 tool_calls."""
+        """Three consecutive function_call items merge into one."""
         items = [
             _make_function_call("fn_a", '{"x": 1}', "a"),
             _make_function_call("fn_b", '{"y": 2}', "b"),
@@ -101,7 +100,7 @@ class TestConsecutiveFunctionCallMerge:
         """ResponseOutputMessage followed by function_call → 2 separate messages."""
         items = [
             _make_message("Hello"),
-            _make_function_call("fn", '{}', "1"),
+            _make_function_call("fn", "{}", "1"),
         ]
         messages = construct_chat_messages_with_tool_call(items)
 
@@ -112,11 +111,11 @@ class TestConsecutiveFunctionCallMerge:
         assert len(messages[1]["tool_calls"]) == 1
 
     def test_tool_output_between_calls_breaks_merge(self):
-        """function_call, function_call_output, function_call → 3 messages (not merged)."""
+        """Tool output between calls breaks the merge."""
         items = [
-            _make_function_call("fn_a", '{}', "a"),
+            _make_function_call("fn_a", "{}", "a"),
             _make_tool_output("a", "result_a"),
-            _make_function_call("fn_b", '{}', "b"),
+            _make_function_call("fn_b", "{}", "b"),
         ]
         messages = construct_chat_messages_with_tool_call(items)
 
@@ -132,7 +131,7 @@ class TestConsecutiveFunctionCallMerge:
         assert len(messages[2]["tool_calls"]) == 1
 
     def test_single_call_unchanged(self):
-        """A single function_call still produces 1 assistant message with 1 tool_call."""
+        """Single function_call produces one assistant message."""
         items = [_make_function_call("fn", '{"k": "v"}', "1")]
         messages = construct_chat_messages_with_tool_call(items)
 
@@ -141,10 +140,10 @@ class TestConsecutiveFunctionCallMerge:
         assert len(messages[0]["tool_calls"]) == 1
 
     def test_parallel_calls_then_outputs(self):
-        """Two parallel calls followed by two outputs → assistant(2 tools) + 2 tool msgs."""
+        """Parallel calls then outputs → merged assistant + tool msgs."""
         items = [
-            _make_function_call("fn_a", '{}', "a"),
-            _make_function_call("fn_b", '{}', "b"),
+            _make_function_call("fn_a", "{}", "a"),
+            _make_function_call("fn_b", "{}", "b"),
             _make_tool_output("a", "res_a"),
             _make_tool_output("b", "res_b"),
         ]

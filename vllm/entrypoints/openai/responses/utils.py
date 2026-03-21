@@ -187,7 +187,7 @@ def construct_chat_messages_with_tool_call(
                 and messages[-1].get("role") == "assistant"
                 and "tool_calls" in messages[-1]
             ):
-                messages[-1]["tool_calls"].append(tool_call_param)
+                messages[-1]["tool_calls"].append(tool_call_param)  # type: ignore[union-attr]
             else:
                 messages.append(
                     ChatCompletionAssistantMessageParam(
