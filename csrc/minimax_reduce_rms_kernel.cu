@@ -629,6 +629,15 @@ inline int getSMVersion(bool queryRealSmArch = false) {
   return sm;
 }
 
+template <typename KernelFunc>
+int get_max_active_blocks(KernelFunc kernel, int block_size,
+                          int dynamic_smem = 0) {
+  int max_active = 0;
+  CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      &max_active, kernel, block_size, dynamic_smem));
+  return std::max(max_active, 1);
+}
+
 template <typename DType, int NRanks>
 void minimax_reduce_rms_kernel_launcher(MiniMaxReduceRMSParams const& params) {
   static int SM = getSMVersion();
@@ -639,8 +648,13 @@ void minimax_reduce_rms_kernel_launcher(MiniMaxReduceRMSParams const& params) {
   int cluster_num = token_num;
   int threads_per_token = params.hidden_dim / kElemsPerAccess<DType>;
   int block_size = threads_per_token;
+
+  int max_blocks_per_sm = get_max_active_blocks(
+      minimax_reduce_rms_kernel_lamport<DType, NRanks>, block_size);
+  int max_grid = max_blocks_per_sm * sm_count;
+
   int grid_size =
-      (std::min(sm_count, cluster_num * cluster_size) / cluster_size) *
+      (std::min(max_grid, cluster_num * cluster_size) / cluster_size) *
       cluster_size;
 
   cudaLaunchConfig_t cfg;
@@ -701,8 +715,20 @@ void minimax_reduce_rms_kernel_launcher_float4(
                    ((params.allreduce_in_k != nullptr)
                         ? divUp(access_per_row_k, MINIMAX_REDUCE_RMS_WARP_SIZE)
                         : 0);
+
+  bool is_qk = (params.allreduce_in_k != nullptr);
+  int max_blocks_per_sm =
+      is_qk
+          ? get_max_active_blocks(
+                minimax_reduce_rms_kernel_lamport_float4<DType, NRanks, true>,
+                block_size)
+          : get_max_active_blocks(
+                minimax_reduce_rms_kernel_lamport_float4<DType, NRanks, false>,
+                block_size);
+
+  int max_grid = max_blocks_per_sm * sm_count;
   int grid_size =
-      (std::min(sm_count, cluster_num * cluster_size) / cluster_size) *
+      (std::min(max_grid, cluster_num * cluster_size) / cluster_size) *
       cluster_size;
 
   cudaLaunchConfig_t cfg;
@@ -719,7 +745,6 @@ void minimax_reduce_rms_kernel_launcher_float4(
   attribute[1].val.clusterDim.z = 1;
   cfg.attrs = attribute;
   cfg.numAttrs = SM >= 90 ? 2 : 0;
-  bool is_qk = (params.allreduce_in_k != nullptr);
 
   if (is_qk) {
     CUDA_CHECK(cudaLaunchKernelEx(

@@ -35,7 +35,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
-_FUSED_AR_TOKEN_THRESHOLD = 2048
+# _FUSED_AR_TOKEN_THRESHOLD = 2048
 
 
 class MiniMaxText01RMSNormTP(CustomOp):
@@ -51,7 +51,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
 
         self.weight.weight_loader = self.weight_loader
         self.variance_epsilon = eps
-
+        self.max_tokens = max_tokens
         self._ar_workspace: torch.Tensor | None = None
         if current_platform.is_cuda() and self.tp_world > 1:
             from .lamport_workspace import get_allreduce_workspace
@@ -59,7 +59,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
             self._ar_workspace = get_allreduce_workspace(
                 self.tp_rank,
                 self.tp_world,
-                max_tokens=_FUSED_AR_TOKEN_THRESHOLD,
+                max_tokens=max_tokens,
                 process_group=get_tp_group().cpu_group,
             )
 
@@ -110,7 +110,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
             current_platform.is_cuda()
             and q_norm.tp_world > 1
             and q_norm._ar_workspace is not None
-            and input_seq <= _FUSED_AR_TOKEN_THRESHOLD
+            and input_seq <= q_norm.max_tokens
         ):
             assert q_norm.variance_epsilon == k_norm.variance_epsilon
             torch.ops._C.minimax_allreduce_rms_qk(
