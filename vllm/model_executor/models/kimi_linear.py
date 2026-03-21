@@ -26,6 +26,8 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -44,6 +46,7 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from .interfaces import HasInnerState, IsHybrid, MixtureOfExperts, SupportsPP
 from .utils import (
+    AutoWeightsLoader,
     PPMissingLayer,
     is_pp_missing_parameter,
     make_layers,
@@ -391,7 +394,6 @@ class KimiLinearModel(nn.Module):
         parallel_config = vllm_config.parallel_config
         self.config = config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         if get_pp_group().is_first_rank:
@@ -471,86 +473,7 @@ class KimiLinearModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-
-class KimiLinearForCausalLM(
-    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
-):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        self.model_config = vllm_config.model_config
-        self.vllm_config = vllm_config
-        self.config = self.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        self.quant_config = quant_config
-        self.model = KimiLinearModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                self.config.vocab_size,
-                self.config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-        else:
-            self.lm_head = PPMissingLayer()
-        logit_scale = getattr(self.config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            self.config.vocab_size, scale=logit_scale
-        )
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **kwargs,
-    ) -> torch.Tensor | IntermediateTensors:
-        hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
-        )
-        return hidden_states
-
-    @classmethod
-    def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype, torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.kda_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
-        )
-
-    @classmethod
-    def get_mamba_state_shape_from_config(
-        cls, vllm_config: "VllmConfig"
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        parallel_config = vllm_config.parallel_config
-        hf_config = vllm_config.model_config.hf_config
-        tp_size = parallel_config.tensor_parallel_size
-        num_spec = (
-            vllm_config.speculative_config.num_speculative_tokens
-            if vllm_config.speculative_config
-            else 0
-        )
-        return MambaStateShapeCalculator.kda_state_shape(
-            tp_size,
-            hf_config.linear_attn_config["num_heads"],
-            hf_config.linear_attn_config["head_dim"],
-            conv_kernel_size=hf_config.linear_attn_config["short_conv_kernel_size"],
-            num_spec=num_spec,
-        )
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
-        return self.logits_processor(self.lm_head, hidden_states)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".gate_up_proj", ".gate_proj", 0),
@@ -644,6 +567,101 @@ class KimiLinearForCausalLM(
                     )
                     weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
+        return loaded_params
+
+
+class KimiLinearForCausalLM(
+    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
+):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        self.model_config = vllm_config.model_config
+        self.vllm_config = vllm_config
+        self.config = self.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.quant_config = quant_config
+        self.model = KimiLinearModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
+        logit_scale = getattr(self.config, "logit_scale", 1.0)
+        self.logits_processor = LogitsProcessor(
+            self.config.vocab_size, scale=logit_scale
+        )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor | IntermediateTensors:
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+        )
+        return hidden_states
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype, torch.dtype, torch.dtype]:
+        return MambaStateDtypeCalculator.kda_state_dtype(
+            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+        )
+
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls, vllm_config: "VllmConfig"
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_config
+        tp_size = parallel_config.tensor_parallel_size
+        num_spec = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+        return MambaStateShapeCalculator.kda_state_shape(
+            tp_size,
+            hf_config.linear_attn_config["num_heads"],
+            hf_config.linear_attn_config["head_dim"],
+            conv_kernel_size=hf_config.linear_attn_config["short_conv_kernel_size"],
+            num_spec=num_spec,
+        )
+
+    @classmethod
+    def get_mamba_state_copy_func(
+        cls,
+    ) -> tuple[
+        MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc
+    ]:
+        return MambaStateCopyFuncCalculator.kda_state_copy_func()
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        return self.logits_processor(self.lm_head, hidden_states)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(weights)
 
 
 def get_spec_layer_idx_from_weight_name(

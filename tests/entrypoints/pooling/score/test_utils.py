@@ -7,7 +7,9 @@ import pytest
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
-from vllm.entrypoints.pooling.score.utils import get_score_prompt
+from vllm.entrypoints.pooling.score.utils import (
+    get_score_prompt,
+)
 from vllm.inputs import TokensPrompt
 from vllm.tokenizers import get_tokenizer
 
@@ -212,7 +214,7 @@ class TestGetScorePrompt:
                 return_value=mock_model_no_score_template,
             ),
             patch(
-                "vllm.entrypoints.pooling.score.utils.apply_hf_chat_template",
+                "vllm.entrypoints.pooling.score.utils.safe_apply_chat_template",
                 return_value="test querytest doc",
             ),
         ):
@@ -245,7 +247,7 @@ class TestGetScorePrompt:
                 return_value=mock_model_no_score_template,
             ),
             patch(
-                "vllm.entrypoints.pooling.score.utils.apply_hf_chat_template",
+                "vllm.entrypoints.pooling.score.utils.safe_apply_chat_template",
                 side_effect=ChatTemplateResolutionError("No template"),
             ),
         ):
@@ -296,7 +298,7 @@ class TestGetScorePrompt:
                 return_value=mock_model_no_score_template,
             ),
             patch(
-                "vllm.entrypoints.pooling.score.utils.apply_hf_chat_template",
+                "vllm.entrypoints.pooling.score.utils.safe_apply_chat_template",
                 side_effect=ChatTemplateResolutionError("No template"),
             ),
         ):
@@ -331,7 +333,7 @@ class TestGetScorePrompt:
                 return_value=mock_model_with_score_template,
             ),
             patch(
-                "vllm.entrypoints.pooling.score.utils.apply_hf_chat_template",
+                "vllm.entrypoints.pooling.score.utils.safe_apply_chat_template",
                 side_effect=ChatTemplateResolutionError("No template"),
             ),
         ):

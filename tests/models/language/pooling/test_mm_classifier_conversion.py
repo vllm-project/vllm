@@ -32,7 +32,8 @@ def test_idefics_multimodal(
 
 
 def update_config(config):
-    config.text_config.update(
+    text_config = config.get_text_config()
+    text_config.update(
         {
             "architectures": ["Gemma3ForSequenceClassification"],
             "classifier_from_token": ["A", "B", "C", "D", "E"],
@@ -96,7 +97,7 @@ def test_gemma_multimodal(
         dtype="bfloat16",
     ) as vllm_model:
         llm = vllm_model.get_llm()
-        prompts = llm.preprocess_chat(messages)
+        prompts = llm._preprocess_chat([messages])
 
         result = llm.classify(prompts)
         assert result[0].outputs.probs[0] > 0.95

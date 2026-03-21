@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
 
 
 @pytest.mark.skip(reason="In V1, we reject tokens > max_seq_len")
@@ -49,12 +50,12 @@ def test_gc():
     del llm
 
     gc.collect()
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
 
     # The memory allocated for model and KV cache should be released.
     # The memory allocated for PyTorch and others should be less than 50MB.
     # Usually, it's around 10MB.
-    allocated = torch.cuda.memory_allocated()
+    allocated = torch.accelerator.memory_allocated()
     assert allocated < 50 * 1024 * 1024
 
 
@@ -65,7 +66,8 @@ def test_model_from_modelscope(monkeypatch: pytest.MonkeyPatch):
         # Don't use HF_TOKEN for ModelScope repos, otherwise it will fail
         # with 400 Client Error: Bad Request.
         m.setenv("HF_TOKEN", "")
-        llm = LLM(model="qwen/Qwen1.5-0.5B-Chat")
+        attn_backend = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
+        llm = LLM(model="qwen/Qwen1.5-0.5B-Chat", attention_backend=attn_backend)
 
         prompts = [
             "Hello, my name is",

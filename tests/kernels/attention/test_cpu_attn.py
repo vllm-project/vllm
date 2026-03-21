@@ -26,6 +26,7 @@ NUM_HEADS = [
     (9, 3),
 ]
 HEAD_SIZES = [96, 128]
+HEAD_SIZES_VEC16 = [96, 80, 112, 128]
 QTYPES = [torch.bfloat16, torch.half, torch.float32]
 SLIDING_WINDOWS = [None, 256]
 NUM_BLOCKS = [
@@ -47,7 +48,7 @@ def get_attn_isa(
     else:
         if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
             return "neon"
-        elif torch._C._cpu._is_amx_tile_supported():
+        elif torch.cpu._is_amx_tile_supported():
             return "amx"
         else:
             return "vec"
@@ -399,9 +400,7 @@ def test_varlen_with_paged_kv_normal_vec(
 @pytest.mark.parametrize("use_alibi", [False])
 @pytest.mark.parametrize("use_sink", [False])
 @pytest.mark.parametrize("isa", ["amx"])
-@pytest.mark.skipif(
-    not torch._C._cpu._is_amx_tile_supported(), reason="no AMX support."
-)
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
 def test_varlen_with_paged_kv_normal_amx(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
@@ -432,7 +431,7 @@ def test_varlen_with_paged_kv_normal_amx(
 
 @pytest.mark.parametrize("seq_lens", SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("head_size", HEAD_SIZES_VEC16)
 @pytest.mark.parametrize("block_size", [48])
 @pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])

@@ -197,20 +197,18 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: GotOcr2ImageProcessorFast | None = None,
+        processor: InternVLProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor().image_processor
+        image_processor: GotOcr2ImageProcessorFast = processor.image_processor
 
-        if not isinstance(processor, GotOcr2ImageProcessorFast):
-            raise ValueError(
-                f"GotOcr2ImageProcessorFast is expected but got {type(processor)}"
-            )
-        num_image_patches = processor.get_number_of_image_patches(
-            image_height, image_width, images_kwargs=dict()
+        num_image_patches = image_processor.get_number_of_image_patches(
+            image_height,
+            image_width,
+            self.ctx.get_merged_mm_kwargs(mm_kwargs),
         )
-        num_image_tokens = self.get_hf_processor().image_seq_length * num_image_patches
-        return num_image_tokens
+
+        return processor.image_seq_length * num_image_patches
 
     def resolve_target_ratios(self, use_thumbnail: bool | None = None):
         image_processor = self.get_hf_processor().image_processor
@@ -243,7 +241,8 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
             feat_size = self.get_num_image_tokens(
                 image_width=width,
                 image_height=height,
-                processor=processor.image_processor,
+                processor=processor,
+                mm_kwargs={},
             )
             if feat_size > largest_feature_size:
                 largest_feature_size = feat_size
@@ -262,7 +261,8 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         return self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
-            processor=processor.image_processor,
+            processor=processor,
+            mm_kwargs={},
         )
 
     def get_num_frames_with_most_features(
@@ -297,7 +297,7 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
@@ -309,8 +309,8 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo])
         config = self.info.get_hf_config()
         image_size_h, image_size_w = config.vision_config.image_size
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
         return {
             "image": self._get_dummy_images(
@@ -764,7 +764,6 @@ class InternS1ForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
             self._set_visual_token_mask(input_ids)
@@ -777,12 +776,11 @@ class InternS1ForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

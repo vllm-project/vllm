@@ -28,7 +28,7 @@ Furthermore, vLLM decides whether to enable or disable a `CustomOp` based on `co
 !!! note
     Note that `all` and `none` cannot coexist in `compilation_config.custom_ops`.
 
-By default, if `compilation_config.backend == "inductor"` and `compilation_config.mode != CompilationMode.NONE`, a `none` will be appended into `compilation_config.custom_ops`, otherwise a `all` will be appended. In other words, this means `CustomOp` will be disabled in some platforms (i.e., those use `inductor` as dafault backend for `torch.compile`) when running with torch compile mode. In this case, Inductor generates (fused) Triton kernels for those disabled custom ops.
+By default, if `compilation_config.backend == "inductor"` and `compilation_config.mode != CompilationMode.NONE`, a `none` will be appended into `compilation_config.custom_ops`, otherwise a `all` will be appended. In other words, this means `CustomOp` will be disabled in some platforms (i.e., those use `inductor` as default backend for `torch.compile`) when running with torch compile mode. In this case, Inductor generates (fused) Triton kernels for those disabled custom ops.
 
 !!! note
     For multi-modal models, vLLM has enforced the enabling of some custom ops to use device-specific deep-optimized kernels for better performance in ViT part, such as `MMEncoderAttention` and `ApplyRotaryEmb`. We can also pass a `enforce_enable=True` param to the `__init__()` method of the `CustomOp` to enforce enable itself at object-level.
@@ -51,9 +51,8 @@ For example:
 **1. Attention:**
 
 ```python
---8<-- "vllm/model_executor/layers/attention/mm_encoder_attention.py:mm_encoder_attn"
-
 --8<-- "vllm/model_executor/layers/mla.py:multi_head_latent_attention"
+
 ```
 
 **2. Activation:**
@@ -168,6 +167,16 @@ For example:
 --8<-- "vllm/model_executor/layers/rotary_embedding/common.py:apply_rotary_emb"
 ```
 
+**12. Encoder:**
+
+```python
+--8<-- "vllm/model_executor/models/deepencoder2.py:qwen2_decoder"
+
+--8<-- "vllm/model_executor/layers/attention/mm_encoder_attention.py:mm_encoder_attn"
+
+--8<-- "vllm/model_executor/models/deepencoder.py:rel_pos_attention"
+```
+
 ## Guidelines for Implementing a New CustomOp
 
 ### Implement a New CustomOp in vLLM
@@ -271,7 +280,7 @@ Taking `MMEncoderAttention` as an example:
 ??? code
 
     ```python
-    from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
+    from vllm.model_executor.layers.attention import MMEncoderAttention
     from vllm.model_executor.custom_op import CustomOp
 
 

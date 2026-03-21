@@ -14,9 +14,14 @@ def adapt_config_dict(
     defaults: dict[str, Any],
 ) -> PretrainedConfig:
     config_dict = _remap_general_mistral_args(config_dict)
+    config_dict = _remap_mistral_sliding_window(config_dict)
 
     if bool(config_dict.get("quantization")):
         config_dict = _remap_mistral_quantization_args(config_dict)
+
+    is_mla = bool(config_dict.get("qk_nope_head_dim"))
+    if is_mla:
+        config_dict = _remap_mistral_mla_args(config_dict)
 
     is_moe = bool(config_dict.get("moe"))
     is_mistral_large_3 = (
@@ -108,12 +113,13 @@ def _remap_mistral_vision_args(config: dict) -> dict:
 
 def _remap_mistral_yarn_args(config: dict) -> dict:
     yarn_config_map = {
-        "factor": "factor",
-        "original_max_position_embeddings": "original_max_position_embeddings",
-        "beta": "beta_fast",
-        "alpha": "beta_slow",
-        "apply_scale": "apply_yarn_scaling",
+        "factor": ("factor", float),
+        "original_max_position_embeddings": ("original_max_position_embeddings", int),
+        "beta": ("beta_fast", float),
+        "alpha": ("beta_slow", float),
+        "apply_scale": ("apply_yarn_scaling", bool),
     }
+
     yarn_config = config.get("yarn") or {}
     config["rope_parameters"] = {
         "rope_type": "yarn",
@@ -123,9 +129,10 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
     if rope_theta := config.pop("rope_theta", None):
         config["rope_parameters"]["rope_theta"] = rope_theta
 
-    for old_name, new_name in yarn_config_map.items():
+    for old_name, (new_name, cast) in yarn_config_map.items():
         if old_name in yarn_config:
-            config["rope_parameters"][new_name] = yarn_config.pop(old_name)
+            # Cast to remove Transformers > v5 type warnings
+            config["rope_parameters"][new_name] = cast(yarn_config.pop(old_name))
 
     assert len(yarn_config) == 0, f"Unparsed yarn config: {yarn_config}"
 
@@ -149,6 +156,7 @@ def _remap_general_mistral_args(config: dict) -> dict:
         "tie_word_embeddings": ("tied_embeddings", False),
         "max_seq_len": ("max_seq_len", config.get("max_position_embeddings", 128_000)),
         "max_position_embeddings": ("max_position_embeddings", 128_000),
+        "dtype": ("dtype", config.get("dtype")),
     }
 
     for key, new_key in config_mapping.items():
@@ -157,6 +165,29 @@ def _remap_general_mistral_args(config: dict) -> dict:
 
     for new_key, (key, default_value) in top_level_mapping_with_default.items():
         config[new_key] = config.pop(key, default_value)
+
+    return config
+
+
+def _remap_mistral_sliding_window(config: dict) -> dict:
+    # Remap sliding_window (list) -> layer_types (list) + sliding window (int)
+    # for HF compatibility
+    # Mistral configs may define sliding_window as list[int]. Convert it
+    # to int and add the layer_types list[str] to make it HF compatible
+    if sliding_window := config.get("sliding_window"):
+        if isinstance(sliding_window, list):
+            pattern_repeats = config["num_hidden_layers"] // len(sliding_window)
+            layer_types = sliding_window * pattern_repeats
+            config["layer_types"] = [
+                "full_attention" if layer_type is None else "sliding_attention"
+                for layer_type in layer_types
+            ]
+            assert len(set(sliding_window) - {None}) <= 1, sliding_window
+            config["sliding_window"] = next(filter(None, sliding_window), None)
+        elif isinstance(sliding_window, int) and config.get("layer_types") is None:
+            config["layer_types"] = ["sliding_attention"] * config["num_hidden_layers"]
+        else:
+            raise ValueError(f"Unsupported sliding_window type: {sliding_window}")
 
     return config
 
@@ -174,6 +205,14 @@ def _remap_mistral_quantization_args(config: dict) -> dict:
                 "quant_method": "fp8",
                 "activation_scheme": "dynamic" if is_dynamic else "static",
             }
+        elif (
+            str(quantization.get("quant_method", "")).lower().replace("_", "-")
+            == "compressed-tensors"
+        ):
+            # Pass through compressed-tensors config, while normalizing
+            # quant_method to the canonical community spelling.
+            quantization["quant_method"] = "compressed-tensors"
+            config["quantization_config"] = quantization
         else:
             raise ValueError(f"Found unknown quantization='{quantization}' in config")
 
@@ -195,16 +234,8 @@ def _remap_mistral_audio_args(config: dict) -> dict:
     else:
         block_pool_size = 1
 
-    _maybe_sliding_window = encoder_args.get("ragged_attention", None)
-    if _maybe_sliding_window is None:
-        sliding_window = None
-    elif _maybe_sliding_window.isdigit():
-        sliding_window = int(_maybe_sliding_window)
-    else:
-        raise NotImplementedError(f"Unsupported: {_maybe_sliding_window=}")
-
     architecture = (
-        "VoxtralStreamingGeneration"
+        "VoxtralRealtimeGeneration"
         if encoder_args.get("causal")
         else "VoxtralForConditionalGeneration"
     )
@@ -224,15 +255,24 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             encoder_layers=encoder_args["n_layers"],
             encoder_ffn_dim=encoder_args["hidden_dim"],
             encoder_attention_heads=encoder_args["n_heads"],
+            encoder_head_dim=encoder_args["head_dim"],
             vocab_size=encoder_args["vocab_size"],
-            max_source_positions=encoder_args["max_source_positions"],
             is_encoder_decoder=False,  # Override WhisperConfig default
             is_causal=encoder_args.get("causal", False),
-            sliding_window=sliding_window,
+            sliding_window=encoder_args.get("sliding_window", None),
             block_pool_size=block_pool_size,
             pos_embed=encoder_args.get("pos_embed", "sinusoidal"),
+            global_log_mel_max=encoder_args["audio_encoding_args"].get(
+                "global_log_mel_max"
+            ),
+            # only needed for RoPE
+            max_position_embeddings=block_pool_size * config["max_position_embeddings"],
         ),
     }
+    # Sometimes max_source_positions is explicitly set to None in params.json but this
+    # is not a valid value for WhisperConfig (or downstream code that uses it).
+    if (max_source_positions := encoder_args.get("max_source_positions")) is not None:
+        config["audio_config"].max_source_positions = max_source_positions
     if quant_config:
         config["quantization_config"] = quant_config
     return config
@@ -260,4 +300,23 @@ def _remap_moe_args(config: dict) -> dict:
     config["norm_topk_prob"] = True
     config["scoring_func"] = "softmax"
 
+    return config
+
+
+def _remap_mistral_mla_args(config: dict) -> dict:
+    if not config.get("moe"):
+        moe = {
+            "num_experts": 1,
+            "first_k_dense_replace": config.get("num_hidden_layers"),
+            "route_every_n": 1,
+            "num_shared_experts": 1,
+            "expert_hidden_dim": config.get("intermediate_size"),
+            "num_experts_per_tok": 1,
+            "routed_scale": 1.0,
+            "renorm_strategy": "WEIGHTS",
+            "use_load_balancing_bias": False,
+            "num_expert_groups": 1,
+            "num_expert_groups_per_tok": 1,
+        }
+        config["moe"] = moe
     return config

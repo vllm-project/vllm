@@ -116,7 +116,18 @@ def apply_grammar_bitmask(
         )
         index_tensor = index_tensor.to(logits.device, non_blocking=True)
 
-    xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
+    # Handle dtype conversion for CPU (older xgrammar CPU kernels require float32)
+    # See: https://github.com/vllm-project/vllm/issues/31901
+    if logits.device.type == "cpu" and logits.dtype != torch.float32:
+        # Convert to float32, apply bitmask, then convert back
+        logits_float32 = logits.to(torch.float32)
+        xgr.apply_token_bitmask_inplace(
+            logits_float32, grammar_bitmask, indices=index_tensor
+        )
+        # Copy the modified values back to the original tensor
+        logits.copy_(logits_float32.to(logits.dtype))
+    else:
+        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
 
 
 class OutlinesVocabulary:
@@ -185,14 +196,13 @@ re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
 re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
 
 
-def _reduced_vocabulary(
-    tokenizer: TokenizerLike, eos_token_id: int
-) -> dict[bytes, list[int]]:
+def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
     """Create a map from vocabulary tokens to lists of equivalent token ids.
 
     Returns:
         A Dict of token string -> equivalent token ids
     """
+    eos_token_id = tokenizer.eos_token_id
 
     unicode_to_bytes = {
         v: k for k, v in convert_slow_tokenizer.bytes_to_unicode().items()
@@ -226,7 +236,9 @@ def _reduced_vocabulary(
                 # by this point.
                 token_bytes = bytes(token_str)  # type: ignore[arg-type]
 
-            elif "\ufffd" in token_str and not re_replacement_seq.match(token_str):
+            elif (token_str == "\ufffd" and token != "\ufffd") or (
+                "\ufffd" in token_str and not re_replacement_seq.match(token_str)
+            ):
                 # Handle tokens with invalid UTF-8 sequences.
                 if re_llama_byte_token.match(token):
                     # Llama-like tokenizers use <0xXX> for incomplete sequences.
@@ -258,30 +270,13 @@ def get_outlines_vocabulary(tokenizer: TokenizerLike) -> oc.Vocabulary:
     if hasattr(tokenizer, "_outlines_vocabulary"):
         return tokenizer._outlines_vocabulary  # type: ignore
 
-    try:
-        if hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id is not None:
-            eos_token_id = tokenizer.eos_token_id
-        else:
-            raise ValueError(
-                "Error during structured outputs setup for outlines: Tokenizer "
-                f"({type(tokenizer)}) has no `eos_token_id` property, but "
-                "`eos_token_id` is required for structured outputs to work properly."
-            )
+    reduced_vocab = _reduced_vocabulary(tokenizer)
+    vocabulary = OutlinesVocabulary(
+        oc.Vocabulary(tokenizer.eos_token_id, reduced_vocab)
+    )
+    tokenizer._outlines_vocabulary = vocabulary  # type: ignore
 
-        reduced_vocab = _reduced_vocabulary(
-            tokenizer,
-            eos_token_id,  # type: ignore
-        )
-        vocabulary = OutlinesVocabulary(oc.Vocabulary(eos_token_id, reduced_vocab))
-        tokenizer._outlines_vocabulary = vocabulary  # type: ignore
-
-        return vocabulary
-    except AttributeError as e:
-        raise ValueError(
-            "Cannot get the vocabulary of the tokenizer "
-            f"({type(tokenizer)}). The tokenizer should have a "
-            "get_vocab method."
-        ) from e
+    return vocabulary
 
 
 def grammar_is_likely_lark(grammar_str: str) -> bool:

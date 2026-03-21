@@ -6,26 +6,60 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp4Static,
+)
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_triton_kernels
 
 logger = init_logger(__name__)
 
+use_legacy_triton_kernels = False
+
 if has_triton_kernels():
     try:
         import triton_kernels.swiglu
-        from triton_kernels.matmul_ogs import FnSpecs, FusedActivation, matmul_ogs
-        from triton_kernels.routing import RoutingData, routing, routing_from_bitmatrix
-        from triton_kernels.tensor import Bitmatrix
+        from triton_kernels.matmul_ogs import (
+            FnSpecs,
+            FusedActivation,
+            GatherIndx,
+            RoutingData,
+            ScatterIndx,
+            matmul_ogs,
+        )
+        from triton_kernels.tensor import (
+            BIT,
+            Bitmatrix,
+        )
+        from triton_kernels.topk import topk
+
+        try:
+            from triton_kernels.tensor import (
+                SparseMatrix,
+                make_ragged_tensor_metadata,
+            )
+        except ImportError:
+            if current_platform.is_rocm():
+                logger.warning_once("Using legacy triton_kernels on ROCm")
+                use_legacy_triton_kernels = True
+            else:
+                raise
     except (AttributeError, ImportError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
@@ -74,6 +108,93 @@ def pack_bitmatrix(
         tl.store(bitmatrix_ptrs, y, mask=offsets_m[:, None] < n_rows)
 
 
+def legacy_routing_from_bitmatrix(
+    bitmatrix: "Bitmatrix",
+    expt_scal: torch.Tensor,
+    expt_indx: torch.Tensor,
+    n_expts_tot: int,
+    n_expts_act: int,
+) -> tuple["RoutingData", "GatherIndx", "ScatterIndx"]:
+    """
+    Replacement for the removed triton_kernels.routing.routing_from_bitmatrix.
+    Creates routing data from a bitmatrix representation.
+    """
+    if use_legacy_triton_kernels:
+        from triton_kernels.routing import routing_from_bitmatrix
+
+        return routing_from_bitmatrix(
+            bitmatrix, expt_scal, expt_indx, n_expts_tot, n_expts_act
+        )
+    sparse_logits = SparseMatrix(indx=expt_indx, vals=expt_scal, mask=bitmatrix)
+    dispatch_indx = sparse_logits.mask_metadata.row_sorted_indx
+    combine_indx = sparse_logits.mask_metadata.col_sorted_indx
+    ragged_batch_metadata = make_ragged_tensor_metadata(
+        sparse_logits.mask_metadata.col_sum,
+        dispatch_indx.shape[0],
+    )
+    gate_scal = sparse_logits.vals.flatten()[combine_indx]
+    routing_data = RoutingData(
+        gate_scal,
+        ragged_batch_metadata.block_sizes,
+        n_expts_tot,
+        n_expts_act,
+        ragged_batch_metadata,
+    )
+    gather_idx = GatherIndx(combine_indx, dispatch_indx)
+    scatter_idx = ScatterIndx(dispatch_indx, combine_indx)
+    return routing_data, gather_idx, scatter_idx
+
+
+def legacy_routing_from_sparsematrix(
+    sparse_logits: "SparseMatrix",
+    n_expts_tot: int,
+    n_expts_act: int,
+) -> tuple["RoutingData", "GatherIndx", "ScatterIndx"]:
+    """
+    Creates routing data from a SparseMatrix representation.
+    """
+    dispatch_indx = sparse_logits.mask_metadata.row_sorted_indx
+    combine_indx = sparse_logits.mask_metadata.col_sorted_indx
+    ragged_batch_metadata = make_ragged_tensor_metadata(
+        sparse_logits.mask_metadata.col_sum,
+        dispatch_indx.shape[0],
+    )
+    gate_scal = sparse_logits.vals.flatten()[combine_indx]
+    routing_data = RoutingData(
+        gate_scal,
+        ragged_batch_metadata.block_sizes,
+        n_expts_tot,
+        n_expts_act,
+        ragged_batch_metadata,
+    )
+    gather_idx = GatherIndx(combine_indx, dispatch_indx)
+    scatter_idx = ScatterIndx(dispatch_indx, combine_indx)
+    return routing_data, gather_idx, scatter_idx
+
+
+def legacy_routing(
+    logits: torch.Tensor,
+    n_expts_act: int,
+    sm_first: bool = False,
+) -> tuple["RoutingData", "GatherIndx", "ScatterIndx"]:
+    """
+    Replacement for the removed triton_kernels.routing.routing function.
+    Computes routing data from gating logits.
+    """
+    if use_legacy_triton_kernels:
+        from triton_kernels.routing import routing
+
+        return routing(logits, n_expts_act, sm_first=sm_first)
+    if sm_first:
+        logits = torch.softmax(logits, dim=-1)
+    sparse_logits = topk(logits, n_expts_act, apply_softmax=not sm_first)
+    return legacy_routing_from_sparsematrix(
+        sparse_logits,
+        logits.shape[-1],
+        n_expts_act,
+    )
+
+
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
     w1,  # Tensor or triton_kernels.Tensor
@@ -81,17 +202,79 @@ def triton_kernel_moe_forward(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    activation: str = "silu",
+    activation: MoEActivation = MoEActivation.SWIGLUOAI,
     quant_config: FusedMoEQuantConfig | None = None,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
+    unpadded_N_w1=None,
+    unpadded_K_w1=None,
+    unpadded_N_w2=None,
+    unpadded_K_w2=None,
 ) -> torch.Tensor:
-    routing_data, gather_idx, scatter_idx = routing(
-        gating_output, topk, sm_first=not renormalize
-    )
+    if (
+        quant_config is not None
+        and quant_config.use_mxfp4_w4a8
+        and rocm_aiter_ops.is_enabled()
+    ):
+        from aiter.ops.triton.moe_routing.routing import routing as aiter_routing
+
+        routing_data, gather_idx, scatter_idx = aiter_routing(
+            gating_output, topk, sm_first=not renormalize
+        )
+        return triton_kernel_fused_mxfp4_w4a8_experts(
+            None,
+            hidden_states,
+            w1,
+            w2,
+            routing_data,
+            gather_idx,
+            scatter_idx,
+            activation=activation.value,
+            quant_config=quant_config,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            unpadded_N_w1=unpadded_N_w1,
+            unpadded_K_w1=unpadded_K_w1,
+            unpadded_N_w2=unpadded_N_w2,
+            unpadded_K_w2=unpadded_K_w2,
+        )
+
+    if expert_map is not None:
+        # With expert parallelism, legacy_routing produces routing data
+        # using global expert IDs which don't correspond to local weight
+        # indices.  Split the routing into topk selection + expert_map
+        # remapping + local routing data construction (matching the
+        # approach used by OAITritonExperts.apply).
+        from triton_kernels.topk import topk as topk_fn
+
+        sm_first = not renormalize
+        logits = gating_output
+        if sm_first:
+            logits = torch.softmax(logits, dim=-1)
+        sparse_logits = topk_fn(logits, topk, apply_softmax=not sm_first)
+        # sparse_logits.indx contains global expert IDs – remap to local.
+        topk_ids = expert_map[sparse_logits.indx.to(torch.long)]
+        topk_weights = sparse_logits.vals
+        local_num_experts = w1.size(0)
+        routing_data, gather_idx, scatter_idx = make_routing_data(
+            topk_ids, topk_weights, local_num_experts
+        )
+        # expert_map already applied; pass None downstream.
+        effective_expert_map = None
+        effective_global_num_experts = local_num_experts
+    else:
+        routing_data, gather_idx, scatter_idx = legacy_routing(
+            gating_output, topk, sm_first=not renormalize
+        )
+        effective_expert_map = expert_map
+        effective_global_num_experts = global_num_experts
 
     output = torch.empty_like(hidden_states)
+    effective_quant_config = (
+        quant_config if quant_config is not None else FUSED_MOE_UNQUANTIZED_CONFIG
+    )
 
     return triton_kernel_fused_experts(
         output,
@@ -103,10 +286,10 @@ def triton_kernel_moe_forward(
         scatter_idx,
         topk=topk,
         activation=activation,
-        quant_config=quant_config,
+        quant_config=effective_quant_config,
         apply_router_weight_on_input=apply_router_weight_on_input,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
+        global_num_experts=effective_global_num_experts,
+        expert_map=effective_expert_map,
     )
 
 
@@ -120,7 +303,7 @@ def triton_kernel_fused_experts(
     gather_indx,  # GatherIndx
     scatter_indx,  # ScatterIndx
     topk: int,
-    activation: str = "silu",
+    activation: MoEActivation = MoEActivation.SWIGLUOAI,
     quant_config: FusedMoEQuantConfig | None = None,
     swiglu_alpha: float = 1.702,
     swiglu_limit: float = 7.0,
@@ -130,8 +313,11 @@ def triton_kernel_fused_experts(
     intermediate_cache: torch.Tensor | None = None,
     a1q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    if quant_config is None:
-        quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+    """Triton implementation of fused expert computation using OAI kernels."""
+    assert activation == MoEActivation.SWIGLUOAI, (
+        "Only SWIGLUOAI activation is supported"
+    )
+    assert quant_config is not None
 
     # type check, uint8 means mxfp4
     assert hidden_states.dtype == torch.bfloat16
@@ -163,10 +349,22 @@ def triton_kernel_fused_experts(
     )
     output_tensor = _resize_cache(output_tensor, (batch_dim, M, K))
 
-    act = FusedActivation(
-        FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
-        (swiglu_alpha, swiglu_limit),
-        2,
+    act = (
+        FusedActivation(
+            FnSpecs(
+                "swiglu",
+                triton_kernels.swiglu.swiglu_fn,
+                ("alpha", "limit"),
+                reduction_n=2,
+            ),
+            (swiglu_alpha, swiglu_limit),
+        )
+        if not use_legacy_triton_kernels
+        else FusedActivation(
+            FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
+            (swiglu_alpha, swiglu_limit),
+            2,
+        )
     )
     gammas = routing_data.gate_scal if routing_data else None
 
@@ -194,6 +392,98 @@ def triton_kernel_fused_experts(
     )
     output_tensor = output_tensor.view(M, K)
     return output_tensor
+
+
+# This is a triton implementation of the fused_experts function
+def triton_kernel_fused_mxfp4_w4a8_experts(
+    output_tensor: torch.Tensor,
+    hidden_states: torch.Tensor,
+    w1,  # Tensor or triton_kernels.Tensor
+    w2,  # Tensor or triton_kernels.Tensor
+    routing_data,  # RoutingData
+    gather_indx,  # GatherIndx
+    scatter_indx,  # ScatterIndx
+    activation: str = "silu",
+    quant_config: FusedMoEQuantConfig | None = None,
+    swiglu_alpha: float = 1.702,
+    swiglu_limit: float = 7.0,
+    apply_router_weight_on_input: bool = False,
+    global_num_experts: int = -1,
+    expert_map: torch.Tensor | None = None,
+    a1q_scale: torch.Tensor | None = None,
+    unpadded_N_w1=None,
+    unpadded_K_w1=None,
+    unpadded_N_w2=None,
+    unpadded_K_w2=None,
+) -> torch.Tensor:
+    assert quant_config is not None
+    # type check, uint8 means mxfp4
+    assert hidden_states.dtype == torch.bfloat16
+    assert quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
+    assert quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
+
+    # Shape check, only check non-mxfp4
+    assert hidden_states.shape[-1] == w1.shape[-2]
+    assert w2.shape[-1] == w1.shape[1]
+
+    E, _, N = w1.shape
+
+    if global_num_experts == -1:
+        global_num_experts = E
+
+    gammas = routing_data.gate_scal if routing_data else None
+
+    from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
+    from aiter.ops.triton.quant_moe import downcast_to_static_fp8
+
+    assert quant_config.w1_precision is not None, (
+        "w1_precision in quant config can't be None"
+    )
+    assert quant_config.w2_precision is not None, (
+        "w2_precision in quant config can't be None"
+    )
+
+    hidden_states = downcast_to_static_fp8(
+        hidden_states, quant_config.w1_precision.flex_ctx.lhs_data.scale
+    )
+
+    intermediate_cache1 = moe_gemm_a8w4(
+        hidden_states,
+        w1.storage.data,
+        None,
+        quant_config.w1_precision.weight_scale.storage.data,
+        quant_config.w1_precision.flex_ctx.lhs_data.scale,
+        quant_config.w2_precision.flex_ctx.lhs_data.scale,
+        quant_config.w1_bias,
+        routing_data,
+        gather_indx=gather_indx,
+        gammas=gammas if apply_router_weight_on_input else None,
+        swizzle_mx_scale="CDNA4_SCALE",
+        out_dtype=torch.float8_e4m3fn,
+        apply_swiglu=True,
+        alpha=swiglu_alpha,
+        limit=swiglu_limit,
+        unpadded_N=unpadded_N_w1,
+        unpadded_K=unpadded_K_w1,
+    )
+
+    intermediate_cache3 = moe_gemm_a8w4(
+        intermediate_cache1,
+        w2.storage.data,
+        None,
+        quant_config.w2_precision.weight_scale.storage.data,
+        quant_config.w2_precision.flex_ctx.lhs_data.scale,
+        None,
+        quant_config.w2_bias,
+        routing_data,
+        scatter_indx=scatter_indx,
+        gammas=None if apply_router_weight_on_input else gammas,
+        swizzle_mx_scale="CDNA4_SCALE",
+        unpadded_N=unpadded_N_w2,
+        unpadded_K=unpadded_K_w2,
+    )
+
+    return intermediate_cache3
 
 
 def make_routing_data(
@@ -227,22 +517,66 @@ def make_routing_data(
 
     bitmatrix_shape = [n_rows, bm_cols * 32]
     bitmatrix_shape_max = [n_rows, None]
-    bitmatrix = Bitmatrix(
-        bitmatrix, shape=bitmatrix_shape, shape_max=bitmatrix_shape_max, scratchpad=None
+    bitmatrix = (
+        Bitmatrix(
+            bitmatrix, dtype=BIT, shape=bitmatrix_shape, shape_max=bitmatrix_shape_max
+        )
+        if not use_legacy_triton_kernels
+        else Bitmatrix(
+            bitmatrix,
+            shape=bitmatrix_shape,
+            shape_max=bitmatrix_shape_max,
+            scratchpad=None,
+        )
     )
 
     # matmul_ogs expects invalid topk_weights to be -1s
     topk_weights = torch.where(topk_ids == -1, -1.0, topk_weights)
-    routing_data, gather_indx, scatter_indx = routing_from_bitmatrix(
+    routing_data, gather_indx, scatter_indx = legacy_routing_from_bitmatrix(
         bitmatrix, topk_weights, topk_ids, num_local_experts, num_topk
     )
 
     return routing_data, gather_indx, scatter_indx
 
 
-class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        super().__init__(quant_config)
+class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        p = current_platform
+        if not p.is_cuda_alike():
+            return False
+        cap = p.get_device_capability()
+        if cap is None:
+            return False
+        # (9,0) <= cap < (11,0) covers CUDA SM90 (Hopper), SM100+ (Blackwell)
+        # and ROCm gfx942/gfx950 (which map to 9.4/9.5).
+        return (9, 0) <= (cap.major, cap.minor) < (11, 0)
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kMxfp4Static, None),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        raise NotImplementedError
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return True
 
     def supports_expert_map(self) -> bool:
         return True
@@ -297,22 +631,15 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class OAITritonExperts(BaseOAITritonExperts):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
-        super().__init__(quant_config)
+    """OAI Triton-based fused MoE expert implementation."""
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SWIGLUOAI
 
-    def supports_chunking(self) -> bool:
-        return True
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def workspace_shapes(
         self,
@@ -323,7 +650,7 @@ class OAITritonExperts(BaseOAITritonExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
         activation_out_dim = self.adjust_N_for_activation(N, activation)
@@ -340,7 +667,7 @@ class OAITritonExperts(BaseOAITritonExperts):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -350,6 +677,9 @@ class OAITritonExperts(BaseOAITritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        if self.quant_config is None:
+            self.quant_config: FusedMoEQuantConfig = FUSED_MOE_UNQUANTIZED_CONFIG
+
         if expert_map is not None:
             topk_ids = expert_map[topk_ids]
 
@@ -391,22 +721,18 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
     One use case for it is to inject LoRA modules on the activation and moe_sum.
     """
 
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
-        super().__init__(quant_config)
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUSTEP,
+        ]
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
-
-    def supports_chunking(self) -> bool:
-        return True
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def workspace_shapes(
         self,
@@ -417,7 +743,7 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
         activation_out_dim = self.adjust_N_for_activation(N, activation)
@@ -437,7 +763,7 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -529,3 +855,118 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         )
 
         self.moe_sum(intermediate_cache3.view(-1, topk, K), output)
+
+
+class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
+    """Monolithic Triton MXFP4 expert. Wraps triton_kernel_moe_forward()."""
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(moe_config, quant_config)
+        self.topk = moe_config.experts_per_token
+        self.renormalize = moe_config.routing_method in (
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
+        )
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        p = current_platform
+        if not p.is_cuda_alike():
+            return False
+        cap = p.get_device_capability()
+        if cap is None:
+            return False
+        # (9,0) <= cap < (11,0) covers CUDA SM90 (Hopper), SM100+ (Blackwell)
+        # and ROCm gfx942/gfx950 (which map to 9.4/9.5).
+        return (9, 0) <= (cap.major, cap.minor) < (11, 0)
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kMxfp4Static, None),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SWIGLUOAI
+
+    @staticmethod
+    def _supports_parallel_config(
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> bool:
+        return (
+            not moe_parallel_config.use_all2all_kernels
+            and not moe_parallel_config.enable_eplb
+            and moe_parallel_config.dp_size <= 1
+        )
+
+    @staticmethod
+    def _supports_routing_method(
+        routing_method: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return routing_method in [
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
+        ]
+
+    @staticmethod
+    def _supports_router_logits_dtype(
+        router_logits_dtype: torch.dtype | None,
+        routing_method: RoutingMethodType,
+    ) -> bool:
+        return True
+
+    def supports_expert_map(self) -> bool:
+        return True
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
+    def apply(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        # grouped topk + fused topk bias parameters
+        num_expert_group: int | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float | None = None,
+        topk_group: int | None = None,
+    ) -> torch.Tensor:
+        return triton_kernel_moe_forward(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            gating_output=router_logits,
+            topk=self.topk,
+            renormalize=self.renormalize,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            quant_config=self.quant_config,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )

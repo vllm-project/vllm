@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
 import numpy as np
 import torch
@@ -51,7 +51,14 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto"]
+    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = [
+        "auto",
+        "float16",
+        "bfloat16",
+    ]
+
+    # Does attention's forward() include kv cache update?
+    forward_includes_kv_cache_update: bool = True
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -64,7 +71,7 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_impl_cls() -> type["AttentionImpl"]:
+    def get_impl_cls() -> type["AttentionImplBase"]:
         raise NotImplementedError
 
     @staticmethod
@@ -82,6 +89,26 @@ class AttentionBackend(ABC):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         raise NotImplementedError
+
+    @classmethod
+    def get_kv_cache_block_dim(
+        cls,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> int:
+        """Discover which tensor dim is the block index, since different
+        backends lay out dims differently."""
+        _S = 1234567
+        shape = cls.get_kv_cache_shape(
+            _S,
+            block_size,
+            num_kv_heads,
+            head_size,
+            cache_dtype_str=cache_dtype_str,
+        )
+        return shape.index(_S)
 
     @staticmethod
     def get_kv_cache_stride_order(
@@ -141,14 +168,8 @@ class AttentionBackend(ABC):
 
     @classmethod
     def supports_block_size(cls, block_size: int | None) -> bool:
-        from vllm.config.cache import BlockSize
-
         if block_size is None:
             return True
-
-        valid_sizes = get_args(BlockSize)
-        if block_size not in valid_sizes:
-            return False
 
         supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
         if not supported_kernel_block_sizes:
@@ -163,6 +184,17 @@ class AttentionBackend(ABC):
             if block_size % supported_size == 0:
                 return True
         return False
+
+    @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        supported_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_sizes:
+            return default_block_size
+
+        if cls.supports_block_size(default_block_size):
+            return default_block_size
+
+        return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -185,6 +217,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_per_head_quant_scales(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -203,7 +239,7 @@ class AttentionBackend(ABC):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: "CacheDType | None",
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -217,11 +253,12 @@ class AttentionBackend(ABC):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: "CacheDType | None",
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
         use_mm_prefix: bool,
+        use_per_head_quant_scales: bool,
         device_capability: "DeviceCapability",
         attn_type: str,
     ) -> list[str]:
@@ -244,12 +281,14 @@ class AttentionBackend(ABC):
             else:
                 invalid_reasons.append("non-MLA not supported")
         if has_sink and not cls.supports_sink():
-            invalid_reasons.append("sink setting not supported")
+            invalid_reasons.append("attention sinks not supported")
         if use_sparse != cls.is_sparse():
             if use_sparse:
                 invalid_reasons.append("sparse not supported")
             else:
                 invalid_reasons.append("non-sparse not supported")
+        if use_per_head_quant_scales and not cls.supports_per_head_quant_scales():
+            invalid_reasons.append("per-head quant scales not supported")
         if not cls.supports_compute_capability(device_capability):
             invalid_reasons.append("compute capability not supported")
         if not cls.supports_attn_type(attn_type):
@@ -323,6 +362,11 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
+    is_prefilling: torch.Tensor | None = None
+    """(batch_size,) bool tensor: True if request is still in prefill phase
+    (num_computed_tokens < num_prompt_tokens). Used by some backends to
+    distinguish actual decodes from short extends."""
+
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
@@ -344,7 +388,7 @@ class CommonAttentionMetadata:
         """
     Prefer using device seq_lens directly to avoid implicit H<>D sync.
     If a CPU copy is needed, use `seq_lens.cpu()` instead.
-    Will be removed in a future release (v0.15.0)
+    Will be removed in a future release, please migrate as soon as possible.
     """
     )
     def seq_lens_cpu(self) -> torch.Tensor:
@@ -358,7 +402,7 @@ class CommonAttentionMetadata:
     Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
     async scheduling. If a CPU copy is needed, it can be derived from 
     query_start_loc_cpu and seq_lens.
-    Will be removed in a future release (v0.15.0)
+    Will be removed in a future release, please migrate as soon as possible.
     """
     )
     def num_computed_tokens_cpu(self) -> torch.Tensor:
@@ -404,6 +448,7 @@ class CommonAttentionMetadata:
             encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
+            is_prefilling=maybe_slice_reqs(self.is_prefilling),
         )
 
 
@@ -477,9 +522,14 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
             ):
+                max_num_queries_for_spec = (
+                    1
+                    + (2 if speculative_config.parallel_drafting else 1)
+                    * speculative_config.num_speculative_tokens
+                )
                 self.reorder_batch_threshold = max(
                     self.reorder_batch_threshold,
-                    1 + speculative_config.num_speculative_tokens,
+                    max_num_queries_for_spec,
                 )
 
         if (
@@ -591,7 +641,14 @@ class AttentionLayer(Protocol):
     ) -> torch.Tensor: ...
 
 
-class AttentionImpl(ABC, Generic[T]):
+class AttentionImplBase(ABC, Generic[T]):
+    """Base class for attention implementations.
+
+    Contains common attributes and initialization logic shared by both
+    standard AttentionImpl and MLAAttentionImpl. Does not define a forward
+    method - subclasses define their own forward interfaces.
+    """
+
     # Required attributes that all impls should have
     num_heads: int
     head_size: int
@@ -658,6 +715,13 @@ class AttentionImpl(ABC, Generic[T]):
         )
         return self
 
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        pass
+
+
+class AttentionImpl(AttentionImplBase[T], Generic[T]):
+    """Standard attention implementation with forward method."""
+
     @abstractmethod
     def __init__(
         self,
@@ -700,11 +764,37 @@ class AttentionImpl(ABC, Generic[T]):
         """
         return False
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
-        pass
+    def fused_rope_kvcache_supported(self):
+        """
+        Does this attention implementation support RoPE+KVCache fusion.
+        This is used by the RopeKVCacheFusionPass to only fuse the RoPE ops
+        with the KV cache update for implementations that support it.
+        """
+        return False
+
+    def do_rope_and_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        """
+        If `fused_rope_kvcache_supported` returns True, this method will be called
+        by torch.ops.vllm.fused_rope_and_unified_kv_cache_update
+        to perform the inplace RoPE and KV cache update.
+        """
+        raise NotImplementedError
 
 
-class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
+class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
+    """MLA attention implementation with forward_mqa and forward_mha methods."""
+
     @abstractmethod
     def __init__(
         self,
@@ -727,27 +817,127 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         v_head_dim: int,
         kv_b_proj: "ColumnParallelLinear",
         indexer: object | None = None,
+        q_pad_num_heads: int | None = None,
     ) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def forward(
+    def forward_mha(
         self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: T,
+        k_scale: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """MHA-style prefill forward pass."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def forward_mqa(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: T,
         layer: AttentionLayer,
-        hidden_states_or_cq: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """MQA-style decode forward pass."""
+        raise NotImplementedError
+
+    def do_kv_cache_update(
+        self,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: T,
-        output: torch.Tensor | None = None,
-        output_scale: torch.Tensor | None = None,
-        output_block_scale: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor,
+    ) -> None:
+        if kv_cache.numel() == 0:
+            return
+        from vllm import _custom_ops as ops
+
+        ops.concat_and_cache_mla(
+            kv_c_normed,
+            k_pe.squeeze(1),
+            kv_cache,
+            slot_mapping.flatten(),
+            kv_cache_dtype=kv_cache_dtype,
+            scale=k_scale,
+        )
+
+
+class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
+    """Sparse MLA attention implementation with only forward_mqa method.
+
+    Sparse MLA implementations only support decode (MQA-style) attention.
+    They do not support prefill (MHA-style) attention.
+    """
+
+    @abstractmethod
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None,
+        attn_type: str,
+        kv_sharing_target_layer_name: str | None,
+        # MLA Specific Arguments
+        q_lora_rank: int | None,
+        kv_lora_rank: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        qk_head_dim: int,
+        v_head_dim: int,
+        kv_b_proj: "ColumnParallelLinear",
+        indexer: object | None = None,
+        q_pad_num_heads: int | None = None,
+    ) -> None:
         raise NotImplementedError
+
+    @abstractmethod
+    def forward_mqa(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: T,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """MQA-style decode forward pass."""
+        raise NotImplementedError
+
+    def do_kv_cache_update(
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor,
+    ) -> None:
+        if kv_cache.numel() == 0:
+            return
+        from vllm import _custom_ops as ops
+
+        ops.concat_and_cache_mla(
+            kv_c_normed,
+            k_pe.squeeze(1),
+            kv_cache,
+            slot_mapping.flatten(),
+            kv_cache_dtype=kv_cache_dtype,
+            scale=k_scale,
+        )
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype != "auto"
+    return kv_cache_dtype.startswith("fp8")
 
 
 def subclass_attention_backend(

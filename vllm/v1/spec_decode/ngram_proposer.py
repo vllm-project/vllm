@@ -3,6 +3,7 @@
 import os
 
 import numpy as np
+import torch
 from numba import get_num_threads, jit, njit, prange, set_num_threads
 
 from vllm.config import VllmConfig
@@ -132,6 +133,9 @@ class NgramProposer:
         sampled_token_ids: list[list[int]],
         num_tokens_no_spec: np.ndarray,
         token_ids_cpu: np.ndarray,
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,  # unused
     ) -> list[list[int]]:
         # find which requests need ngram proposals
         valid_ngram_requests = []

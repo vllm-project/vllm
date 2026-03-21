@@ -2,18 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import huggingface_hub
-from huggingface_hub.utils import (
-    EntryNotFoundError,
-    HfHubHTTPError,
-    HFValidationError,
-    RepositoryNotFoundError,
-)
+import regex as re
+from huggingface_hub.utils import HfHubHTTPError, HFValidationError
 from torch import nn
 from transformers import PretrainedConfig
 
+from vllm import envs
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 
@@ -24,6 +21,7 @@ from vllm.lora.layers import (
     ColumnParallelLinearWithShardedLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
+    GateLinearWithLoRA,
     LogitsProcessorWithLoRA,
     MergedColumnParallelLinearVariableSliceWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -48,6 +46,25 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+def get_captured_lora_counts(max_loras: int, specialize: bool) -> list[int]:
+    """
+    Returns num_active_loras values for cudagraph capture.
+
+    When specialize=True: powers of 2 up to max_loras, plus max_loras + 1.
+    When specialize=False: just [max_loras + 1].
+
+    This is the single source of truth for LoRA capture cases, used by both
+    CudagraphDispatcher and PunicaWrapperGPU.
+    """
+    if not specialize:
+        return [max_loras + 1]
+
+    return [
+        n for n in range(1, max_loras + 2) if (n & (n - 1)) == 0 or n == max_loras + 1
+    ]
+
+
 _GLOBAL_LORA_ID = 0
 
 
@@ -65,6 +82,7 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     MergedQKVParallelLinearWithLoRA,
     RowParallelLinearWithLoRA,
     ReplicatedLinearWithLoRA,
+    GateLinearWithLoRA,
     LogitsProcessorWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
     QKVParallelLinearWithShardedLoRA,
@@ -135,7 +153,7 @@ def replace_submodule(
 
 
 def parse_fine_tuned_lora_name(
-    name: str, weights_mapper: Optional["WeightsMapper"] = None
+    name: str, weights_mapper: "WeightsMapper | None" = None
 ) -> tuple[str, bool]:
     """Parse the name of lora weights.
 
@@ -178,7 +196,7 @@ def parse_fine_tuned_lora_name(
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
-def is_base_embeddding_weights(name: str) -> bool:
+def is_base_embedding_weights(name: str) -> bool:
     # hardcoded subfixes for input & output embedding weights
     embedding_suffixes = (
         ".embed_tokens.base_layer.weight",
@@ -211,6 +229,57 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
     return list(supported_lora_modules)
 
 
+def is_supported_lora_module(
+    module_name: str,
+    supported_lora_modules: list[str],
+) -> bool:
+    """Check if a module is in the model's supported LoRA modules.
+
+    Uses regex suffix matching against the model-defined supported modules
+    list (e.g., matching "model.layers.0.self_attn.o_proj" against
+    "o_proj").
+
+    Args:
+        module_name: Full dot-separated module name.
+        supported_lora_modules: List of module suffixes supported by the
+            model.
+
+    Returns:
+        True if the module is supported, False otherwise.
+    """
+    return any(
+        re.match(
+            r".*\.{target_module}$".format(target_module=target_module),
+            module_name,
+        )
+        or target_module == module_name
+        for target_module in supported_lora_modules
+    )
+
+
+def is_in_target_modules(
+    module_name: str,
+    target_modules: list[str] | None,
+) -> bool:
+    """Check if a module passes the deployment-time target_modules filter.
+
+    When target_modules is None (no restriction), all modules pass.
+    Otherwise, the module's suffix must be in the target_modules list.
+
+    Args:
+        module_name: Full dot-separated module name.
+        target_modules: Optional deployment-time restriction list from
+            LoRAConfig.target_modules.
+
+    Returns:
+        True if the module passes the filter, False otherwise.
+    """
+    if target_modules is None:
+        return True
+    module_suffix = module_name.split(".")[-1]
+    return module_suffix in set(target_modules)
+
+
 def get_adapter_absolute_path(lora_path: str) -> str:
     """
     Resolves the given lora_path to an absolute local path.
@@ -240,18 +309,27 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     if os.path.exists(lora_path):
         return os.path.abspath(lora_path)
 
-    # If the path does not exist locally, assume it's a Hugging Face repo.
+    # If the path does not exist locally.
+    if envs.VLLM_USE_MODELSCOPE:
+        # If using ModelScope, we assume the path is a ModelScope repo.
+        from modelscope.hub.snapshot_download import InvalidParameter, snapshot_download
+        from requests import HTTPError
+
+        download_fn = lambda: snapshot_download(model_id=lora_path)
+        download_exceptions = (HTTPError, InvalidParameter)
+        error_log = "Error downloading the ModelScope model"
+    else:
+        # Otherwise, we assume the path is a Hugging Face Hub repo.
+        download_fn = lambda: huggingface_hub.snapshot_download(repo_id=lora_path)
+        download_exceptions = (HfHubHTTPError, HFValidationError)
+        error_log = "Error downloading the HuggingFace model"
+
     try:
-        local_snapshot_path = huggingface_hub.snapshot_download(repo_id=lora_path)
-    except (
-        HfHubHTTPError,
-        RepositoryNotFoundError,
-        EntryNotFoundError,
-        HFValidationError,
-    ):
-        # Handle errors that may occur during the download
-        # Return original path instead of throwing error here
-        logger.exception("Error downloading the HuggingFace model")
+        local_snapshot_path = download_fn()
+    except download_exceptions:
+        # Handle errors that may occur during the download.
+        # Return original path instead of throwing error here.
+        logger.exception(error_log)
         return lora_path
 
     return local_snapshot_path

@@ -10,11 +10,11 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
+from multiprocessing.queues import Queue
 from typing import (
     TYPE_CHECKING,
     Any,
     Generic,
-    Optional,
     TypeVar,
     Union,
     overload,
@@ -174,6 +174,7 @@ class APIServerProcessManager:
         input_addresses: list[str],
         output_addresses: list[str],
         stats_update_address: str | None = None,
+        tensor_queue: Queue | None = None,
     ):
         """Initialize and start API server worker processes.
 
@@ -186,6 +187,7 @@ class APIServerProcessManager:
             input_addresses: Input addresses for each API server
             output_addresses: Output addresses for each API server
             stats_update_address: Optional stats update address
+            tensor_queue: Optional tensor IPC queue for sharing MM tensors
         """
         self.listen_address = listen_address
         self.sock = sock
@@ -206,6 +208,8 @@ class APIServerProcessManager:
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
+            if tensor_queue is not None:
+                client_config["tensor_queue"] = tensor_queue
 
             proc = spawn_context.Process(
                 target=target_server_fn,
@@ -221,15 +225,17 @@ class APIServerProcessManager:
         # The extra processes are managed by their owners
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
-    def close(self) -> None:
-        self._finalizer()
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown API server processes with configurable timeout"""
+        if self._finalizer.detach() is not None:
+            shutdown(self.processes, timeout=timeout)
 
 
 def wait_for_completion_or_failure(
     api_server_manager: APIServerProcessManager,
     engine_manager: Union["CoreEngineProcManager", "CoreEngineActorManager"]
     | None = None,
-    coordinator: Optional["DPCoordinator"] = None,
+    coordinator: "DPCoordinator | None" = None,
 ) -> None:
     """Wait for all processes to complete or detect if any fail.
 
@@ -289,25 +295,30 @@ def wait_for_completion_or_failure(
     except Exception as e:
         logger.exception("Exception occurred while running API servers: %s", str(e))
         raise
-    finally:
-        logger.info("Terminating remaining processes ...")
-        api_server_manager.close()
-        if coordinator:
-            coordinator.close()
-        if engine_manager:
-            engine_manager.close()
 
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(procs: list[BaseProcess]):
+def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
+    """Shutdown processes with timeout.
+
+    Args:
+        procs: List of processes to shutdown
+        timeout: Maximum time in seconds to wait for graceful shutdown
+    """
+    if timeout is None:
+        timeout = 0.0
+
+    # Allow at least 5 seconds for remaining procs to terminate.
+    timeout = max(timeout, 5.0)
+
     # Shutdown the process.
     for proc in procs:
         if proc.is_alive():
             proc.terminate()
 
-    # Allow 5 seconds for remaining procs to terminate.
-    deadline = time.monotonic() + 5
+    # Allow time for remaining procs to terminate.
+    deadline = time.monotonic() + timeout
     for proc in procs:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -413,7 +424,7 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
     Returns:
         A memoryview of the tensor data as uint8.
     """
-    return tensor.flatten().contiguous().view(torch.uint8).numpy().data
+    return tensor.flatten().cpu().contiguous().view(torch.uint8).numpy().data
 
 
 @dataclass

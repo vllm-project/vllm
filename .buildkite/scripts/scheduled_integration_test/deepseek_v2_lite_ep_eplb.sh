@@ -43,7 +43,6 @@ trap cleanup EXIT
 
 for BACK in "${BACKENDS[@]}"; do
   VLLM_DEEP_GEMM_WARMUP=skip \
-  VLLM_ALL2ALL_BACKEND=$BACK \
   vllm serve "$MODEL" \
     --enforce-eager \
     --tensor-parallel-size 2 \
@@ -52,13 +51,14 @@ for BACK in "${BACKENDS[@]}"; do
     --enable-eplb \
     --trust-remote-code \
     --max-model-len 2048 \
-    --port $PORT &
+    --all2all-backend "$BACK" \
+    --port "$PORT" &
   SERVER_PID=$!
-  wait_for_server $PORT
+  wait_for_server "$PORT"
 
   TAG=$(echo "$MODEL" | tr '/: \\n' '_____')
   OUT="${OUT_DIR}/${TAG}_${BACK}.json"
-  python3 tests/evals/gsm8k/gsm8k_eval.py --host http://127.0.0.1 --port $PORT --num-questions ${NUM_Q} --save-results ${OUT}
+  python3 tests/evals/gsm8k/gsm8k_eval.py --host http://127.0.0.1 --port "$PORT" --num-questions "${NUM_Q}" --save-results "${OUT}"
   python3 - <<PY
 import json; acc=json.load(open('${OUT}'))['accuracy']
 print(f"${MODEL} ${BACK}: accuracy {acc:.3f}")

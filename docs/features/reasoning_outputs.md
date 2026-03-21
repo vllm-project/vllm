@@ -5,14 +5,14 @@ vLLM offers support for reasoning models like [DeepSeek R1](https://huggingface.
 Reasoning models return an additional `reasoning` field in their outputs, which contains the reasoning steps that led to the final conclusion. This field is not present in the outputs of other models.
 
 !!! warning
-    `reasoning` used to be called `reasoning_content`. For now, `reasoning_content` will continue to work. However, we encourage you to migrate to `reasoning` in case `reasoning_content` is removed in future.
+    `reasoning` used to be called `reasoning_content`. To migrate, directly replace `reasoning_content` with `reasoning`.
 
 ## Supported Models
 
 vLLM currently supports the following reasoning models:
 
 | Model Series | Parser Name | Structured Output Support | Tool Calling |
-|--------------|-------------|------------------|-------------|
+| ------------ | ----------- | ---------------- | ----------- |
 | [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `json`, `regex` | ❌ |
 | [DeepSeek-V3.1](https://huggingface.co/collections/deepseek-ai/deepseek-v31-68a491bed32bd77e7fca048f) | `deepseek_v3` | `json`, `regex` | ❌ |
 | [ERNIE-4.5-VL series](https://huggingface.co/baidu/ERNIE-4.5-VL-28B-A3B-PT) | `ernie45` | `json`, `regex` | ❌ |
@@ -254,7 +254,8 @@ You can add a new `ReasoningParser` similar to [vllm/reasoning/deepseek_r1_reaso
     # import the required packages
 
     from vllm.reasoning import ReasoningParser, ReasoningParserManager
-    from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 
     # define a reasoning parser and register it to vllm
     # the name list in register_module can be used

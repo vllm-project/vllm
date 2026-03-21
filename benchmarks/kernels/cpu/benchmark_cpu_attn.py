@@ -14,7 +14,7 @@ from vllm._custom_ops import (
 )
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend, _get_attn_isa
 
 
@@ -27,7 +27,7 @@ def get_attn_isa(
     else:
         if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
             return "neon"
-        elif torch._C._cpu._is_amx_tile_supported():
+        elif torch.cpu._is_amx_tile_supported():
             return "amx"
         else:
             return "vec"
@@ -58,7 +58,7 @@ def main(
     seed: int = 0,
     iters: int = 20,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
