@@ -753,6 +753,8 @@ class OpenAIServingChat(OpenAIServing):
                         else:
                             current_token_ids = as_list(output.token_ids)
 
+                    suppressed_auto_tool_delta = False
+
                     if self.use_harmony:
                         delta_message, tools_streamed_flag = (
                             extract_harmony_streaming_delta(
@@ -968,6 +970,7 @@ class OpenAIServingChat(OpenAIServing):
                                 delta_token_ids=delta_token_ids,
                                 request=request,
                             )
+                            suppressed_auto_tool_delta = delta_message is None
                             if delta_message and delta_message.tool_calls:
                                 tools_streamed[i] = True
                     # when only tool calls
@@ -982,6 +985,7 @@ class OpenAIServingChat(OpenAIServing):
                             delta_token_ids=output.token_ids,
                             request=request,
                         )
+                        suppressed_auto_tool_delta = delta_message is None
                         if delta_message and delta_message.tool_calls:
                             tools_streamed[i] = True
 
@@ -1027,16 +1031,17 @@ class OpenAIServingChat(OpenAIServing):
                     # wasn't ready to send a token, then
                     #   get the next token without streaming a chunk
                     if delta_message is None:
-                        # Some tool parsers intentionally suppress control
-                        # tokens by returning None. When the client asked for
-                        # token_ids or logprobs, still emit an empty delta so
-                        # those per-token details are not dropped from the
-                        # stream.
-                        if not self._should_emit_empty_delta_chunk(
-                            output=output,
-                            request=request,
-                            logprobs=logprobs,
-                        ):
+                        # Keep metadata-only chunks only for finish events,
+                        # token_ids, or auto tool parser control tokens.
+                        should_emit_empty_delta_chunk = (
+                            output.finish_reason is not None
+                            or request.return_token_ids
+                            or (
+                                suppressed_auto_tool_delta
+                                and logprobs is not None
+                            )
+                        )
+                        if not should_emit_empty_delta_chunk:
                             continue
                         delta_message = DeltaMessage()
 
@@ -1781,18 +1786,6 @@ class OpenAIServingChat(OpenAIServing):
             and delta_message.tool_calls[0]
             and delta_message.tool_calls[0].function
             and delta_message.tool_calls[0].function.arguments is not None
-        )
-
-    @staticmethod
-    def _should_emit_empty_delta_chunk(
-        output: CompletionOutput,
-        request: ChatCompletionRequest,
-        logprobs: ChatCompletionLogProbs | None,
-    ) -> bool:
-        return bool(
-            output.finish_reason is not None
-            or request.return_token_ids
-            or logprobs is not None
         )
 
     @staticmethod
