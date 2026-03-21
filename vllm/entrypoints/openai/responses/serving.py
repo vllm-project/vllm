@@ -1360,9 +1360,11 @@ class OpenAIServingResponses(OpenAIServing):
             if ctx.last_output is None:
                 continue
             if reasoning_parser and prompt_is_reasoning_end is None:
-                prompt_is_reasoning_end = reasoning_parser.is_reasoning_end(
-                    ctx.last_output.prompt_token_ids
-                )
+                prompt_ids = ctx.last_output.prompt_token_ids
+                if prompt_ids is not None:
+                    prompt_is_reasoning_end = reasoning_parser.is_reasoning_end(
+                        prompt_ids
+                    )
             if ctx.last_output.outputs:
                 output = ctx.last_output.outputs[0]
                 # finish_reason='error' indicates a retryable error
