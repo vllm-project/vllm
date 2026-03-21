@@ -12,7 +12,6 @@ from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import reduce
-from math import prod
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -6345,7 +6344,7 @@ class GPUModelRunner(
                     ]
                     if has_mamba:
                         kv_cache_stride, storage_offset = (
-                            self._get_hybrid_attention_mamba_layout(
+                            mamba_utils.get_hybrid_attention_mamba_layout(
                                 kv_cache_shape=kv_cache_shape,
                                 kv_cache_stride=kv_cache_stride,
                                 kv_cache_spec=kv_cache_spec,
@@ -6387,57 +6386,6 @@ class GPUModelRunner(
                     raise NotImplementedError
 
         return kv_caches
-
-    def _get_hybrid_attention_mamba_layout(
-        self,
-        kv_cache_shape: tuple[int, ...],
-        kv_cache_stride: tuple[int, ...],
-        kv_cache_spec: AttentionSpec,
-        layer_idx: int,
-        kernel_num_blocks: int,
-        kernel_block_size: int,
-    ) -> tuple[tuple[int, ...], int]:
-        """
-        Compute the stride and storage offset for the hybrid attention+mamba layout.
-
-        Args:
-            kv_cache_shape: The shape of the KV cache tensor.
-            kv_cache_stride: The stride of the KV cache tensor.
-            kv_cache_spec: The specification of the KV cache.
-            layer_idx: The index of the layer.
-            kernel_num_blocks: The number of kernel blocks.
-            kernel_block_size: The size of the kernel block.
-        Returns:
-            A tuple containing the target stride and storage offset.
-        """
-        target_stride_list = list(kv_cache_stride)
-        storage_offset = 0
-
-        attn_group_size = kv_cache_spec.group_size
-        kernel_blocks_idx = kv_cache_shape.index(kernel_num_blocks)
-        if kv_cache_shape[0] == 2:
-            # Hybrid attention+mamba uses (2, num_blocks, ...) logical shape but
-            # (num_blocks, 2, ...) physical layout.
-            assert kv_cache_shape[1] != 2, (
-                "Fail to determine whether the layout is "
-                "(2, num_blocks, ...) or (num_blocks, 2, ...) for "
-                f"a tensor of shape {kv_cache_shape}"
-            )
-            assert kernel_blocks_idx == 1
-            hidden_size = prod(kv_cache_shape[2:])
-            target_stride_list[0] = hidden_size
-            target_stride_list[1] = 2 * hidden_size
-        if attn_group_size > 1:
-            target_stride_list[kernel_blocks_idx] *= attn_group_size
-            dtype_size = get_dtype_size(kv_cache_spec.dtype)
-            num_element_per_page = kv_cache_spec.page_size_bytes // dtype_size
-            num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
-            num_element_per_attn_group = (
-                num_element_per_page // num_blocks_per_kv_block // attn_group_size
-            )
-            attn_group_idx = layer_idx % attn_group_size
-            storage_offset = attn_group_idx * num_element_per_attn_group
-        return tuple(target_stride_list), storage_offset
 
     def initialize_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
