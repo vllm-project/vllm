@@ -170,9 +170,8 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
             kv_cache_dummy_dep: torch.Tensor,
         ) -> torch.Tensor:
             # attn output in quant_dtype
-            output_attn = torch.ops.aten.full.default(
+            output_attn = torch.empty(
                 [q.shape[0], self.num_heads, self.head_size],
-                0.0,
                 dtype=self.quant_dtype,
                 device=q.device,
             )
@@ -251,11 +250,11 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
             )
             at2 = auto_functionalized(
                 self.QUANT_OP,
-                output=output_quant,
                 input=attn_out_view,
-                output_scale=output_scale,
                 input_scale=input_scale,
                 is_sf_swizzled_layout=True,
+                output=output_quant,
+                output_scale=output_scale,
             )
             output_scale_view = torch.ops.aten.view.dtype(at2[2], FP8_DTYPE)
             return at2[1], output_scale_view
@@ -271,9 +270,8 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
             kv_cache_dummy_dep: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             # attention output in quant_dtype
-            output_attn = torch.ops.aten.full.default(
+            output_attn = torch.empty(
                 [q.shape[0], self.num_heads, self.head_size // 2],
-                0.0,
                 dtype=self.quant_dtype,
                 device=q.device,
             )

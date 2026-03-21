@@ -175,7 +175,7 @@ class DPMetadata:
     # Get the cumulative tokens across sequence parallel ranks.
     # In this case the input to the MoEs will be distributed w.r.t both
     # DP and TP rank.
-    # When sp_size==1, this is just the cummulative num tokens across DP.
+    # When sp_size==1, this is just the cumulative num tokens across DP.
     def cu_tokens_across_sp(self, sp_size: int) -> torch.Tensor:
         num_tokens_across_sp_cpu = (
             self.num_tokens_across_dp_cpu - 1 + sp_size
@@ -197,8 +197,6 @@ class ForwardContext:
     for each microbatch.
     Set dynamically for each forward pass
     """
-    # TODO: remove after making all virtual_engines share the same kv cache
-    virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: DPMetadata | None = None
     # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
@@ -265,7 +263,6 @@ def is_forward_context_available() -> bool:
 def create_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
-    virtual_engine: int = 0,
     dp_metadata: DPMetadata | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
@@ -282,7 +279,6 @@ def create_forward_context(
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         all_moe_layers=all_moe_layers,
-        virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         slot_mapping=slot_mapping or {},
         dp_metadata=dp_metadata,
@@ -313,7 +309,6 @@ def override_forward_context(forward_context: ForwardContext | None):
 def set_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
-    virtual_engine: int = 0,
     num_tokens: int | None = None,
     num_tokens_across_dp: torch.Tensor | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
@@ -362,7 +357,6 @@ def set_forward_context(
     additional_kwargs = current_platform.set_additional_forward_context(
         attn_metadata=attn_metadata,
         vllm_config=vllm_config,
-        virtual_engine=virtual_engine,
         dp_metadata=dp_metadata,
         num_tokens=num_tokens,
         num_tokens_across_dp=num_tokens_across_dp,
@@ -374,7 +368,6 @@ def set_forward_context(
     forward_context = create_forward_context(
         attn_metadata,
         vllm_config,
-        virtual_engine,
         dp_metadata,
         cudagraph_runtime_mode,
         batch_descriptor,

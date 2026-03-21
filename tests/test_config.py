@@ -853,7 +853,7 @@ def test_vllm_config_defaults_are_none():
 
 
 @pytest.mark.parametrize(
-    ("model_id", "compiliation_config", "optimization_level"),
+    ("model_id", "compilation_config", "optimization_level"),
     [
         (
             None,
@@ -895,7 +895,7 @@ def test_vllm_config_defaults_are_none():
         ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O3),
     ],
 )
-def test_vllm_config_defaults(model_id, compiliation_config, optimization_level):
+def test_vllm_config_defaults(model_id, compilation_config, optimization_level):
     """Test that optimization-level defaults are correctly applied."""
 
     model_config = None
@@ -903,12 +903,12 @@ def test_vllm_config_defaults(model_id, compiliation_config, optimization_level)
         model_config = ModelConfig(model_id)
         vllm_config = VllmConfig(
             model_config=model_config,
-            compilation_config=compiliation_config,
+            compilation_config=compilation_config,
             optimization_level=optimization_level,
         )
     else:
         vllm_config = VllmConfig(
-            compilation_config=compiliation_config,
+            compilation_config=compilation_config,
             optimization_level=optimization_level,
         )
     # Use the global optimization level defaults

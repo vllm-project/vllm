@@ -105,6 +105,14 @@ os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 # see https://github.com/vllm-project/vllm/issues/10619
 torch._inductor.config.compile_threads = 1
 
+# Enable Triton autotuning result caching to disk by default.
+# Without this, Triton re-runs autotuning on every process restart,
+# adding significant latency to the first inference request.
+# This writes autotuning results to TRITON_CACHE_DIR.
+# It can still be overridden by setting TRITON_CACHE_AUTOTUNING=0
+# in the environment.
+os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
+
 # ===================================================
 # torch 2.9 Inductor PythonWrapperCodegen monkeypatch
 # ===================================================
@@ -482,44 +490,3 @@ if is_torch_equal("2.9.0"):
 
     PythonWrapperCodegen.memory_plan_reuse = memory_plan_reuse_patched
     GraphLowering._update_scheduler = _update_scheduler_patched
-
-# ===================================================
-# torch 2.11 Inductor constrain_to_fx_strides monkeypatch
-# ===================================================
-# Patch the inductor's `constrain_to_fx_strides` to handle opaque
-# (non-tensor) arguments.  The original calls `.stride()` on every FX
-# arg's meta value, which crashes on FakeScriptObject (the compile-time
-# proxy for hoisted opaque types).  The patched version skips args
-# whose meta value is not a torch.Tensor.
-# Upstream issue: https://github.com/pytorch/pytorch/issues/175973
-
-from vllm.utils.torch_utils import is_torch_equal_or_newer
-
-if is_torch_equal_or_newer("2.11.0.dev"):
-    import torch._inductor.ir as _ir
-    import torch._inductor.lowering as _lowering
-    from torch._inductor.virtualized import V as _V
-
-    _orig_constrain = _lowering.constrain_to_fx_strides
-
-    def _patched_constrain_to_fx_strides(fx_node, *args, **kwargs):
-        def apply_constraint(arg, fx_arg):
-            if isinstance(arg, _ir.IRNode):
-                meta_val = fx_arg.meta.get("val")
-                if isinstance(meta_val, torch.Tensor):
-                    stride_order = _ir.get_stride_order(
-                        meta_val.stride(), _V.graph.sizevars.shape_env
-                    )
-                    return _ir.ExternKernel.require_stride_order(arg, stride_order)
-                return arg
-            if isinstance(arg, dict):
-                return {key: apply_constraint(arg[key], fx_arg[key]) for key in arg}
-            return arg
-
-        args = tuple(
-            apply_constraint(arg, fx_arg) for arg, fx_arg in zip(args, fx_node.args)
-        )
-        kwargs = {k: apply_constraint(v, fx_node.kwargs[k]) for k, v in kwargs.items()}
-        return args, kwargs
-
-    _lowering.constrain_to_fx_strides = _patched_constrain_to_fx_strides
