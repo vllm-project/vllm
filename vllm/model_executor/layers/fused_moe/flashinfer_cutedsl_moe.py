@@ -144,6 +144,13 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool | None,
     ):
+        # Skip this kernel during autotuning dummy run to avoid
+        # CUDA errors from incompatible autotuning (flashinfer#2023).
+        import vllm.utils.flashinfer as fi_utils
+
+        if fi_utils._is_fi_autotuning:
+            return
+
         assert self.quant_dtype == "nvfp4", (
             "Only nvfp4 quantization are currently supported."
         )
@@ -165,20 +172,25 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             if envs.VLLM_DEEPEPLL_NVFP4_DISPATCH
             else hidden_states
         )
-        flashinfer_cutedsl_moe_masked(
-            hidden_states=flashinfer_hidden_states,
-            input_global_scale=input_global_scale,
-            w1=w1,
-            w1_blockscale=self.w1_scale,
-            w1_alpha=self.g1_alphas,
-            w2=w2,
-            a2_global_scale=self.a2_gscale,
-            w2_blockscale=self.w2_scale,
-            w2_alpha=self.g2_alphas,
-            masked_m=expert_num_tokens,
-            workspace=workspace2,
-            out=output,
-        )
+        # Disable autotune until
+        # https://github.com/flashinfer-ai/flashinfer/issues/2023 is resolved.
+        from vllm.utils.flashinfer import autotune
+
+        with autotune(False):
+            flashinfer_cutedsl_moe_masked(
+                hidden_states=flashinfer_hidden_states,
+                input_global_scale=input_global_scale,
+                w1=w1,
+                w1_blockscale=self.w1_scale,
+                w1_alpha=self.g1_alphas,
+                w2=w2,
+                a2_global_scale=self.a2_gscale,
+                w2_blockscale=self.w2_scale,
+                w2_alpha=self.g2_alphas,
+                masked_m=expert_num_tokens,
+                workspace=workspace2,
+                out=output,
+            )
 
 
 def get_cute_dtype(input: torch.Tensor) -> str:
