@@ -38,6 +38,7 @@ from typing_extensions import deprecated
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal.audio import get_audio_duration
 from vllm.multimodal.image import convert_image_mode
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -54,10 +55,6 @@ try:
 except ImportError:
     pd = PlaceholderModule("pandas")
 
-try:
-    import librosa
-except ImportError:
-    librosa = PlaceholderModule("librosa")
 
 logger = logging.getLogger(__name__)
 
@@ -3253,7 +3250,7 @@ class ASRDataset(HuggingFaceDataset):
                 break
             audio = item["audio"]
             y, sr = audio["array"], audio["sampling_rate"]
-            duration_s = librosa.get_duration(y=y, sr=sr)
+            duration_s = get_audio_duration(y=y, sr=sr)
             if duration_s < asr_min_audio_len_sec or duration_s > asr_max_audio_len_sec:
                 skipped += 1
                 continue
