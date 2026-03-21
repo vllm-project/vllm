@@ -35,13 +35,15 @@ generate_cache_key() {
         exit 1
     fi
     local dockerfile_hash=$(sha256sum "$DOCKERFILE" | cut -c1-16)
-
+    
+    # Extract config from Dockerfile.rocm_base
+    DEFAULT_PYTHON_VERSION=$(grep '^ARG PYTHON_VERSION=' "$DOCKERFILE" | sed 's/^ARG PYTHON_VERSION=//')
+    DEFAULT_PYTORCH_ROCM_ARCH=$(grep '^ARG PYTORCH_ROCM_ARCH=' "$DOCKERFILE" | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
+    
     # Include key build args that affect the output
-    # These should match the ARGs in Dockerfile.rocm_base that change the build output
-    # Note: ROCm version is determined by BASE_IMAGE in the Dockerfile, so it's captured by dockerfile_hash
-    local args_string="${PYTHON_VERSION:-}|${PYTORCH_ROCM_ARCH:-}"
+    local args_string="${PYTHON_VERSION:-$DEFAULT_PYTHON_VERSION}|${PYTORCH_ROCM_ARCH:-$DEFAULT_PYTORCH_ROCM_ARCH}"
     local args_hash=$(echo "$args_string" | sha256sum | cut -c1-8)
-
+    
     echo "${dockerfile_hash}-${args_hash}"
 }
 

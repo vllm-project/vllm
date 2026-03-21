@@ -180,9 +180,9 @@ steps:
   #       env:
   #         DOCKER_BUILDKIT: "1"
 
-  # - group: "Publish release images"
-  #   key: "publish-release-images"
-  #   steps:
+  - group: "Publish release images"
+    key: "publish-release-images"
+    steps:
   #     - label: "Create multi-arch manifest - CUDA 12.9"
   #       depends_on:
   #         - build-release-image-x86
@@ -195,14 +195,14 @@ steps:
   #         - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64 --amend"
   #         - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
 
-  #     - label: "Annotate release workflow - CUDA 12.9"
-  #       depends_on:
-  #         - create-multi-arch-manifest
-  #       id: annotate-release-workflow
-  #       agents:
-  #         queue: small_cpu_queue_postmerge
-  #       commands:
-  #         - "bash .buildkite/scripts/annotate-release.sh"
+      - label: "Annotate release workflow - CUDA 12.9"
+        depends_on: ~
+          # - create-multi-arch-manifest
+        id: annotate-release-workflow
+        agents:
+          queue: small_cpu_queue_postmerge
+        commands:
+          - "bash .buildkite/scripts/annotate-release.sh"
 
   #     - label: "Create multi-arch manifest - CUDA 13.0"
   #       depends_on:
@@ -362,12 +362,12 @@ steps:
           echo ""
           
           docker pull "$${ECR_CACHE_TAG}"
-          docker tag "$${ECR_CACHE_TAG}" "rocm/vllm-dev:base-$${BUILDKITE_BUILD_NUMBER}"
           
           # Rebuild wheel extraction stage
           DOCKER_BUILDKIT=1 docker buildx build \
             --file docker/Dockerfile.rocm_base \
             --tag rocm-base-debs:$${BUILDKITE_BUILD_NUMBER} \
+            --build-arg BASE_IMAGE="$${ECR_IMAGE_TAG}" \
             --target debs_wheel_release \
             --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
             --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
@@ -398,7 +398,6 @@ steps:
           DOCKER_BUILDKIT=1 docker buildx build \
             --file docker/Dockerfile.rocm_base \
             --tag "$${ECR_CACHE_TAG}" \
-            --tag "rocm/vllm-dev:base-$${BUILDKITE_BUILD_NUMBER}" \
             --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
             --build-arg PYTHON_VERSION="$${PYTHON_VERSION}" \
             --build-arg USE_SCCACHE=1 \
@@ -429,10 +428,9 @@ steps:
           docker rm $${cid}
           
           .buildkite/scripts/cache-rocm-base-wheels.sh upload
-          
-          # Pull back for local use
-          docker pull "$${ECR_CACHE_TAG}"
-          docker tag "$${ECR_CACHE_TAG}" "rocm/vllm-dev:base-$${BUILDKITE_BUILD_NUMBER}"
+
+          # Cache base docker image to ECR
+          docker push "$${ECR_CACHE_TAG}"
           
           buildkite-agent meta-data set "rocm-base-image-tag" "$${ECR_CACHE_TAG}"
           
@@ -498,9 +496,6 @@ steps:
         
         # Pull base Docker image from ECR
         docker pull "$${ECR_IMAGE_TAG}"
-        
-        # Tag for local use
-        docker tag "$${ECR_IMAGE_TAG}" "rocm/vllm-dev:base-$${BUILDKITE_BUILD_NUMBER}"
         
         echo "Loaded base image: $${ECR_IMAGE_TAG}"
         
@@ -611,7 +606,7 @@ steps:
       S3_BUCKET: "vllm-wheels-dev"
       VARIANT: "rocm700"
 
-  # ROCm Job 5: Build ROCm Release Docker Image
+  # ROCm Job 6: Build ROCm Release Docker Image
   - label: ":docker: Build release image - x86_64 - ROCm"
     id: build-rocm-release-image
     depends_on:
