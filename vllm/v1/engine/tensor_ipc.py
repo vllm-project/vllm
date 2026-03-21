@@ -12,6 +12,8 @@ and cleanup lives here.
 
 import dataclasses
 import uuid
+from collections import defaultdict
+from dataclasses import field
 from multiprocessing.queues import Queue as MPQueue
 from typing import Any
 
@@ -103,6 +105,12 @@ class TensorIpcSender(OOBTensorConsumer):
             return None
 
 
+@dataclasses.dataclass
+class _Sender:
+    current_message_id: int = -1
+    tensors: dict[int, dict[int, torch.Tensor]] = field(default_factory=dict)
+
+
 class TensorIpcReceiver:
     """Receive-side logic for tensor IPC via torch.multiprocessing.Queue.
 
@@ -111,7 +119,7 @@ class TensorIpcReceiver:
 
     def __init__(self, queue: TensorIpcQueue):
         self.queue = queue
-        self._tensor_buffers = dict[str, tuple[int, dict[int, torch.Tensor]]]()
+        self._tensor_buffers = defaultdict[str, _Sender](_Sender)
 
     def __call__(
         self, dtype: str, shape: tuple[int, ...], meta: dict[str, Any]
@@ -132,12 +140,19 @@ class TensorIpcReceiver:
         # the one we're waiting for as they may arrive out of order from
         # multiple producers.
         while True:
-            current_message_id, tensors = self._tensor_buffers.get(sender_id, (-1, {}))
-            if message_id < current_message_id:
-                raise RuntimeError(f"Missing IPC tensor: {meta}")
-            if message_id == current_message_id:
-                tensor = tensors.pop(tensor_id, None)
+            sender = self._tensor_buffers.get(sender_id)
+            if sender is not None:
+                tensors = sender.tensors
+                tensor = tensors.get(message_id, {}).pop(tensor_id, None)
                 if tensor is not None:
+                    if sender.current_message_id != message_id:
+                        while tensors and (mid := next(iter(tensors))) < message_id:
+                            if sender.tensors.pop(mid):
+                                logger.warning(
+                                    "Discarding %d stale tensors from sender %s",
+                                    sender_id,
+                                )
+                        sender.current_message_id = message_id
                     logger.debug(
                         "Received tensor %s from sender %s for (shape=%s, device=%s) "
                         "via IPC queue (shared memory)",
@@ -148,24 +163,16 @@ class TensorIpcReceiver:
                     )
                     return tensor
 
-            # Release lock while waiting on queue (important to avoid
-            # blocking cleanup)
             ipc_data: TensorIpcData = self.queue.get(timeout=10.0)
 
             # Store tensor
-            current_message_id, tensors = self._tensor_buffers.get(
-                ipc_data.sender_id, (-1, {})
-            )
-            if current_message_id != ipc_data.message_id:
-                if tensors:
-                    logger.warning(
-                        "Discarding %d stale tensors from sender %s",
-                        len(tensors),
-                        ipc_data.sender_id,
-                    )
-                self._tensor_buffers[ipc_data.sender_id] = (
-                    ipc_data.message_id,
-                    {ipc_data.tensor_id: ipc_data.tensor},
+            sender = self._tensor_buffers[ipc_data.sender_id]
+            if sender.current_message_id > ipc_data.message_id:
+                logger.warning(
+                    "Ignoring stale tensor from sender %s", ipc_data.sender_id
                 )
-            else:
-                tensors[ipc_data.tensor_id] = ipc_data.tensor
+                continue
+
+            sender.tensors.setdefault(ipc_data.message_id, {})[ipc_data.tensor_id] = (
+                ipc_data.tensor
+            )

@@ -50,7 +50,7 @@ def encoder_process(
     """Process that msgpack-encodes and sends tensors via IPC."""
     try:
         sender = TensorIpcSender(tensor_queue)
-        encoder = MsgpackEncoder(oob_tensor_consumer=sender.send_tensor)
+        encoder = MsgpackEncoder(oob_tensor_consumer=sender)
 
         if torch.cuda.is_available():
             device = "cuda:0"
@@ -102,9 +102,7 @@ def decoder_process(
 
         encoded = payload_queue.get(timeout=5.0)
         receiver = TensorIpcReceiver(tensor_queue)
-        decoder = MsgpackDecoder(
-            TensorEnvelope, oob_tensor_provider=receiver.recv_tensor
-        )
+        decoder = MsgpackDecoder(TensorEnvelope, oob_tensor_provider=receiver)
         decoded = decoder.decode(encoded)
 
         result_queue.put(
@@ -207,9 +205,9 @@ def test_msgpack_encoder_decoder_with_ipc():
     """Test the full msgpack + tensor IPC path in one process."""
     tensor_queue = torch_mp.Queue()
     sender = TensorIpcSender(tensor_queue)
-    encoder = MsgpackEncoder(oob_tensor_consumer=sender.send_tensor)
+    encoder = MsgpackEncoder(oob_tensor_consumer=sender)
     receiver = TensorIpcReceiver(tensor_queue)
-    decoder = MsgpackDecoder(TensorEnvelope, oob_tensor_provider=receiver.recv_tensor)
+    decoder = MsgpackDecoder(TensorEnvelope, oob_tensor_provider=receiver)
 
     # Use CPU here to exercise the msgpack + sender/receiver integration
     # without relying on same-process CUDA IPC behavior.
@@ -229,37 +227,49 @@ def test_decoder_buffer_management():
     """Test receiver's tensor buffer management when draining queue."""
     tensor_queue = torch_mp.Queue()
 
-    # Put multiple tensors in queue using TensorIpcData
-    tensors = {
-        "tensor_1": torch.randn(2, 3),
-        "tensor_2": torch.randn(4, 5),
-        "tensor_3": torch.randn(6, 7),
-    }
+    sender_id = "test_sender"
+    message_id = 1
 
-    for tensor_id, tensor in tensors.items():
-        ipc_data = TensorIpcData(tensor_id=tensor_id, tensor=tensor)
+    # Put multiple tensors in queue using TensorIpcData
+    tensors_data = [
+        (0, torch.randn(2, 3)),
+        (1, torch.randn(4, 5)),
+        (2, torch.randn(6, 7)),
+    ]
+
+    for tensor_id, tensor in tensors_data:
+        ipc_data = TensorIpcData(
+            sender_id=sender_id,
+            message_id=message_id,
+            tensor_id=tensor_id,
+            tensor=tensor,
+        )
         tensor_queue.put(ipc_data)
 
     # Create receiver directly
-    receiver = TensorIpcReceiver(tensor_queue, max_senders=3)
+    receiver = TensorIpcReceiver(tensor_queue)
 
-    # Request tensor_3 (should buffer tensor_1 and tensor_2)
-    handle = {"tensor_id": "tensor_3", "device": "cpu"}
+    # Request tensor_id=2 (should buffer tensor_id=0 and tensor_id=1)
+    handle = {"sender_id": sender_id, "message_id": message_id, "tensor_id": 2}
 
-    result = receiver.recv_tensor("float32", (6, 7), handle)
+    result = receiver("float32", (6, 7), handle)
     assert result.shape == (6, 7)
 
-    # Verify buffer has tensor_1 and tensor_2 using tuple keys
-    assert "tensor_1" in receiver._tensor_buffer
-    assert "tensor_2" in receiver._tensor_buffer
+    # Verify buffer has tensor_id 0 and 1
+    sender = receiver._tensor_buffers[sender_id]
+    tensors = sender.tensors.get(message_id, {})
+    assert 0 in tensors
+    assert 1 in tensors
 
     # Request buffered tensor
-    handle2 = {"tensor_id": "tensor_1", "device": "cpu"}
+    handle2 = {"sender_id": sender_id, "message_id": message_id, "tensor_id": 0}
 
-    result2 = receiver.recv_tensor("float32", (2, 3), handle2)
+    result2 = receiver("float32", (2, 3), handle2)
     assert result2.shape == (2, 3)
-    # tensor_1 should be removed from buffer
-    assert (None, "tensor_1") not in receiver._tensor_buffer
+    # tensor_id 0 should be removed from buffer
+    sender = receiver._tensor_buffers[sender_id]
+    tensors = sender.tensors.get(message_id, {})
+    assert 0 not in tensors
 
 
 def api_server_worker(
@@ -273,13 +283,18 @@ def api_server_worker(
     try:
         # Each server sends a unique tensor
         tensor = torch.ones(server_id + 1, server_id + 2) * server_id
-        tensor_id = f"server_{server_id}_tensor"
+        sender_id = f"server_{server_id}"
 
         # Wait for all servers to be ready
         barrier.wait()
 
         # Send tensor using TensorIpcData
-        ipc_data = TensorIpcData(tensor_id=tensor_id, tensor=tensor)
+        ipc_data = TensorIpcData(
+            sender_id=sender_id,
+            message_id=0,
+            tensor_id=0,
+            tensor=tensor,
+        )
         tensor_queue.put(ipc_data)
 
         result_queue.put({"server_id": server_id, "success": True})
@@ -334,17 +349,19 @@ def test_multiple_api_servers_to_engine():
     received_tensors = []
     for _ in range(num_api_servers):
         ipc_data = tensor_queue.get(timeout=1.0)
-        received_tensors.append((ipc_data.tensor_id, ipc_data.tensor))
+        received_tensors.append((ipc_data.sender_id, ipc_data.tensor))
 
     assert len(received_tensors) == num_api_servers
 
     # Verify tensor content (order may vary with multiprocessing)
-    tensor_by_id = {tid: t for tid, t in received_tensors}
+    tensor_by_sender = {sid: t for sid, t in received_tensors}
     for server_id in range(num_api_servers):
-        expected_id = f"server_{server_id}_tensor"
-        assert expected_id in tensor_by_id, f"Missing tensor from server {server_id}"
+        expected_id = f"server_{server_id}"
+        assert expected_id in tensor_by_sender, (
+            f"Missing tensor from server {server_id}"
+        )
         expected_tensor = torch.ones(server_id + 1, server_id + 2) * server_id
-        assert torch.allclose(tensor_by_id[expected_id], expected_tensor)
+        assert torch.allclose(tensor_by_sender[expected_id], expected_tensor)
 
     # Signal workers that retrieval is complete
     retrieval_done.set()
@@ -363,17 +380,21 @@ def mixed_tensor_encoder_process(
     """Process that encodes mixed CPU/CUDA tensors."""
     try:
         sender = TensorIpcSender(tensor_queue)
-        _encoder = MsgpackEncoder(oob_tensor_consumer=sender.send_tensor)
+        _encoder = MsgpackEncoder(oob_tensor_consumer=sender)
 
         # Create only CUDA tensor for IPC (CPU will be serialized)
         # But actually, let's just send CUDA tensor directly
         cuda_tensor = torch.randn(4, 5, device="cuda:0")
 
         # Manually send via IPC to test the mechanism
-        tensor_id = "test_cuda_tensor"
         cuda_tensor_shared = cuda_tensor.share_memory_()
 
-        ipc_data = TensorIpcData(tensor_id=tensor_id, tensor=cuda_tensor_shared)
+        ipc_data = TensorIpcData(
+            sender_id="mixed_encoder",
+            message_id=0,
+            tensor_id=0,
+            tensor=cuda_tensor_shared,
+        )
         tensor_queue.put(ipc_data, timeout=10.0)
 
         ready_event.set()
@@ -482,7 +503,7 @@ def cpu_tensor_ipc_encoder_process(
     try:
         # Create encoder with IPC enabled for all tensors
         sender = TensorIpcSender(tensor_queue)
-        encoder = MsgpackEncoder(oob_tensor_consumer=sender.send_tensor)
+        encoder = MsgpackEncoder(oob_tensor_consumer=sender)
 
         # Create a CPU tensor
         tensor = torch.randn(*tensor_shape, dtype=torch.float32)
@@ -647,7 +668,7 @@ def test_mixed_cpu_cuda_with_ipc_enabled():
 
     # Create sender and encoder with IPC enabled
     sender = TensorIpcSender(tensor_queue)
-    encoder = MsgpackEncoder(oob_tensor_consumer=sender.send_tensor)
+    encoder = MsgpackEncoder(oob_tensor_consumer=sender)
 
     # Verify sender configuration
     assert encoder.oob_tensor_consumer is not None, "Consumer should be set"
@@ -669,18 +690,28 @@ def test_tensor_cleanup_after_decode():
         tensor.share_memory_()
 
     # Manually create a TensorIpcData and put it in the queue
-    tensor_id = "encoder_0"
-    ipc_data = TensorIpcData(tensor_id=tensor_id, tensor=tensor)
+    sender_id = "test_sender"
+    message_id = 0
+    tensor_id = 0
+    ipc_data = TensorIpcData(
+        sender_id=sender_id,
+        message_id=message_id,
+        tensor_id=tensor_id,
+        tensor=tensor,
+    )
     tensor_queue.put(ipc_data)
 
     # Create receiver directly
     receiver = TensorIpcReceiver(tensor_queue)
 
-    # Mirror the actual msgpack decode shape used in vLLM: a 5-element list.
-    handle = {"tensor_id": tensor_id, "device": str(tensor.device)}
+    handle = {
+        "sender_id": sender_id,
+        "message_id": message_id,
+        "tensor_id": tensor_id,
+    }
 
     # Receive the tensor - this should retrieve it from the queue
-    decoded_tensor = receiver.recv_tensor(
+    decoded_tensor = receiver(
         str(tensor.dtype).removeprefix("torch."), tensor.shape, handle
     )
 
@@ -688,6 +719,6 @@ def test_tensor_cleanup_after_decode():
     assert decoded_tensor.shape == tensor.shape, "Decoded tensor should match shape"
 
     # Verify the tensor was removed from buffer after decode
-    assert tensor_id not in receiver._tensor_buffer, (
-        "Tensor should be removed from buffer"
-    )
+    sender = receiver._tensor_buffers[sender_id]
+    tensors = sender.tensors.get(message_id, {})
+    assert tensor_id not in tensors, "Tensor should be removed from buffer"

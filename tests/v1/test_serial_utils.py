@@ -304,13 +304,11 @@ def test_non_multimodal_tensor_with_ipc():
 
     # Create encoder with IPC sender
     sender = TensorIpcSender(tensor_queues[0])
-    encoder = MsgpackEncoder(oob_tensor_consumer=sender.send_tensor)
+    encoder = MsgpackEncoder(oob_tensor_consumer=sender)
 
     # Create decoder with IPC receiver
     receiver = TensorIpcReceiver(tensor_queues[0])
-    decoder = MsgpackDecoder(
-        RequestWithTensor, oob_tensor_provider=receiver.recv_tensor
-    )
+    decoder = MsgpackDecoder(RequestWithTensor, oob_tensor_provider=receiver)
 
     # Create a request with a non-multimodal tensor
     original_tensor = torch.randn(5, 10, dtype=torch.float32)
@@ -347,13 +345,11 @@ def test_non_multimodal_tensor_with_ipc_none_value():
 
     # Create encoder with IPC sender
     sender = TensorIpcSender(tensor_queues[0])
-    encoder = MsgpackEncoder(oob_tensor_consumer=sender.send_tensor)
+    encoder = MsgpackEncoder(oob_tensor_consumer=sender)
 
     # Create decoder with IPC receiver
     receiver = TensorIpcReceiver(tensor_queues[0])
-    decoder = MsgpackDecoder(
-        RequestWithTensor, oob_tensor_provider=receiver.recv_tensor
-    )
+    decoder = MsgpackDecoder(RequestWithTensor, oob_tensor_provider=receiver)
 
     # Create a request with None for the tensor field
     request = RequestWithTensor(prompt_embeds=None, data="test_data_with_none")
