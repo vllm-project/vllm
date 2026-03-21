@@ -280,7 +280,7 @@ class ParsableContext(ConversationContext):
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
     ):
-        self.last_output = None
+        self.last_output: RequestOutput | None = None
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
