@@ -280,6 +280,7 @@ class ParsableContext(ConversationContext):
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
     ):
+        self.last_output = None
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
@@ -312,14 +313,21 @@ class ParsableContext(ConversationContext):
         self.output_messages: list[ResponseRawMessageAndToken] = []
         self._accumulated_token_ids: list[int] = []
         self.kv_transfer_params: dict[str, Any] | None = None
+        self._accumulated_text: str = ""
+        self._final_parsed: bool = False
 
     def append_output(self, output: RequestOutput) -> None:
+        self.last_output = output
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
-        self.parser.process(output.outputs[0])
+
+        # Accumulate text for deferred parsing — process() expects the
+        # complete output, not per-token deltas.  We run a single full
+        # parse when the generation finishes (see _ensure_final_parse).
+        self._accumulated_text += output.outputs[0].text
         output_token_ids = output.outputs[0].token_ids or []
         self._accumulated_token_ids.extend(output_token_ids)
 
@@ -348,12 +356,38 @@ class ParsableContext(ConversationContext):
                 )
             )
 
+    def _ensure_final_parse(self) -> None:
+        """Run the full parse exactly once over accumulated text."""
+        if self._final_parsed:
+            return
+        self._final_parsed = True
+        if self._accumulated_text:
+            from vllm.outputs import CompletionOutput
+
+            synthetic = CompletionOutput(
+                index=0,
+                text=self._accumulated_text,
+                token_ids=tuple(self._accumulated_token_ids),
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason=self.last_output.outputs[0].finish_reason
+                if self.last_output
+                else None,
+            )
+            self.parser.process(synthetic)
+
     def append_tool_output(self, output: list[ResponseInputOutputItem]) -> None:
+        self._ensure_final_parse()
         self.parser.response_messages.extend(output)
+        # Reset accumulation for the next generation turn.
+        self._accumulated_text = ""
+        self._accumulated_token_ids = []
+        self._final_parsed = False
 
     def need_builtin_tool_call(self) -> bool:
         """Return true if the last message is a builtin tool call
         that the request has enabled."""
+        self._ensure_final_parse()
         last_message = self.parser.response_messages[-1]
         if last_message.type != "function_call":
             return False
