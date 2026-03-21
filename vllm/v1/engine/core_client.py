@@ -554,7 +554,7 @@ class MPClient(EngineCoreClient):
             oob_tensor_consumer: OOBTensorConsumer | None = None
             model_config = getattr(vllm_config, "model_config", None)
             if model_config is not None and model_config.multimodal_config is not None:
-                mm_tensor_ipc = vllm_config.model_config.multimodal_config.mm_tensor_ipc
+                mm_tensor_ipc = model_config.multimodal_config.mm_tensor_ipc
                 if mm_tensor_ipc == "torch_shm" and tensor_queue is not None:
                     oob_tensor_consumer = TensorIpcSender(tensor_queue)
 
