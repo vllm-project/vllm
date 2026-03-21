@@ -1,16 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import copy
 from dataclasses import dataclass, fields, replace
 from enum import IntEnum
 from math import prod
+from typing import TYPE_CHECKING
 
 import torch
 from typing_extensions import Self
 
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 
