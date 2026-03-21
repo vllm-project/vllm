@@ -101,7 +101,7 @@ def backend_to_kernel_cls(
         return [FlashInferExperts]
 
     elif backend == Mxfp4MoeBackend.TRITON:
-        from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (  # noqa: E501
             OAITritonExperts,
             OAITritonMxfp4ExpertsMonolithic,
         )
@@ -110,7 +110,7 @@ def backend_to_kernel_cls(
         return [OAITritonMxfp4ExpertsMonolithic, OAITritonExperts]
 
     elif backend == Mxfp4MoeBackend.TRITON_UNFUSED:
-        from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (  # noqa: E501
             UnfusedOAITritonExperts,
         )
 
