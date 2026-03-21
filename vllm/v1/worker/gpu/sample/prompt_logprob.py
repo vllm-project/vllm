@@ -88,7 +88,7 @@ class PromptLogprobsWorker:
         needs_temp = needs_prompt_logprobs & ~((temp_np == 1.0) | (temp_np == 0.0))
         use_temp = np.any(needs_temp)
 
-        # Build a per-token temperature tensor and token->req_state_idx mapping 
+        # Build a per-token temperature tensor and token->req_state_idx mapping
         # for the Triton kernel.
         if use_temp:
             num_tokens = input_batch.num_tokens

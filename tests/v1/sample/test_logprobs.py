@@ -422,10 +422,12 @@ def test_prompt_logprobs_temperature_increases_argmax_prob(
     monkeypatch,
     use_v2_model_runner: bool,
 ) -> None:
-    """We test that decreasing prompt_logprobs_temperature increases the probability of the argmax token.
-    To do this, we first generate a sequence of argmax tokens given a seed prompt.
-    We then pass seed prompt concatenated with argmax tokens as the prompt using various prompt_logprobs_temperatures
-    and examine the probabilities of the argmax tokens.
+    """We test that decreasing prompt_logprobs_temperature increases
+    the probability of the argmax token. To do this, we first generate
+    a sequence of argmax tokens given a seed prompt. We then pass seed
+    prompt concatenated with argmax tokens as the prompt using various
+    prompt_logprobs_temperatures and examine the probabilities of the
+    argmax tokens.
     """
 
     # test for v1 and v2
