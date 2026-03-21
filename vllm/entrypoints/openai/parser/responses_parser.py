@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
+import json
 import logging
 from collections.abc import Callable
 
@@ -101,6 +103,33 @@ class ResponsesParser:
                 content = tool_call_info.content
                 if content and content.strip() == "":
                     content = None
+
+        # Fallback: when tool_choice="required", guided generation forces the
+        # model to output a JSON array of {name, parameters} objects instead of
+        # the native tool-call token format.  The native tool parser won't
+        # recognise this, so we parse the JSON directly — mirroring the Chat
+        # Completions handling (engine/serving.py line 905-919).
+        tool_choice = getattr(self.request, "tool_choice", None)
+        if not function_calls and tool_choice == "required" and content:
+            with contextlib.suppress(Exception):
+                parsed = json.loads(content)
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        name = item.get("name", "")
+                        params = item.get("parameters", {})
+                        function_calls.append(
+                            ResponseFunctionToolCall(
+                                id=f"fc_{random_uuid()}",
+                                call_id=f"call_{random_uuid()}",
+                                type="function_call",
+                                status="completed",
+                                name=name,
+                                arguments=json.dumps(
+                                    params, ensure_ascii=False),
+                            )
+                        )
+                    if function_calls:
+                        content = None
 
         if content:
             self.response_messages.append(

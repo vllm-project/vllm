@@ -159,13 +159,42 @@ def construct_chat_messages_with_tool_call(
     """This function wraps _construct_single_message_from_response_item
     Because some chatMessages come from multiple response items
     for example a reasoning item and a MCP tool call are two response items
-    but are one chat message
+    but are one chat message.
+
+    Consecutive function_call items are merged into a single assistant
+    message with multiple tool_calls so that models that support parallel
+    tool calling see them as one assistant turn (matching the format they
+    were trained on).
     """
     messages: list[ChatCompletionMessageParam] = []
     for item in input_messages:
         maybe_combined_message = _maybe_combine_reasoning_and_tool_call(item, messages)
         if maybe_combined_message is not None:
             messages[-1] = maybe_combined_message
+        elif isinstance(item, ResponseFunctionToolCall):
+            # Merge consecutive function_call items into one assistant
+            # message so parallel tool calls stay in a single turn.
+            tool_call_param = ChatCompletionMessageToolCallParam(
+                id=item.call_id,
+                function=FunctionCallTool(
+                    name=item.name,
+                    arguments=item.arguments,
+                ),
+                type="function",
+            )
+            if (
+                messages
+                and messages[-1].get("role") == "assistant"
+                and "tool_calls" in messages[-1]
+            ):
+                messages[-1]["tool_calls"].append(tool_call_param)
+            else:
+                messages.append(
+                    ChatCompletionAssistantMessageParam(
+                        role="assistant",
+                        tool_calls=[tool_call_param],
+                    )
+                )
         else:
             messages.append(_construct_single_message_from_response_item(item))
 
