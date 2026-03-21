@@ -62,7 +62,6 @@ _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
     "awq": 0.5,
     "awq_marlin": 0.5,
     "gptq": 0.5,
-    "gptq_marlin": 0.5,
     "bitsandbytes": 0.5,
     "modelopt_fp4": 0.5,
     "petit_nvfp4": 0.5,

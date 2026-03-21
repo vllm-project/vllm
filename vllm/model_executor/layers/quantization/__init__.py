@@ -20,7 +20,6 @@ QuantizationMethods = Literal[
     "modelopt_mxfp8",
     "modelopt_mixed",
     "gguf",
-    "gptq_marlin",
     "awq_marlin",
     "gptq",
     "compressed-tensors",
@@ -44,7 +43,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "fp_quant",
     "experts_int8",
     "petit_nvfp4",
-    "gptq_marlin",
 ]
 
 # The customized quantization methods which will be added to this dict.
