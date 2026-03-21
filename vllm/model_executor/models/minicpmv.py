@@ -387,8 +387,8 @@ class Resampler4_5(Resampler2_5):
             pos_embed_2d, batch_first=True, padding_value=0.0
         ).permute(1, 0, 2)  # BLD => L * B * D
 
-        k = x
-        v = x + pos_embed_2d
+        k = x + pos_embed_2d
+        v = x
         if pos_embed_temporal:
             k += torch.stack(pos_embed_temporal, dim=0)
             bs = len(temporal_ids)
@@ -557,6 +557,11 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
 
+    def get_data_parser(self):
+        return MiniCPMVMultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_model_version(self):
         return get_version_by_config(self.get_hf_config())
 
@@ -702,7 +707,7 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -713,8 +718,8 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
         return {
             "image": self._get_dummy_images(
@@ -736,9 +741,6 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
 
 class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MiniCPMVMultiModalDataParser()
-
     def get_image_prompt_texts(self, image_size: ImageSize, image_idx: int = 0) -> str:
         return self.info.get_slice_image_placeholder(
             image_size,
@@ -765,10 +767,9 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if (images := mm_data.get("images")) is None:
             return {}
 
-        parsed_images = (
-            self._get_data_parser()
-            .parse_mm_data({"image": images})
-            .get_items("image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems))
+        mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+        parsed_images = mm_items.get_items(
+            "image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems)
         )
 
         if isinstance(parsed_images, MiniCPMVImageEmbeddingItems):
@@ -793,10 +794,9 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if (videos := mm_data.get("videos")) is None:
             return {}
 
-        parsed_videos = (
-            self._get_data_parser()
-            .parse_mm_data({"video": videos})
-            .get_items("video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems))
+        mm_items = self.info.parse_mm_data({"video": videos}, validate=False)
+        parsed_videos = mm_items.get_items(
+            "video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems)
         )
 
         if isinstance(parsed_videos, MiniCPMVVideoEmbeddingItems):
@@ -1035,11 +1035,13 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             )
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
-            self.vpm = vpm = self.init_vision_module(
+            self.vpm = self.init_vision_module(
                 config, quant_config, prefix=maybe_prefix(prefix, "vpm")
             )
             self.vision_dim = (
-                vpm.embed_dim if self.version == (2, 0) else vpm.embeddings.embed_dim
+                self.vpm.embed_dim
+                if self.version == (2, 0)
+                else self.vpm.embeddings.embed_dim
             )
             self.embed_dim = self.config.hidden_size
 
@@ -1145,7 +1147,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1334,8 +1336,8 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
@@ -1427,8 +1429,8 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
@@ -1451,10 +1453,11 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
                 quant_config=quant_config,
                 prefix=prefix,
             )
-
-        return resampler.to(
-            device=current_platform.device_type, dtype=torch.get_default_dtype()
-        )
+        target_device = current_platform.device_type
+        target_dtype = torch.get_default_dtype()
+        if any(p.is_meta for p in resampler.parameters()):
+            return resampler.to_empty(device=target_device).to(dtype=target_dtype)
+        return resampler.to(device=target_device, dtype=target_dtype)
 
     def get_vision_hidden_states(self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
@@ -1525,8 +1528,8 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
@@ -1623,8 +1626,8 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
@@ -1647,10 +1650,11 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
                 quant_config=quant_config,
                 prefix=prefix,
             )
-
-        return resampler.to(
-            device=current_platform.device_type, dtype=torch.get_default_dtype()
-        )
+        target_device = current_platform.device_type
+        target_dtype = torch.get_default_dtype()
+        if any(p.is_meta for p in resampler.parameters()):
+            return resampler.to_empty(device=target_device).to(dtype=target_dtype)
+        return resampler.to(device=target_device, dtype=target_dtype)
 
     def get_vision_hidden_states(self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]

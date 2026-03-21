@@ -6,7 +6,9 @@ from transformers import AutoTokenizer
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
-from vllm.reasoning.holo2_reasoning_parser import Holo2ReasoningParser
+from vllm.reasoning.deepseek_v3_reasoning_parser import (
+    DeepSeekV3ReasoningWithThinkingParser as Holo2ReasoningParser,
+)
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 
 REASONING_MODEL_NAME = "HCompany/Holo2-4B"

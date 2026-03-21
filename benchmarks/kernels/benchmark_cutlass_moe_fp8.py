@@ -9,13 +9,15 @@ but use different quantization strategies and backends.
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -62,7 +64,7 @@ def bench_run(
     per_out_ch: bool,
     mkn: tuple[int, int, int],
 ):
-    init_workspace_manager(torch.cuda.current_device())
+    init_workspace_manager(torch.accelerator.current_device_index())
     (m, k, n) = mkn
 
     dtype = torch.half
@@ -135,15 +137,22 @@ def bench_run(
         per_out_ch_quant=per_out_ch,
     )
 
-    fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        CutlassExpertsFp8(
-            out_dtype=a.dtype,
-            e=num_experts,
-            n=n,
-            k=k,
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        hidden_dim=k,
+        intermediate_size_per_partition=n,
+        in_dtype=a.dtype,
+    )
+    fn = mk.FusedMoEKernel(
+        maybe_make_prepare_finalize(
+            moe=moe_config,
             quant_config=quant_config,
-            device=w1.device,
+            allow_new_interface=True,
+            use_monolithic=False,
+        ),
+        CutlassExpertsFp8(
+            moe_config=moe_config,
+            quant_config=quant_config,
         ),
     )
 
@@ -159,10 +168,10 @@ def bench_run(
                 w2_fp8q_cutlass,
                 topk_weights,
                 topk_ids,
-                activation="silu",
+                activation=MoEActivation.SILU,
                 global_num_experts=num_experts,
             )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Create CUDA graphs for Triton (match benchmark_moe.py pattern exactly)
     triton_stream = torch.cuda.Stream()
@@ -178,14 +187,14 @@ def bench_run(
                 topk_ids,
                 quant_config=quant_config,
             )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     def bench_cuda_graph(graph, num_warmup=5, num_iters=100):
         """Benchmark CUDA graph using events like benchmark_moe.py"""
         # Warmup
         for _ in range(num_warmup):
             graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         # Timing
         start_event = torch.Event(enable_timing=True)
@@ -193,7 +202,7 @@ def bench_run(
 
         latencies = []
         for _ in range(num_iters):
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             start_event.record()
             graph.replay()
             end_event.record()

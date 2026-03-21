@@ -6,9 +6,6 @@ from copy import deepcopy
 
 from tblib import pickling_support
 
-# Import fixture
-from tests.v1.entrypoints.conftest import sample_json_schema  # noqa
-
 # ruff: noqa
 
 # Install support for pickling exceptions so that we can nicely propagate
@@ -27,7 +24,7 @@ import threading
 from collections.abc import Generator
 from contextlib import nullcontext
 from enum import Enum
-from typing import Any, Callable, TypedDict, TypeVar, cast, TYPE_CHECKING
+from typing import Any, Callable, TypedDict, TypeVar, cast, TYPE_CHECKING, Optional
 
 import numpy as np
 import pytest
@@ -80,6 +77,55 @@ if TYPE_CHECKING:
 
 
 logger = init_logger(__name__)
+
+
+@pytest.fixture
+def sample_json_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"},
+            "skills": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                },
+            },
+            "grade": {
+                "type": "string",
+                "pattern": "^[A-D]$",
+            },
+            "email": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$",
+            },
+            "work_history": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "company": {"type": "string"},
+                        "duration": {
+                            "type": "number",
+                            "minimum": 0.0,
+                            "maximum": 100.0,
+                        },
+                        "position": {"type": "string"},
+                    },
+                    "required": ["company", "duration", "position"],
+                    "additionalProperties": False,
+                },
+                "minItems": 0,
+                "maxItems": 3,
+            },
+        },
+        "required": ["name", "age", "skills", "grade", "email", "work_history"],
+        "additionalProperties": False,
+        "minProperties": 1,
+        "maxProperties": 10,
+    }
+
 
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
@@ -176,16 +222,20 @@ def init_test_http_connection():
 
 @pytest.fixture
 def dist_init():
+    from tests.utils import ensure_current_vllm_config
+
     temp_file = tempfile.mkstemp()[1]
-    init_distributed_environment(
-        world_size=1,
-        rank=0,
-        distributed_init_method=f"file://{temp_file}",
-        local_rank=0,
-        backend="nccl",
-    )
-    initialize_model_parallel(1, 1)
-    yield
+
+    with ensure_current_vllm_config():
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            local_rank=0,
+            backend="nccl",
+        )
+        initialize_model_parallel(1, 1)
+        yield
     cleanup_dist_env_and_memory()
 
 
@@ -365,6 +415,7 @@ class HfRunner:
             self.config,
             dtype=dtype,
             is_pooling_model=is_sentence_transformer or is_cross_encoder,
+            config_format="hf",
         )
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
@@ -418,18 +469,16 @@ class HfRunner:
             self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
                 AutoTokenizer.from_pretrained(
                     model_name,
-                    dtype=dtype,
                     trust_remote_code=trust_remote_code,
                 )
             )
 
         # don't put this import at the top level
-        # it will call torch.cuda.device_count()
+        # it will call torch.accelerator.device_count()
         from transformers import AutoProcessor
 
         self.processor = AutoProcessor.from_pretrained(
             model_name,
-            dtype=dtype,
             trust_remote_code=trust_remote_code,
         )
         if skip_tokenizer_init:
@@ -791,7 +840,6 @@ class VllmRunner:
         tensor_parallel_size: int = 1,
         block_size: int = 16 if not torch.xpu.is_available() else 64,
         enable_chunked_prefill: bool | None = False,
-        swap_space: int = 4,
         enforce_eager: bool | None = False,
         # Set this to avoid hanging issue
         default_torch_num_threads: int | None = None,
@@ -828,7 +876,6 @@ class VllmRunner:
                 trust_remote_code=trust_remote_code,
                 dtype=dtype,
                 seed=seed,
-                swap_space=swap_space,
                 enforce_eager=enforce_eager,
                 disable_log_stats=disable_log_stats,
                 tensor_parallel_size=tensor_parallel_size,
@@ -840,7 +887,10 @@ class VllmRunner:
 
     def get_inputs(
         self,
-        prompts: list[str] | list[torch.Tensor] | list[list[int]],
+        prompts: list[str]
+        | list[torch.Tensor]
+        | list[list[int]]
+        | list[dict[str, Any]],
         images: PromptImageInput | None = None,
         videos: PromptVideoInput | None = None,
         audios: PromptAudioInput | None = None,
@@ -854,26 +904,32 @@ class VllmRunner:
 
         inputs = list[dict[str, Any]]()
         for i, prompt in enumerate(prompts):
-            prompt_dict = dict[str, Any]()
-            if isinstance(prompt, str):
-                prompt_dict["prompt"] = prompt
-            elif isinstance(prompt, list):
-                prompt_dict["prompt_token_ids"] = prompt
+            # If we're passing an encoder/decoder prompt, we assume it
+            # already contains the multimodal data in the prompt
+            if isinstance(prompt, dict):
+                assert images is None and audios is None and videos is None
+                inputs.append(prompt.copy())
             else:
-                prompt_dict["prompt_embeds"] = prompt
+                prompt_dict = dict[str, Any]()
+                if isinstance(prompt, str):
+                    prompt_dict["prompt"] = prompt
+                elif isinstance(prompt, list):
+                    prompt_dict["prompt_token_ids"] = prompt
+                else:
+                    prompt_dict["prompt_embeds"] = prompt
 
-            multi_modal_data = dict[str, Any]()
-            if images is not None and (image := images[i]) is not None:
-                multi_modal_data["image"] = image
-            if videos is not None and (video := videos[i]) is not None:
-                multi_modal_data["video"] = video
-            if audios is not None and (audio := audios[i]) is not None:
-                multi_modal_data["audio"] = audio
+                multi_modal_data = dict[str, Any]()
+                if images is not None and (image := images[i]) is not None:
+                    multi_modal_data["image"] = image
+                if videos is not None and (video := videos[i]) is not None:
+                    multi_modal_data["video"] = video
+                if audios is not None and (audio := audios[i]) is not None:
+                    multi_modal_data["audio"] = audio
 
-            if multi_modal_data:
-                prompt_dict["multi_modal_data"] = multi_modal_data
+                if multi_modal_data:
+                    prompt_dict["multi_modal_data"] = multi_modal_data
 
-            inputs.append(prompt_dict)
+                inputs.append(prompt_dict)
 
         return inputs
 
@@ -1023,7 +1079,9 @@ class VllmRunner:
             **kwargs,
         )
 
-    def generate_prompt_perplexity(self, prompts: list[str]) -> list[float]:
+    def generate_prompt_perplexity(
+        self, prompts: list[str], mask: Optional[list[str]] = None
+    ) -> list[float]:
         """
         Return the perplexity score associated with generating the prompts
 
@@ -1034,13 +1092,20 @@ class VllmRunner:
             prompts, max_tokens=1, num_logprobs=None, num_prompt_logprobs=0
         )
 
+        mask_prefix_lens = (
+            [len(self.llm.get_tokenizer()(prefix)["input_ids"]) for prefix in mask]
+            if mask is not None
+            else [0 for _ in range(len(prompts))]
+        )
+
         perplexities = []
-        for output in outputs:
+        for output, mask_prefix_len in zip(outputs, mask_prefix_lens):
             output = cast(TokensTextLogprobsPromptLogprobs, output)
             token_datas = cast(list[dict[int, Logprob] | None], output[3])
             assert token_datas[0] is None
+
             token_log_probs = []
-            for token_data in token_datas[1:]:
+            for token_data in token_datas[mask_prefix_len + 1 :]:
                 assert token_data is not None
                 assert len(token_data) == 1
                 token_log_prob = list(token_data.values())[0].logprob
@@ -1121,10 +1186,22 @@ class VllmRunner:
     def get_llm(self) -> LLM:
         return self.llm
 
+    def collective_rpc(self, *args, **kwargs):
+        return self.llm.collective_rpc(*args, **kwargs)
+
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        # Explicitly shutdown the engine core to release GPU resources
+        # This is needed because when executing consecutive tests, the GC
+        # might not be fast enough in shutting down the llm engine. This can lead to OOMs
+        # because when the next test starts some GPU memory is still in use.
+        try:
+            self.llm.llm_engine.engine_core.shutdown()
+        except Exception:
+            # Ignore shutdown errors as cleanup will still proceed
+            pass
         del self.llm
         cleanup_dist_env_and_memory()
 
@@ -1504,7 +1581,7 @@ def clean_gpu_memory_between_tests():
 
     from tests.utils import wait_for_gpu_memory_to_clear
 
-    num_gpus = torch.cuda.device_count()
+    num_gpus = torch.accelerator.device_count()
     if num_gpus > 0:
         try:
             wait_for_gpu_memory_to_clear(
@@ -1518,7 +1595,7 @@ def clean_gpu_memory_between_tests():
 
     # Clean up GPU memory after the test
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         gc.collect()
 
 
@@ -1531,3 +1608,17 @@ def use_fresh_inductor_cache():
     """
     with fresh_cache():
         yield
+
+
+@pytest.fixture
+def fresh_vllm_cache(monkeypatch, use_fresh_inductor_cache):
+    """Temporary VLLM_CACHE_ROOT combined with a fresh inductor cache."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        monkeypatch.setenv("VLLM_CACHE_ROOT", tmp_dir)
+        yield tmp_dir
+
+
+@pytest.fixture(scope="function")
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")

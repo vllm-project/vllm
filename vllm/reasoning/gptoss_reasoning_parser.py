@@ -2,21 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.entrypoints.openai.parser.harmony_utils import parse_chat_output
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+
 logger = init_logger(__name__)
 
-no_func_reaonsing_tag = {
+no_func_reasoning_tag = {
     "type": "structural_tag",
     "format": {
         "type": "triggered_tags",
@@ -49,10 +51,10 @@ def from_builtin_tool_to_tag(tool: str) -> list[dict]:
     return tag
 
 
-def tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tool_list: list[str]) -> dict:
+def tag_with_builtin_funcs(no_func_reasoning_tag, builtin_tool_list: list[str]) -> dict:
     import copy
 
-    new_tag = copy.deepcopy(no_func_reaonsing_tag)
+    new_tag = copy.deepcopy(no_func_reasoning_tag)
     new_tag["format"]["triggers"].append("<|channel|>commentary to=")
 
     for tool in builtin_tool_list:
@@ -76,9 +78,12 @@ class GptOssReasoningParser(ReasoningParser):
             "<|channel|>final"
         )
         self.reasoning_end_token_ids_suffix = self.model_tokenizer.encode("<|message|>")
+        # We also need to check for the <|end|> token to avoid false positives from
+        # previous messages in multi-turn conversations.
+        self.eom_token_id = self.vocab["<|end|>"]
         self.reasoning_max_num_between_tokens = 20
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         end_token_ids_prefix = self.reasoning_end_token_ids_prefix
         end_token_ids_suffix = self.reasoning_end_token_ids_suffix
         assert len(end_token_ids_prefix) > 0, "reasoning_end_token_ids_prefix is empty"
@@ -86,6 +91,12 @@ class GptOssReasoningParser(ReasoningParser):
         # Check if the end sequence is present in the input_ids.
         # We search from the end of input_ids to find the last match.
         for i in range(len(input_ids) - len(end_token_ids_prefix), -1, -1):
+            if input_ids[i] == self.eom_token_id:
+                # We looped backwards far enough to find the end of a previous message,
+                # which means we have searched the entirety of the current message
+                # and can exit early without searching further back into prior
+                # messages of the conversation.
+                return False
             if input_ids[i : i + len(end_token_ids_prefix)] == end_token_ids_prefix:
                 # We have found the prefix, now we look for the suffix after the prefix.
                 suffix_start = i + len(end_token_ids_prefix)
@@ -139,7 +150,7 @@ class GptOssReasoningParser(ReasoningParser):
     def extract_reasoning(
         self,
         model_output: str,
-        request: ChatCompletionRequest,
+        request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
         raise NotImplementedError(
             "gpt-oss has a special branch for parsing reasoning in non-streaming mode. This method shouldn't be used."  # noqa: E501
@@ -151,7 +162,7 @@ class GptOssReasoningParser(ReasoningParser):
     ) -> str | None:
         if original_tag is None:
             if tool_server is None:
-                return json.dumps(no_func_reaonsing_tag)
+                return json.dumps(no_func_reasoning_tag)
             else:
                 builtin_tool_list: list[str] = []
                 if tool_server.has_tool("browser"):
@@ -164,11 +175,11 @@ class GptOssReasoningParser(ReasoningParser):
                 if len(builtin_tool_list) > 0:
                     logger.info("Builtin_tool_list: %s", builtin_tool_list)
                     func_tag = json.dumps(
-                        tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tool_list)
+                        tag_with_builtin_funcs(no_func_reasoning_tag, builtin_tool_list)
                     )
                 else:
                     logger.info("Builtin_tool_list is empty")
-                    func_tag = json.dumps(no_func_reaonsing_tag)
+                    func_tag = json.dumps(no_func_reasoning_tag)
 
                 return func_tag
         else:

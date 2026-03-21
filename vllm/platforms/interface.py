@@ -4,14 +4,11 @@ import contextlib
 import enum
 import os
 import platform
-import random
 import sys
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple
 
-import numpy as np
 import torch
-from typing_extensions import deprecated
 
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -20,7 +17,7 @@ if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
     from vllm.config import VllmConfig
-    from vllm.inputs import ProcessorInputs, PromptType
+    from vllm.inputs import ProcessorInputs
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -37,6 +34,8 @@ def in_wsl() -> bool:
 
 
 class PlatformEnum(enum.Enum):
+    """Enumeration of supported hardware platforms."""
+
     CUDA = enum.auto()
     ROCM = enum.auto()
     TPU = enum.auto()
@@ -119,6 +118,11 @@ class Platform:
     # https://github.com/ray-project/ray/tree/master/python/ray/_private/accelerators # noqa
     device_control_env_var: str = "VLLM_DEVICE_CONTROL_ENV_VAR_PLACEHOLDER"
 
+    # environment variables that need to be set to 1 to prevent ray from
+    # setting the visible devices e.g.
+    # RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES
+    ray_noset_device_env_vars: list[str] = []
+
     # The torch.compile backend for compiling simple and
     # standalone functions. The default value is "inductor" to keep
     # the same behavior as PyTorch.
@@ -163,6 +167,9 @@ class Platform:
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
 
+    def is_zen_cpu(self) -> bool:
+        return False
+
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
 
@@ -189,7 +196,7 @@ class Platform:
         Get the pass manager class for this platform.
         It will be registered as a custom pass under the current_platform.pass_key.
         """
-        return "vllm.compilation.pass_manager.PostGradPassManager"
+        return "vllm.compilation.passes.pass_manager.PostGradPassManager"
 
     @classmethod
     def get_compile_backend(cls) -> str:
@@ -228,6 +235,7 @@ class Platform:
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int | None = None,
     ) -> str:
         """Get the attention backend class of a device."""
         return ""
@@ -243,7 +251,7 @@ class Platform:
         cls,
         head_size: int,
         dtype: torch.dtype,
-        backend: Optional["AttentionBackendEnum"] = None,
+        backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
         """
         Get the vision attention backend class of a device.
@@ -366,23 +374,6 @@ class Platform:
         return torch.inference_mode(mode=True)
 
     @classmethod
-    @deprecated(
-        "`seed_everything` is deprecated. It will be removed in v0.15.0 or later. "
-        "Please use `vllm.utils.torch_utils.set_random_seed` instead."
-    )
-    def seed_everything(cls, seed: int | None = None) -> None:
-        """
-        Set the seed of each random module.
-        `torch.manual_seed` will set seed on all devices.
-
-        Loosely based on: https://github.com/Lightning-AI/pytorch-lightning/blob/2.4.0/src/lightning/fabric/utilities/seed.py#L20
-        """
-        if seed is not None:
-            random.seed(seed)
-            np.random.seed(seed)
-            torch.manual_seed(seed)
-
-    @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
         Set the device for the current platform.
@@ -406,6 +397,20 @@ class Platform:
         pass
 
     @classmethod
+    def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Apply the platform-specific default values to the config.
+
+        This function is called during the initialization of global VllmConfig, after
+        parsing cli arguments.
+        It can modify the defaults of the config according to the platform. For example,
+        it can enable custom_ops based on the enabled features.
+
+        The config is passed by reference, so it can be modified in place.
+        """
+        pass
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
         Check and update the configuration for the current platform.
@@ -417,6 +422,56 @@ class Platform:
         The config is passed by reference, so it can be modified in place.
         """
         pass
+
+    @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Ensure block_size is compatible with the attention backend.
+        """
+        from vllm.config.cache import CacheConfig
+
+        cache_config = vllm_config.cache_config
+        if cache_config.user_specified_block_size:
+            # User specified --block-size; keep it.
+            return
+
+        model_config = vllm_config.model_config
+        # model_config may be None during testing.
+        # Skip hybrid models — their block_size is managed by
+        # HybridAttentionMambaModelConfig.
+        if model_config is None or model_config.is_hybrid:
+            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
+            return
+
+        from vllm.config.vllm import (
+            get_layers_from_vllm_config,
+            set_current_vllm_config,
+        )
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
+
+        attn_layers = get_layers_from_vllm_config(
+            vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+        if not attn_layers:
+            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
+            return
+
+        first_layer = next(iter(attn_layers.values()))
+        backend_cls = first_layer.get_attn_backend()
+        with set_current_vllm_config(vllm_config):
+            preferred = backend_cls.get_preferred_block_size(
+                CacheConfig.DEFAULT_BLOCK_SIZE
+            )
+        if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
+            logger.info(
+                "Setting kv cache block size to %d for %s backend.",
+                preferred,
+                backend_cls.get_name(),
+            )
+        cache_config.block_size = preferred
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
@@ -580,13 +635,17 @@ class Platform:
     @classmethod
     def validate_request(
         cls,
-        prompt: "PromptType",
-        params: "SamplingParams | PoolingParams",
         processed_inputs: "ProcessorInputs",
+        params: "SamplingParams | PoolingParams",
     ) -> None:
         """Raises if this request is unsupported on this platform"""
 
     def __getattr__(self, key: str):
+        # Pickle checks dunder methods like __getstate__. If we return None
+        # for them, pickle treats it like a real value and tries to call it.
+        if key.startswith("__") and key.endswith("__"):
+            raise AttributeError(key)
+
         device = getattr(torch, self.device_type, None)
         if device is not None and hasattr(device, key):
             attr = getattr(device, key)
@@ -654,6 +713,22 @@ class Platform:
         return False
 
     @classmethod
+    def support_deep_gemm(cls) -> bool:
+        """
+        Returns if DeepGEMM is supported by the current platform.
+        """
+        return False
+
+    @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        """
+        Whether this platform should use torch.ops.vllm.* custom ops for collectives.
+
+        Returns False by default - platforms must explicitly opt-in.
+        """
+        return False
+
+    @classmethod
     def use_sync_weight_loader(cls) -> bool:
         """
         Returns if the current platform needs to sync weight loader.
@@ -704,6 +779,16 @@ class Platform:
         Set some additional forward context for the current platform if needs.
         """
         return {}
+
+    @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        """
+        Get the number of compute units for the current platform.
+        (NVIDIA SM / AMD CU / Intel EU)
+        """
+        raise NotImplementedError(
+            "num_compute_units is not implemented for the current platform."
+        )
 
 
 class UnspecifiedPlatform(Platform):

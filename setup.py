@@ -18,8 +18,6 @@ import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
-from setuptools.command.build_py import build_py
-from setuptools.command.develop import develop
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
@@ -56,6 +54,9 @@ elif sys.platform.startswith("linux") and os.getenv("VLLM_TARGET_DEVICE") is Non
     if torch.version.hip is not None:
         VLLM_TARGET_DEVICE = "rocm"
         logger.info("Auto-detected ROCm")
+    elif torch.version.xpu is not None:
+        VLLM_TARGET_DEVICE = "xpu"
+        logger.info("Auto-detected XPU")
     elif torch.version.cuda is not None:
         VLLM_TARGET_DEVICE = "cuda"
         logger.info("Auto-detected CUDA")
@@ -79,81 +80,6 @@ def is_ninja_available() -> bool:
 
 def is_freethreaded():
     return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
-
-
-def compile_grpc_protos():
-    """Compile gRPC protobuf definitions during build.
-
-    This generates *_pb2.py, *_pb2_grpc.py, and *_pb2.pyi files from
-    the vllm_engine.proto definition.
-    """
-    try:
-        from grpc_tools import protoc
-    except ImportError:
-        logger.warning(
-            "grpcio-tools not installed, skipping gRPC proto compilation. "
-            "gRPC server functionality will not be available."
-        )
-        return False
-
-    proto_file = ROOT_DIR / "vllm" / "grpc" / "vllm_engine.proto"
-    if not proto_file.exists():
-        logger.warning("Proto file not found at %s, skipping compilation", proto_file)
-        return False
-
-    logger.info("Compiling gRPC protobuf: %s", proto_file)
-
-    result = protoc.main(
-        [
-            "grpc_tools.protoc",
-            f"--proto_path={ROOT_DIR}",
-            f"--python_out={ROOT_DIR}",
-            f"--grpc_python_out={ROOT_DIR}",
-            f"--pyi_out={ROOT_DIR}",
-            str(proto_file),
-        ]
-    )
-
-    if result != 0:
-        logger.error("protoc failed with exit code %s", result)
-        return False
-
-    # Add SPDX headers and mypy ignore to generated files
-    spdx_header = (
-        "# SPDX-License-Identifier: Apache-2.0\n"
-        "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project\n"
-        "# mypy: ignore-errors\n"
-    )
-
-    grpc_dir = ROOT_DIR / "vllm" / "grpc"
-    for generated_file in [
-        grpc_dir / "vllm_engine_pb2.py",
-        grpc_dir / "vllm_engine_pb2_grpc.py",
-        grpc_dir / "vllm_engine_pb2.pyi",
-    ]:
-        if generated_file.exists():
-            content = generated_file.read_text()
-            if not content.startswith("# SPDX-License-Identifier"):
-                generated_file.write_text(spdx_header + content)
-
-    logger.info("gRPC protobuf compilation successful")
-    return True
-
-
-class BuildPyAndGenerateGrpc(build_py):
-    """Build Python modules and generate gRPC stubs from proto files."""
-
-    def run(self):
-        compile_grpc_protos()
-        super().run()
-
-
-class DevelopAndGenerateGrpc(develop):
-    """Develop mode that also generates gRPC stubs from proto files."""
-
-    def run(self):
-        compile_grpc_protos()
-        super().run()
 
 
 class CMakeExtension(Extension):
@@ -439,6 +365,49 @@ class precompiled_wheel_utils:
             return False
 
     @staticmethod
+    def detect_system_cuda_variant() -> str:
+        """Auto-detect CUDA variant from torch, nvidia-smi, or env default."""
+
+        # Map CUDA major version to hosted wheel variants on wheels.vllm.ai
+        supported = {12: "cu129", 13: "cu130"}
+
+        # Respect explicitly set VLLM_MAIN_CUDA_VERSION
+        if envs.is_set("VLLM_MAIN_CUDA_VERSION"):
+            v = envs.VLLM_MAIN_CUDA_VERSION
+            print(f"Using VLLM_MAIN_CUDA_VERSION={v}")
+            return "cu" + v.replace(".", "")[:3]
+
+        # Try torch.version.cuda
+        cuda_version = None
+        try:
+            import torch
+
+            cuda_version = torch.version.cuda
+        except Exception:
+            pass
+
+        # Try nvidia-smi
+        if not cuda_version:
+            try:
+                out = subprocess.run(
+                    ["nvidia-smi"], capture_output=True, text=True, timeout=10
+                )
+                if m := re.search(r"CUDA Version:\s*(\d+\.\d+)", out.stdout):
+                    cuda_version = m.group(1)
+            except Exception:
+                pass
+
+        # Fall back to default
+        if not cuda_version:
+            cuda_version = envs.VLLM_MAIN_CUDA_VERSION
+
+        # Map to supported variant
+        major = int(cuda_version.split(".")[0])
+        variant = supported.get(major, supported[max(supported)])
+        print(f"Detected CUDA {cuda_version}, using variant {variant}")
+        return variant
+
+    @staticmethod
     def find_local_rocm_wheel() -> str | None:
         """Search for a local vllm wheel in common locations."""
         import glob
@@ -513,8 +482,8 @@ class precompiled_wheel_utils:
         1. user-specified wheel location (can be either local or remote, via
            VLLM_PRECOMPILED_WHEEL_LOCATION)
         2. user-specified variant (VLLM_PRECOMPILED_WHEEL_VARIANT) from nightly repo
-        3. the variant corresponding to VLLM_MAIN_CUDA_VERSION from nightly repo
-        4. the default variant from nightly repo
+           or auto-detected CUDA variant based on system (torch, nvidia-smi)
+        3. the default variant from nightly repo
 
         If downloading from the nightly repo, the commit can be specified via
         VLLM_PRECOMPILED_WHEEL_COMMIT; otherwise, the head commit in the main branch
@@ -533,9 +502,11 @@ class precompiled_wheel_utils:
             import platform
 
             arch = platform.machine()
-            # try to fetch the wheel metadata from the nightly wheel repo
-            main_variant = "cu" + envs.VLLM_MAIN_CUDA_VERSION.replace(".", "")
-            variant = os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", main_variant)
+            # try to fetch the wheel metadata from the nightly wheel repo,
+            # detecting CUDA variant from system if not specified
+            variant = os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", None)
+            if variant is None:
+                variant = precompiled_wheel_utils.detect_system_cuda_variant()
             commit = os.getenv("VLLM_PRECOMPILED_WHEEL_COMMIT", "").lower()
             if not commit or len(commit) != 40:
                 print(
@@ -629,6 +600,7 @@ class precompiled_wheel_utils:
             with zipfile.ZipFile(wheel_path) as wheel:
                 files_to_copy = [
                     "vllm/_C.abi3.so",
+                    "vllm/_C_stable_libtorch.abi3.so",
                     "vllm/_moe_C.abi3.so",
                     "vllm/_flashmla_C.abi3.so",
                     "vllm/_flashmla_extension_C.abi3.so",
@@ -646,6 +618,9 @@ class precompiled_wheel_utils:
                 triton_kernels_regex = re.compile(
                     r"vllm/third_party/triton_kernels/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
+                flashmla_regex = re.compile(
+                    r"vllm/third_party/flashmla/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
+                )
                 file_members = list(
                     filter(lambda x: x.filename in files_to_copy, wheel.filelist)
                 )
@@ -656,6 +631,9 @@ class precompiled_wheel_utils:
                     filter(
                         lambda x: triton_kernels_regex.match(x.filename), wheel.filelist
                     )
+                )
+                file_members += list(
+                    filter(lambda x: flashmla_regex.match(x.filename), wheel.filelist)
                 )
 
                 for file in file_members:
@@ -683,13 +661,18 @@ class precompiled_wheel_utils:
     def get_base_commit_in_main_branch() -> str:
         try:
             # Get the latest commit hash of the upstream main branch.
-            resp_json = subprocess.check_output(
-                [
-                    "curl",
-                    "-s",
-                    "https://api.github.com/repos/vllm-project/vllm/commits/main",
+            curl_cmd = [
+                "curl",
+                "-s",
+                "https://api.github.com/repos/vllm-project/vllm/commits/main",
+            ]
+            github_token = os.getenv("GH_TOKEN", os.getenv("GITHUB_TOKEN"))
+            if github_token:
+                curl_cmd += [
+                    "-H",
+                    f"Authorization: token {github_token}",
                 ]
-            ).decode("utf-8")
+            resp_json = subprocess.check_output(curl_cmd).decode("utf-8")
             upstream_main_commit = json.loads(resp_json)["sha"]
             print(f"Upstream main branch latest commit: {upstream_main_commit}")
 
@@ -767,7 +750,7 @@ def _is_xpu() -> bool:
 
 
 def _build_custom_ops() -> bool:
-    return _is_cuda() or _is_hip() or _is_cpu()
+    return _is_cuda() or _is_hip()
 
 
 def get_rocm_version():
@@ -925,6 +908,15 @@ if _is_cuda():
     ):
         # FA3 requires CUDA 12.3 or later
         ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
+    # FA4 CuteDSL - Python-only component for FA4's cute DSL support
+    # Optional since this doesn't produce a .so file, just copies Python files
+    ext_modules.append(
+        CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa4_cutedsl_C", optional=True)
+    )
+    if envs.VLLM_USE_PRECOMPILED or (
+        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.9")
+    ):
+        # FlashMLA requires CUDA 12.9 or later
         # Optional since this doesn't get built (produce an .so file) when
         # not targeting a hopper system
         ext_modules.append(CMakeExtension(name="vllm._flashmla_C", optional=True))
@@ -932,8 +924,22 @@ if _is_cuda():
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
 
+if _is_cpu():
+    import platform
+
+    if platform.machine() in ("x86_64", "AMD64"):
+        ext_modules.append(CMakeExtension(name="vllm._C"))
+        ext_modules.append(CMakeExtension(name="vllm._C_AVX512"))
+        ext_modules.append(CMakeExtension(name="vllm._C_AVX2"))
+    else:
+        ext_modules.append(CMakeExtension(name="vllm._C"))
+
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
+    # also _is_hip() once https://github.com/vllm-project/vllm/issues/35163 is
+    # fixed
+    if _is_cuda():
+        ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
 
 package_data = {
     "vllm": [
@@ -959,17 +965,12 @@ if _no_device():
     ext_modules = []
 
 if not ext_modules:
-    cmdclass = {
-        "build_py": BuildPyAndGenerateGrpc,
-        "develop": DevelopAndGenerateGrpc,
-    }
+    cmdclass = {}
 else:
     cmdclass = {
         "build_ext": precompiled_build_ext
         if envs.VLLM_USE_PRECOMPILED
         else cmake_build_ext,
-        "build_py": BuildPyAndGenerateGrpc,
-        "develop": DevelopAndGenerateGrpc,
     }
 
 setup(
@@ -978,12 +979,16 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
-        "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy"],
+        # AMD Zen CPU optimizations via zentorch
+        "zen": ["zentorch"],
+        "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
-        "fastsafetensors": ["fastsafetensors >= 0.1.10"],
-        "runai": ["runai-model-streamer[s3,gcs] >= 0.15.3"],
+        "fastsafetensors": ["fastsafetensors >= 0.2.2"],
+        "instanttensor": ["instanttensor >= 0.1.5"],
+        "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
-            "librosa",
+            "av",
+            "resampy",
             "scipy",
             "soundfile",
             "mistral_common[audio]",
@@ -991,7 +996,16 @@ setup(
         "video": [],  # Kept for backwards compatibility
         "flashinfer": [],  # Kept for backwards compatibility
         # Optional deps for Helion kernel development
-        "helion": ["helion"],
+        "helion": ["helion==0.3.2"],
+        # Optional deps for gRPC server (vllm serve --grpc)
+        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
+        # Optional deps for OpenTelemetry tracing
+        "otel": [
+            "opentelemetry-sdk>=1.26.0",
+            "opentelemetry-api>=1.26.0",
+            "opentelemetry-exporter-otlp>=1.26.0",
+            "opentelemetry-semantic-conventions-ai>=0.4.1",
+        ],
     },
     cmdclass=cmdclass,
     package_data=package_data,

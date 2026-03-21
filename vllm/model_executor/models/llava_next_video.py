@@ -165,7 +165,7 @@ class LlavaNextVideoDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_videos = mm_counts.get("video", 0)
 
@@ -174,7 +174,7 @@ class LlavaNextVideoDummyInputsBuilder(
             seq_len, mm_counts
         )
 
-        video_overrides = mm_options.get("video") if mm_options else None
+        video_overrides = mm_options.get("video")
 
         return {
             "video": self._get_dummy_videos(
@@ -332,7 +332,6 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             self.vision_tower = init_vision_tower_for_llava(
                 config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
@@ -427,7 +426,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

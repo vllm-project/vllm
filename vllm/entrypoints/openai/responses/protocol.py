@@ -27,6 +27,7 @@ from openai.types.responses import (
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseStatus,
+    ResponseTextConfig,
     ResponseWebSearchCallCompletedEvent,
     ResponseWebSearchCallInProgressEvent,
     ResponseWebSearchCallSearchingEvent,
@@ -38,20 +39,13 @@ from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreated
 from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
-from openai.types.responses.tool import Tool
-from openai_harmony import Message as OpenAIHarmonyMessage
-
-# Backward compatibility for OpenAI client versions
-try:  # For older openai versions (< 1.100.0)
-    from openai.types.responses import ResponseTextConfig
-except ImportError:  # For newer openai versions (>= 1.100.0)
-    from openai.types.responses import ResponseFormatTextConfig as ResponseTextConfig
-
 from openai.types.responses.response import IncompleteDetails, ToolChoice
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
+from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     Field,
     ValidationError,
@@ -59,12 +53,15 @@ from pydantic import (
     model_validator,
 )
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.entrypoints.openai.engine.protocol import (
-    OpenAIBaseModel,
+from vllm.config import ModelConfig
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
 )
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
@@ -73,6 +70,9 @@ from vllm.sampling_params import (
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
+
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
 
 
 class InputTokensDetails(OpenAIBaseModel):
@@ -173,6 +173,14 @@ class ResponsesRequest(OpenAIBaseModel):
     user: str | None = None
     skip_special_tokens: bool = True
     include_stop_str_in_output: bool = False
+    prompt_cache_key: str | None = Field(
+        default=None,
+        description=(
+            "A key that was used to read from or write to the prompt cache."
+            "Note: This field has not been implemented yet "
+            "and vLLM will ignore it."
+        ),
+    )
 
     # --8<-- [start:responses-extra-params]
     request_id: str = Field(
@@ -183,12 +191,21 @@ class ResponsesRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
     priority: int = Field(
         default=0,
+        ge=_INT64_MIN,
+        le=_INT64_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -211,8 +228,7 @@ class ResponsesRequest(OpenAIBaseModel):
         default=False,
         description=(
             "Dictates whether or not to return messages as part of the "
-            "response object. Currently only supported for"
-            "non-background and gpt-oss only. "
+            "response object. Currently only supported for non-background."
         ),
     )
     # similar to input_messages / output_messages in ResponsesResponse
@@ -220,7 +236,64 @@ class ResponsesRequest(OpenAIBaseModel):
     # this cannot be used in conjunction with previous_response_id
     # TODO: consider supporting non harmony messages as well
     previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
+    structured_outputs: StructuredOutputsParams | None = Field(
+        default=None,
+        description="Additional kwargs for structured outputs",
+    )
+
+    repetition_penalty: float | None = None
+    seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
+    stop: str | list[str] | None = []
+    ignore_eos: bool = False
+    vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
+        default=None,
+        description=(
+            "Additional request parameters with (list of) string or "
+            "numeric values, used by custom extensions."
+        ),
+    )
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
     # --8<-- [end:responses-extra-params]
+
+    def build_chat_params(
+        self,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+    ) -> ChatParams:
+        from .utils import should_continue_final_message
+
+        # Check if we should continue the final message (partial completion)
+        # This enables Anthropic-style partial message completion where the
+        # user provides an incomplete assistant message to continue from.
+        continue_final = should_continue_final_message(self.input)
+
+        reasoning = self.reasoning
+
+        return ChatParams(
+            chat_template=default_template,
+            chat_template_content_format=default_template_content_format,
+            chat_template_kwargs=merge_kwargs(  # To remove unset values
+                {},
+                dict(
+                    add_generation_prompt=not continue_final,
+                    continue_final_message=continue_final,
+                    reasoning_effort=None if reasoning is None else reasoning.effort,
+                ),
+            ),
+            media_io_kwargs=self.media_io_kwargs,
+        )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=self.max_output_tokens or 0,
+            truncate_prompt_tokens=-1 if self.truncation != "disabled" else None,
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_output_tokens",
+        )
 
     _DEFAULT_SAMPLING_PARAMS = {
         "temperature": 1.0,
@@ -251,23 +324,41 @@ class ResponsesRequest(OpenAIBaseModel):
             top_k = default_sampling_params.get(
                 "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
             )
+
+        if (repetition_penalty := self.repetition_penalty) is None:
+            repetition_penalty = default_sampling_params.get("repetition_penalty", 1.0)
+
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
-        structured_outputs = None
+        structured_outputs = self.structured_outputs
+
+        # Also check text.format for OpenAI-style json_schema
         if self.text is not None and self.text.format is not None:
+            if structured_outputs is not None:
+                raise VLLMValidationError(
+                    "Cannot specify both structured_outputs and text.format",
+                    parameter="structured_outputs",
+                )
             response_format = self.text.format
             if (
                 response_format.type == "json_schema"
                 and response_format.schema_ is not None
             ):
                 structured_outputs = StructuredOutputsParams(
-                    json=response_format.schema_
+                    json=response_format.schema_  # type: ignore[call-arg]
+                    # --follow-imports skip hides the class definition but also hides
+                    # multiple third party conflicts, so best of both evils
                 )
-            elif response_format.type == "json_object":
-                raise NotImplementedError("json_object is not supported")
 
-        # TODO: add more parameters
+        stop = self.stop if self.stop else []
+        if isinstance(stop, str):
+            stop = [stop]
+
+        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        if self.kv_transfer_params:
+            extra_args["kv_transfer_params"] = self.kv_transfer_params
+
         return SamplingParams.from_optional(
             temperature=temperature,
             top_p=top_p,
@@ -275,11 +366,16 @@ class ResponsesRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop_token_ids=stop_token_ids,
+            stop=stop,
+            repetition_penalty=repetition_penalty,
+            seed=self.seed,
+            ignore_eos=self.ignore_eos,
             output_kind=(
                 RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
             ),
             structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
+            extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=self.skip_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -295,14 +391,19 @@ class ResponsesRequest(OpenAIBaseModel):
         )
 
     @model_validator(mode="before")
+    @classmethod
     def validate_background(cls, data):
         if not data.get("background"):
             return data
         if not data.get("store", True):
-            raise ValueError("background can only be used when `store` is true")
+            raise VLLMValidationError(
+                "background can only be used when `store` is true",
+                parameter="background",
+            )
         return data
 
     @model_validator(mode="before")
+    @classmethod
     def validate_prompt(cls, data):
         if data.get("prompt") is not None:
             raise VLLMValidationError(
@@ -311,16 +412,19 @@ class ResponsesRequest(OpenAIBaseModel):
         return data
 
     @model_validator(mode="before")
+    @classmethod
     def check_cache_salt_support(cls, data):
         if data.get("cache_salt") is not None and (
             not isinstance(data["cache_salt"], str) or not data["cache_salt"]
         ):
-            raise ValueError(
-                "Parameter 'cache_salt' must be a non-empty string if provided."
+            raise VLLMValidationError(
+                "Parameter 'cache_salt' must be a non-empty string if provided.",
+                parameter="cache_salt",
             )
         return data
 
     @model_validator(mode="before")
+    @classmethod
     def function_call_parsing(cls, data):
         """Parse function_call dictionaries into ResponseFunctionToolCall objects.
         This ensures Pydantic can properly resolve union types in the input field.
@@ -392,6 +496,11 @@ class ResponsesResponse(OpenAIBaseModel):
     usage: ResponseUsage | None = None
     user: str | None = None
 
+    # vLLM-specific fields that are not in OpenAI spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
+
     # --8<-- [start:responses-response-extra-params]
     # These are populated when enable_response_messages is set to True
     # NOTE: custom serialization is needed
@@ -435,6 +544,7 @@ class ResponsesResponse(OpenAIBaseModel):
         usage: ResponseUsage | None = None,
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
+        kv_transfer_params: dict[str, Any] | None = None,
     ) -> "ResponsesResponse":
         incomplete_details: IncompleteDetails | None = None
         if status == "incomplete":
@@ -470,6 +580,7 @@ class ResponsesResponse(OpenAIBaseModel):
             truncation=request.truncation,
             user=request.user,
             usage=usage,
+            kv_transfer_params=kv_transfer_params,
         )
 
 

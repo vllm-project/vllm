@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
@@ -76,7 +76,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig | None" = None,
     ):
         super().__init__(
             vllm_config=vllm_config,
@@ -214,7 +214,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 if kv_cache is None:
                     continue
 
-                layer = kv_cache[forward_context.virtual_engine]
+                layer = kv_cache[0]
 
                 kv_cache = self.p2p_nccl_engine.recv_tensor(
                     request.request_id + "#" + layer_name, remote_address

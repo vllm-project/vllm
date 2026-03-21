@@ -4,10 +4,10 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
+from http import HTTPStatus
 from typing import Any, ClassVar, Literal, TypeAlias
 
 import regex as re
-import torch
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -17,15 +17,10 @@ from pydantic import (
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.logger import init_logger
-from vllm.sampling_params import (
-    SamplingParams,
-)
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
-
-_LONG_INFO = torch.iinfo(torch.long)
 
 
 class OpenAIBaseModel(BaseModel):
@@ -53,7 +48,7 @@ class OpenAIBaseModel(BaseModel):
 
         # Compare against both field names and aliases
         if any(k not in field_names for k in data):
-            logger.warning(
+            logger.debug(
                 "The following fields were present in the request but ignored: %s",
                 data.keys() - field_names,
             )
@@ -163,7 +158,7 @@ AnyResponseFormat: TypeAlias = (
 
 
 class StreamOptions(OpenAIBaseModel):
-    include_usage: bool | None = True
+    include_usage: bool | None = False
     continuous_usage_stats: bool | None = False
 
 
@@ -221,6 +216,10 @@ def get_logits_processors(
 
 
 class FunctionCall(OpenAIBaseModel):
+    # Internal field to preserve native tool call ID from tool parser.
+    # Excluded from serialization to maintain OpenAI API compatibility
+    # (function object should only contain 'name' and 'arguments').
+    id: str | None = Field(default=None, exclude=True)
     name: str
     arguments: str
 
@@ -260,62 +259,12 @@ class DeltaMessage(OpenAIBaseModel):
     role: str | None = None
     content: str | None = None
     reasoning: str | None = None
-    reasoning_content: str | None = None
-    """Deprecated: use `reasoning` instead."""
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
 
-    @model_validator(mode="after")
-    def handle_deprecated_reasoning_content(self):
-        """Copy reasoning to reasoning_content for backward compatibility."""
-        self.reasoning_content = self.reasoning
-        return self
 
+class GenerationError(Exception):
+    """raised when finish_reason indicates internal server error (500)"""
 
-####### Tokens IN <> Tokens OUT #######
-class GenerateRequest(BaseModel):
-    request_id: str = Field(
-        default_factory=random_uuid,
-        description=(
-            "The request_id related to this request. If the caller does "
-            "not set it, a random_uuid will be generated. This id is used "
-            "through out the inference process and return in response."
-        ),
-    )
-    token_ids: list[int]
-    """The token ids to generate text from."""
-
-    # features: MultiModalFeatureSpec
-    # TODO (NickLucche): implement once Renderer work is completed
-    features: str | None = None
-    """The processed MM inputs for the model."""
-
-    sampling_params: SamplingParams
-    """The sampling parameters for the model."""
-
-    model: str | None = None
-
-    stream: bool | None = False
-    stream_options: StreamOptions | None = None
-    cache_salt: str | None = Field(
-        default=None,
-        description=(
-            "If specified, the prefix cache will be salted with the provided "
-            "string to prevent an attacker to guess prompts in multi-user "
-            "environments. The salt should be random, protected from "
-            "access by 3rd parties, and long enough to be "
-            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit)."
-        ),
-    )
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."
-        ),
-    )
-    kv_transfer_params: dict[str, Any] | None = Field(
-        default=None,
-        description="KVTransfer parameters used for disaggregated serving.",
-    )
+    def __init__(self, message: str = "Internal server error"):
+        super().__init__(message)
+        self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
