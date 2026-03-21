@@ -571,6 +571,12 @@ VLM_TEST_SETTINGS = {
         hf_model_kwargs={"device_map": "auto"},
         patch_hf_runner=model_utils.isaac_patch_hf_runner,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[
+            pytest.mark.skip(
+                reason="PerceptronAI/Isaac-0.1 HF repo has stale "
+                "safetensors index referencing removed shards",
+            )
+        ],
     ),
     "kimi_vl": VLMTestInfo(
         models=["moonshotai/Kimi-VL-A3B-Instruct"],
