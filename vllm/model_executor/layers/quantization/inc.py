@@ -345,7 +345,7 @@ class INCConfig(QuantizationConfig):
                 )
         else:
             use_marlin = False
-        from vllm.model_executor.layers.quantization.gptq import (
+        from vllm.model_executor.layers.quantization.gptq_marlin import (
             GPTQMarlinConfig,
             GPTQMarlinLinearMethod,
             GPTQMarlinMoEMethod,

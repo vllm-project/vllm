@@ -59,7 +59,7 @@ class MoeWNA16Config(QuantizationConfig):
         # Avoid circular import
         from vllm.model_executor.layers.quantization.awq import AWQConfig
         from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
-        from vllm.model_executor.layers.quantization.gptq import GPTQMarlinConfig
+        from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
 
         if self.linear_quant_method == "gptq":
             self.use_marlin = GPTQMarlinConfig.is_gptq_marlin_compatible(full_config)
@@ -175,7 +175,9 @@ class MoeWNA16Config(QuantizationConfig):
             from vllm.model_executor.layers.quantization.awq_marlin import (
                 AWQMarlinConfig,
             )
-            from vllm.model_executor.layers.quantization.gptq import GPTQMarlinConfig
+            from vllm.model_executor.layers.quantization.gptq_marlin import (
+                GPTQMarlinConfig,
+            )
 
             if self.linear_quant_method == "gptq":
                 return GPTQMarlinConfig.from_config(self.full_config).get_quant_method(

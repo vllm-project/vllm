@@ -120,7 +120,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .fp8 import Fp8Config
     from .fp_quant import FPQuantConfig
     from .gguf import GGUFConfig
-    from .gptq import GPTQMarlinConfig
+    from .gptq_marlin import GPTQMarlinConfig
     from .inc import INCConfig
     from .modelopt import (
         ModelOptFp8Config,

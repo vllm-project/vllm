@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.layers.quantization.gptq import GPTQMarlinLinearMethod
+from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinLinearMethod
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override,
 )

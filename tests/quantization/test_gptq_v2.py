@@ -10,7 +10,7 @@ import torch
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams
-from vllm.model_executor.layers.quantization.gptq import GPTQMarlinLinearMethod
+from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinLinearMethod
 
 # A dummy small model quantized by GPTQModel, stored in GPTQ v2 format
 MODELS = ["XXXXyu/Qwen3-1.7B-w2g64-gptq_v2"]

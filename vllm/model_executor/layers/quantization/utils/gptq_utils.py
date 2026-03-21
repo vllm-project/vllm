@@ -15,7 +15,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 
 if TYPE_CHECKING:
-    from ..gptq import GPTQMarlinConfig
+    from ..gptq_marlin import GPTQMarlinConfig
 else:
     GPTQMarlinConfig = object
 
