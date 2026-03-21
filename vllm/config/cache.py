@@ -13,6 +13,7 @@ logger = init_logger(__name__)
 
 CacheDType = Literal[
     "auto",
+    "float16",
     "bfloat16",
     "fp8",
     "fp8_e4m3",
@@ -83,7 +84,8 @@ class CacheConfig:
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
     reproducible hashing. Requires the optional ``xxhash`` package."""
     calculate_kv_scales: bool = False
-    """This enables dynamic calculation of `k_scale` and `v_scale` when
+    """Deprecated: This option is deprecated and will be removed in v0.19.
+    It enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
     checkpoint if available. Otherwise, the scales will default to 1.0."""
     cpu_kvcache_space_bytes: int | None = None
@@ -207,6 +209,18 @@ class CacheConfig:
         else:
             object.__setattr__(self, "user_specified_block_size", True)
         return self
+
+    @field_validator("calculate_kv_scales", mode="after")
+    @classmethod
+    def _warn_deprecated_calculate_kv_scales(cls, calculate_kv_scales: bool) -> bool:
+        if calculate_kv_scales:
+            logger.warning(
+                "The `--calculate-kv-scales` option is deprecated and will "
+                "be removed in v0.19. The scales will be loaded from the "
+                "model checkpoint if available, otherwise they default to "
+                "1.0."
+            )
+        return calculate_kv_scales
 
     @field_validator("cache_dtype", mode="after")
     @classmethod

@@ -25,9 +25,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     ocp_mx_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
-from vllm.model_executor.layers.quantization.mxfp4 import (
-    Mxfp4Backend,
-    get_mxfp4_backend,
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    Mxfp4MoeBackend,
+    select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
@@ -92,7 +92,8 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                 rocm_aiter_ops.is_fused_moe_enabled()
             )
             if (
-                input_config.get("dtype") == "fp8_e4m3"
+                input_config is not None
+                and input_config.get("dtype") == "fp8_e4m3"
                 and not input_config.get("is_dynamic")
                 and not emulate
             ):
@@ -698,9 +699,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 f"Please check that the combination is supported in OCP_MX_Scheme."
             )
 
-        self.mxfp4_backend: Mxfp4Backend | None = None
+        self.mxfp4_backend: Mxfp4MoeBackend | None = None
         if self.ocp_mx_scheme == "w_mxfp4":
-            self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
+            self.mxfp4_backend, _ = select_mxfp4_moe_backend(moe)
 
         if self.input_quant is not None:
             self.static_input_scales = not self.input_quant.get("is_dynamic")

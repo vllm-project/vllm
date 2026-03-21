@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
-from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -114,8 +113,24 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         Args:
             vllm_config: vLLM Config
         """
+        cache_config = vllm_config.cache_config
+
+        # Disable calculate_kv_scales for hybrid models: uninitialized
+        # recurrent state corrupts scales during the calibration pass.
+        # See issue: https://github.com/vllm-project/vllm/issues/37554
+        if cache_config.calculate_kv_scales:
+            logger.warning(
+                "Disabling calculate_kv_scales for hybrid model '%s'. "
+                "Hybrid models with recurrent layers (GDN, Mamba, SSM) "
+                "produce unreliable KV cache scales during the "
+                "calibration pass because recurrent state is "
+                "uninitialized. Using default scale of 1.0 instead.",
+                vllm_config.model_config.model,
+            )
+            cache_config.calculate_kv_scales = False
+
         # Save the user input before it gets modified by MambaModelConfig
-        mamba_block_size = vllm_config.cache_config.mamba_block_size
+        mamba_block_size = cache_config.mamba_block_size
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
 
@@ -149,17 +164,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             ).page_size_bytes
         else:
             kernel_block_alignment_size = 16
-            if (
-                current_platform.is_device_capability_family(100)
-                and model_config.get_head_size() == 256
-                and (
-                    attention_config.backend is None
-                    or attention_config.backend == AttentionBackendEnum.FLASHINFER
-                )
-            ):
-                # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that`
-                # head size 256 and block size 16 is not supported on blackwell.
-                kernel_block_alignment_size = 32
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,
                 group_size=cache_config.mamba_num_attn_pages,
@@ -661,6 +665,7 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
+    "ColQwen3_5": Qwen3_5ForConditionalGenerationConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
     "FalconMambaForCausalLM": MambaModelConfig,

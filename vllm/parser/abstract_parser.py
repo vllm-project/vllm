@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import json
 from abc import abstractmethod
 from collections.abc import Sequence
@@ -18,7 +19,7 @@ from openai.types.responses.response_output_text import Logprob
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -154,7 +155,9 @@ class Parser:
     @abstractmethod
     def extract_response_outputs(
         self,
+        *,
         model_output: str,
+        model_output_token_ids: Sequence[int],
         request: ResponsesRequest,
         enable_auto_tools: bool = False,
         tool_call_id_type: str = "random",
@@ -169,6 +172,7 @@ class Parser:
 
         Args:
             model_output: The complete model-generated string.
+            model_output_token_ids: The token IDs of the model output.
             request: The request object used to generate the output.
             enable_auto_tools: Whether to enable automatic tool call parsing.
             tool_call_id_type: Type of tool call ID generation ("random", etc).
@@ -195,7 +199,7 @@ class Parser:
             request: The request object used to generate the output.
 
         Returns:
-            A tuple of (reasoning_content, response_content).
+            A tuple of (reasoning, response_content).
         """
 
     @abstractmethod
@@ -312,7 +316,9 @@ class DelegatingParser(Parser):
 
     def extract_response_outputs(
         self,
+        *,
         model_output: str,
+        model_output_token_ids: Sequence[int],
         request: ResponsesRequest,
         enable_auto_tools: bool = False,
         tool_call_id_type: str = "random",
@@ -422,15 +428,19 @@ class DelegatingParser(Parser):
 
         if request.tool_choice == "required":
             # Required tool calls - parse JSON
-            assert content is not None
-            tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
-            function_calls.extend(
-                FunctionCall(
-                    name=tool_call.name,
-                    arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
+            tool_calls = []
+            with contextlib.suppress(ValidationError):
+                content = content or ""
+                tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(
+                    content
                 )
-                for tool_call in tool_calls
-            )
+            for tool_call in tool_calls:
+                function_calls.append(
+                    FunctionCall(
+                        name=tool_call.name,
+                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
+                    )
+                )
             return function_calls, None  # Clear content since tool is called.
 
         if (
