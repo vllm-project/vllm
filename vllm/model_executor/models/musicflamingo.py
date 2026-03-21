@@ -63,6 +63,7 @@ from .audioflamingo3 import (
     AudioFlamingo3MultiModalProjector,
     AudioFlamingo3ProcessingInfo,
     _audioflamingo3_field_config,
+    _count_audio_tokens_from_mask,
 )
 
 
@@ -323,15 +324,6 @@ class MusicFlamingoMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        base_updates = super()._get_prompt_updates(
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            out_mm_kwargs=out_mm_kwargs,
-        )
-        if len(base_updates) != 1 or not isinstance(base_updates[0], PromptReplacement):
-            raise ValueError("Expected exactly one audio PromptReplacement.")
-        base_update = base_updates[0]
-
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
@@ -345,23 +337,29 @@ class MusicFlamingoMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
         audio_eos_token = processor.audio_eos_token
         audio_eos_token_id = vocab.get(audio_eos_token, processor.audio_eos_token_id)
 
+        out_mm_data = out_mm_kwargs.get_data()
+        feature_attention_mask = out_mm_data.get("feature_attention_mask")
+        chunk_counts = out_mm_data.get("chunk_counts")
+
         def get_replacement_musicflamingo(item_idx: int):
-            base_replacement = base_update.replacement
-            base_details = (
-                base_replacement(item_idx)
-                if callable(base_replacement)
-                else base_replacement
-            )
-            if not isinstance(base_details, PromptUpdateDetails):
-                base_details = PromptUpdateDetails.from_seq(base_details)
-
-            base_full = base_details.full
-            if not isinstance(base_full, list):
-                raise TypeError(
-                    "Expected token-id replacement from AudioFlamingo3 prompt update."
+            if feature_attention_mask is not None:
+                num_features = _count_audio_tokens_from_mask(
+                    feature_attention_mask,
+                    chunk_counts,
+                    item_idx,
                 )
+            else:
+                audio_embeds = out_mm_data["audio_embeds"][item_idx]
+                num_features = audio_embeds.shape[0]
 
-            full_tokens = [audio_bos_token_id, *base_full, audio_eos_token_id]
+            if num_features == 0:
+                raise ValueError("Audio is too short")
+
+            full_tokens = [
+                audio_bos_token_id,
+                *([audio_token_id] * int(num_features)),
+                audio_eos_token_id,
+            ]
 
             return PromptUpdateDetails.select_token_id(
                 full_tokens,
@@ -370,8 +368,8 @@ class MusicFlamingoMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
 
         return [
             PromptReplacement(
-                modality=base_update.modality,
-                target=base_update.target,
+                modality="audio",
+                target=audio_token,
                 replacement=get_replacement_musicflamingo,
             )
         ]
