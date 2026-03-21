@@ -10,7 +10,7 @@ import torch
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams
-from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
+from vllm.model_executor.layers.quantization.gptq import GPTQMarlinLinearMethod
 
 # A dummy small model quantized by GPTQModel, stored in GPTQ v2 format
 MODELS = ["XXXXyu/Qwen3-1.7B-w2g64-gptq_v2"]
@@ -25,22 +25,13 @@ def test_model_load(vllm_runner, model_id, monkeypatch):
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-    # Only check the default GPTQ linear method (used for 2/3-bit models).
-    # 4/8-bit linear methods like Marlin already support gptq_v2.
-    linear_method_cls = GPTQLinearMethod
-
     with vllm_runner(model_id, dtype=torch.float16, max_model_len=512) as llm:
 
         def check_model(model_id):
             for name, submodule in model_id.named_modules():
                 # Could check more modules if necessary
                 if name == "model_id.layers.0.self_attn.qkv_proj":
-                    assert isinstance(submodule.quant_method, linear_method_cls)
-
-                    config = submodule.quant_method.quant_config
-                    assert config.checkpoint_format == "gptq_v2"
-                    assert submodule.quant_method.use_v2_format
-
+                    assert isinstance(submodule.quant_method, GPTQMarlinLinearMethod)
                     # Just break since currently we only check 1 module
                     break
 

@@ -44,6 +44,7 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "fp_quant",
     "experts_int8",
     "petit_nvfp4",
+    "gptq_marlin",
 ]
 
 # The customized quantization methods which will be added to this dict.
@@ -119,8 +120,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .fp8 import Fp8Config
     from .fp_quant import FPQuantConfig
     from .gguf import GGUFConfig
-    from .gptq import GPTQConfig
-    from .gptq_marlin import GPTQMarlinConfig
+    from .gptq import GPTQMarlinConfig
     from .inc import INCConfig
     from .modelopt import (
         ModelOptFp8Config,
@@ -147,7 +147,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "gguf": GGUFConfig,
         "gptq_marlin": GPTQMarlinConfig,
         "awq_marlin": AWQMarlinConfig,
-        "gptq": GPTQConfig,
+        "gptq": GPTQMarlinConfig,
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
         "ptpc_fp8": PTPCFp8Config,

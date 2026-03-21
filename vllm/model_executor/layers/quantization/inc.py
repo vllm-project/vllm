@@ -345,35 +345,21 @@ class INCConfig(QuantizationConfig):
                 )
         else:
             use_marlin = False
-        if use_marlin:
-            from vllm.model_executor.layers.quantization.gptq_marlin import (
-                GPTQMarlinConfig,
-                GPTQMarlinLinearMethod,
-                GPTQMarlinMoEMethod,
-            )
+        from vllm.model_executor.layers.quantization.gptq import (
+            GPTQMarlinConfig,
+            GPTQMarlinLinearMethod,
+            GPTQMarlinMoEMethod,
+        )
 
-            quant_args_marlin = GPTQMarlinConfig(
-                weight_bits=weight_bits,
-                group_size=group_size,
-                is_sym=sym,
-                lm_head_quantized=False,
-                desc_act=False,
-                dynamic={},
-                full_config={},
-            )
-        else:
-            from vllm.model_executor.layers.quantization.gptq import (
-                GPTQConfig,
-                GPTQLinearMethod,
-            )
-
-            quant_args = GPTQConfig(
-                weight_bits=weight_bits,
-                group_size=group_size,
-                lm_head_quantized=False,
-                desc_act=False,
-                dynamic={},
-            )
+        quant_args_marlin = GPTQMarlinConfig(
+            weight_bits=weight_bits,
+            group_size=group_size,
+            is_sym=sym,
+            lm_head_quantized=False,
+            desc_act=False,
+            dynamic={},
+            full_config={},
+        )
 
         if isinstance(layer, FusedMoE):
             if use_marlin:
@@ -395,10 +381,7 @@ class INCConfig(QuantizationConfig):
                 )
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
-            if use_marlin:
-                return GPTQMarlinLinearMethod(quant_args_marlin)
-            else:
-                return GPTQLinearMethod(quant_args)
+            return GPTQMarlinLinearMethod(quant_args_marlin)
 
         return None
 
