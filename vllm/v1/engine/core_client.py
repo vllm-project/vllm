@@ -455,56 +455,6 @@ class ElasticScalingCache:
     pending_notifications: dict[EEPNotificationType, set[int]]
 
 
-def allocate_stateless_group_ports(parallel_config, new_data_parallel_size: int):
-    """
-    Allocate stateless group ports for elastic EP.
-    """
-    from vllm.utils.network_utils import get_open_ports_list
-
-    assert parallel_config.enable_elastic_ep, "Elastic EP must be enabled"
-    world_size = parallel_config.world_size
-    new_world_size_across_dp = world_size * new_data_parallel_size
-    num_world_groups = 1
-    num_dp_groups = max(1, new_world_size_across_dp // new_data_parallel_size)
-    num_ep_groups = max(
-        1,
-        new_world_size_across_dp
-        // (new_data_parallel_size * parallel_config.tensor_parallel_size),
-    )
-    num_eplb_groups = num_ep_groups
-    total_ports_needed = (
-        num_world_groups + num_dp_groups + num_ep_groups + num_eplb_groups
-    ) * 3 + 5
-    all_ports = get_open_ports_list(total_ports_needed)
-    new_data_parallel_master_port_list = all_ports[-5:]
-    all_ports = all_ports[:-5]
-    new_stateless_world_group_port_list = [
-        all_ports[i : i + 3] for i in range(0, num_world_groups * 3, 3)
-    ]
-    start_idx = num_world_groups * 3
-    new_stateless_dp_group_port_list = [
-        all_ports[i : i + 3] for i in range(start_idx, start_idx + num_dp_groups * 3, 3)
-    ]
-    start_idx += num_dp_groups * 3
-    new_stateless_ep_group_port_list = [
-        all_ports[i : i + 3] for i in range(start_idx, start_idx + num_ep_groups * 3, 3)
-    ]
-    start_idx += num_ep_groups * 3
-    new_stateless_eplb_group_port_list = [
-        all_ports[i : i + 3]
-        for i in range(start_idx, start_idx + num_eplb_groups * 3, 3)
-    ]
-
-    parallel_config._stateless_world_group_port_list = (
-        new_stateless_world_group_port_list
-    )
-    parallel_config._stateless_dp_group_port_list = new_stateless_dp_group_port_list
-    parallel_config._stateless_ep_group_port_list = new_stateless_ep_group_port_list
-    parallel_config._stateless_eplb_group_port_list = new_stateless_eplb_group_port_list
-    parallel_config.data_parallel_master_port = new_data_parallel_master_port_list.pop()
-    parallel_config._data_parallel_master_port_list = new_data_parallel_master_port_list
-
-
 class MPClient(EngineCoreClient):
     """
     MPClient: base client for multi-proc EngineCore.
@@ -544,6 +494,11 @@ class MPClient(EngineCoreClient):
         try:
             # State used for data parallel.
             self.engines_running = False
+            parallel_config = vllm_config.parallel_config
+            # Elastic EP can remove a rank and later add it back with the same
+            # identity. The client input ROUTER needs handover to allow the new
+            # engine to replace the dead connection.
+            enable_input_socket_handover = parallel_config.enable_elastic_ep
 
             self.stats_update_address: str | None = None
             if client_addresses:
@@ -552,7 +507,11 @@ class MPClient(EngineCoreClient):
                 output_address = client_addresses["output_address"]
                 self.stats_update_address = client_addresses.get("stats_update_address")
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
-                    self.ctx, input_address, zmq.ROUTER, bind=True
+                    self.ctx,
+                    input_address,
+                    zmq.ROUTER,
+                    bind=True,
+                    router_handover=enable_input_socket_handover,
                 )
                 self.resources.output_socket = make_zmq_socket(
                     self.ctx, output_address, zmq.PULL
@@ -561,7 +520,11 @@ class MPClient(EngineCoreClient):
                 # Engines are managed by this client.
                 addresses = get_engine_zmq_addresses(vllm_config)
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
-                    self.ctx, addresses.inputs[0], zmq.ROUTER, bind=True
+                    self.ctx,
+                    addresses.inputs[0],
+                    zmq.ROUTER,
+                    bind=True,
+                    router_handover=enable_input_socket_handover,
                 )
                 self.resources.output_socket = make_zmq_socket(
                     self.ctx, addresses.outputs[0], zmq.PULL
@@ -579,7 +542,6 @@ class MPClient(EngineCoreClient):
                         coordinator.get_stats_publish_address()
                     )
 
-            parallel_config = vllm_config.parallel_config
             dp_size = parallel_config.data_parallel_size
             dp_rank = parallel_config.data_parallel_index
             dp_local_size = parallel_config.data_parallel_size_local
@@ -1529,6 +1491,28 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self._ensure_output_queue_task()
         await future
 
+    def _setup_elastic_ep_reconfig_bootstrap(self) -> tuple[str, int]:
+        from vllm.distributed.utils import create_tcp_store
+        from vllm.utils.network_utils import get_open_ports_list
+
+        parallel_config = self.vllm_config.parallel_config
+        parallel_config._data_parallel_master_port_list = get_open_ports_list(5)
+        parallel_config.data_parallel_master_port = (
+            parallel_config._data_parallel_master_port_list.pop()
+        )
+
+        ip = parallel_config.data_parallel_master_ip
+        store = create_tcp_store(
+            ip,
+            0,
+            is_master=True,
+            world_size=-1,
+            wait_for_workers=False,
+        )
+        parallel_config._coord_store_port = store.port
+        self._coord_store = store
+        return ip, store.port
+
     async def _scale_up_elastic_ep(
         self, cur_data_parallel_size: int, new_data_parallel_size: int
     ) -> None:
@@ -1543,7 +1527,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
 
         parallel_config = self.vllm_config.parallel_config
-        allocate_stateless_group_ports(parallel_config, new_data_parallel_size)
+        ip, coord_store_port = self._setup_elastic_ep_reconfig_bootstrap()
 
         # Phase 1: Send reconfig messages to existing engines
         reconfig_futures = []
@@ -1552,13 +1536,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 new_data_parallel_size=new_data_parallel_size,
                 new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
                 new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_master_ip=parallel_config.data_parallel_master_ip,
+                new_data_parallel_master_ip=ip,
                 new_data_parallel_master_port=parallel_config.data_parallel_master_port,
                 new_data_parallel_master_port_list=parallel_config._data_parallel_master_port_list,
-                new_stateless_world_group_port_list=parallel_config._stateless_world_group_port_list,
-                new_stateless_dp_group_port_list=parallel_config._stateless_dp_group_port_list,
-                new_stateless_ep_group_port_list=parallel_config._stateless_ep_group_port_list,
-                new_stateless_eplb_group_port_list=parallel_config._stateless_eplb_group_port_list,
+                coord_store_port=coord_store_port,
             )
             coro = self._call_utility_async(
                 "reinitialize_distributed", reconfig_request, engine=engine
@@ -1638,7 +1619,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
 
         parallel_config = self.vllm_config.parallel_config
-        allocate_stateless_group_ports(parallel_config, new_data_parallel_size)
+        ip, coord_store_port = self._setup_elastic_ep_reconfig_bootstrap()
 
         reconfig_futures = []
         for cur_dp_rank, engine in enumerate(self.core_engines):
@@ -1646,13 +1627,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 new_data_parallel_size=new_data_parallel_size,
                 new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
                 new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_master_ip=parallel_config.data_parallel_master_ip,
+                new_data_parallel_master_ip=ip,
                 new_data_parallel_master_port=parallel_config.data_parallel_master_port,
                 new_data_parallel_master_port_list=parallel_config._data_parallel_master_port_list,
-                new_stateless_world_group_port_list=parallel_config._stateless_world_group_port_list,
-                new_stateless_dp_group_port_list=parallel_config._stateless_dp_group_port_list,
-                new_stateless_ep_group_port_list=parallel_config._stateless_ep_group_port_list,
-                new_stateless_eplb_group_port_list=parallel_config._stateless_eplb_group_port_list,
+                coord_store_port=coord_store_port,
             )
             if cur_dp_rank >= new_data_parallel_size:
                 reconfig_request.new_data_parallel_rank = (

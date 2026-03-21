@@ -180,7 +180,7 @@ class KVBlockZeroer:
         )
         self._ids_gpu = torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
         self._meta = (
-            torch.tensor(seg_addrs, dtype=torch.int64, device=self.device),
+            torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
             page_size_el,
             blk_size,
             len(seg_addrs),
@@ -258,7 +258,8 @@ class AttentionGroup:
 
 
 def select_common_block_size(
-    kv_manager_block_size: int, attn_groups: list[AttentionGroup]
+    kv_manager_block_size: int,
+    backends: list[type[AttentionBackend]],
 ) -> int:
     """
     Select a block size that is supported by all backends and is a factor of
@@ -269,7 +270,7 @@ def select_common_block_size(
 
     Args:
         kv_manager_block_size: Block size of KV cache.
-        attn_groups: List of attention groups.
+        backends: List of attention backend classes.
 
     Returns:
         The selected block size.
@@ -296,8 +297,6 @@ def select_common_block_size(
             if not is_supported:
                 return False
         return True
-
-    backends = [group.backend for group in attn_groups]
 
     # Case 1: if the block_size of kv cache manager is supported by all backends,
     # return it directly.
@@ -356,8 +355,9 @@ def prepare_kernel_block_sizes(
         if isinstance(kv_cache_spec, AttentionSpec):
             # This is an attention backend that supports virtual block splitting.
             kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
+            group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
             selected_kernel_size = select_common_block_size(
-                kv_manager_block_size, attn_groups[kv_cache_gid]
+                kv_manager_block_size, group_backends
             )
             kernel_block_sizes.append(selected_kernel_size)
         elif isinstance(kv_cache_spec, MambaSpec):
@@ -510,7 +510,7 @@ def bind_kv_cache(
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
-        # NOTE: Use list because of v0 PP virtual engine.
+        # NOTE: Keep list wrapper for layers that index kv_cache by engine slot.
         forward_context[layer_name].kv_cache = [kv_cache]
 
 
