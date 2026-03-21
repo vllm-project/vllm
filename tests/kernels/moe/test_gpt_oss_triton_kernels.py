@@ -26,7 +26,7 @@ from triton_kernels.testing import assert_close
 from triton_kernels.topk import topk as topk_fn
 
 from vllm.model_executor.layers.fused_moe.config import mxfp4_w4a16_moe_quant_config
-from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
+from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
     legacy_routing,
     make_routing_data,
     triton_kernel_moe_forward,

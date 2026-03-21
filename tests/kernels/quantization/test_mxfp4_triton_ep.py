@@ -36,20 +36,20 @@ class TestTritonMoeForwardExpertMap:
 
         with (
             patch(
-                "vllm.model_executor.layers.fused_moe."
+                "vllm.model_executor.layers.fused_moe.experts."
                 "gpt_oss_triton_kernels_moe.legacy_routing"
             ) as mock_legacy,
             patch("triton_kernels.topk.topk") as mock_topk,
             patch(
-                "vllm.model_executor.layers.fused_moe."
+                "vllm.model_executor.layers.fused_moe.experts."
                 "gpt_oss_triton_kernels_moe.make_routing_data"
             ) as mock_make_routing,
             patch(
-                "vllm.model_executor.layers.fused_moe."
+                "vllm.model_executor.layers.fused_moe.experts."
                 "gpt_oss_triton_kernels_moe.triton_kernel_fused_experts"
             ) as mock_fused_experts,
         ):
-            from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
+            from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (  # noqa: E501
                 triton_kernel_moe_forward,
             )
 
