@@ -2,22 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side handler for SimpleCPUOffloadConnector."""
 
-import queue
-import threading
 from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.simple_kv_offload import copy_ops
+from vllm.v1.simple_kv_offload.copy_backend import CopyBackend, get_copy_backend
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.simple_kv_offload.copy_ops import BatchMemcpyParams
 
 logger = init_logger(__name__)
 
@@ -30,6 +26,7 @@ class SimpleCPUOffloadWorker:
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig | None",
         cpu_capacity_bytes: int,
+        copy_backend: str = "kernel",
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -44,9 +41,7 @@ class SimpleCPUOffloadWorker:
         self.load_stream: torch.cuda.Stream | None = None
         self.store_stream: torch.cuda.Stream | None = None
 
-        # Pre-computed params for batched DMA copies (one per direction).
-        self._store_batch_params: BatchMemcpyParams | None = None
-        self._load_batch_params: BatchMemcpyParams | None = None
+        self._backend: CopyBackend = get_copy_backend(copy_backend)
 
         # Ordered (event_idx, Event). Events pre-allocated on main thread.
         self._load_events: list[tuple[int, torch.Event]] = []
@@ -62,8 +57,6 @@ class SimpleCPUOffloadWorker:
         # Pending event index sets, populated in bind_connector_metadata
         self._pending_load_event_indices: set[int] = set()
         self._pending_store_event_indices: set[int] = set()
-
-        self._copy_queue: queue.SimpleQueue = queue.SimpleQueue()
 
     @property
     def _is_initialized(self) -> bool:
@@ -183,24 +176,14 @@ class SimpleCPUOffloadWorker:
         self.load_stream = torch.cuda.Stream(priority=low_pri)
         self.store_stream = torch.cuda.Stream(priority=low_pri)
 
-        # Build batch memcpy params after streams are created.
-        self._store_batch_params = copy_ops.build_params(
+        # Initialize copy backend with caches and streams.
+        self._backend.init(
             self.gpu_kv_caches,
             self.cpu_kv_caches,
-            stream=self.store_stream,
+            self.device,
+            self.load_stream,
+            self.store_stream,
         )
-        self._load_batch_params = copy_ops.build_params(
-            self.cpu_kv_caches,
-            self.gpu_kv_caches,
-            stream=self.load_stream,
-        )
-
-        self._copy_thread = threading.Thread(
-            target=self._copy_loop,
-            args=(self._copy_queue, self.device, self._load_events, self._store_events),
-            daemon=True,
-        )
-        self._copy_thread.start()
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata
@@ -286,24 +269,6 @@ class SimpleCPUOffloadWorker:
             self._store_hwm = event_idx
         self._store_events.clear()
 
-    @staticmethod
-    def _copy_loop(
-        q: queue.SimpleQueue,
-        device: torch.device,
-        load_events: list[tuple[int, torch.Event]],
-        store_events: list[tuple[int, torch.Event]],
-    ) -> None:
-        current_platform.set_device(device)
-        while True:
-            item = q.get()
-            if item is None:
-                return
-            src_blocks, dst_blocks, params, stream, event_idx, is_store = item
-            copy_ops.copy_blocks(src_blocks, dst_blocks, params)
-            event = torch.Event()
-            event.record(stream)
-            (store_events if is_store else load_events).append((event_idx, event))
-
     def _launch_copy_kernel(
         self,
         src_blocks: list[int],
@@ -315,22 +280,17 @@ class SimpleCPUOffloadWorker:
             return
 
         if is_store:
-            batch_params = self._store_batch_params
-            stream = self.store_stream
-        else:
-            batch_params = self._load_batch_params
-            stream = self.load_stream
+            assert self.store_stream is not None
+            # Await for GPU blocks to be populated.
+            self.store_stream.wait_stream(torch.cuda.current_stream(self.device))
 
-        assert stream is not None and batch_params is not None
-
-        if is_store:
-            # Await for GPU blocks to be populated. Current stream could be from either
-            # the default stream or CUDA graph stream, but the model runner guarantees
-            # no stream switches between model()/replay() and get_finished().
-            stream.wait_stream(torch.cuda.current_stream(self.device))
-
-        self._copy_queue.put(
-            (src_blocks, dst_blocks, batch_params, stream, event_idx, is_store)
+        events = self._store_events if is_store else self._load_events
+        self._backend.launch_copy(
+            src_blocks,
+            dst_blocks,
+            is_store,
+            event_idx,
+            events,
         )
 
     def _drain_stream_events(self, is_store: bool) -> int:
