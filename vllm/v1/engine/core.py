@@ -13,6 +13,7 @@ from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
+from multiprocessing.queues import Queue
 from typing import Any, TypeVar, cast
 
 import msgspec
@@ -59,6 +60,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
     EngineZmqAddresses,
@@ -788,6 +790,7 @@ class EngineCoreProc(EngineCore):
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
+        tensor_queue: Queue | None = None,
         *,
         engine_index: int = 0,
     ):
@@ -801,6 +804,12 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
+
+        # Receiver for tensor IPC
+        self.tensor_ipc_receiver: TensorIpcReceiver | None = None
+        if tensor_queue is not None:
+            self.tensor_ipc_receiver = TensorIpcReceiver(tensor_queue)
+            logger.info("Using tensor IPC queue for multimodal tensor sharing")
 
         with self._perform_handshakes(
             handshake_address,
@@ -1340,9 +1349,11 @@ class EngineCoreProc(EngineCore):
     ):
         """Input socket IO thread."""
 
-        # Msgpack serialization decoding.
-        add_request_decoder = MsgpackDecoder(EngineCoreRequest)
-        generic_decoder = MsgpackDecoder()
+        # Msgpack serialization decoding with optional tensor IPC receiver.
+        add_request_decoder = MsgpackDecoder(
+            EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
+        )
+        generic_decoder = MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver)
 
         with ExitStack() as stack, zmq.Context() as ctx:
             input_sockets = [
@@ -1418,10 +1429,7 @@ class EngineCoreProc(EngineCore):
                     self.input_queue.put_nowait((request_type, request))
 
     def process_output_sockets(
-        self,
-        output_paths: list[str],
-        coord_output_path: str | None,
-        engine_index: int,
+        self, output_paths: list[str], coord_output_path: str | None, engine_index: int
     ):
         """Output socket IO thread."""
 
@@ -1580,6 +1588,7 @@ class DPEngineCoreProc(EngineCoreProc):
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
+        tensor_queue: Queue | None = None,
     ):
         assert vllm_config.model_config.is_moe, (
             "DPEngineCoreProc should only be used for MoE models"
@@ -1605,6 +1614,7 @@ class DPEngineCoreProc(EngineCoreProc):
             log_stats,
             client_handshake_address,
             engine_index=dp_rank,
+            tensor_queue=tensor_queue,
         )
 
     def _init_data_parallel(self, vllm_config: VllmConfig):

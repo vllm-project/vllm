@@ -14,7 +14,12 @@ import vllm.envs as envs
 from vllm.config.model_arch import (
     ModelArchitectureConfig,
 )
-from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
+from vllm.config.multimodal import (
+    MMCacheType,
+    MMEncoderTPMode,
+    MMTensorIPC,
+    MultiModalConfig,
+)
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
@@ -310,6 +315,7 @@ class ModelConfig:
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
+    mm_tensor_ipc: InitVar[MMTensorIPC] = None
 
     def compute_hash(self) -> str:
         """
@@ -430,6 +436,7 @@ class ModelConfig:
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
+        mm_tensor_ipc: MMTensorIPC,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -612,6 +619,7 @@ class ModelConfig:
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
+                mm_tensor_ipc=mm_tensor_ipc,
             )
 
             mm_config_kwargs = {
@@ -1110,6 +1118,22 @@ class ModelConfig:
                 " must be divisible by dcp world size when enable "
                 "decode context parallel for GQA "
                 f"({parallel_config.decode_context_parallel_size})."
+            )
+
+        # torch_shm uses a single IPC queue to rank 0; DP>1 is
+        # incompatible because API servers can't know which
+        # CoreEngine the scheduler will assign work to. TP>1 is
+        # also not supported because this requires broadcasting
+        # MM tensors between all TP ranks.
+        if (
+            self.multimodal_config is not None
+            and self.multimodal_config.mm_tensor_ipc == "torch_shm"
+            and parallel_config.world_size_across_dp > 1
+        ):
+            raise ValueError(
+                "mm_tensor_ipc='torch_shm' is not supported with "
+                "data_parallel_size > 1 or tensor_parallel_size > 1 "
+                "or pipeline_parallel_size > 1."
             )
 
     def get_sliding_window(self) -> int | None:

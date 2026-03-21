@@ -766,6 +766,17 @@ class VllmConfig:
             else:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
 
+        if (
+            self.model_config is not None
+            and self.model_config.multimodal_config is not None
+            and self.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"
+            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
+        ):
+            raise ValueError(
+                "torch_shm is known to fail without "
+                "VLLM_WORKER_MULTIPROC_METHOD set to spawn"
+            )
+
         from vllm.platforms import current_platform
 
         if (
