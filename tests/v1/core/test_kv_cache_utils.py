@@ -24,8 +24,8 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
-    _merge_layers_from_attn_grouping,
-    _split_layers_from_attn_grouping,
+    _merge_attn_layers_into_pack,
+    _split_attn_layers_from_pack,
     estimate_max_model_len,
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
@@ -2143,7 +2143,7 @@ def test_unify_hybrid_kv_cache_specs():
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
 
 
-def test_merge_layers_from_attn_grouping():
+def test_merge_attn_layers_into_pack():
     attn_pack_size = 2
 
     hybrid_kv_cache_specs = {
@@ -2151,7 +2151,7 @@ def test_merge_layers_from_attn_grouping():
         "layer_2": new_kv_cache_spec(head_size=32),
         "layer_3": new_kv_cache_spec(head_size=32),
     }
-    merged_kv_cache_specs = _merge_layers_from_attn_grouping(
+    merged_kv_cache_specs = _merge_attn_layers_into_pack(
         attn_pack_size, hybrid_kv_cache_specs
     )
     assert merged_kv_cache_specs == {
@@ -2165,7 +2165,7 @@ def test_merge_layers_from_attn_grouping():
         "layer_3": new_kv_cache_spec(head_size=32),
         "layer_4": new_kv_cache_spec(head_size=32),
     }
-    merged_kv_cache_specs = _merge_layers_from_attn_grouping(
+    merged_kv_cache_specs = _merge_attn_layers_into_pack(
         attn_pack_size, hybrid_kv_cache_specs
     )
     assert merged_kv_cache_specs == {
@@ -2175,7 +2175,7 @@ def test_merge_layers_from_attn_grouping():
     }
 
 
-def test_split_layers_from_attn_grouping():
+def test_split_attn_layers_from_pack():
     attn_pack_size = 2
     expected_page_size = new_mamba_spec().page_size_bytes
 
@@ -2195,7 +2195,7 @@ def test_split_layers_from_attn_grouping():
             ),
         ],
     )
-    split_kv_cache_config = _split_layers_from_attn_grouping(
+    split_kv_cache_config = _split_attn_layers_from_pack(
         attn_pack_size, kv_cache_config
     )
 
