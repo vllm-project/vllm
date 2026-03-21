@@ -75,9 +75,9 @@ def make_copy_and_call(
             runtime_tensor = list_args[arg_idx]
             runtime_shape = runtime_tensor.shape[0]
             assert runtime_shape <= input_buffers[buf_idx].shape[0], (
-                f"runtime shape {runtime_shape} exceeds static buffer size "
+                f"Runtime shape {runtime_shape} exceeds static buffer size "
                 f"{input_buffers[buf_idx].shape[0]}. "
-                f"The first run must use the maximum input size."
+                "Ensure input tensors do not exceed the pre-allocated buffer capacity."
             )
             static_tensor = input_buffers[buf_idx][:runtime_shape]
             static_tensor.copy_(runtime_tensor)
