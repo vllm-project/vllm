@@ -767,7 +767,8 @@ class VllmConfig:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
 
         if (
-            self.model_config.multimodal_config is not None
+            self.model_config is not None
+            and self.model_config.multimodal_config is not None
             and self.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"
             and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
         ):

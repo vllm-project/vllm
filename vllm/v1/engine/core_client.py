@@ -21,7 +21,6 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import MMTensorIPC
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -552,15 +551,12 @@ class MPClient(EngineCoreClient):
                     )
 
             # Serialization setup with tensor queues for multimodal tensor IPC.
-            # Get IPC config from multimodal_config, falling back to default
-            mm_tensor_ipc: MMTensorIPC = "direct_rpc"  # Default
-            if vllm_config.model_config.multimodal_config is not None:
-                mm_tensor_ipc = vllm_config.model_config.multimodal_config.mm_tensor_ipc
-
-            # Create TensorIpcSender when IPC is enabled and queues available
             oob_tensor_consumer: OOBTensorConsumer | None = None
-            if mm_tensor_ipc == "torch_shm" and tensor_queue:
-                oob_tensor_consumer = TensorIpcSender(tensor_queue)
+            model_config = getattr(vllm_config, "model_config", None)
+            if model_config is not None and model_config.multimodal_config is not None:
+                mm_tensor_ipc = vllm_config.model_config.multimodal_config.mm_tensor_ipc
+                if mm_tensor_ipc == "torch_shm" and tensor_queue is not None:
+                    oob_tensor_consumer = TensorIpcSender(tensor_queue)
 
             self.encoder = MsgpackEncoder(oob_tensor_consumer=oob_tensor_consumer)
             self.decoder = MsgpackDecoder(EngineCoreOutputs)
