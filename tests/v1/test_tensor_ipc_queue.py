@@ -659,6 +659,225 @@ def test_ipc_disabled_mode():
         )
 
 
+@dataclass
+class MultiTensorMessage:
+    """Message with multiple tensors to test multi-tensor IPC."""
+
+    t1: torch.Tensor
+    t2: torch.Tensor
+    sender_label: str
+
+
+def concurrent_sender_process(
+    tensor_queue: torch_mp.Queue,
+    payload_queue: mp.Queue,
+    result_queue: mp.Queue,
+    sender_index: int,
+    num_messages: int,
+    barrier: BarrierType,
+    retrieval_done: EventType,
+):
+    """Process that acts as one of N concurrent senders."""
+    try:
+        sender = TensorIpcSender(tensor_queue)
+        encoder = MsgpackEncoder(oob_tensor_consumer=sender)
+
+        # Wait for all senders to be ready before sending
+        barrier.wait(timeout=10.0)
+
+        encoded_payloads = []
+        for msg_idx in range(num_messages):
+            # Each sender creates uniquely-shaped tensors so we can
+            # verify correct routing on the receiver side.
+            t1 = torch.full((sender_index + 1, 3), float(msg_idx), dtype=torch.float32)
+            t2 = torch.full(
+                (2, sender_index + 2), float(msg_idx + 100), dtype=torch.float64
+            )
+            msg = MultiTensorMessage(
+                t1=t1,
+                t2=t2,
+                sender_label=f"sender_{sender_index}_msg_{msg_idx}",
+            )
+            encoded = encoder.encode(msg)
+            encoded_payloads.append(encoded)
+
+        # Send all encoded payloads via the regular (non-tensor) queue
+        for encoded in encoded_payloads:
+            payload_queue.put(encoded, timeout=10.0)
+
+        result_queue.put(
+            {
+                "success": True,
+                "sender_index": sender_index,
+                "num_sent": num_messages,
+            }
+        )
+
+        # Keep alive so shared-memory handles remain valid
+        retrieval_done.wait(timeout=30.0)
+    except Exception as e:
+        import traceback
+
+        result_queue.put(
+            {
+                "success": False,
+                "sender_index": sender_index,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }
+        )
+
+
+def test_concurrent_senders_single_receiver():
+    """Test N concurrent senders sharing one queue with a single receiver.
+
+    Each sender encodes multiple messages (each containing two tensors) via
+    its own MsgpackEncoder + TensorIpcSender.  A single TensorIpcReceiver
+    on the receiving side must correctly drain-and-buffer interleaved
+    TensorIpcData items from the shared queue and match them back to the
+    right message handles during decode.
+    """
+    num_senders = 4
+    num_messages_per_sender = 3
+    tensor_queue = torch_mp.Queue()
+    payload_queue: mp.Queue = mp.Queue()
+    result_queue: mp.Queue = mp.Queue()
+    barrier = mp.Barrier(num_senders)
+    retrieval_done = mp.Event()
+
+    # Launch sender processes
+    processes = []
+    for i in range(num_senders):
+        proc = mp.Process(
+            target=concurrent_sender_process,
+            args=(
+                tensor_queue,
+                payload_queue,
+                result_queue,
+                i,
+                num_messages_per_sender,
+                barrier,
+                retrieval_done,
+            ),
+        )
+        proc.start()
+        processes.append(proc)
+
+    # Collect send confirmations
+    send_results = []
+    for _ in range(num_senders):
+        send_results.append(result_queue.get(timeout=15.0))
+    for r in send_results:
+        assert r["success"], (
+            f"Sender {r['sender_index']} failed: {r.get('error')}\n"
+            f"{r.get('traceback', '')}"
+        )
+
+    # Now decode all messages from the main process using a single receiver
+    receiver = TensorIpcReceiver(tensor_queue)
+    decoder = MsgpackDecoder(MultiTensorMessage, oob_tensor_provider=receiver)
+
+    decoded_messages: list[MultiTensorMessage] = []
+    total = num_senders * num_messages_per_sender
+    for _ in range(total):
+        encoded = payload_queue.get(timeout=10.0)
+        decoded = decoder.decode(encoded)
+        assert isinstance(decoded, MultiTensorMessage)
+        decoded_messages.append(decoded)
+
+    # Signal senders they can exit
+    retrieval_done.set()
+
+    # Group by sender_label prefix to verify all messages arrived
+    by_sender: dict[int, list[MultiTensorMessage]] = {}
+    for msg in decoded_messages:
+        # label format: "sender_{i}_msg_{j}"
+        parts = msg.sender_label.split("_")
+        sender_idx = int(parts[1])
+        by_sender.setdefault(sender_idx, []).append(msg)
+
+    assert len(by_sender) == num_senders, (
+        f"Expected {num_senders} senders, got {len(by_sender)}"
+    )
+
+    for sender_idx in range(num_senders):
+        msgs = sorted(by_sender[sender_idx], key=lambda m: m.sender_label)
+        assert len(msgs) == num_messages_per_sender, (
+            f"Sender {sender_idx}: expected {num_messages_per_sender} "
+            f"messages, got {len(msgs)}"
+        )
+        for msg_idx, msg in enumerate(msgs):
+            assert msg.sender_label == f"sender_{sender_idx}_msg_{msg_idx}"
+            # Verify tensor shapes match what the sender created
+            assert msg.t1.shape == (sender_idx + 1, 3)
+            assert msg.t2.shape == (2, sender_idx + 2)
+            # Verify tensor values
+            assert torch.allclose(msg.t1, torch.full_like(msg.t1, float(msg_idx)))
+            assert torch.allclose(msg.t2, torch.full_like(msg.t2, float(msg_idx + 100)))
+
+    for proc in processes:
+        proc.join(timeout=5.0)
+
+
+def test_concurrent_senders_interleaved_buffer():
+    """Test receiver buffering when tensors from multiple senders interleave.
+
+    Manually enqueue TensorIpcData from two senders in an interleaved order
+    and verify the receiver correctly buffers and retrieves each tensor by
+    its (sender_id, message_id, tensor_id) handle.
+    """
+    tensor_queue = torch_mp.Queue()
+
+    # Sender A: 2 tensors for message 1
+    a_t0 = torch.randn(2, 3)
+    a_t1 = torch.randn(4, 5)
+    # Sender B: 2 tensors for message 1
+    b_t0 = torch.randn(6, 7)
+    b_t1 = torch.randn(8, 9)
+
+    # Interleave: B_t0, A_t0, B_t1, A_t1
+    for sid, mid, tid, t in [
+        ("B", 1, 0, b_t0),
+        ("A", 1, 0, a_t0),
+        ("B", 1, 1, b_t1),
+        ("A", 1, 1, a_t1),
+    ]:
+        tensor_queue.put(
+            TensorIpcData(sender_id=sid, message_id=mid, tensor_id=tid, tensor=t)
+        )
+
+    receiver = TensorIpcReceiver(tensor_queue)
+
+    # Request A_t1 first — receiver must drain and buffer B_t0, A_t0, B_t1
+    result = receiver(
+        "float32", a_t1.shape, {"sender_id": "A", "message_id": 1, "tensor_id": 1}
+    )
+    assert torch.equal(result, a_t1)
+
+    # Now request B_t0 from buffer
+    result = receiver(
+        "float32", b_t0.shape, {"sender_id": "B", "message_id": 1, "tensor_id": 0}
+    )
+    assert torch.equal(result, b_t0)
+
+    # Request A_t0 from buffer
+    result = receiver(
+        "float32", a_t0.shape, {"sender_id": "A", "message_id": 1, "tensor_id": 0}
+    )
+    assert torch.equal(result, a_t0)
+
+    # Request B_t1 from buffer
+    result = receiver(
+        "float64", b_t1.shape, {"sender_id": "B", "message_id": 1, "tensor_id": 1}
+    )
+    assert torch.equal(result, b_t1)
+
+    # All buffers should be drained
+    for sid in ("A", "B"):
+        tensors = receiver._tensor_buffers[sid].tensors.get(1, {})
+        assert len(tensors) == 0, f"Sender {sid} buffer not empty: {tensors}"
+
+
 def test_mixed_cpu_cuda_with_ipc_enabled():
     """Test that encoder is configured correctly for IPC with all tensor types."""
     if not torch.cuda.is_available():
