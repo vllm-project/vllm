@@ -8,51 +8,60 @@
 
 ## 日期：2026-03-21 (第三天)
 
-### 🌅 09:43 晨间检查
+### 🌅 10:49 晨间检查
 
 **simpx PR 状态确认:**
 
-| PR # | 标题 | 状态 | 评论 | 行动 |
-|------|------|------|------|------|
-| #37621 | [Bugfix] JAIS: Only apply ALiBi when position_embedding_type is alibi | open | 0 | 等待维护者 review |
-| #37578 | [Bugfix] Fix unclean shutdown from Ctrl-C with AR Fusion | open | 1 (bot) | 等待维护者 review |
+| PR # | 标题 | 状态 | 评论 | 创建时间 | 行动 |
+|------|------|------|------|----------|------|
+| #37621 | [Bugfix] JAIS: Only apply ALiBi when position_embedding_type is alibi | open, blocked | 0 | 03-20 00:50 | 等待维护者 review |
+| #37578 | [Bugfix] Fix unclean shutdown from Ctrl-C with AR Fusion | open, blocked | 1 (bot) | 03-19 16:39 | 等待维护者 review |
 
 **评论详情：**
-- PR #37621：无评论，创建约 33 小时，静默等待中
-- PR #37578：仅 gemini-code-assist[bot] 评论（无法 review 文件类型），创建约 41 小时
+- PR #37621：无评论，创建约 34 小时，静默等待中
+- PR #37578：仅 gemini-code-assist[bot] 评论（无法 review 文件类型），创建约 42 小时
 
-**决策：** 无维护者评论需要回复，继续等待。
+**发现：** PR #37621 修复的是 issue #37400（good first issue），但 PR 描述中未添加 `Fixes #37400` 关联。考虑通过 GitHub 网页编辑补充。
+
+**决策：** 无维护者评论需要回复，继续等待。今日可提交新 PR（上限 2 个，今日 0/2）。
 
 ### 👀 izhuhaoran 动态 (2026-03-21 凌晨)
 
-**新建 PRs (今天 01:00-01:20 UTC / 09:00-09:20 HKT):**
-| PR # | 标题 | 时间 |
-|------|------|------|
-| #37728 | Fix Mamba state corruption from stale CUDA graph block table entries | 01:19 UTC |
-| #37727 | [Bugfix] Fix Responses API instructions leaking through previous_response_id | 01:09 UTC |
-| #37726 | Revert "[Model] Deprecate the score task..." | 01:05 UTC |
+**新建 PRs (今天 01:00-02:30 UTC / 09:00-10:30 HKT):**
+| PR # | 标题 | 时间 (UTC) |
+|------|------|-----------|
+| #37728 | Fix Mamba state corruption from stale CUDA graph block table entries | 02:21 |
+| #37727 | [Bugfix] Fix Responses API instructions leaking through previous_response_id | 02:07 |
+| #37726 | Revert "[Model] Deprecate the score task (this will not affect users)." (#37537) | 01:08 |
+| #37725 | [Bugfix] Preserve CUDA arch suffix (a/f) for SM12x — fixes NVFP4 NaN on desktop Blackwell | 02:33 |
+| #37723 | [ROCm][CI] Stabilize ROCm speech-to-text translation test with ROCM_EXTRA_ARGS | 23:32 (03-20) |
+| #37722 | quick fix for 37665 | 23:19 (03-20) |
+| #37721 | [ROCm][CI] Update GSM8K eval config to use fp8-and-mixed models list (MI355) | 01:27 |
+| #37719 | [Test] Only Run MLA model when user explicitly set for batch invariance | 22:24 (03-20) |
 
 **观察：**
-- izhuhaoran 今天继续活跃，凌晨时段提交 3 个新 PR
-- 领域覆盖：Mamba、Responses API、Model deprecation
-- PR #37725 有维护者互动（RobTand 测试反馈 + johnnynubez 回复）
-- **学习点**：PR 描述中引用用户测试反馈可以增加可信度
+- izhuhaoran 今天继续高产，凌晨时段提交 8 个新 PR
+- 领域覆盖：Mamba、Responses API、Model deprecation、CUDA arch、ROCm CI、Test
+- PR 标题格式：`[标签] 描述` 或直接描述问题
+- **学习点**：高产出贡献者会批量处理同领域问题，但每个 PR 仍保持专注单一问题
 
 ### 📚 学习的 Merge PR 经验 (2026-03-20)
 
 | PR # | 作者 | 标题 | 学习点 |
 |------|------|------|--------|
-| #37711 | AndreasKaratzas | [ROCm][CI] Setting some mi325_4 tests back to optional | CI 配置调整，已 merged ✅ |
+| #37711 | AndreasKaratzas | [ROCm][CI] Setting some mi325_4 tests back to optional (in parity with upstream) | CI 配置调整，已 merged ✅ |
 | #37693 | DarkLight1337 | [Model] Update Kimi-K25 and Isaac processors to fit HF-style | 模型兼容性更新 |
 | #37685 | hmellor | Fix attribute error in `isaac_patch_hf_runner` | 核心贡献者，快速 merge |
 | #37683 | xyang16 | [Perf] Eliminate redundant SparseMatrix creation in gpt_oss_triton_kernels | 性能优化 |
 | #37681 | hmellor | Fix various config related issues for Transformers v5 | 批量修复相关问题 |
+| #37661 | chaunceyjiang | [Misc] Use logger.info_once for auto tool choice log message | 小改动，日志优化 |
+| #37645 | WoosukKwon | [MRV2] Avoid recompilation of _gather_block_tables_kernel | 核心维护者，小改动解决编译问题 |
 
 **标题格式总结:**
 - `[标签] 描述` 或 `[标签][子标签] 描述`
 - 常用标签：`[Bugfix]`, `[Perf]`, `[MRV2]`, `[ROCm]`, `[CI]`, `[Test]`, `[Misc]`, `[Model]`, `[Feature]`
 - 描述简洁，直接说明问题/方案
-- 核心贡献者（hmellor）有时不用标签，直接描述
+- 核心贡献者（hmellor, WoosukKwon）有时不用标签，直接描述
 
 **改动大小观察:**
 - 小修复：±1-5 行，1-2 文件
@@ -63,27 +72,48 @@
 
 ### 🎯 今日计划 (2026-03-21 周六)
 
-| 时间 | 任务 | 优先级 |
-|------|------|--------|
-| 09:43-10:00 | 完成状态检查，更新 DAILY_LEARNINGS.md | 高 |
-| 10:00-11:00 | 学习社区 merge 的 PRs 模式 | 中 |
-| 11:00-12:00 | 研究候选 issue（#37223 Qwen3 ASR LoRA 或 good first issue） | 中 |
-| 14:00-16:00 | 本地复现/测试，准备新 PR | 中 |
-| 16:00-17:00 | 如测试通过，提交第二个 PR（上限 2/天） | 中 |
+| 时间 | 任务 | 优先级 | 状态 |
+|------|------|--------|------|
+| 09:43-10:00 | 完成状态检查，更新 DAILY_LEARNINGS.md | 高 | ✅ |
+| 10:00-11:00 | 学习社区 merge 的 PRs 模式 | 中 | ✅ |
+| 10:49-11:00 | 决定今日工作重点 | 高 | 🔄 |
+| 11:00-12:00 | 研究候选 issue（#37223 Qwen3 ASR LoRA 或 #33267 torch.compile） | 中 | ⏳ |
+| 14:00-16:00 | 本地复现/测试，准备新 PR | 中 | ⏳ |
+| 16:00-17:00 | 如测试通过，提交 PR（上限 2/天） | 中 | ⏳ |
 
 **今日决策：**
 - ✅ 现有 PRs 无维护者评论，无需回复
-- ✅ 今日 PR 上限重置为 2 个（新的一天）
+- ✅ 今日 PR 上限重置为 2 个（新的一天，当前 0/2）
 - ✅ 优先等待现有 PRs 进展，如长时间无反馈可开新 PR
-- ✅ 候选方向：Qwen 模型（#37223）或 torch.compile KVCache
+- ✅ 候选方向：Qwen 模型（#37223）或 torch.compile KVCache（#33267）
+- ⚠️ 考虑给 PR #37621 添加 `Fixes #37400` 关联（通过 GitHub 网页编辑）
 
 ---
 
 ### 📝 待办事项
 
-- [ ] 检查 good first issues 列表
+- [ ] 检查 good first issues 列表 ✅
 - [ ] 研究 #37223（Add LoRA support for Qwen3ASRForConditionalGeneration）
+- [ ] 研究 #33267（Remove attention layer name from unified_kv_cache_update）
 - [ ] 如现有 PRs 无进展，准备新 PR
+- [ ] 考虑编辑 PR #37621 描述，添加 `Fixes #37400`
+
+---
+
+### 🔍 Good First Issues 候选
+
+| Issue # | 标题 | 标签 | 创建时间 | 备注 |
+|---------|------|------|----------|------|
+| #37400 | JAIS: ALiBi is applied even when position_embedding_type="learned" | bug, good first issue | 03-18 | **已被 PR #37621 修复** |
+| #37223 | Add LoRA support for Qwen3ASRForConditionalGeneration | feature, good first issue | 03-16 | 推荐，Qwen 模型方向 |
+| #35310 | Qwen-ASR Forced Aligner | feature, good first issue | 02-25 | Qwen-ASR 相关 |
+| #33267 | Remove attention layer name from unified_kv_cache_update | torch.compile, good first issue | 01-28 | 技术深度好 |
+| #32588 | Wrong timestamps if audio > 30s | bug, good first issue | 01-19 | Audio/ASR 方向 |
+
+**推荐优先级：**
+1. **#37223** — Qwen 模型 + LoRA，与 izhuhaoran 专注领域重合，学习价值高
+2. **#33267** — torch.compile KVCache，技术深度好，有长期价值
+3. **#32588** — Audio timestamp bug，相对独立，容易测试
 
 ---
 
@@ -988,5 +1018,202 @@
 ---
 
 *Last updated: 2026-03-21 06:28 HKT*
+
+---
+
+## 📊 2026-03-21 10:49 上午检查（Cron 任务）
+
+### PR 状态确认
+
+| PR # | 标题 | 状态 | 评论 | 创建时间 | 行动 |
+|------|------|------|------|----------|------|
+| #37621 | [Bugfix] JAIS: Only apply ALiBi when position_embedding_type is alibi | open, blocked | 0 | 03-20 00:50 | 等待维护者 review |
+| #37578 | [Bugfix] Fix unclean shutdown from Ctrl-C with AR Fusion | open, blocked | 1 (bot) | 03-19 16:39 | 等待维护者 review |
+
+**评论详情：**
+- PR #37621：无评论，创建约 34 小时，静默等待中
+- PR #37578：仅 gemini-code-assist[bot] 评论（无法 review 文件类型），无需行动
+
+**发现：** PR #37621 修复的是 issue #37400（good first issue），但 PR 描述中未添加 `Fixes #37400` 关联。考虑通过 GitHub 网页编辑补充。
+
+### 👀 izhuhaoran 动态 (2026-03-21 凌晨)
+
+**新建 PRs (今天 01:00-02:30 UTC / 09:00-10:30 HKT):**
+| PR # | 标题 | 时间 (UTC) |
+|------|------|-----------|
+| #37728 | Fix Mamba state corruption from stale CUDA graph block table entries | 02:21 |
+| #37727 | [Bugfix] Fix Responses API instructions leaking through previous_response_id | 02:07 |
+| #37726 | Revert "[Model] Deprecate the score task (this will not affect users)." (#37537) | 01:08 |
+| #37725 | [Bugfix] Preserve CUDA arch suffix (a/f) for SM12x — fixes NVFP4 NaN on desktop Blackwell | 02:33 |
+| #37723 | [ROCm][CI] Stabilize ROCm speech-to-text translation test with ROCM_EXTRA_ARGS | 23:32 (03-20) |
+| #37722 | quick fix for 37665 | 23:19 (03-20) |
+| #37721 | [ROCm][CI] Update GSM8K eval config to use fp8-and-mixed models list (MI355) | 01:27 |
+| #37719 | [Test] Only Run MLA model when user explicitly set for batch invariance | 22:24 (03-20) |
+
+**观察：**
+- izhuhaoran 今天继续高产，凌晨时段提交 8 个新 PR
+- 领域覆盖：Mamba、Responses API、Model deprecation、CUDA arch、ROCm CI、Test
+- PR 标题格式：`[标签] 描述` 或直接描述问题
+- **学习点**：高产出贡献者会批量处理同领域问题，但每个 PR 仍保持专注单一问题
+
+### 📚 学习的 Merge PR 经验 (2026-03-20)
+
+| PR # | 作者 | 标题 | 学习点 |
+|------|------|------|--------|
+| #37711 | AndreasKaratzas | [ROCm][CI] Setting some mi325_4 tests back to optional (in parity with upstream) | CI 配置调整，已 merged ✅ |
+| #37693 | DarkLight1337 | [Model] Update Kimi-K25 and Isaac processors to fit HF-style | 模型兼容性更新 |
+| #37685 | hmellor | Fix attribute error in `isaac_patch_hf_runner` | 核心贡献者，快速 merge |
+| #37683 | xyang16 | [Perf] Eliminate redundant SparseMatrix creation in gpt_oss_triton_kernels | 性能优化 |
+| #37681 | hmellor | Fix various config related issues for Transformers v5 | 批量修复相关问题 |
+| #37661 | chaunceyjiang | [Misc] Use logger.info_once for auto tool choice log message | 小改动，日志优化 |
+| #37645 | WoosukKwon | [MRV2] Avoid recompilation of _gather_block_tables_kernel | 核心维护者，小改动解决编译问题 |
+
+**标题格式总结:**
+- `[标签] 描述` 或 `[标签][子标签] 描述`
+- 常用标签：`[Bugfix]`, `[Perf]`, `[MRV2]`, `[ROCm]`, `[CI]`, `[Test]`, `[Misc]`, `[Model]`, `[Feature]`
+- 描述简洁，直接说明问题/方案
+- 核心贡献者（hmellor, WoosukKwon）有时不用标签，直接描述
+
+**改动大小观察:**
+- 小修复：±1-5 行，1-2 文件
+- 性能优化：±50-100 行，2-5 文件
+- CI/测试类 PR 容易先 merge
+
+### 🎯 今日计划 (2026-03-21 周六)
+
+| 时间 | 任务 | 优先级 | 状态 |
+|------|------|--------|------|
+| 09:43-10:00 | 完成状态检查，更新 DAILY_LEARNINGS.md | 高 | ✅ |
+| 10:00-11:00 | 学习社区 merge 的 PRs 模式 | 中 | ✅ |
+| 10:49-11:00 | 决定今日工作重点 | 高 | 🔄 |
+| 11:00-12:00 | 研究候选 issue（#37223 Qwen3 ASR LoRA 或 #33267 torch.compile） | 中 | ⏳ |
+| 14:00-16:00 | 本地复现/测试，准备新 PR | 中 | ⏳ |
+| 16:00-17:00 | 如测试通过，提交 PR（上限 2/天） | 中 | ⏳ |
+
+**今日决策：**
+- ✅ 现有 PRs 无维护者评论，无需回复
+- ✅ 今日 PR 上限重置为 2 个（新的一天，当前 0/2）
+- ✅ 优先等待现有 PRs 进展，如长时间无反馈可开新 PR
+- ✅ 候选方向：Qwen 模型（#37223）或 torch.compile KVCache（#33267）
+- ⚠️ 考虑给 PR #37621 添加 `Fixes #37400` 关联（通过 GitHub 网页编辑）
+
+### 🔍 Good First Issues 候选
+
+| Issue # | 标题 | 标签 | 创建时间 | 备注 |
+|---------|------|------|----------|------|
+| #37400 | JAIS: ALiBi is applied even when position_embedding_type="learned" | bug, good first issue | 03-18 | **已被 PR #37621 修复** |
+| #37223 | Add LoRA support for Qwen3ASRForConditionalGeneration | feature, good first issue | 03-16 | 推荐，Qwen 模型方向 |
+| #35310 | Qwen-ASR Forced Aligner | feature, good first issue | 02-25 | Qwen-ASR 相关 |
+| #33267 | Remove attention layer name from unified_kv_cache_update | torch.compile, good first issue | 01-28 | 技术深度好 |
+| #32588 | Wrong timestamps if audio > 30s | bug, good first issue | 01-19 | Audio/ASR 方向 |
+
+**推荐优先级：**
+1. **#37223** — Qwen 模型 + LoRA，与 izhuhaoran 专注领域重合，学习价值高
+2. **#33267** — torch.compile KVCache，技术深度好，有长期价值
+3. **#32588** — Audio timestamp bug，相对独立，容易测试
+
+---
+
+*Last updated: 2026-03-21 10:49 HKT*
+
+---
+
+## 📊 2026-03-21 11:54 上午检查（Cron 任务）
+
+### PR 状态确认
+
+| PR # | 标题 | 状态 | 评论 | 创建时间 | 行动 |
+|------|------|------|------|----------|------|
+| #37621 | [Bugfix] JAIS: Only apply ALiBi when position_embedding_type is alibi | open | 0 | 03-20 00:50 | 等待维护者 review |
+| #37578 | [Bugfix] Fix unclean shutdown from Ctrl-C with AR Fusion | open | 1 (bot) | 03-19 16:39 | 等待维护者 review |
+
+**评论详情：**
+- PR #37621：无评论，创建约 35 小时，静默等待中
+- PR #37578：仅 gemini-code-assist[bot] 评论（无法 review 文件类型），无需行动
+
+**决策：** 无维护者评论需要回复，继续等待。今日可提交新 PR（上限 2 个，今日 0/2）。
+
+### 👀 izhuhaoran 动态 (2026-03-21 凌晨)
+
+**新建 PRs (今天 01:00-03:10 UTC / 09:00-11:10 HKT):**
+| PR # | 标题 | 时间 (UTC) |
+|------|------|-----------|
+| #37731 | Support FP8 KVCache on XPU | 03:10 |
+| #37728 | Fix Mamba state corruption from stale CUDA graph block table entries | 02:21 |
+| #37727 | [Bugfix] Fix Responses API instructions leaking through previous_response_id | 02:07 |
+| #37726 | Revert "[Model] Deprecate the score task (this will not affect users)." (#37537) | 01:08 |
+| #37725 | [Bugfix] Preserve CUDA arch suffix (a/f) for SM12x — fixes NVFP4 NaN on desktop Blackwell | 02:33 |
+| #37723 | [ROCm][CI] Stabilize ROCm speech-to-text translation test with ROCM_EXTRA_ARGS | 23:32 (03-20) |
+| #37722 | quick fix for 37665 | 23:19 (03-20) |
+| #37721 | [ROCm][CI] Update GSM8K eval config to use fp8-and-mixed models list (MI355) | 01:27 |
+| #37719 | [Test] Only Run MLA model when user explicitly set for batch invariance | 22:24 (03-20) |
+
+**观察：**
+- izhuhaoran 今天继续高产，凌晨时段提交 9 个新 PR
+- 领域覆盖：XPU FP8 KVCache、Mamba、Responses API、Model deprecation、CUDA arch、ROCm CI、Test
+- PR 标题格式：`[标签] 描述` 或直接描述问题
+- **学习点**：高产出贡献者会批量处理同领域问题，但每个 PR 仍保持专注单一问题；KVCache 是持续关注领域
+
+### 📚 学习的 Merge PR 经验 (2026-03-20 至今)
+
+| PR # | 作者 | 标题 | 学习点 |
+|------|------|------|--------|
+| #37711 | AndreasKaratzas | [ROCm][CI] Setting some mi325_4 tests back to optional (in parity with upstream) | CI 配置调整，已 merged ✅ |
+| #37694 | tmm77 | Add get_device_uuid for rocm | 已 merged，小功能添加 |
+| #37693 | DarkLight1337 | [Model] Update Kimi-K25 and Isaac processors to fit HF-style | 模型兼容性更新 |
+| #37685 | hmellor | Fix attribute error in `isaac_patch_hf_runner` | 核心贡献者，快速 merge |
+| #37683 | xyang16 | [Perf] Eliminate redundant SparseMatrix creation in gpt_oss_triton_kernels | 性能优化 |
+| #37681 | hmellor | Fix various config related issues for Transformers v5 | 批量修复相关问题 |
+| #37661 | chaunceyjiang | [Misc] Use logger.info_once for auto tool choice log message | 小改动，日志优化 |
+| #37645 | WoosukKwon | [MRV2] Avoid recompilation of _gather_block_tables_kernel | 核心维护者，小改动解决编译问题 |
+
+**标题格式总结:**
+- `[标签] 描述` 或 `[标签][子标签] 描述`
+- 常用标签：`[Bugfix]`, `[Perf]`, `[MRV2]`, `[ROCm]`, `[CI]`, `[Test]`, `[Misc]`, `[Model]`, `[Feature]`, `[XPU]`
+- 描述简洁，直接说明问题/方案
+- 核心贡献者（hmellor, WoosukKwon）有时不用标签，直接描述
+
+**改动大小观察:**
+- 小修复：±1-5 行，1-2 文件
+- 性能优化：±50-100 行，2-5 文件
+- CI/测试类 PR 容易先 merge
+
+### 🎯 今日计划更新 (2026-03-21 周六)
+
+| 时间 | 任务 | 优先级 | 状态 |
+|------|------|--------|------|
+| 09:43-10:00 | 完成状态检查，更新 DAILY_LEARNINGS.md | 高 | ✅ |
+| 10:00-11:00 | 学习社区 merge 的 PRs 模式 | 中 | ✅ |
+| 10:49-11:00 | 决定今日工作重点 | 高 | ✅ |
+| 11:00-12:00 | 研究候选 issue（#37223 Qwen3 ASR LoRA 或 #33267 torch.compile） | 中 | ⏳ |
+| 14:00-16:00 | 本地复现/测试，准备新 PR | 中 | ⏳ |
+| 16:00-17:00 | 如测试通过，提交 PR（上限 2/天） | 中 | ⏳ |
+
+**今日决策：**
+- ✅ 现有 PRs 无维护者评论，无需回复
+- ✅ 今日 PR 上限重置为 2 个（新的一天，当前 0/2）
+- ✅ 优先等待现有 PRs 进展，如长时间无反馈可开新 PR
+- ✅ 候选方向：Qwen 模型（#37223）或 torch.compile KVCache（#33267）
+- ⚠️ 考虑给 PR #37621 添加 `Fixes #37400` 关联（通过 GitHub 网页编辑）
+- 📌 izhuhaoran 在 KVCache 领域活跃（#37731 FP8 KVCache on XPU），可关注学习
+
+### 🔍 Good First Issues 候选
+
+| Issue # | 标题 | 标签 | 创建时间 | 备注 |
+|---------|------|------|----------|------|
+| #37400 | JAIS: ALiBi is applied even when position_embedding_type="learned" | bug, good first issue | 03-18 | **已被 PR #37621 修复** |
+| #37223 | Add LoRA support for Qwen3ASRForConditionalGeneration | feature, good first issue | 03-16 | 推荐，Qwen 模型方向 |
+| #35310 | Qwen-ASR Forced Aligner | feature, good first issue | 02-25 | Qwen-ASR 相关 |
+| #33267 | Remove attention layer name from unified_kv_cache_update | torch.compile, good first issue | 01-28 | 技术深度好 |
+| #32588 | Wrong timestamps if audio > 30s | bug, good first issue | 01-19 | Audio/ASR 方向 |
+
+**推荐优先级：**
+1. **#37223** — Qwen 模型 + LoRA，与 izhuhaoran 专注领域重合，学习价值高
+2. **#33267** — torch.compile KVCache，技术深度好，有长期价值
+3. **#32588** — Audio timestamp bug，相对独立，容易测试
+
+---
+
+*Last updated: 2026-03-21 11:54 HKT*
 
 ---
