@@ -41,12 +41,18 @@ class UnquantizedMoeBackend(Enum):
     OOT = "OOT"
 
 
-def _get_priority_backends() -> list[UnquantizedMoeBackend]:
+def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBackend]:
     """
     Get available backends in priority order based on platform and config.
 
     This function can be extended to become more complex as needed.
     """
+
+    def _move_to_back(
+        backends: list[UnquantizedMoeBackend],
+        backend: UnquantizedMoeBackend,
+    ) -> None:
+        backends.append(backends.pop(backends.index(backend)))
 
     if current_platform.is_rocm():
         _AVAILABLE_BACKENDS = [
@@ -61,6 +67,13 @@ def _get_priority_backends() -> list[UnquantizedMoeBackend]:
             UnquantizedMoeBackend.TRITON,
             UnquantizedMoeBackend.BATCHED_TRITON,
         ]
+
+        # HACK: Qwen3.5 has crash with FLASHINFER_CUTLASS BF16 if DEP.
+        # Updating the oracle querying logic is out of the scope of this
+        # PR. Need to fix the kernel or update structure in follow up.
+        if moe_config.moe_parallel_config.dp_size > 1:
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
+
     elif current_platform.is_xpu():
         _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.XPU]
     elif current_platform.is_cpu():
@@ -148,7 +161,7 @@ def select_unquantized_moe_backend(
         return UnquantizedMoeBackend.OOT, None
 
     # NOTE: the kernels are selected in the following order.
-    AVAILABLE_BACKENDS = _get_priority_backends()
+    AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
 
     # NOTE(rob): We need to peak into the P/F selection to determine
     # if we are using the batched or standard expert format, which
