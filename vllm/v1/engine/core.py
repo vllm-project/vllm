@@ -1632,7 +1632,11 @@ class DPEngineCoreProc(EngineCoreProc):
         if self.has_coordinator and request_wave != self.current_wave:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
-            elif not self.engines_running:
+            elif (
+                not self.engines_running
+                and self.scheduler.pause_state == PauseState.UNPAUSED
+            ):
+                self.engines_running = True
                 # Request received for an already-completed wave, notify
                 # front-end that we need to start the next one.
                 self.output_queue.put_nowait(
@@ -1690,6 +1694,8 @@ class DPEngineCoreProc(EngineCoreProc):
             if self.eep_scaling_state is not None:
                 _ = self.eep_scaling_state.progress()
                 if self.eep_scaling_state.is_complete():
+                    if self.eep_scaling_state.worker_type == "removing":
+                        raise SystemExit
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
 
@@ -1767,6 +1773,7 @@ class DPEngineCoreProc(EngineCoreProc):
         new_parallel_config._data_parallel_master_port_list = (
             reconfig_request.new_data_parallel_master_port_list
         )
+        new_parallel_config._coord_store_port = reconfig_request.coord_store_port
 
         is_scale_down = reconfig_request.new_data_parallel_size < old_dp_size
         is_shutdown = (
@@ -1852,20 +1859,7 @@ class DPEngineCoreProc(EngineCoreProc):
             scale_type="scale_up",
             reconfig_request=None,
         )
-        self.model_executor.collective_rpc("init_device")
-        self.model_executor.collective_rpc("load_model")
-        self._eep_send_engine_core_notification(
-            EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY
-        )
-        self.model_executor.collective_rpc(
-            "elastic_ep_execute", args=("receive_weights",)
-        )
-        self.available_gpu_memory_for_kv_cache = (
-            ParallelConfig.sync_kv_cache_memory_size(self.dp_group, -1)
-        )
-        self.model_executor.collective_rpc(
-            "elastic_ep_execute", args=("prepare_new_worker",)
-        )
+        self.eep_scaling_state.run_pre_kv_init_states()
         self.process_input_queue_block = False
 
 
