@@ -6288,7 +6288,7 @@ class GPUModelRunner(
         """
         kv_caches: dict[str, torch.Tensor] = {}
 
-        # Pre-scan to determine whether there are attn / mamba layers.
+        # Pre-scan to determine whether there are mamba layers.
         has_mamba = False
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
