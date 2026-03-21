@@ -50,7 +50,11 @@ def test_select_default_backend_by_platform(
         )
 
         assert selected_backend == expected_backend
-        if expected_backend == UnquantizedMoeBackend.CPU:
+        if expected_backend == [
+            UnquantizedMoeBackend.CPU,
+            UnquantizedMoeBackend.OOT,
+            UnquantizedMoeBackend.TPU,
+        ]:
             assert expert_cls is None
         else:
             assert expert_cls is not None
