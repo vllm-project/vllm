@@ -120,7 +120,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .fp_quant import FPQuantConfig
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
-    from .gptq_marlin import GPTQMarlinConfig
     from .inc import INCConfig
     from .modelopt import (
         ModelOptFp8Config,
@@ -145,7 +144,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "modelopt_mxfp8": ModelOptMxFp8Config,
         "modelopt_mixed": ModelOptMixedPrecisionConfig,
         "gguf": GGUFConfig,
-        "gptq_marlin": GPTQMarlinConfig,
+        "gptq_marlin": GPTQConfig,
         "awq_marlin": AWQMarlinConfig,
         "gptq": GPTQConfig,
         "compressed-tensors": CompressedTensorsConfig,

@@ -886,6 +886,14 @@ class ModelConfig:
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods, self.quantization)
 
+        # Auto-convert deprecated gptq_marlin to gptq (they are now the same).
+        if self.quantization == "gptq_marlin":
+            logger.warning(
+                "'gptq_marlin' is deprecated. gptq_marlin has been merged "
+                "into gptq. Auto-converting to 'gptq'."
+            )
+            self.quantization = cast(me_quant.QuantizationMethods, "gptq")
+
         # Parse quantization method from the HF model config, if available.
         quant_cfg = self.model_arch_config.quantization_config
 
@@ -895,7 +903,6 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
-                "gptq_marlin",
                 "awq_marlin",
                 "inc",
                 "moe_wna16",
