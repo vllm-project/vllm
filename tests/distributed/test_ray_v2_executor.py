@@ -313,6 +313,52 @@ def test_ray_v2_single_node_generation(tp_size, pp_size):
         gc.collect()
 
 
+@pytest.mark.parametrize(
+    "bundle_indices, expected_bundle_ids, create_placement_group",
+    [("2,3", [2, 3], 4), ("3,2", [3, 2], 4)],
+    indirect=["create_placement_group"],
+)
+def test_ray_v2_bundle_indices_env(
+    bundle_indices, expected_bundle_ids, create_placement_group, monkeypatch
+):
+    """Validate explicit VLLM_RAY_BUNDLE_INDICES bundle placement."""
+    monkeypatch.setenv("VLLM_RAY_BUNDLE_INDICES", bundle_indices)
+    vllm_config = create_vllm_config(
+        tensor_parallel_size=2,
+        placement_group=create_placement_group,
+    )
+    executor = RayExecutorV2(vllm_config=vllm_config)
+    try:
+        actual = [
+            h.bundle_id_idx
+            for h in sorted(executor.ray_worker_handles, key=lambda h: h.rank)
+        ]
+        assert actual == expected_bundle_ids
+        assert_executor(executor, tp_size=2, pp_size=1)
+    finally:
+        executor.shutdown()
+
+
+@pytest.mark.parametrize(
+    "bundle_indices, expected_error, create_placement_group",
+    [
+        ("1,1", "cannot have duplicate values,", 4),
+        ("0,1,2", "must have the same size", 4),
+    ],
+    indirect=["create_placement_group"],
+)
+def test_ray_v2_invalid_bundle_indices(
+    bundle_indices, expected_error, create_placement_group, monkeypatch
+):
+    """Validate invalid bundle indices are rejected."""
+    monkeypatch.setenv("VLLM_RAY_BUNDLE_INDICES", bundle_indices)
+    vllm_config = create_vllm_config(
+        tensor_parallel_size=2, placement_group=create_placement_group
+    )
+    with pytest.raises(AssertionError, match=expected_error):
+        RayExecutorV2(vllm_config=vllm_config)
+
+
 @pytest.mark.parametrize("tp_size, pp_size", [(2, 1), (2, 2)])
 def test_ray_v2_single_node_generation_with_pg(tp_size, pp_size):
     """E2E LLM generation with a user-provided placement group."""

@@ -25,6 +25,7 @@ from vllm.v1.executor.multiproc_executor import (
 )
 from vllm.v1.executor.ray_utils import (
     build_actor_name,
+    get_bundles_for_indices,
     get_bundles_sorted_by_node,
     initialize_ray_cluster,
     ray,
@@ -55,6 +56,9 @@ class RayWorkerHandle:
 
     node_id: str
     """Node ID of the worker"""
+
+    bundle_id_idx: int = -1
+    """Placement group bundle index for the worker"""
 
     run_ref: ObjectRef = None
     """run() ObjectRef used as a sentinel for health monitoring"""
@@ -163,8 +167,16 @@ class RayExecutorV2(MultiprocExecutor):
             f"_parallel_size ({pcp_size}). "
         )
 
-        # Step 2: Query PG table, sort bundles, assign ranks
-        bundle_to_node_id = get_bundles_sorted_by_node(placement_group)
+        # Step 2: Build bundle assignments for worker rank placement
+        # while respecting VLLM_RAY_BUNDLE_INDICES.
+        if envs.VLLM_RAY_BUNDLE_INDICES:
+            bundle_to_node_id = get_bundles_for_indices(
+                placement_group,
+                list(map(int, envs.VLLM_RAY_BUNDLE_INDICES.split(","))),
+                self.world_size,
+            )
+        else:
+            bundle_to_node_id = get_bundles_sorted_by_node(placement_group)
         driver_node = ray.get_runtime_context().get_node_id()
 
         # Assign each worker a local rank
@@ -255,6 +267,7 @@ class RayExecutorV2(MultiprocExecutor):
                 rank=bundle["rank"],
                 local_rank=bundle["local_rank"],
                 node_id=bundle["node_id"],
+                bundle_id_idx=bundle["bundle_id_idx"],
             )
             self.ray_worker_handles.append(handle)
 

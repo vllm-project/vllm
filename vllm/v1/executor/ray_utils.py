@@ -51,6 +51,8 @@ try:
             # that thread.
             self.compiled_dag_cuda_device_set = False
 
+        rpc_rank: int
+
         def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
             """
             Adjust the rpc_rank based on the given mapping.
@@ -286,6 +288,36 @@ def build_actor_name(
     if pcp_size > 1:
         name += f"_PCP{rank // (tp_size * pp_size)}"
     return name
+
+
+def get_bundles_for_indices(
+    placement_group: "PlacementGroup",
+    bundle_indices: list[int],
+    world_size: int,
+) -> list[tuple[int, str, str]]:
+    """
+    Return GPU bundle indices paired with node IDs and node IPs for
+    explicit bundle indices specified via VLLM_RAY_BUNDLE_INDICES.
+    """
+    assert len(bundle_indices) == world_size, (
+        "VLLM_RAY_BUNDLE_INDICES must have the same size"
+        f" as the world size, but got {bundle_indices=} "
+        f"and {world_size=}"
+    )
+    assert len(set(bundle_indices)) == len(bundle_indices), (
+        "VLLM_RAY_BUNDLE_INDICES cannot have duplicate values,"
+        f" but got {bundle_indices=}"
+    )
+
+    pg_data = placement_group_table(placement_group)
+    pg_bundle_to_node = pg_data["bundles_to_node_id"]
+    node_id_to_ip = {
+        n["NodeID"]: n["NodeManagerAddress"] for n in ray.nodes() if n["Alive"]
+    }
+    return [
+        (bid, pg_bundle_to_node[bid], node_id_to_ip[pg_bundle_to_node[bid]])
+        for bid in bundle_indices
+    ]
 
 
 def get_bundles_sorted_by_node(
