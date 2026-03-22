@@ -186,7 +186,7 @@ def kernel_unified_attention_2d(
     GROUP_SIZE: tl.constexpr = 0,  # int, group size for per-group quant
     out_group_scale_ptr=None,  # [num_tokens, num_groups]
     out_group_scale_stride_0: tl.int64 = 0,  # stride for token dim
-    out_group_scale_stride_1: tl.int64 = 0,  # stride for group dim
+    out_group_scale_stride_1: tl.constexpr = 1,  # stride for group dim
     NUM_GROUPS_PER_HEAD: tl.constexpr = 1,  # HEAD_SIZE // GROUP_SIZE
 ):
     q_block_global_idx = tl.program_id(0)
@@ -1275,7 +1275,7 @@ def unified_attention(
                 output_group_scale.stride(0) if use_fp8_group else 0
             ),
             out_group_scale_stride_1=(
-                output_group_scale.stride(1) if use_fp8_group else 0
+                output_group_scale.stride(1) if use_fp8_group else 1
             ),
             NUM_GROUPS_PER_HEAD=num_groups_per_head,
         )
@@ -1366,7 +1366,7 @@ def unified_attention(
                 output_group_scale.stride(0) if use_fp8_group else 0
             ),
             out_group_scale_stride_1=(
-                output_group_scale.stride(1) if use_fp8_group else 0
+                output_group_scale.stride(1) if use_fp8_group else 1
             ),
             NUM_GROUPS_PER_HEAD=num_groups_per_head,
         )
