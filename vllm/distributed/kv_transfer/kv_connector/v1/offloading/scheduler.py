@@ -69,12 +69,7 @@ class OffloadingConnectorScheduler:
         self._reqs_being_loaded = defaultdict[ReqId, set[BlockHash]](set)
 
     def _ensure_transfer_supported(self) -> None:
-        if self.hybrid_offload_enabled and self.requires_partial_group_offload:
-            raise NotImplementedError(
-                "hybrid_chunk_size currently requires partial-group GPU transfer "
-                "support in the worker/backend; scheduler-side planning exists "
-                "but transfer emission is not implemented yet"
-            )
+        return
 
     def _chunk_prefix_tokens(self, chunk_count: int) -> int:
         if not self.hybrid_offload_enabled:
@@ -116,6 +111,76 @@ class OffloadingConnectorScheduler:
         assert len(existing) == len(new_block_id_groups) == self.num_kv_groups
         for group_index, group_block_ids in enumerate(new_block_id_groups):
             existing[group_index].extend(group_block_ids)
+
+    def _build_gpu_transfer_spec_from_chunk_range(
+        self,
+        block_groups: tuple[list[int], ...] | list[list[int]],
+        start_chunk_idx: int,
+        end_chunk_idx: int,
+        include_block_indices: bool = False,
+    ) -> GPULoadStoreSpec:
+        if not self.hybrid_offload_enabled:
+            block_groups_list: list[list[int]] = []
+            block_indices: list[int] = []
+            for group_index, group_block_ids in enumerate(block_groups):
+                group_factor = self.block_size_factors[group_index]
+                start_gpu_block_idx = start_chunk_idx * group_factor
+                end_gpu_block_idx = end_chunk_idx * group_factor
+                if include_block_indices:
+                    block_indices.append(start_gpu_block_idx)
+                block_groups_list.append(group_block_ids[start_gpu_block_idx:end_gpu_block_idx])
+            flat_block_ids, group_sizes = self._flatten_block_groups(block_groups_list)
+            return GPULoadStoreSpec(
+                flat_block_ids,
+                group_sizes=group_sizes,
+                block_indices=tuple(block_indices) if include_block_indices else None,
+            )
+
+        flat_block_ids: list[int] = []
+        flat_block_offsets: list[int] = []
+        flat_block_counts: list[int] = []
+        group_sizes: list[int] = []
+        block_indices: list[int] = []
+
+        for group_index, group_block_ids in enumerate(block_groups):
+            unit_size = self.group_hash_block_sizes[group_index]
+            gpu_block_size = self.gpu_block_sizes[group_index]
+            assert gpu_block_size % unit_size == 0, (
+                "Hybrid GPU block size must be divisible by group offload unit size"
+            )
+            sub_blocks_per_gpu_block = gpu_block_size // unit_size
+
+            start_unit_idx = (start_chunk_idx * self.offloaded_block_size) // unit_size
+            end_unit_idx = (end_chunk_idx * self.offloaded_block_size) // unit_size
+            assert end_unit_idx >= start_unit_idx
+
+            group_entry_count = 0
+            if include_block_indices:
+                block_indices.append(start_unit_idx // sub_blocks_per_gpu_block)
+
+            unit_idx = start_unit_idx
+            while unit_idx < end_unit_idx:
+                gpu_block_idx = unit_idx // sub_blocks_per_gpu_block
+                sub_block_offset = unit_idx % sub_blocks_per_gpu_block
+                sub_block_count = min(
+                    sub_blocks_per_gpu_block - sub_block_offset,
+                    end_unit_idx - unit_idx,
+                )
+                flat_block_ids.append(group_block_ids[gpu_block_idx])
+                flat_block_offsets.append(sub_block_offset)
+                flat_block_counts.append(sub_block_count)
+                group_entry_count += 1
+                unit_idx += sub_block_count
+
+            group_sizes.append(group_entry_count)
+
+        return GPULoadStoreSpec(
+            flat_block_ids,
+            group_sizes=tuple(group_sizes),
+            block_indices=tuple(block_indices) if include_block_indices else None,
+            block_offsets=flat_block_offsets,
+            block_counts=flat_block_counts,
+        )
 
     def _get_block_hashes(
         self,
@@ -251,10 +316,9 @@ class OffloadingConnectorScheduler:
             for group_tokens in computed_tokens_per_group
         ), "All KV groups must agree on the already-computed prefix length."
         full_block_tokens = num_computed_tokens + num_external_tokens
-        assert full_block_tokens % self.offloaded_block_size == 0
-
-        start_block_idx = num_computed_tokens // self.offloaded_block_size
-        num_blocks = full_block_tokens // self.offloaded_block_size
+        start_block_idx = self._chunk_count_for_tokens(num_computed_tokens)
+        num_blocks = self._chunk_count_for_tokens(full_block_tokens)
+        assert self._chunk_prefix_tokens(num_blocks) == full_block_tokens
 
         assert self._get_num_offloaded_blocks(request) >= num_blocks
         block_hashes = self._get_block_hashes(
@@ -262,35 +326,11 @@ class OffloadingConnectorScheduler:
         )
 
         src_spec = self.manager.prepare_load(block_hashes)
-
-        pending_block_groups: list[list[int]] = []
-        block_indices: list[int] = []
-        pending_tokens_per_group: int | None = None
-        for group_index, (group_block_ids, group_blocks) in enumerate(
-            zip(block_groups, blocks.blocks)
-        ):
-            num_computed_gpu_blocks = sum(
-                block.block_hash is not None
-                for block in group_blocks
-                if not block.is_null
-            )
-            block_indices.append(num_computed_gpu_blocks)
-            pending_group_block_ids = group_block_ids[num_computed_gpu_blocks:]
-            pending_block_groups.append(pending_group_block_ids)
-            pending_tokens = len(pending_group_block_ids) * self.gpu_block_sizes[group_index]
-            if pending_tokens_per_group is None:
-                pending_tokens_per_group = pending_tokens
-            else:
-                assert pending_tokens == pending_tokens_per_group
-
-        assert pending_tokens_per_group == num_external_tokens
-        flat_pending_block_ids, group_sizes = self._flatten_block_groups(
-            pending_block_groups
-        )
-        dst_spec = GPULoadStoreSpec(
-            flat_pending_block_ids,
-            group_sizes=group_sizes,
-            block_indices=tuple(block_indices),
+        dst_spec = self._build_gpu_transfer_spec_from_chunk_range(
+            block_groups,
+            start_chunk_idx=start_block_idx,
+            end_chunk_idx=num_blocks,
+            include_block_indices=True,
         )
 
         block_hashes = self._get_block_hashes(
@@ -323,21 +363,12 @@ class OffloadingConnectorScheduler:
             expected_tokens = req.num_computed_tokens + new_tokens
             # with async scheduling, some tokens may be missing
             total_tokens = min(expected_tokens, req.num_tokens)
-            num_blocks = total_tokens // self.offloaded_block_size
+            num_blocks = self._chunk_count_for_tokens(total_tokens)
             start_block_idx = self._next_stored_block_idx.get(req_id, 0)
             num_new_blocks = num_blocks - start_block_idx
 
             if num_new_blocks <= 0:
                 continue
-
-            expected_group_gpu_blocks = [
-                num_blocks * self.block_size_factors[group_index]
-                for group_index in range(self.num_kv_groups)
-            ]
-            assert all(
-                len(group_block_ids) >= expected_group_gpu_blocks[group_index]
-                for group_index, group_block_ids in enumerate(block_groups)
-            )
 
             new_block_hashes = list(
                 self._get_block_hashes(req, start_idx=start_block_idx, end_idx=num_blocks)
@@ -359,20 +390,68 @@ class OffloadingConnectorScheduler:
             self.manager.touch(block_hashes)
 
             dst_spec = store_output.store_spec
-            src_block_groups: list[list[int]] = []
-            for group_index, group_block_ids in enumerate(block_groups):
-                group_factor = self.block_size_factors[group_index]
-                src_group_block_ids: list[int] = []
-                for idx, blk_hash in enumerate(new_block_hashes):
-                    if blk_hash not in block_hashes_to_store:
+            if self.hybrid_offload_enabled:
+                block_hash_to_chunk_idx = {
+                    block_hash: start_block_idx + idx
+                    for idx, block_hash in enumerate(new_block_hashes)
+                }
+                src_specs: list[GPULoadStoreSpec] = []
+                for block_hash in new_block_hashes:
+                    if block_hash not in block_hashes_to_store:
                         continue
-                    offloaded_block_idx = start_block_idx + idx
-                    gpu_block_idx = offloaded_block_idx * group_factor
-                    for i in range(group_factor):
-                        src_group_block_ids.append(group_block_ids[gpu_block_idx + i])
-                src_block_groups.append(src_group_block_ids)
-            flat_src_block_ids, group_sizes = self._flatten_block_groups(src_block_groups)
-            src_spec = GPULoadStoreSpec(flat_src_block_ids, group_sizes=group_sizes)
+                    chunk_idx = block_hash_to_chunk_idx[block_hash]
+                    src_specs.append(
+                        self._build_gpu_transfer_spec_from_chunk_range(
+                            block_groups,
+                            start_chunk_idx=chunk_idx,
+                            end_chunk_idx=chunk_idx + 1,
+                        )
+                    )
+
+                flat_src_block_ids: list[int] = []
+                flat_block_offsets: list[int] = []
+                flat_block_counts: list[int] = []
+                group_sizes = [0] * self.num_kv_groups
+                for src_spec_part in src_specs:
+                    start = 0
+                    for group_index, group_size in enumerate(src_spec_part.group_sizes):
+                        end = start + group_size
+                        flat_src_block_ids.extend(
+                            src_spec_part.block_ids[start:end].tolist()
+                        )
+                        assert src_spec_part.block_offsets is not None
+                        assert src_spec_part.block_counts is not None
+                        flat_block_offsets.extend(
+                            src_spec_part.block_offsets[start:end].tolist()
+                        )
+                        flat_block_counts.extend(
+                            src_spec_part.block_counts[start:end].tolist()
+                        )
+                        group_sizes[group_index] += group_size
+                        start = end
+                src_spec = GPULoadStoreSpec(
+                    flat_src_block_ids,
+                    group_sizes=tuple(group_sizes),
+                    block_offsets=flat_block_offsets,
+                    block_counts=flat_block_counts,
+                )
+            else:
+                src_block_groups: list[list[int]] = []
+                for group_index, group_block_ids in enumerate(block_groups):
+                    group_factor = self.block_size_factors[group_index]
+                    src_group_block_ids: list[int] = []
+                    for idx, blk_hash in enumerate(new_block_hashes):
+                        if blk_hash not in block_hashes_to_store:
+                            continue
+                        offloaded_block_idx = start_block_idx + idx
+                        gpu_block_idx = offloaded_block_idx * group_factor
+                        for i in range(group_factor):
+                            src_group_block_ids.append(group_block_ids[gpu_block_idx + i])
+                    src_block_groups.append(src_group_block_ids)
+                flat_src_block_ids, group_sizes = self._flatten_block_groups(
+                    src_block_groups
+                )
+                src_spec = GPULoadStoreSpec(flat_src_block_ids, group_sizes=group_sizes)
 
             reqs_to_store[req_id] = (src_spec, dst_spec)
             self._reqs_being_stored[req_id] |= block_hashes_to_store

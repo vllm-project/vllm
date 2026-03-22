@@ -751,12 +751,72 @@ def test_offloading_spec_exposes_hybrid_planner_from_config():
 def test_offloading_spec_reports_partial_group_requirement():
     assert spec.requires_partial_group_offload is True
 def test_scheduler_rejects_partial_group_hybrid_transfers():
+
+def test_scheduler_builds_partial_group_load_spec_for_first_hybrid_chunk():
+    vllm_config = create_vllm_config(block_size=16, max_num_batched_tokens=1000)
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "spec_name": "MockOffloadingSpec",
+            "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",
+            "hybrid_chunk_size": 16384,
+        },
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=128,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["mamba-0"],
+                MambaSpec(
+                    block_size=65536,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                ),
+            ),
+                ["attn"],
+                FullAttentionSpec(
+                    block_size=1056,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+        ],
     connector = OffloadingConnector(
         vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
     scheduler = connector.connector_scheduler
     assert scheduler is not None
     with pytest.raises(NotImplementedError, match="partial-group GPU transfer"):
         scheduler._ensure_transfer_supported()
+
+    spec = scheduler._build_gpu_transfer_spec_from_chunk_range(
+        ([100], list(range(200, 215))),
+        start_chunk_idx=0,
+        end_chunk_idx=1,
+        include_block_indices=True,
+    )
+    assert spec.group_sizes == (1, 15)
+    assert spec.block_indices == (0, 0)
+    assert spec.block_ids.tolist() == [100, *range(200, 215)]
+    assert spec.block_offsets is not None
+    assert spec.block_counts is not None
+    assert spec.block_offsets.tolist() == [0] * 16
+    assert spec.block_counts.tolist() == [1] * 16
+def test_scheduler_builds_partial_group_load_spec_for_second_hybrid_chunk():
+    connector = OffloadingConnector(
+        create_hybrid_vllm_config(hybrid_chunk_size=16384),
+        KVConnectorRole.SCHEDULER,
+        create_hybrid_kv_cache_config(num_mamba_groups=1),
+    scheduler = connector.connector_scheduler
+    assert scheduler is not None
+        ([100], list(range(200, 240))),
+        start_chunk_idx=1,
+        end_chunk_idx=2,
+    assert spec.group_sizes == (1, 16)
+    assert spec.block_indices == (0, 15)
+    assert spec.block_ids.tolist() == [100, *range(215, 231)]
+    assert spec.block_offsets.tolist() == [1] + [0] * 16
+    assert spec.block_counts.tolist() == [1] * 17
 
 
 def test_offloading_spec_allows_engine_hash_size_1056_with_hybrid_chunk():
