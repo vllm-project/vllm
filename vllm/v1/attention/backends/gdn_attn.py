@@ -247,6 +247,21 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_prefill_tokens = (
                 non_spec_query_lens_cpu.sum().item() - num_decode_tokens
             )
+
+        # Calculate bounds checking once for both branches to avoid duplication
+        # Prevents CUDA illegal memory access when using >4 speculative tokens
+        max_allowed_spec_tokens = (
+            min(self.num_spec + 1, block_table_tensor.size(1))
+            if spec_sequence_masks is not None
+            else None
+        )
+        if (
+            max_allowed_spec_tokens is not None
+            and max_allowed_spec_tokens < self.num_spec + 1
+        ):
+            _warn_about_spec_token_limitation(self.num_spec, max_allowed_spec_tokens)
+
+        if spec_sequence_masks is None:
             num_spec_decode_tokens = (
                 query_lens_cpu.sum().item() - num_prefill_tokens - num_decode_tokens
             )
@@ -265,16 +280,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     0, dtype=torch.int32, device=query_start_loc.device
                 )
                 # Filter by spec_sequence_masks to exclude padded sequences
-                # Add bounds checking to prevent CUDA illegal memory access
-                # when using >4 speculative tokens (FlashInfer GDN limitation)
-                max_allowed_spec_tokens = min(
-                    self.num_spec + 1, block_table_tensor.size(1)
-                )
-                if max_allowed_spec_tokens < self.num_spec + 1:
-                    _warn_about_spec_token_limitation(
-                        self.num_spec, max_allowed_spec_tokens
-                    )
-
                 spec_state_indices_tensor = block_table_tensor[
                     spec_sequence_masks, :max_allowed_spec_tokens
                 ]
@@ -286,6 +291,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_query_start_loc = None
                 non_spec_query_start_loc_cpu = None
             else:
+                # Type assertions for mypy - these are not None in this branch
+                assert spec_sequence_masks is not None
+                assert spec_sequence_masks_cpu is not None
+
                 spec_token_masks = torch.repeat_interleave(
                     spec_sequence_masks, query_lens
                 )
@@ -293,16 +302,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
                 non_spec_token_indx = index[:num_non_spec_tokens]
                 spec_token_indx = index[num_non_spec_tokens:]
-
-                # Add bounds checking to prevent CUDA illegal memory access
-                # when using >4 speculative tokens (FlashInfer GDN limitation)
-                max_allowed_spec_tokens = min(
-                    self.num_spec + 1, block_table_tensor.size(1)
-                )
-                if max_allowed_spec_tokens < self.num_spec + 1:
-                    _warn_about_spec_token_limitation(
-                        self.num_spec, max_allowed_spec_tokens
-                    )
 
                 spec_state_indices_tensor = block_table_tensor[
                     spec_sequence_masks, :max_allowed_spec_tokens
