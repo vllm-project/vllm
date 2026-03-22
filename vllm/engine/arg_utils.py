@@ -619,6 +619,8 @@ class EngineArgs:
         MambaConfig.enable_stochastic_rounding
     )
     mamba_cache_philox_rounds: int = MambaConfig.stochastic_rounding_philox_rounds
+    tlru_xi_tokens: int | None = CacheConfig.tlru_xi_tokens
+    tlru_qhat_tokens: int = CacheConfig.tlru_qhat_tokens
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 

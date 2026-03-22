@@ -233,6 +233,8 @@ class Scheduler(SchedulerInterface):
             pcp_world_size=self.pcp_world_size,
             hash_block_size=self.block_size,
             metrics_collector=self.kv_metrics_collector,
+            tlru_xi_tokens=self.cache_config.tlru_xi_tokens,
+            tlru_qhat_tokens=self.cache_config.tlru_qhat_tokens,
         )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
