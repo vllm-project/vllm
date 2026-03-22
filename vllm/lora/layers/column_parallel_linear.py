@@ -187,9 +187,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         # There are two LoRA layers
         # the output_sizes in MergedColumnParallelLinear is not sharded by tp
         # we need to divide it by the tp_size to get correct slices size
-        output_sizes = self.base_layer.output_sizes
+        self.output_sizes = self.base_layer.output_sizes
         self.output_slices = tuple(
-            divide(output_size, self.tp_size) for output_size in output_sizes
+            divide(output_size, self.tp_size) for output_size in self.output_sizes
         )
         self.n_slices = len(self.output_slices)
         self.output_ids = (self.tp_rank,) * self.n_slices
@@ -253,6 +253,46 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 ]
         return sliced_lora_b
 
+    def _expand_packed_lora(
+        self,
+        lora_a: list[torch.Tensor | None],
+        lora_b: list[torch.Tensor | None],
+    ) -> tuple[list[torch.Tensor | None], list[torch.Tensor | None]]:
+        """Expand packed adapter groups to match n_slices.
+
+        Some adapters store weights for multiple consecutive output slices as a
+        single fused tensor (e.g., a single ``in_proj_qkv`` tensor covering
+        Q, K and V slices of a 4-slice layer).  This method splits each
+        lora_b entry according to the layer's ``output_sizes`` and replicates
+        the corresponding lora_a for every slice it covers.
+        """
+        output_sizes = self.base_layer.output_sizes
+        expanded_a: list[torch.Tensor | None] = []
+        expanded_b: list[torch.Tensor | None] = []
+        slice_idx = 0
+        for a_i, b_i in zip(lora_a, lora_b):
+            if b_i is None:
+                expanded_a.append(None)
+                expanded_b.append(None)
+                slice_idx += 1
+                continue
+            # Determine how many output slices this b_i covers.
+            b_rows = b_i.shape[0]
+            covered = 0
+            cumulative = 0
+            while slice_idx + covered < len(output_sizes) and cumulative < b_rows:
+                cumulative += output_sizes[slice_idx + covered]
+                covered += 1
+            # Split b_i into per-slice tensors and replicate a_i for each.
+            start = 0
+            for j in range(covered):
+                size = output_sizes[slice_idx + j]
+                expanded_b.append(b_i[start : start + size, :])
+                expanded_a.append(a_i)
+                start += size
+            slice_idx += covered
+        return expanded_a, expanded_b
+
     def set_lora(
         self,
         index: int,
@@ -260,6 +300,12 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_b: torch.Tensor | list[torch.Tensor],
     ):
         self.reset_lora(index)
+
+        # Expand packed adapter groups when they don't match n_slices.
+        # E.g. in_proj_qkv (covers Q+K+V) + in_proj_z as 2 groups for a
+        # 4-slice layer: split b_qkv by output_sizes and replicate a_qkv.
+        if isinstance(lora_b, list) and len(lora_b) != self.n_slices:
+            lora_a, lora_b = self._expand_packed_lora(lora_a, lora_b)
 
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
@@ -467,18 +513,14 @@ class MergedColumnParallelLinearWithShardedLoRA(MergedColumnParallelLinearWithLo
     def slice_lora_a(
         self, lora_a: list[torch.Tensor | None]
     ) -> list[torch.Tensor | None]:
-        # NOTE: lora_a contains 2 subloras, and each sublora could be None.
         output_shard_size = self.lora_a_stacked[0].shape[2]
         output_start_idx = self.tp_rank * output_shard_size
-        lora_a = [
-            lora_a[0][output_start_idx : output_start_idx + output_shard_size, :]
-            if lora_a[0] is not None
-            else None,
-            lora_a[1][output_start_idx : output_start_idx + output_shard_size, :]
-            if lora_a[1] is not None
-            else None,
+        return [
+            lora_a[i][output_start_idx : output_start_idx + output_shard_size, :]
+            if lora_a[i] is not None
+            else None
+            for i in range(len(lora_a))
         ]
-        return lora_a
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         return _mcp_apply(x, bias, self)

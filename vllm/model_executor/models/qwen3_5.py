@@ -41,7 +41,6 @@ from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3_5RMSNorm,
 )
 from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
     MergedColumnParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -131,40 +130,6 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             "Qwen3.5 Series dont need to fix query key value ordering"
         )
 
-    def __init__(
-        self,
-        config: Qwen3_5Config,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
-        create_in_proj_qkvz = vllm_config.lora_config is None
-        super().__init__(
-            config,
-            vllm_config=vllm_config,
-            prefix=prefix,
-            create_in_proj_qkvz=create_in_proj_qkvz,
-        )
-        if vllm_config.lora_config is not None:
-            # Separate in_proj_qkv (Q,K,V) and in_proj_z for LoRA compatibility.
-            # Use MergedColumnParallelLinear for in_proj_qkv because GDN can have
-            # linear_num_key_heads != linear_num_value_heads (e.g. 16 vs 32), so
-            # output sizes [key_dim, key_dim, value_dim] are not representable
-            # with a single QKVParallelLinear (which ties K and V head counts).
-            self.in_proj_qkv = MergedColumnParallelLinear(
-                input_size=self.hidden_size,
-                output_sizes=[self.key_dim, self.key_dim, self.value_dim],
-                bias=False,
-                quant_config=vllm_config.quant_config,
-                prefix=f"{prefix}.in_proj_qkv",
-            )
-            self.in_proj_z = ColumnParallelLinear(
-                input_size=self.hidden_size,
-                output_size=self.value_dim,
-                bias=False,
-                quant_config=vllm_config.quant_config,
-                prefix=f"{prefix}.in_proj_z",
-            )
-
     def create_qkvz_proj(
         self,
         hidden_size: int,
@@ -215,21 +180,15 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        if hasattr(self, "in_proj_qkv"):
-            # LoRA path: separate in_proj_qkv and in_proj_z
-            mixed_qkv, _ = self.in_proj_qkv(hidden_states)
-            ba, _ = self.in_proj_ba(hidden_states)
-            z, _ = self.in_proj_z(hidden_states)
-        else:
-            mixed_qkvz, ba = torch.ops.vllm.gdn_in_proj(
-                hidden_states,
-                sum(self.in_proj_qkvz.output_sizes) // self.tp_size,
-                sum(self.in_proj_ba.output_sizes) // self.tp_size,
-                self.prefix,
-            )
-            qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-            z_size = self.value_dim // self.tp_size
-            mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+        mixed_qkvz, ba = torch.ops.vllm.gdn_in_proj(
+            hidden_states,
+            sum(self.in_proj_qkvz.output_sizes) // self.tp_size,
+            sum(self.in_proj_ba.output_sizes) // self.tp_size,
+            self.prefix,
+        )
+        qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+        z_size = self.value_dim // self.tp_size
+        mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
         z = z.reshape(z.size(0), -1, self.head_v_dim)
         b, a = ba.chunk(2, dim=-1)
 
@@ -368,7 +327,6 @@ class Qwen3_5Model(Qwen3NextModel):
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
-        self.enable_lora = vllm_config.lora_config is not None
 
         self.vocab_size = config.vocab_size
 
@@ -427,6 +385,9 @@ class Qwen3_5Model(Qwen3NextModel):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
+            # GDN
+            ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
+            ("in_proj_qkvz", "in_proj_z", 3),
             # self attention
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
@@ -437,21 +398,6 @@ class Qwen3_5Model(Qwen3NextModel):
             ("in_proj_ba", "in_proj_b", 0),
             ("in_proj_ba", "in_proj_a", 1),
         ]
-
-        if self.enable_lora:
-            stacked_params_mapping.extend(
-                [
-                    ("in_proj_qkv", "in_proj_qkv", (0, 1, 2)),
-                    ("in_proj_z", "in_proj_z", 0),
-                ]
-            )
-        else:
-            stacked_params_mapping.extend(
-                [
-                    ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
-                    ("in_proj_qkvz", "in_proj_z", 3),
-                ]
-            )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -500,10 +446,7 @@ class Qwen3_5Model(Qwen3NextModel):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                if param_name == "in_proj_z" and self.enable_lora:
-                    weight_loader(param, loaded_weight)
-                else:
-                    weight_loader(param, loaded_weight, shard_id)
+                weight_loader(param, loaded_weight, shard_id)
                 break
             else:
                 is_expert_weight = False
@@ -633,15 +576,6 @@ class Qwen3_5ForCausalLMBase(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        # When LoRA is enabled, GDN uses separate in_proj_qkv and in_proj_z
-        # instead of merged in_proj_qkvz; pack mapping must match.
-        if vllm_config.lora_config:
-            base = getattr(Qwen3_5ForCausalLMBase, "packed_modules_mapping", {})
-            self.packed_modules_mapping = {k: list(v) for k, v in base.items()}
-            self.packed_modules_mapping.pop("in_proj_qkvz", None)
-            self.packed_modules_mapping["in_proj_qkv"] = ["in_proj_qkv"]
-            self.packed_modules_mapping["in_proj_z"] = ["in_proj_z"]
-
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
@@ -763,14 +697,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         )
 
     def update_packed_mapping(self, enable_lora: bool):
-        # When LoRA is enabled, GDN uses separate in_proj_qkv and in_proj_z
-        if enable_lora:
-            base = getattr(
-                Qwen3_5ForConditionalGeneration, "packed_modules_mapping", {}
-            )
-            self.packed_modules_mapping = {k: list(v) for k, v in base.items()}
-            self.packed_modules_mapping.pop("in_proj_qkvz", None)
-            self.packed_modules_mapping["in_proj_qkv"] = ["in_proj_qkv"]
+        pass
 
     def embed_input_ids(
         self,
