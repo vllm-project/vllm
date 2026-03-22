@@ -22,6 +22,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
+from vllm.v1.attention.backends.mla.utils import zero_out_decode_padding
 from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 logger = init_logger(__name__)
@@ -199,6 +200,14 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
         )
+        # Flashinfer MLA kernels introduces NaNs in padded regions in
+        # some cases.  We need to zero out the padded regions to avoid
+        # NaNs in the output.
+        assert o.size(0) == attn_metadata.decode.seq_lens.size(0), (
+            f"output shape {o.size()} != "
+            f"seq_lens shape {attn_metadata.decode.seq_lens.size()}"
+        )
+        o = zero_out_decode_padding(o, attn_metadata.decode.seq_lens)
 
         # Flatten the output for consistent shape
         o = o.view(-1, o.shape[-2], o.shape[-1])
