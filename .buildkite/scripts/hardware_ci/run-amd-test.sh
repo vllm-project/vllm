@@ -326,8 +326,7 @@ apply_rocm_test_overrides() {
   if [[ $cmds == *" kernels/moe"* ]]; then
     cmds="${cmds} \
     --ignore=kernels/moe/test_moe.py \
-    --ignore=kernels/moe/test_cutlass_moe.py \
-    --ignore=kernels/moe/test_triton_moe_ptpc_fp8.py"
+    --ignore=kernels/moe/test_cutlass_moe.py"
   fi
 
   # --- Entrypoint ignores ---
