@@ -288,13 +288,7 @@ def FusedMoE(
         vllm_config.parallel_config.riy_expert_profile
         or os.environ.get("RIY_EXPERT_PROFILE", "")
     )
-    is_drafter = "mtp" in prefix.lower() or "drafter" in prefix.lower()
-    if (
-        riy_profile
-        and os.path.exists(riy_profile)
-        and layer_idx >= 0
-        and not is_drafter
-    ):
+    if riy_profile and os.path.exists(riy_profile) and layer_idx >= 0:
         num_kept, riy_prune_map, riy_logit_mask = build_riy_prune_map(
             layer_idx, global_num_experts, riy_profile
         )
@@ -367,7 +361,7 @@ def FusedMoE(
             vllm_config.device_config.device
         )
 
-    if layer_idx >= 0:
+    if layer_idx >= 0 and os.environ.get("VLLM_RIY_MONITOR", "0") == "1":
         riy = get_riy_state()
         if riy.enabled:
             total_layers = 0
