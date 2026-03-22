@@ -126,6 +126,12 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
+    # T-LRU: set to True at free_request() time when this block's position
+    # is beyond the TEL-safe cap B = (H + Q_hat - xi)+.  Such blocks are
+    # routed to the TEL-safe eviction queue and evicted before normal LRU
+    # blocks.  Reset to False when the block is evicted or re-allocated.
+    is_tel_safe: bool = False
+
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash

@@ -284,11 +284,18 @@ class SingleTypeKVCacheManager(ABC):
         req_blocks = self.req_to_blocks.pop(request_id, [])
 
         # Free blocks in reverse order so that the tail blocks are
-        # freed first.
+        # freed first (tail = suffix = furthest from prefix cache = first to
+        # evict under normal LRU, AND first to be TEL-safe under T-LRU).
         ordered_blocks = reversed(req_blocks)
 
-        self.block_pool.free_blocks(ordered_blocks)
+        if self.block_pool.tlru_xi_blocks is not None and req_blocks:
+            # T-LRU path: route suffix blocks to tel_safe_queue, prefix blocks
+            # to the normal LRU queue, based on the TEL-safe cap.
+            self.block_pool.free_blocks_tlru(ordered_blocks, len(req_blocks))
+        else:
+            self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
+
 
     @abstractmethod
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:

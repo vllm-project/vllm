@@ -596,6 +596,8 @@ class EngineArgs:
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    tlru_xi_tokens: int | None = CacheConfig.tlru_xi_tokens
+    tlru_qhat_tokens: int = CacheConfig.tlru_qhat_tokens
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 

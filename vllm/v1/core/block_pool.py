@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import deque
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -152,11 +153,22 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        tlru_xi_blocks: int | None = None,
+        tlru_qhat_blocks: int = 0,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
+
+        # T-LRU parameters.  When tlru_xi_blocks is None, T-LRU is disabled
+        # and behaviour is identical to the original LRU eviction.
+        self.tlru_xi_blocks: int | None = tlru_xi_blocks
+        self.tlru_qhat_blocks: int = tlru_qhat_blocks
+        # TEL-safe eviction queue (Phase 1): holds blocks whose position in
+        # the conversation is beyond the TEL-safe cap.  Eviction always drains
+        # this queue before touching the normal LRU free_block_queue.
+        self.tel_safe_queue: deque[KVCacheBlock] = deque()
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
@@ -331,7 +343,23 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        # T-LRU Phase 1: try to allocate from the TEL-safe queue first.  Only
+        # blocks in the normal free_block_queue are candidates for prefix-cache
+        # prefetch; tel_safe blocks are not cached but can supply raw memory.
+        ret: list[KVCacheBlock] = []
+        while len(ret) < num_blocks and self.tel_safe_queue:
+            block = self.tel_safe_queue.popleft()
+            # The block may have been re-touched (ref_cnt > 0) since it was
+            # queued; skip it in that case and let get_new_blocks handle it.
+            if block.ref_cnt == 0 and not block.is_null:
+                # Always clear the TEL-safe tag on re-allocation regardless of
+                # whether prefix caching is enabled.
+                block.is_tel_safe = False
+                ret.append(block)
+        # Fall back to normal LRU queue for the remaining blocks.
+        remaining = num_blocks - len(ret)
+        if remaining > 0:
+            ret.extend(self.free_block_queue.popleft_n(remaining))
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
@@ -363,6 +391,9 @@ class BlockPool:
         # Clean up metrics tracking first to prevent leaks
         if self.metrics_collector:
             self.metrics_collector.on_block_evicted(block)
+
+        # T-LRU: clear the safe tag so that re-use starts fresh.
+        block.is_tel_safe = False
 
         block_hash = block.block_hash
         if block_hash is None:
@@ -422,6 +453,55 @@ class BlockPool:
             [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
         )
 
+    def free_blocks_tlru(
+        self,
+        ordered_blocks: Iterable[KVCacheBlock],
+        req_total_blocks: int,
+    ) -> None:
+        """T-LRU variant of free_blocks.  Call this instead of free_blocks()
+        when T-LRU is enabled.  Blocks whose position (0-indexed from the
+        start of the request's block list) is beyond the TEL-safe cap
+        B = max(0, req_total_blocks + tlru_qhat_blocks - tlru_xi_blocks) are
+        routed to tel_safe_queue; the rest go to the normal LRU free queue.
+
+        Args:
+            ordered_blocks: Blocks in eviction priority order (suffix first,
+                as produced by reversed(req_to_blocks[req_id])).
+            req_total_blocks: Total number of blocks in the request
+                (= H in the paper, measured at free time so it includes
+                the just-generated response).
+        """
+        assert self.tlru_xi_blocks is not None, (
+            "free_blocks_tlru called but T-LRU is not enabled"
+        )
+        B = max(0, req_total_blocks + self.tlru_qhat_blocks - self.tlru_xi_blocks)
+        # ordered_blocks arrives suffix-first (reversed), so the first element
+        # is at position req_total_blocks-1, the second at req_total_blocks-2,
+        # etc.  Blocks at position >= B (i.e. the last req_total_blocks - B
+        # blocks) are TEL-safe.
+        num_tel_safe = req_total_blocks - B  # == max(0, H - B)
+
+        blocks_list = list(ordered_blocks)
+        for block in blocks_list:
+            block.ref_cnt -= 1
+
+        normal_blocks: list[KVCacheBlock] = []
+        for idx, block in enumerate(blocks_list):
+            if block.ref_cnt != 0 or block.is_null:
+                continue
+            # idx=0 → position req_total_blocks-1, idx=1 → position
+            # req_total_blocks-2, …  So position = req_total_blocks-1-idx.
+            # The block is TEL-safe iff position >= B,
+            # i.e. req_total_blocks-1-idx >= B,
+            # i.e. idx <= req_total_blocks-1-B = num_tel_safe-1.
+            if idx < num_tel_safe:
+                block.is_tel_safe = True
+                self.tel_safe_queue.append(block)
+            else:
+                normal_blocks.append(block)
+
+        self.free_block_queue.append_n(normal_blocks)
+
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
 
@@ -480,9 +560,9 @@ class BlockPool:
         """Get the number of free blocks in the pool.
 
         Returns:
-            The number of free blocks.
+            The number of free blocks (normal LRU queue + TEL-safe queue).
         """
-        return self.free_block_queue.num_free_blocks
+        return self.free_block_queue.num_free_blocks + len(self.tel_safe_queue)
 
     def get_usage(self) -> float:
         """Get the KV cache usage.
