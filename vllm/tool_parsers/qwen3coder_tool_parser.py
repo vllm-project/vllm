@@ -671,6 +671,7 @@ class Qwen3CoderToolParser(ToolParser):
                 boundary_candidates: list[tuple[int, str]] = []
                 for token, kind in (
                     (self.parameter_end_token, "parameter"),
+                    (self.parameter_prefix, "next_param"),
                     (self.function_end_token, "function"),
                     (self.tool_call_end_token, "tool"),
                 ):
@@ -718,10 +719,12 @@ class Qwen3CoderToolParser(ToolParser):
                     if current_value.endswith("\n"):
                         safe_len = len(current_value) - 1
 
-                    # Hold back partial close-tag suffixes
-                    # (covers \n + partial tags, e.g. "\n<" or "\n</f").
+                    # Hold back partial boundary suffixes (close tags + next
+                    # parameter start token). Covers cases like "\n<",
+                    # "\n</f", and "\n<param".
                     for close_token in (
                         self.parameter_end_token,
+                        self.parameter_prefix,
                         self.function_end_token,
                         self.tool_call_end_token,
                     ):

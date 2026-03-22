@@ -811,6 +811,61 @@ fahrenheit
     assert args["unit"] == "fahrenheit"
 
 
+def test_qwen3coder_streaming_string_boundary_on_next_parameter(
+    qwen3_tool_parser, qwen3_tokenizer, sample_tools
+):
+    """String streaming should stop at next <parameter=...> boundary.
+
+    Reproduces malformed XML where the first string parameter misses
+    </parameter> and is immediately followed by the next parameter.
+    """
+
+    model_output = """Let me check the weather for you:
+<tool_call>
+<function=get_current_weather>
+<parameter=city>
+Dallas
+<parameter=state>
+TX
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+
+    tool_states = {}
+    for delta_message in stream_delta_message_generator(
+        qwen3_tool_parser, qwen3_tokenizer, model_output, request
+    ):
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+                if idx not in tool_states:
+                    tool_states[idx] = {
+                        "name": None,
+                        "arguments": "",
+                    }
+
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
+
+    assert len(tool_states) == 1
+    assert tool_states[0]["name"] == "get_current_weather"
+
+    arguments = tool_states[0]["arguments"]
+    assert isinstance(arguments, str)
+    args = json.loads(arguments)
+    assert args["city"] == "Dallas"
+    assert args["state"] == "TX"
+    assert args["unit"] == "fahrenheit"
+
+
 def test_extract_tool_calls_streaming_incremental(
     qwen3_tool_parser_parametrized, qwen3_tokenizer, sample_tools
 ):
