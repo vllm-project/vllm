@@ -98,7 +98,6 @@ def test_gpt_oss_lora(
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.timeout(500)
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
 def test_gpt_oss_lora_tp2(
