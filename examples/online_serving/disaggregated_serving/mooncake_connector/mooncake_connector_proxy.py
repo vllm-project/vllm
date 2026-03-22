@@ -39,7 +39,6 @@ async def get_prefiller_info(prefill_clients: list, ready: asyncio.Event):
     for prefill_client in prefill_clients:
         while True:
             try:
-                # Wait for prefill service to be ready
                 response = await prefill_client["client"].get("/health")
                 response.raise_for_status()
             except Exception:
@@ -61,6 +60,46 @@ async def get_prefiller_info(prefill_clients: list, ready: asyncio.Event):
 
     ready.set()
     print("All prefiller instances are ready.")
+
+
+async def monitor_prefiller_engine_ids(app: FastAPI):
+    """
+    Periodically monitor and automatically update stale engine_ids.
+    This handles the case where a prefiller restarts and gets a new engine_id.
+    """
+    await app.state.ready.wait()
+
+    while True:
+        await asyncio.sleep(30)
+
+        for prefill_client in app.state.prefill_clients:
+            try:
+                response = await prefill_client["client"].get("/health")
+                if response.status_code != 200:
+                    continue
+
+                response = await prefill_client["client"].get(
+                    prefill_client["bootstrap_addr"] + "/query"
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                for dp_rank, dp_entry in data.items():
+                    dp_rank_int = int(dp_rank)
+                    current_engine_id = dp_entry["engine_id"]
+                    cached_engine_id = prefill_client["dp_engine_id"].get(dp_rank_int)
+
+                    if current_engine_id != cached_engine_id:
+                        prefill_client["dp_engine_id"][dp_rank_int] = current_engine_id
+                        print(
+                            f"Updated engine_id for prefiller "
+                            f"{prefill_client['url']} dp_rank={dp_rank_int}: "
+                            f"{cached_engine_id} -> {current_engine_id}"
+                        )
+            except Exception as e:
+                print(
+                    f"Error monitoring prefiller {prefill_client['url']}: {e}"
+                )
 
 
 @asynccontextmanager
@@ -111,6 +150,7 @@ async def lifespan(app: FastAPI):
         )
 
     asyncio.create_task(get_prefiller_info(app.state.prefill_clients, app.state.ready))
+    asyncio.create_task(monitor_prefiller_engine_ids(app))
 
     # Initialize round-robin iterators
     app.state.prefill_iterator = prefiller_cycle(app.state.prefill_clients)
