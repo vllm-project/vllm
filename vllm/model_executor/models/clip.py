@@ -65,7 +65,9 @@ from .vision import (
     get_num_selected_vision_tokens,
     is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
+    should_torch_compile_mm_vit,
 )
+from vllm.compilation.decorators import support_torch_compile
 
 
 class CLIPImagePixelInputs(TensorSchema):
@@ -465,6 +467,10 @@ class CLIPMLP(nn.Module):
         return hidden_states
 
 
+@support_torch_compile(
+    dynamic_arg_dims={"hidden_states": 0},
+    enable_if=should_torch_compile_mm_vit,
+)
 class CLIPEncoderLayer(nn.Module):
     def __init__(
         self,
@@ -532,17 +538,20 @@ class CLIPEncoder(nn.Module):
         else:
             num_hidden_layers = num_hidden_layers_override
 
-        self.layers = nn.ModuleList(
-            [
-                CLIPEncoderLayer(
-                    config=config,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.layers.{layer_idx}",
-                    attn_cls=attn_cls,
-                )
-                for layer_idx in range(num_hidden_layers)
-            ]
-        )
+        from vllm.compilation.backends import set_model_tag
+
+        with set_model_tag("CLIPEncoderLayer", is_encoder=True):
+            self.layers = nn.ModuleList(
+                [
+                    CLIPEncoderLayer(
+                        config=config,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.layers.{layer_idx}",
+                        attn_cls=attn_cls,
+                    )
+                    for layer_idx in range(num_hidden_layers)
+                ]
+            )
 
     def forward(
         self,
