@@ -545,8 +545,12 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
     ),
     "isaac": VLMTestInfo(
+        # NOTE: PerceptronAI/Isaac-0.1 removed because the upstream HF
+        # repo has a stale model.safetensors.index.json that references
+        # shard files which no longer exist (consolidated into a single
+        # model.safetensors on 2026-03-20). Re-add once upstream fixes
+        # the index file.
         models=[
-            "PerceptronAI/Isaac-0.1",
             "PerceptronAI/Isaac-0.2-2B-Preview",
         ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
