@@ -4175,15 +4175,18 @@ class GPUModelRunner(
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
             return None
+
+        # Sync the async D→H copy of DSL k_valid.  This is idempotent and
+        # usually a no-op because get_dsl_metrics_delta (called from
+        # sample_tokens earlier in the same step) already synced it.
+        if hasattr(self.drafter, "sync_dsl_k_valid"):
+            self.drafter.sync_dsl_k_valid()
+
         draft_token_ids, req_ids = self._get_draft_token_ids_cpu()
 
-        # When DSL (confidence-threshold early exit) caused the proposer to
-        # generate fewer tokens than num_spec_tokens, trim the per-request
-        # CPU lists to the actual count.  This tells the scheduler to commit
-        # to only the actually-drafted slots, saving verification compute for
-        # the skipped positions.  The GPU tensor is kept padded (see
-        # eagle.py) so that _prepare_input_ids can still use its fixed-stride
-        # indexing; only the CPU list returned to the scheduler is shortened.
+        # Trim per-request lists to the actual number of valid draft tokens.
+        # _last_draft_token_count is set by sync_dsl_k_valid(); it equals
+        # num_spec_tokens when DSL did not exit early (no trimming).
         actual_k = getattr(
             self.drafter, "_last_draft_token_count", self.num_spec_tokens
         )

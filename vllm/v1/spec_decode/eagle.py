@@ -92,11 +92,15 @@ class SpecDecodeBaseProposer:
         )
 
         # Pluggable policy that decides whether to continue drafting at each
-        # step.  ConfidenceThresholdPolicy implements the DISCO-style mean
-        # early-exit heuristic; AlwaysContinuePolicy is a no-op sentinel used
-        # when DSL is disabled (threshold == 0).
+        # step.  ConfidenceThresholdPolicy maintains GPU-side exit state and
+        # is updated via update() (no sync).  AlwaysContinuePolicy is a no-op
+        # sentinel used when DSL is disabled (threshold == 0).
         self.draft_length_policy: DraftLengthPolicy = (
-            ConfidenceThresholdPolicy(self.draft_confidence_threshold)
+            ConfidenceThresholdPolicy(
+                self.draft_confidence_threshold,
+                device,
+                self.num_speculative_tokens,
+            )
             if self.draft_confidence_threshold > 0
             else AlwaysContinuePolicy()
         )
@@ -114,14 +118,31 @@ class SpecDecodeBaseProposer:
         self.dsl_last_reported_generated = 0
         self.dsl_last_reported_requested = 0
 
-        # Actual number of draft tokens produced in the last propose() call.
-        # Equals num_speculative_tokens when DSL did not exit early; less when
-        # it did.  Used by take_draft_token_ids() (sync scheduling only) to
-        # trim the CPU list so the scheduler schedules only the actually-
-        # drafted slots, saving verification compute on the skipped positions.
-        # The GPU tensor itself remains padded to num_speculative_tokens to
-        # keep the fixed stride expected by _prepare_input_ids.
+        # Actual number of valid draft tokens from the last propose() call.
+        # Set to num_speculative_tokens initially; updated by sync_dsl_k_valid()
+        # once the async D→H copy of k_valid_gpu lands.
         self._last_draft_token_count: int = self.num_speculative_tokens
+
+        # Async D→H copy infrastructure for DSL k_valid
+        # (only allocated when DSL is enabled on this proposer subclass).
+        self._dsl_k_valid_cpu: torch.Tensor | None = None
+        self._dsl_k_valid_event: torch.cuda.Event | None = None
+        self._dsl_k_valid_copy_stream: torch.cuda.Stream | None = None
+        # Batch size stored by propose() for use in sync_dsl_k_valid() metrics.
+        self._last_batch_size: int = 0
+        # Guard: prevent double-processing metrics within a single step.
+        self._dsl_synced_this_step: bool = False
+
+        dsl_active = self.draft_confidence_threshold > 0 and self._supports_dsl
+        if dsl_active:
+            self._dsl_k_valid_cpu = torch.zeros(
+                (),
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=is_pin_memory_available(),
+            )
+            self._dsl_k_valid_event = torch.cuda.Event()
+            self._dsl_k_valid_copy_stream = torch.cuda.Stream()
 
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
@@ -470,9 +491,15 @@ class SpecDecodeBaseProposer:
     def get_dsl_metrics_delta(self) -> tuple[int, int, int, int]:
         """Get DSL metrics delta since last call and update last reported values.
 
+        Syncs the async D→H copy of k_valid (if pending) so that early-exit
+        counts and token counts for the current step are up-to-date before the
+        delta is computed.  The sync is idempotent within a step.
+
         Returns (delta_proposals, delta_exits, delta_generated, delta_requested).
         This is used to report per-step metrics to the scheduler.
         """
+        # Ensure current step's k_valid is resolved before computing delta.
+        self.sync_dsl_k_valid()
         delta_proposals = self.dsl_total_proposals - self.dsl_last_reported_proposals
         delta_exits = self.dsl_early_exits - self.dsl_last_reported_exits
         delta_generated = self.dsl_tokens_generated - self.dsl_last_reported_generated
@@ -649,19 +676,18 @@ class SpecDecodeBaseProposer:
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
-        # DSL (Dynamic Speculative Length) early exit logic:
-        # When confidence drops below threshold, stop generating more tokens.
-        # This saves computation while maintaining quality.
-        # Policy: Conservative - exits if ANY request in batch is low confidence.
-        # Rationale: Synchronous generation requires all requests to proceed together.
+        # DSL (Dynamic Speculative Length): sync-free early exit detection.
+        # ConfidenceThresholdPolicy.update() performs only GPU tensor ops; all
+        # K draft steps pipeline without interruption.  A single async D→H
+        # copy is initiated after the loop and synced later in
+        # sync_dsl_k_valid() (called from get_dsl_metrics_delta / take_draft_token_ids).
         dsl_enabled = self._supports_dsl and self.draft_confidence_threshold > 0
-        initial_tokens_requested = self.num_speculative_tokens - 1
-        dsl_did_early_exit = False  # Tracks whether early exit fired this proposal
 
-        # Update metrics only when DSL is enabled
         if dsl_enabled:
+            self.draft_length_policy.reset()  # reset GPU state for this proposal
+            self._dsl_synced_this_step = False
             self.dsl_total_proposals += 1
-            self.dsl_tokens_requested += initial_tokens_requested * batch_size
+            self.dsl_tokens_requested += (self.num_speculative_tokens - 1) * batch_size
 
         cudagraph_runtime_mode, input_batch_size, batch_size_across_dp = (
             self._determine_batch_execution_and_padding(batch_size)
@@ -795,61 +821,62 @@ class SpecDecodeBaseProposer:
             # Always append the token first
             draft_token_ids_list.append(draft_token_ids)
 
-            # Check if we should stop early (DSL early exit).
-            # Delegate the continue/stop decision to the pluggable policy; the
-            # policy is a no-op (AlwaysContinuePolicy) when DSL is disabled.
-            # Only evaluate before the final draft step to avoid a wasted check.
+            # DSL: update GPU exit state (no CPU sync).
+            # Only check before the final step to skip a wasted logit compute
+            # on the last step that can no longer save any forward passes.
             if dsl_enabled and (token_index + 1) < (self.num_speculative_tokens - 1):
                 assert logits is not None
                 draft_probs = logits.softmax(dim=-1, dtype=torch.float32)
                 draft_token_ids_probs = draft_probs.gather(
                     1, draft_token_ids.unsqueeze(1)
                 ).squeeze(-1)
-                if not self.draft_length_policy.should_continue(
-                    token_index, draft_token_ids_probs
-                ):
-                    self.dsl_early_exits += 1
-                    self.dsl_tokens_generated += (token_index + 1) * batch_size
-                    dsl_did_early_exit = True
+                # GPU-only update; no sync here.
+                self.draft_length_policy.update(token_index, draft_token_ids_probs)
 
-                    logger.debug(
-                        "[SpecDecode] Early exit at token %d/%d: "
-                        "confidence below threshold %.3f, "
-                        "generated %d tokens instead of %d",
-                        token_index + 1,
-                        self.num_speculative_tokens - 1,
-                        self.draft_confidence_threshold,
-                        token_index + 1,
-                        self.num_speculative_tokens - 1,
-                    )
-                    break
-
-        # [batch_size, num_actual_draft_tokens (≤ num_speculative_tokens)]
+        # [batch_size, num_speculative_tokens] — always K tokens (no break).
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
 
-        # Record the actual (un-padded) count for the scheduler.  This is read
-        # by take_draft_token_ids() in sync-scheduling mode so that the
-        # scheduler commits to only the drafted slots.
-        self._last_draft_token_count = len(draft_token_ids_list)
-
-        # Pad the GPU tensor back to num_speculative_tokens.  This is required
-        # because _prepare_input_ids in the model runner uses a fixed stride of
-        # num_speculative_tokens when indexing into the flattened draft-token
-        # tensor.  The padded zeros are never read by the scheduler (the CPU
-        # list is trimmed first) and are never accepted by the verifier.
-        if draft_token_ids.shape[1] < self.num_speculative_tokens:
-            pad_width = self.num_speculative_tokens - draft_token_ids.shape[1]
-            draft_token_ids = torch.nn.functional.pad(
-                draft_token_ids, (0, pad_width), value=0
-            )
-
-        # Update token count only on full completion (early exit already counted above)
-        if dsl_enabled and not dsl_did_early_exit:
-            # Exclude first token
-            actual_tokens_generated = len(draft_token_ids_list) - 1
-            self.dsl_tokens_generated += actual_tokens_generated * batch_size
+        # DSL: initiate async D→H copy of k_valid_gpu.
+        # sync_dsl_k_valid() (called from get_dsl_metrics_delta or
+        # take_draft_token_ids) will wait for this copy, set
+        # _last_draft_token_count, and update dsl_early_exits /
+        # dsl_tokens_generated metrics.
+        if dsl_enabled and self._dsl_k_valid_copy_stream is not None:
+            self._last_batch_size = batch_size
+            k_valid_gpu = self.draft_length_policy.k_valid_gpu
+            assert k_valid_gpu is not None
+            assert self._dsl_k_valid_cpu is not None
+            assert self._dsl_k_valid_event is not None
+            default_stream = torch.cuda.current_stream()
+            with torch.cuda.stream(self._dsl_k_valid_copy_stream):
+                self._dsl_k_valid_copy_stream.wait_stream(default_stream)
+                self._dsl_k_valid_cpu.copy_(k_valid_gpu, non_blocking=True)
+                self._dsl_k_valid_event.record()
 
         return draft_token_ids
+
+    def sync_dsl_k_valid(self) -> None:
+        """Synchronise the async D→H copy of k_valid and update metrics.
+
+        Idempotent within a single decode step (guarded by
+        ``_dsl_synced_this_step``).  Must be called before
+        ``_last_draft_token_count`` is read for scheduler trimming.
+        No-op when DSL is disabled.
+        """
+        if self._dsl_k_valid_event is None or self._dsl_synced_this_step:
+            return
+        self._dsl_k_valid_event.synchronize()
+        assert self._dsl_k_valid_cpu is not None
+        k_valid = int(self._dsl_k_valid_cpu.item())  # plain CPU read, no GPU sync
+        self._last_draft_token_count = k_valid
+        batch_size = self._last_batch_size
+        if k_valid < self.num_speculative_tokens:
+            self.dsl_early_exits += 1
+            # Tokens presented to the verifier (excluding seed).
+            self.dsl_tokens_generated += (k_valid - 1) * batch_size
+        else:
+            self.dsl_tokens_generated += (self.num_speculative_tokens - 1) * batch_size
+        self._dsl_synced_this_step = True
 
     def set_inputs_first_pass(
         self,
