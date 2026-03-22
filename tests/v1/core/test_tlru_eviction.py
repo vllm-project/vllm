@@ -125,18 +125,16 @@ class TestFreeBlocksTlru:
         pool.free_blocks_tlru(blocks, req_total_blocks)
         return pool, blocks
 
-    def test_all_blocks_tel_safe_when_history_long(self):
+    def test_most_blocks_tel_safe_when_history_long_and_xi_tight(self):
         """
-        When H (history) >> xi + qhat, all blocks should be TEL-safe.
+        When H is long and xi (SLA threshold) is tight, only the tail blocks
+        beyond the prefix cap B are TEL-safe.
 
         TEL-safe cap  B = max(0, H + Q_hat - xi)
-        Here H=10, qhat=2, xi=5  =>  B = max(0, 10+2-5) = 7
-        So block indices >= 7 are NOT TEL-safe.  Wait – the paper says
-        blocks with index < B are the *tail* ones that can be safely evicted
-        (they won't cause TEL for the current conversation).
+        H=10, qhat=2, xi=5  =>  B = max(0, 10+2-5) = 7
 
-        Actually: blocks[pos] is TEL-safe  iff  pos >= max(0, H + Q_hat - xi)
-        Here that threshold = 7, so only blocks[7..9] are TEL-safe (3 blocks).
+        Blocks at positions 7..9 (3 blocks) are TEL-safe (the suffix beyond B).
+        Blocks at positions 0..6 (7 blocks) are TEL-unsafe (the critical prefix).
         """
         H = 10  # total blocks for the request
         xi = 5
@@ -149,14 +147,14 @@ class TestFreeBlocksTlru:
         assert tel_safe_count == expected_tel_safe
         assert len(pool.tel_safe_queue) == expected_tel_safe
 
-    def test_no_blocks_tel_safe_when_history_short(self):
+    def test_all_blocks_tel_safe_when_xi_loose(self):
         """
-        When H is very short, no blocks should be TEL-safe.
+        When xi (SLA threshold) is very large, the prefix cap B=max(0,H+Q-xi)
+        is 0, meaning ALL blocks are TEL-safe (the next turn is short enough
+        that even recomputing everything stays within the SLA).
 
         H=2, qhat=1, xi=10  =>  B = max(0, 2+1-10) = 0
-        All 2 blocks have index >= 0 means all are "safe"?  No —
-        threshold = max(0, H + Q_hat - xi) = 0, meaning every block index
-        from 0 onwards is beyond the threshold, so ALL are TEL-safe.
+        All 2 blocks are at position >= 0 == B, so all are TEL-safe.
         """
         H = 2
         xi = 10
