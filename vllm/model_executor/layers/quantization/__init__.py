@@ -38,7 +38,6 @@ QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 DEPRECATED_QUANTIZATION_METHODS = [
     "tpu_int8",
-    "ptpc_fp8",
     "fbgemm_fp8",
     "fp_quant",
     "experts_int8",
@@ -130,12 +129,13 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
     from .petit import PetitNvFp4Config
-    from .ptpc_fp8 import PTPCFp8Config
+    from .fp8 import Fp8Config
     from .torchao import TorchAOConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AWQConfig,
         "fp8": Fp8Config,
+        "ptpc_fp8": Fp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
         "fp_quant": FPQuantConfig,
         "modelopt": ModelOptFp8Config,
@@ -148,7 +148,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "gptq": GPTQConfig,
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
-        "ptpc_fp8": PTPCFp8Config,
         "experts_int8": ExpertsInt8Config,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,

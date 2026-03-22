@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
     normalize_batched_scales_shape,
 )
+from vllm.platforms import current_platform
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
@@ -49,7 +50,7 @@ def dequant_fp8(
     return (expert_x_fp32 * expert_x_scales).view(expert_x_fp8.size())
 
 
-class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
     Prepare/Finalize using DeepEP low-latency kernels.
     """
@@ -119,7 +120,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # time. This setting is handled by post_init_setup.
         self.use_ue8m0_dispatch = False
 
-    def post_init_setup(self, fused_experts: mk.FusedMoEPermuteExpertsUnpermute):
+    def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
         if not fused_experts.supports_packed_ue8m0_act_scales():
             # Early exit.
             return
@@ -157,11 +158,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if self.global_to_physical is None:
             return topk_ids
         return self.global_to_physical[topk_ids]
-
-    def _map_local_to_global_ids(self, expert_topk_ids: torch.Tensor) -> torch.Tensor:
-        if self.local_expert_global_ids is None:
-            return expert_topk_ids
-        return self.local_expert_global_ids[expert_topk_ids]
 
     def _do_quant(
         self,
@@ -295,23 +291,46 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # Dispatch
         dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
-        expert_x, expert_num_tokens, handle, _, hook = self.buffer.low_latency_dispatch(
-            a1,
-            dispatch_topk_ids,
-            self.max_tokens_per_rank,
-            num_experts,
-            use_fp8=self.use_fp8_dispatch,
-            round_scale=self.use_ue8m0_dispatch,
-            use_ue8m0=self.use_ue8m0_dispatch,
-            **(dict(use_nvfp4=True) if use_nvfp4 else dict()),
-            **(
-                dict(x_global_scale=qc_a1_gscale_or_scale)
-                if qc_a1_gscale_or_scale is not None
-                else dict()
-            ),
-            async_finish=False,
-            return_recv_hook=True,
-        )
+        if current_platform.is_rocm():
+            (
+                expert_x,
+                expert_num_tokens,
+                handle,
+                _,
+                hook,
+            ) = self.buffer.low_latency_dispatch(
+                a1,
+                dispatch_topk_ids,
+                self.max_tokens_per_rank,
+                num_experts,
+                use_fp8=self.use_fp8_dispatch,
+                async_finish=False,
+                return_recv_hook=True,
+            )
+        else:
+            (
+                expert_x,
+                expert_num_tokens,
+                handle,
+                _,
+                hook,
+            ) = self.buffer.low_latency_dispatch(
+                a1,
+                dispatch_topk_ids,
+                self.max_tokens_per_rank,
+                num_experts,
+                use_fp8=self.use_fp8_dispatch,
+                round_scale=self.use_ue8m0_dispatch,
+                use_ue8m0=self.use_ue8m0_dispatch,
+                **(dict(use_nvfp4=True) if use_nvfp4 else dict()),
+                **(
+                    dict(x_global_scale=qc_a1_gscale_or_scale)
+                    if qc_a1_gscale_or_scale is not None
+                    else dict()
+                ),
+                async_finish=False,
+                return_recv_hook=True,
+            )
         self.handles[a2a_idx] = handle
 
         return (

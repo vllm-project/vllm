@@ -4,7 +4,7 @@
 import enum
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import field
+from dataclasses import field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -96,6 +96,9 @@ class CUDAGraphMode(enum.Enum):
 
     def __str__(self) -> str:
         return self.name
+
+    def __bool__(self) -> bool:
+        return self != CUDAGraphMode.NONE
 
 
 @config
@@ -269,6 +272,24 @@ class PassConfig:
             )
             self.fuse_rope_kvcache = False
 
+    def log_enabled_passes(self) -> None:
+        """
+        Log the enabled custom fusion passes.
+        This is called at the end of VLLMConfig post_init,
+        after all defaults are finalized.
+        TODO also log the compile ranges for which this is enabled.
+        """
+        enabled_fusions = [
+            f.name[len("fuse_") :]
+            for f in fields(self)
+            if getattr(self, f.name) and f.name.startswith("fuse_")
+        ]
+
+        if enabled_fusions:
+            logger.info_once(
+                "Enabled custom fusions: %s", ", ".join(enabled_fusions), scope="global"
+            )
+
 
 class DynamicShapesType(str, enum.Enum):
     """Types of dynamic shapes handling in torch.compile().
@@ -341,7 +362,8 @@ class CompilationConfig:
     VLLMConfig's post_init does further initialization. If used outside of the
     VLLMConfig, some fields will be left in an improper state.
 
-    It has three parts:
+    It contains PassConfig, which controls the custom fusion/transformation passes.
+    The rest has three parts:
 
     - Top-level Compilation control:
         - [`mode`][vllm.config.CompilationConfig.mode]
@@ -363,8 +385,8 @@ class CompilationConfig:
         [vllm.config.CompilationConfig.cudagraph_copy_inputs]
     - Inductor compilation:
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
-        - [`compile_ranges_split_points`]
-            [vllm.config.CompilationConfig.compile_ranges_split_points]
+        - [`compile_ranges_endpoints`]
+            [vllm.config.CompilationConfig.compile_ranges_endpoints]
         - [`inductor_compile_config`]
         [vllm.config.CompilationConfig.inductor_compile_config]
         - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
@@ -381,13 +403,6 @@ class CompilationConfig:
         certain small batchsizes, where inductor is good at optimizing.
     """
 
-    # Top-level Compilation control
-    level: int = Field(default=None)
-    """
-    Level is deprecated and will be removed in the next release,
-    either 0.12.0 or 0.11.2 whichever is soonest.
-    Please use mode. Currently all levels are mapped to mode.
-    """
     # Top-level Compilation control
     mode: CompilationMode = Field(default=None)
     """The compilation approach used for torch.compile-based compilation of the
@@ -480,12 +495,12 @@ class CompilationConfig:
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
 
-    compile_ranges_split_points: list[int] | None = None
-    """Split points that represent compile ranges for inductor.
+    compile_ranges_endpoints: list[int] | None = None
+    """Endpoints for Inductor compile ranges.
     The compile ranges are
-    [1, split_points[0]],
-    [split_points[0] + 1, split_points[1]], ...,
-    [split_points[-1] + 1, max_num_batched_tokens].
+    [1, endpoints[0]],
+    [endpoints[0] + 1, endpoints[1]], ...,
+    [endpoints[-1] + 1, max_num_batched_tokens].
     Compile sizes are also used single element ranges,
     the range is represented as [compile_sizes[i], compile_sizes[i]].
 
@@ -673,6 +688,7 @@ class CompilationConfig:
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
         "vllm::gdn_attention_core",
+        "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
@@ -801,17 +817,6 @@ class CompilationConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
-        if self.level is not None:
-            logger.warning(
-                "Level is deprecated and will be removed in the next release,"
-                "either 0.12.0 or 0.11.2 whichever is soonest."
-                "Use mode instead."
-                "If both level and mode are given,"
-                "only mode will be used."
-            )
-            if self.mode is None:
-                self.mode = self.level
-
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
@@ -890,7 +895,7 @@ class CompilationConfig:
                 )
 
         # Currently only eager and inductor backend are supported.
-        # for piecewise compilation. Custom backends are not suppported for
+        # for piecewise compilation. Custom backends are not supported for
         # piecewise compilation. Update when more backends are supported.
         if self.mode == CompilationMode.VLLM_COMPILE and self.backend not in [
             "",
@@ -904,11 +909,19 @@ class CompilationConfig:
         if self.backend == "":
             self.backend = current_platform.get_compile_backend()
 
-    def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
+    def init_backend(
+        self,
+        vllm_config: "VllmConfig",
+        prefix: str = "",
+        is_encoder: bool = False,
+    ) -> str | Callable:
         """
         Initialize the backend for the compilation config from a vllm config.
         Arguments:
             vllm_config: The vllm config to initialize the backend from.
+            prefix: Cache directory prefix for this compiled module.
+            is_encoder: Whether this module is used in an encoder (as
+                opposed to a text backbone).
         Returns:
             The backend for the compilation config.
         """
@@ -938,9 +951,7 @@ class CompilationConfig:
 
         from vllm.compilation.backends import VllmBackend
 
-        # TODO[@lucaskabela]: See if we can forward prefix
-        # https://github.com/vllm-project/vllm/issues/27045
-        return VllmBackend(vllm_config)
+        return VllmBackend(vllm_config, prefix=prefix, is_encoder=is_encoder)
 
     def post_init_cudagraph_sizes(self) -> None:
         """To complete the initialization after cudagraph related
@@ -1007,6 +1018,7 @@ class CompilationConfig:
                 # https://github.com/vllm-project/vllm/issues/33267
                 if not self.use_inductor_graph_partition:
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
+                    self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
             elif len(self.splitting_ops) == 0:
                 if (
@@ -1189,12 +1201,63 @@ class CompilationConfig:
         self.max_cudagraph_capture_size = rounded_sizes[-1]
         self.cudagraph_capture_sizes = rounded_sizes
 
+    def adjust_cudagraph_sizes_for_mamba_cache(
+        self, num_mamba_cache_blocks: int
+    ) -> None:
+        """Cap cudagraph capture sizes to available Mamba cache blocks.
+
+        For hybrid Mamba/attention models, the Mamba conv_state and
+        ssm_state tensors have their first dimension equal to num_blocks
+        (from KVCacheConfig). During CUDA graph capture the decode batch
+        size equals num_tokens, so capture sizes exceeding num_blocks
+        would cause out-of-bounds access in Mamba kernels.
+
+        See: https://github.com/vllm-project/vllm/issues/34094
+        """
+        if not self.cudagraph_capture_sizes or num_mamba_cache_blocks <= 0:
+            return
+
+        assert self.max_cudagraph_capture_size is not None
+
+        if num_mamba_cache_blocks >= self.max_cudagraph_capture_size:
+            return
+
+        capped_sizes = [
+            s for s in self.cudagraph_capture_sizes if s <= num_mamba_cache_blocks
+        ]
+
+        if len(capped_sizes) == 0:
+            logger.warning(
+                "No valid cudagraph capture sizes remain after capping "
+                "to Mamba cache blocks (%d). The smallest capture size "
+                "was %d. Disabling cudagraph capture. Consider reducing "
+                "max_num_seqs or increasing available GPU memory.",
+                num_mamba_cache_blocks,
+                self.cudagraph_capture_sizes[0],
+            )
+            self.cudagraph_capture_sizes = []
+            self.max_cudagraph_capture_size = 0
+            return
+
+        logger.warning(
+            "Capping cudagraph capture sizes from max %d to %d to fit "
+            "Mamba cache blocks (%d blocks available). This limits the "
+            "maximum batch size that can use CUDA graphs. To increase "
+            "this limit, reduce max_num_seqs or increase available GPU "
+            "memory.",
+            self.max_cudagraph_capture_size,
+            capped_sizes[-1],
+            num_mamba_cache_blocks,
+        )
+
+        self.max_cudagraph_capture_size = capped_sizes[-1]
+        self.cudagraph_capture_sizes = capped_sizes
+
     def get_compile_ranges(self) -> list[Range]:
         """Get the compile ranges for the compilation config."""
-        if self.compile_ranges_split_points is None:
+        if self.compile_ranges_endpoints is None:
             return []
-        split_points = sorted(set(self.compile_ranges_split_points))
+        endpoints = sorted(set(self.compile_ranges_endpoints))
         return [
-            Range(start=s + 1, end=e)
-            for s, e in zip([0] + split_points[:-1], split_points)
+            Range(start=s + 1, end=e) for s, e in zip([0] + endpoints[:-1], endpoints)
         ]

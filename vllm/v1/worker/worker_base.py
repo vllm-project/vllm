@@ -15,7 +15,6 @@ from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.kv_cache_interface import KVCacheSpec
-from vllm.v1.serial_utils import run_method
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -105,10 +104,6 @@ class WorkerBase:
         """
         raise NotImplementedError
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
-        """Initialize the KV cache with the given size in blocks."""
-        raise NotImplementedError
-
     def reset_mm_cache(self) -> None:
         reset_fn = getattr(self.model_runner, "reset_mm_cache", None)
         if callable(reset_fn):
@@ -127,7 +122,7 @@ class WorkerBase:
 
         return format_model_inspection(self.get_model())
 
-    def load_model(self) -> None:
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
         """Load model onto target device."""
         raise NotImplementedError
 
@@ -210,15 +205,6 @@ class WorkerWrapperBase:
     def shutdown(self) -> None:
         if self.worker is not None:
             self.worker.shutdown()
-
-    def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
-        """
-        Adjust the rpc_rank based on the given mapping.
-        It is only used during the initialization of the executor,
-        to adjust the rpc_rank of workers after we create all workers.
-        """
-        if self.rpc_rank in rank_mapping:
-            self.rpc_rank = rank_mapping[self.rpc_rank]
 
     def update_environment_variables(
         self,
@@ -324,25 +310,6 @@ class WorkerWrapperBase:
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during device initialization
             self.worker.init_device()  # type: ignore
-
-    def execute_method(self, method: str | bytes, *args, **kwargs):
-        try:
-            # method resolution order:
-            # if a method is defined in this class, it will be called directly.
-            # otherwise, since we define `__getattr__` and redirect attribute
-            # query to `self.worker`, the method will be called on the worker.
-            return run_method(self, method, args, kwargs)
-        except Exception as e:
-            # if the driver worker also execute methods,
-            # exceptions in the rest worker may cause deadlock in rpc like ray
-            # see https://github.com/vllm-project/vllm/issues/3455
-            # print the error and inform the user to solve the error
-            msg = (
-                f"Error executing method {method!r}. "
-                "This might cause deadlock in distributed execution."
-            )
-            logger.exception(msg)
-            raise e
 
     def __getattr__(self, attr: str):
         return getattr(self.worker, attr)

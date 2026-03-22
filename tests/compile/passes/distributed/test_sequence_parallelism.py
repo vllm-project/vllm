@@ -36,6 +36,8 @@ from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
+pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+
 FP8_DTYPE = current_platform.fp8_dtype()
 prompts = [
     "Hello, my name is",
@@ -226,7 +228,7 @@ def sequence_parallelism_pass_on_test_model(
     set_random_seed(0)
 
     device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 
