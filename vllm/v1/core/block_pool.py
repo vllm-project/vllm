@@ -1,5 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""KV 缓存块池模块。
+
+本模块实现了 KV 缓存块池管理功能，负责：
+- 管理 KV 缓存块的分配和释放
+- 实现前缀缓存功能（通过块哈希映射）
+- 处理块驱逐事件和 KV 缓存事件
+- 支持块指标采集（用于性能分析）
+
+主要类：
+- BlockHashToBlockMap: 块哈希到块的映射表
+- BlockPool: KV 缓存块池管理器
+"""
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -31,36 +43,39 @@ logger = init_logger(__name__)
 
 
 class BlockHashToBlockMap:
-    """
-    Cache of blocks that are used for prefix caching. It caches blocks
-    from hash directly to a block or multiple blocks
-    (i.e. {block_hash: KVCacheBlocks})
-    - Mostly block_hash maps to a single KVCacheBlock, and KVCacheBlocks
-        would simply be a KVCacheBlock.
-    - Otherwise, KVCacheBlocks is a dict from {block_id: KVCacheBlock}
+    """块哈希到块的映射表。
 
-    A cached block is a full block with a block hash that can be used
-    for prefix caching.
-    The cached block may be used by running requests or in the
-    free_block_queue that could potentially be evicted.
+    用于前缀缓存的块缓存数据结构，将块哈希映射到一个或多个 KVCacheBlock。
+    大多数情况下一个块哈希对应单个 KVCacheBlock，但在存在重复块时可能对应多个。
 
-    NOTE #1: We currently don't de-duplicate the blocks in the cache,
-    meaning that if a block becomes full and is cached, we don't check
-    if there is already an identical block in the cache. This is because
-    we want to make sure the allocated block IDs won't change so that
-    block tables are append-only.
-    NOTE #2: The union type is introduced in order to reduce GC costs
-    from the inner dict.
+    缓存的块是具有块哈希的完整块，可用于前缀缓存查找。
+    这些块可能被运行中的请求使用，或者在 free_block_queue 中等待被驱逐。
+
+    注意：
+        1. 当前实现不去重缓存的块，即如果一个块已满并被缓存，不会检查
+           缓存中是否已存在相同的块。这是为了确保分配的块 ID 不会改变，
+           从而保证块表是只追加的。
+        2. 使用联合类型（KVCacheBlock | dict）是为了减少内部字典带来的 GC 开销。
+
+    Attributes:
+        _cache: 内部缓存字典，键为 BlockHashWithGroupId，
+                值为单个 KVCacheBlock 或块 ID 到块的字典
     """
 
     def __init__(self):
+        """初始化块哈希到块的映射表。"""
         self._cache: dict[
             BlockHashWithGroupId, KVCacheBlock | dict[int, KVCacheBlock]
         ] = {}
 
     def get_one_block(self, key: BlockHashWithGroupId) -> KVCacheBlock | None:
-        """
-        Gets any block with the given block hash key.
+        """获取具有给定块哈希键的任意一个块。
+
+        Args:
+            key: 块哈希键（包含组 ID）
+
+        Returns:
+            如果找到则返回 KVCacheBlock，否则返回 None
         """
         blocks = self._cache.get(key)
         if blocks is not None:
@@ -72,46 +87,54 @@ class BlockHashToBlockMap:
         return None
 
     def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
-        """
-        Inserts the KVCacheBlock to the cache
+        """插入 KVCacheBlock 到缓存中。
+
+        如果键已存在，则将新块合并到现有条目中（转为字典格式）。
+
+        Args:
+            key: 块哈希键（包含组 ID）
+            block: 要插入的 KVCacheBlock
         """
         blocks = self._cache.get(key)
         if blocks is None:
-            # When key is not found, attach a single block to the key
+            # 键不存在时，将单个块附加到键
             self._cache[key] = block
         elif isinstance(blocks, KVCacheBlock):
-            # If there's a block with the same key, merge the original block
-            # and the new block into a dict
+            # 如果已存在相同键的块，将原块和新块合并为字典
             self._cache[key] = {blocks.block_id: blocks, block.block_id: block}
         elif isinstance(blocks, dict):
-            # If it's already a dict, simply insert the block
+            # 如果已经是字典，直接插入新块
             blocks[block.block_id] = block
         else:
             self._unexpected_blocks_type(blocks)
 
     def pop(self, key: BlockHashWithGroupId, block_id: int) -> KVCacheBlock | None:
-        """
-        Checks if block_hash exists and pop block_id from the cache
+        """从缓存中弹出指定块 ID 的块。
+
+        Args:
+            key: 块哈希键（包含组 ID）
+            block_id: 要弹出的块 ID
+
+        Returns:
+            如果找到则返回 KVCacheBlock，否则返回 None
         """
         blocks = self._cache.pop(key, None)
         if blocks is None:
-            # block_hash not found in the cache
+            # 块哈希不在缓存中
             return None
-        # TODO(Jialin): If key is found, block_id should always present
-        # in blocks. We currently keep the original behaviour for safety.
+        # TODO(Jialin): 如果找到键，block_id 应该总是存在于 blocks 中。
+        # 目前为了安全起见保持原有行为。
         #
-        # Will add block_id == blocks.block_id assertion and
-        # use del blocks[block_id] instead as followup.
+        # 后续可以添加 block_id == blocks.block_id 断言，
+        # 并使用 del blocks[block_id] 替代。
         if isinstance(blocks, KVCacheBlock):
             if blocks.block_id == block_id:
                 return blocks
-            # If the single block ID doesn't match, we should put the
-            # block back (it should happen rarely)
+            # 如果单个块的 ID 不匹配，将块放回缓存（这种情况应该很少见）
             self._cache[key] = blocks
             return None
         if isinstance(blocks, dict):
-            # Try to pop block_id from the block dict, and if dict still
-            # contain blocks, put back to the cache.
+            # 尝试从块字典中弹出 block_id，如果字典仍包含块则放回缓存
             block = blocks.pop(block_id, None)
             if len(blocks) > 0:
                 self._cache[key] = blocks
@@ -120,29 +143,47 @@ class BlockHashToBlockMap:
         return None
 
     def __len__(self) -> int:
+        """返回缓存中的条目数量。
+
+        Returns:
+            缓存条目数
+        """
         return len(self._cache)
 
     def _unexpected_blocks_type(self, blocks: Any) -> None:
+        """抛出块类型错误。
+
+        Args:
+            blocks: 意外类型的块对象
+        """
         raise AssertionError(f"Invalid KV cache block type {type(blocks)}")
 
 
 class BlockPool:
-    """BlockPool that manages KVCacheBlocks.
-    It provides methods to allocate, free and cache the kv cache blocks. The
-    free_block_queue stores the free blocks in eviction order to enable
-    allocation, free, and cache eviction. The cached_block_hash_to_block
-    maps between block hash and cached block to support finding cached blocks
-    by their block hash.
+    """KV 缓存块池管理器。
+
+    负责管理 KVCacheBlocks 的分配、释放和缓存。
+    free_block_queue 按驱逐顺序存储空闲块，支持分配、释放和缓存驱逐操作。
+    cached_block_hash_to_block 建立块哈希到缓存块的映射，支持通过块哈希查找缓存块。
+
+    Attributes:
+        num_gpu_blocks: GPU 上的块总数
+        enable_caching: 是否启用前缀缓存
+        hash_block_size: 计算块哈希的块大小
+        blocks: 所有 KV 缓存块列表
+        free_block_queue: 空闲块队列（双向链表）
+        cached_block_hash_to_block: 块哈希到块的缓存映射
+        null_block: 空块（block_id=0 的占位符）
+        enable_kv_cache_events: 是否启用 KV 缓存事件
+        kv_event_queue: KV 缓存事件队列
+        metrics_collector: 可选的块指标采集器
 
     Args:
-        num_gpu_blocks: The number of blocks in the pool.
-        enable_caching: Whether to enable prefix caching.
-        hash_block_size: The block size of which the block hashes are computed.
-            The actual block size usually equals hash_block_size, but in cases
-            where different KV cache groups have different block sizes, the
-            actual block size can be a multiple of hash_block_size.
-        enable_kv_cache_events: Whether to enable kv cache events.
-        metrics_collector: Optional metrics collector for tracking block residency.
+        num_gpu_blocks: GPU 上的块数量
+        enable_caching: 是否启用前缀缓存
+        hash_block_size: 计算块哈希的块大小
+        enable_kv_cache_events: 是否启用 KV 缓存事件
+        metrics_collector: 可选的块指标采集器
     """
 
     def __init__(
@@ -153,25 +194,31 @@ class BlockPool:
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
+        """初始化块池。
+
+        Args:
+            num_gpu_blocks: GPU 上的块数量
+            enable_caching: 是否启用前缀缓存
+            hash_block_size: 计算块哈希的块大小
+            enable_kv_cache_events: 是否启用 KV 缓存事件
+            metrics_collector: 可选的块指标采集器
+        """
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
-        # All kv-cache blocks.
+        # 所有 kv-cache 块
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
         ]
-        # Free block queue that constructs and manipulates a doubly linked
-        # list of free blocks (including eviction candidates when caching is
-        # enabled).
+        # 空闲块队列，构建和操作双向链表
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
-        # Cache for block lookup
+        # 块查找缓存
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
 
-        # To represent a placeholder block with block_id=0.
-        # The ref_cnt of null_block is not maintained, needs special care to
-        # avoid freeing it.
+        # 占位符空块（block_id=0）
+        # null_block 的 ref_cnt 不维护，需要特别注意避免释放它
         self.null_block = self.free_block_queue.popleft()
         self.null_block.is_null = True
 
@@ -183,16 +230,17 @@ class BlockPool:
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
-        """Get the cached block by the block hash for each group in
-        `kv_cache_group_ids`, or None if cache miss for any group.
-        If there are duplicated blocks, we return the first block in the cache.
+        """获取每个 KV 缓存组中给定块哈希的缓存块。
+
+        对于 kv_cache_group_ids 中的每个组，查找对应的缓存块。
+        如果存在重复块，返回缓存中的第一个块。
 
         Args:
-            block_hash: The hash value of the block.
-            kv_cache_group_ids: The ids of the KV cache groups.
+            block_hash: 块的哈希值
+            kv_cache_group_ids: KV 缓存组 ID 列表
 
         Returns:
-            The cached blocks if exists, or None.
+            如果所有组都存在缓存块则返回块列表，否则返回 None（任一组未命中）
         """
         cached_blocks = []
         for group_id in kv_cache_group_ids:
@@ -216,36 +264,32 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
     ) -> None:
-        """Cache a list of full blocks for prefix caching.
-        This function takes a list of blocks that will have their block hash
-        metadata to be updated and cached. Given a request, it updates the
-        metadata for each block and caching it in the
-        `cached_block_hash_to_block`.
-        The block hashes values are computed by the Request object immediately
-        when it is created and when new tokens are appended.
+        """缓存请求的完整块用于前缀缓存。
+
+        此函数更新并缓存一组块的块哈希元数据。给定一个请求，它为每个块更新元数据
+        并将其添加到 cached_block_hash_to_block 中。块哈希值由 Request 对象在创建时
+        以及添加新 token 时立即计算。
 
         Args:
-            request: The request to cache the blocks.
-            blocks: All blocks in the request.
-            num_cached_blocks: The number of blocks that are already cached.
-            num_full_blocks: The number of blocks that are full and should
-                be cached after this function.
-            block_size: Number of tokens in each block.
-            kv_cache_group_id: The id of the KV cache group.
+            request: 要缓存块的请求
+            blocks: 请求中的所有块
+            num_cached_blocks: 已经缓存的块数量
+            num_full_blocks: 在此函数之后应该被缓存的完整块数量
+            block_size: 每个块中的 token 数量
+            kv_cache_group_id: KV 缓存组 ID
         """
         if num_cached_blocks >= num_full_blocks:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert len(request.block_hashes) >= num_full_blocks
         if block_size == self.hash_block_size:
-            # Common case.
+            # 常见情况
             block_hashes: BlockHashList = request.block_hashes
         else:
-            # block_size is a multiple of hash_block_size. This happens when
-            # different KV cache groups have different block sizes.
+            # block_size 是 hash_block_size 的倍数
+            # 当不同 KV 缓存组有不同块大小时会发生这种情况
             assert block_size % self.hash_block_size == 0
-            # Recalculate block_hashes at the granularity of block_size, using
-            # the original block_hashes (at the granularity of hash_block_size).
+            # 使用原始块哈希（hash_block_size 粒度）重新计算 block_size 粒度的块哈希
             block_hashes = BlockHashListWithBlockSize(
                 request.block_hashes, self.hash_block_size, block_size
             )
@@ -255,15 +299,14 @@ class BlockPool:
             [] if self.enable_kv_cache_events else None
         )
         for i, blk in enumerate(new_full_blocks):
-            # Some blocks may be null blocks when enabling sparse attention like
-            # sliding window attention, or Mamba models with prefix-caching in
-            # align mode. We skip null blocks here.
+            # 当启用稀疏注意力（如滑动窗口注意力）或启用前缀缓存的 Mamba 模型时，
+            # 一些块可能是空块。跳过空块。
             if blk.is_null:
                 continue
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
 
-            # Update and added the full block to the cache.
+            # 更新完整块并将其添加到缓存
             block_hash_with_group_id = make_block_hash_with_group_id(
                 block_hash, kv_cache_group_id
             )
@@ -280,14 +323,13 @@ class BlockPool:
                     block_hashes[num_cached_blocks - 1]
                 )
 
-            # Calculate token range for the blocks being cached
+            # 计算要缓存的块的 token 范围
             start_token_idx = num_cached_blocks * block_size
             end_token_idx = num_full_blocks * block_size
 
-            # Generate extra keys for each block individually.
-            # Each block may have different extra_keys (e.g., different MM
-            # features, or cache_salt only for the first block).
-            # Skip null blocks to match the length of new_hashes.
+            # 为每个块单独生成 extra_keys
+            # 每个块可能有不同的 extra_keys（例如不同的多模态特征，或仅第一个块的 cache_salt）
+            # 跳过空块以匹配 new_hashes 的长度
             extra_keys_list: list[tuple[Any, ...] | None] = []
             curr_mm_idx = 0
             for i in range(num_cached_blocks, num_full_blocks):
@@ -318,22 +360,25 @@ class BlockPool:
             )
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
-        """Get new blocks from the free block pool.
+        """从空闲块池获取新块。
 
-        Note that we do not check block cache in this function.
+        注意：此函数不检查块缓存。
 
         Args:
-            num_blocks: The number of blocks to allocate.
+            num_blocks: 要分配的块数量
 
         Returns:
-            A list of new block.
+            新块列表
+
+        Raises:
+            ValueError: 如果没有足够的空闲块
         """
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
-        # In order to only iterate the list once, we duplicated code a bit
+        # 为了只迭代列表一次，代码略有重复
         if self.enable_caching:
             for block in ret:
                 self._maybe_evict_cached_block(block)
@@ -350,37 +395,36 @@ class BlockPool:
         return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
-        """
-        If a block is cached in `cached_block_hash_to_block`, we reset its hash
-        metadata and evict it from the cache.
+        """驱逐缓存块。
+
+        如果一个块在 cached_block_hash_to_block 中被缓存，重置其哈希元数据
+        并从缓存中驱逐它。
 
         Args:
-            block: The block to evict.
+            block: 要驱逐的块
 
         Returns:
-            True if the block is evicted, False otherwise.
+            True 表示块被驱逐，False 表示未驱逐
         """
-        # Clean up metrics tracking first to prevent leaks
+        # 首先清理指标跟踪以防止泄漏
         if self.metrics_collector:
             self.metrics_collector.on_block_evicted(block)
 
         block_hash = block.block_hash
         if block_hash is None:
-            # The block doesn't have hash, eviction is not needed
+            # 块没有哈希，不需要驱逐
             return False
 
         if self.cached_block_hash_to_block.pop(block_hash, block.block_id) is None:
-            # block not found in cached_block_hash_to_block,
-            # eviction is not needed
+            # 块不在 cached_block_hash_to_block 中，不需要驱逐
             return False
 
         block.reset_hash()
 
         if self.enable_kv_cache_events:
-            # FIXME (Chen): Not sure whether we should return `hash_value`
-            # or `(hash_value, group_id)` here. But it's fine now because
-            # we disable hybrid kv cache manager when kv cache event is
-            # enabled, so there is only one group.
+            # FIXME (Chen): 不确定这里应该返回 hash_value 还是 (hash_value, group_id)
+            # 但目前没问题，因为当启用 kv cache event 时禁用了 hybrid kv cache manager，
+            # 所以只有一个组
             self.kv_event_queue.append(
                 BlockRemoved(
                     block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
@@ -390,16 +434,16 @@ class BlockPool:
         return True
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
-        """Touch a block increases its reference count by 1, and may remove
-        the block from the free queue. This is used when a block is hit by
-        another request with the same prefix.
+        """触摸块（增加引用计数）。
+
+        触摸一个块会将其引用计数加 1，并可能从空闲队列中移除该块。
+        当一个块被具有相同前缀的另一个请求命中时使用此方法。
 
         Args:
-            blocks: A list of blocks to touch.
+            blocks: 要触摸的块列表
         """
         for block in blocks:
-            # ref_cnt=0 means this block is in the free list (i.e. eviction
-            # candidate), so remove it.
+            # ref_cnt=0 表示此块在空闲列表中（即驱逐候选），所以移除它
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
@@ -407,14 +451,14 @@ class BlockPool:
                 self.metrics_collector.on_block_accessed(block)
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
-        """Free a list of blocks. The blocks should be ordered by their
-        eviction priority, where the first block will be evicted first.
+        """释放一组块。
+
+        块应按驱逐优先级排序，第一个块将最先被驱逐。
 
         Args:
-            ordered_blocks: A list of blocks to free ordered by their eviction
-                priority.
+            ordered_blocks: 按驱逐优先级排序的块列表
         """
-        # Materialize the iterable to allow multiple passes.
+        # 物化迭代器以允许多次遍历
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
             block.ref_cnt -= 1
@@ -423,14 +467,16 @@ class BlockPool:
         )
 
     def evict_blocks(self, block_ids: set[int]) -> None:
-        """evict blocks from the prefix cache by their block IDs.
+        """按块 ID 从前缀缓存中驱逐块。
 
-        only evicts blocks that are currently cached (have a hash). blocks
-        with ref_cnt > 0 are not freed from the block pool, only evicted
-        from the prefix cache hash table.
+        仅驱逐当前被缓存的块（具有哈希）。ref_cnt > 0 的块不会从块池中释放，
+        仅从前缀缓存哈希表中移除。
 
         Args:
-            block_ids: Set of block IDs to evict from cache.
+            block_ids: 要从缓存中驱逐的块 ID 集合
+
+        Raises:
+            AssertionError: 如果块 ID 超出范围
         """
         for block_id in block_ids:
             assert block_id < len(self.blocks), (
@@ -442,16 +488,16 @@ class BlockPool:
             self._maybe_evict_cached_block(block)
 
     def reset_prefix_cache(self) -> bool:
-        """Reset prefix cache. This function may be used in RLHF
-        flows to invalid prefix caching after the weights are updated,
-        or used for resetting prefix caching status for benchmarking.
+        """重置前缀缓存。
+
+        此函数可用于 RLHF 流程中权重更新后使前缀缓存失效，
+        或用于基准测试时重置前缀缓存状态。
 
         Returns:
-            bool: True if the prefix cache is successfully reset,
-            False otherwise.
+            True 表示前缀缓存成功重置，False 表示失败（仍有块未释放）
         """
         num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
-        if num_used_blocks != 1:  # The null block is always marked as used
+        if num_used_blocks != 1:  # null 块总是标记为已使用
             logger.warning(
                 "Failed to reset prefix cache because some "
                 "blocks (%d) are not freed yet",
@@ -459,10 +505,10 @@ class BlockPool:
             )
             return False
 
-        # Remove all hashes so that no new blocks will hit.
+        # 移除所有哈希，使新块不会命中缓存
         self.cached_block_hash_to_block = BlockHashToBlockMap()
 
-        # Remove all hashes from all blocks.
+        # 从所有块中移除哈希
         for block in self.blocks:
             block.reset_hash()
 
@@ -477,34 +523,34 @@ class BlockPool:
         return True
 
     def get_num_free_blocks(self) -> int:
-        """Get the number of free blocks in the pool.
+        """获取池中空闲块的数量。
 
         Returns:
-            The number of free blocks.
+            空闲块数量
         """
         return self.free_block_queue.num_free_blocks
 
     def get_usage(self) -> float:
-        """Get the KV cache usage.
+        """获取 KV 缓存使用率。
 
         Returns:
-            The KV cache usage (between 0.0 and 1.0).
+            KV 缓存使用率（0.0 到 1.0 之间）
         """
-
-        # Subtract 1 to account for null block.
+        # 减去 1 以排除 null 块
         total_gpu_blocks = self.num_gpu_blocks - 1
         if not total_gpu_blocks:
             return 0
         return 1.0 - (self.get_num_free_blocks() / total_gpu_blocks)
 
     def take_events(self) -> list[KVCacheEvent]:
-        """Atomically takes all events and clears the queue.
+        """原子性地获取所有事件并清除队列。
 
         Returns:
-            A list of KV cache events.
+            KV 缓存事件列表，如果未启用事件则返回空列表
         """
         if not self.enable_kv_cache_events:
             return []
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
+

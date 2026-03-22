@@ -1,5 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""编码器缓存管理器模块。
+
+本模块实现了多模态模型的编码器输出缓存管理功能，负责：
+- 管理多模态编码器输出的缓存生命周期（如视觉嵌入）
+- 提供内存感知的缓存管理，避免重复计算编码器输出
+- 支持细粒度的内存管理和多模态输入的块处理
+- 通过 LRU 策略管理缓存驱逐
+
+主要类：
+- EncoderCacheManager: 编码器缓存管理器
+- EncoderDecoderCacheManager: 编码器 - 解码器缓存管理器
+
+应用场景：
+- 视觉 - 语言模型（如 LLaVA）缓存图像编码器输出
+- 任何多模态模型中编码器计算开销大且可缓存的场景
+"""
 
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -15,72 +31,55 @@ logger = init_logger(__name__)
 
 
 class EncoderCacheManager:
-    """Manages caching of encoder outputs for multimodal models in vLLM V1.
+    """编码器缓存管理器。
 
-    The EncoderCacheManager handles the lifecycle of multimodal encoder outputs
-    (such as vision embeddings from images) during request processing. It
-    provides memory-aware caching to avoid recomputing encoder outputs when the
-    same multimodal inputs appear in different stages of request processing.
+    管理多模态模型（如视觉 - 语言模型）的编码器输出缓存。
+    处理请求处理过程中多模态编码器输出（如视觉嵌入）的生命周期。
+    提供内存感知的缓存，当相同的多模态输入出现在请求处理的不同阶段时，
+    避免重新计算编码器输出。
 
-    This manager is particularly important for:
-    - Vision-language models (e.g., LLaVA) where image encoder outputs are
-      cached
-    - Any multimodal model where encoder computation is expensive and
-      cacheable
+    缓存以请求中各个多模态输入项的粒度操作，允许细粒度的内存管理。
+    缓存启用时，在不同请求之间共享相同多模态数据项（通过哈希值识别）的嵌入，
+    当没有新嵌入空间时在分配时进行驱逐。具有零引用的最旧缓存嵌入将首先被驱逐。
 
-    The cache operates at the granularity of individual multimodal input items
-    within requests, allowing for fine-grained memory management and enabling
-    chunked processing of multimodal inputs.
-
-    Cache is enabled to share embeddings of same multimodal data
-    item (identified by their hash value) between different requests,
-    and eviction takes place at allocation time when there's no free
-    space for new embeddings.
-    Oldest cached embeddings with no request referenced will be first evicted.
-
-    NOTE: The EncoderCacheManager operates on the level of multimodal embeddings
-    instead of encoder tokens (i.e. all tokens that represent the multimodal data
-    in the input sequence). This means all break/text tokens in-between multimodal
-    embeddings are not considered with respect to the cache size and the number
-    of free slots.
-
-    Args:
-        cache_size: Limit the size of the cache, measured by the number of
-                    encoder embeddings from the input sequence.
+    注意：
+        EncoderCacheManager 操作在多模态嵌入级别而不是编码器 token 级别。
+        这意味着嵌入之间的所有中断/文本 token 不考虑缓存大小和空闲槽位数量。
 
     Attributes:
-        cache_size: Total cache capacity in encoder embeddings.
-        num_free_slots: Current available cache capacity in encoder embeddings.
-        num_freeable_slots: Capacity that can be immediately reclaimed by
-            evicting entries with zero references (in encoder embeddings).
-        cached: Mapping from mm_hash to a set of request IDs that currently
-            reference the cached entry. If the set is empty, the entry exists
-            but is not referenced by any request and is eligible for
-            reclamation.
-        freeable: List of tuples (mm_hash, num_encoder_embeds) representing entries
-            whose no current running request is needed and that can be freed to
-            make space when needed.
-        freed: List of mm_hash strings that were actually evicted since the
-            last call to get_freed_mm_hashes(). This list is cleared on return.
+        cache_size: 以编码器嵌入为单位的总缓存容量
+        num_free_slots: 当前可用缓存槽位数量（编码器嵌入）
+        num_freeable_slots: 可通过驱逐零引用条目立即回收的容量
+        cached: 从 mm_hash 到引用该缓存条目的请求 ID 集合的映射
+        freeable: 可释放条目列表（mm_hash, num_encoder_embeds 元组）
+        freed: 自上次调用 get_freed_mm_hashes() 以来实际被驱逐的 mm_hash 列表
+
+    Args:
+        cache_size: 限制缓存大小，以输入序列中的编码器嵌入数量为单位
     """
 
     def __init__(self, cache_size: int):
+        """初始化编码器缓存管理器。
+
+        Args:
+            cache_size: 缓存容量（编码器嵌入数量）
+        """
         self.cache_size = cache_size
         self.num_free_slots = cache_size
         self.num_freeable_slots = cache_size
 
-        # mm_hash of mm_data => ids of requests that reference the mm_data
+        # mm_hash -> 引用该 mm_data 的请求 ID 集合
         self.cached: dict[str, set[str]] = {}
 
-        # mm_hash of mm_data => num_encoder_embeds of the mm_data
+        # mm_hash -> mm_data 的 num_encoder_embeds
         self.freeable: OrderedDict[str, int] = OrderedDict()
         self.freed: list[str] = []
 
     def reset(self) -> None:
-        """Reset the encoder cache to its initial state.
+        """重置编码器缓存到初始状态。
 
-        This clears all cached encoder outputs and resets capacity tracking.
-        Called when model weights are updated to invalidate stale embeddings.
+        清除所有缓存的编码器输出并重置容量跟踪。
+        在模型权重更新时调用以使过时的嵌入失效。
         """
         self.cached.clear()
         self.freeable.clear()
@@ -89,26 +88,25 @@ class EncoderCacheManager:
         self.num_freeable_slots = self.cache_size
 
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
-        """Check if encoder output for a specific multimodal input is cached.
+        """检查特定多模态输入的编码器输出是否已缓存。
 
-        If the encoder output is cached, update `cached` to add the request id
-        to the set of request ids that reference the cached encoder output.
-        If the encoder output was previously not referenced by any request,
-        update `freeable` and `num_freeable_slots` accordingly.
+        如果编码器输出已缓存，更新 cached 以将请求 ID 添加到引用该缓存
+        编码器输出的请求 ID 集合中。
+        如果编码器输出之前未被任何请求引用，更新 freeable 和 num_freeable_slots。
 
         Args:
-            request: The request containing the multimodal input
-            input_id: Index of the multimodal input within the request
+            request: 包含多模态输入的请求
+            input_id: 请求中多模态输入的索引
 
         Returns:
-            True if the encoder output for this input is already cached
+            如果此输入的编码器输出已缓存则返回 True
         """
         mm_hash = request.mm_features[input_id].identifier
-        # Not cached at all
+        # 完全不在缓存中
         if mm_hash not in self.cached:
             return False
 
-        # Cached but currently not referenced by any request
+        # 已缓存但目前未被任何请求引用
         if not self.cached[mm_hash]:
             num_encoder_embeds = self.freeable.pop(mm_hash)
             self.num_freeable_slots -= num_encoder_embeds
@@ -123,53 +121,45 @@ class EncoderCacheManager:
         encoder_compute_budget: int,
         num_embeds_to_schedule: int,
     ) -> bool:
-        """Check if there's sufficient cache space for a multimodal input.
-        If there is, return True and update EncoderCacheManager state.
+        """检查是否有足够的缓存空间用于多模态输入。
 
-        If there is not enough free space in `num_free_slots` but there is
-        enough reclaimable space in `num_freeable_slots`, entries will be
-        evicted from `freeable` (their mm_hash appended to `freed`) until
-        enough space is available, and then this method returns True.
-        Older entries are evicted first.
-
-        Returns False only if the requested number of tokens exceeds both
-        the free and reclaimable capacities combined.
+        如果有足够的空间，返回 True 并更新 EncoderCacheManager 状态。
+        如果 num_free_slots 中没有足够的空闲空间，但 num_freeable_slots 中有
+        足够的可回收空间，则从 freeable 中驱逐条目（将 mm_hash 追加到 freed），
+        直到有足够的可用空间，然后返回 True。较旧的条目首先被驱逐。
+        仅当请求的 token 数量超过空闲和可回收容量总和时才返回 False。
 
         Args:
-            request: The request containing the multimodal input.
-            input_id: Index of the multimodal input within the request.
-            encoder_compute_budget: Number of encoder embeddings allowed to be
-                computed when this method is invoked.
-            num_embeds_to_schedule: Number of encoder embeddings already scheduled to be
-                allocated with cache space when this method is invoked.
+            request: 包含多模态输入的请求
+            input_id: 请求中多模态输入的索引
+            encoder_compute_budget: 调用此方法时允许计算的编码器嵌入数量
+            num_embeds_to_schedule: 调用此方法时已计划分配缓存空间的编码器嵌入数量
 
         Returns:
-            True if there's enough capacity to hold the encoder output for this
-            input (possibly after reclaiming `freeable` entries); otherwise
-            False.
+            如果有足够的容量容纳此输入的编码器输出（可能在回收 freeable 条目后）
+            则返回 True；否则返回 False
 
-        Note: This method does not allocate physical memory for the encoder
-        output but only the state of EncoderCacheManager.
+        注意：
+            此方法不分配编码器输出的物理内存，仅更新 EncoderCacheManager 状态。
         """
         num_embeds = request.get_num_encoder_embeds(input_id)
 
-        # Not enough compute budget
+        # 计算预算不足
         if num_embeds > encoder_compute_budget:
             return False
 
         num_embeds += num_embeds_to_schedule
 
-        # Enough free slots
+        # 有足够的空闲槽位
         if num_embeds <= self.num_free_slots:
             return True
 
-        # Not enough reclaimable slots
+        # 没有足够的可回收槽位
         if num_embeds > self.num_freeable_slots:
             return False
 
-        # Not enough free slots but enough reclaimable slots
-        # NOTE: Eviction takes place here, but physical memory is not freed
-        # until model runner is notified by the scheduler output.
+        # 没有足够的空闲槽位但有足够的可回收槽位
+        # 注意：驱逐在这里发生，但物理内存要等到调度器通知模型运行器时才释放
         while num_embeds > self.num_free_slots:
             mm_hash, num_free_embeds = self.freeable.popitem(last=False)
             del self.cached[mm_hash]
@@ -178,16 +168,14 @@ class EncoderCacheManager:
         return True
 
     def allocate(self, request: Request, input_id: int) -> None:
-        """Allocate cache space for a multimodal input's encoder output.
+        """为多模态输入的编码器输出分配缓存空间。
 
-        This reserves cache space for storing the encoder output of the
-        specified multimodal input. The actual encoder output storage happens in
-        the model runner; this method updates the manager's bookkeeping.
+        这预留了缓存空间用于存储指定多模态输入的编码器输出。
+        实际的编码器输出存储发生在模型运行器中；此方法更新管理器的记账。
 
-        Note:
-            This method assumes can_allocate() returned True for the same input.
+        注意：
+            此方法假设 can_allocate() 对相同输入返回了 True。
         """
-
         mm_hash = request.mm_features[input_id].identifier
         request_id = request.request_id
         if mm_hash not in self.cached:
@@ -195,8 +183,8 @@ class EncoderCacheManager:
 
         num_encoder_embeds = request.get_num_encoder_embeds(input_id)
 
-        # NOTE: Encoder cache should always have enough space for encoder inputs
-        # that are scheduled since eviction takes place at can_allocate().
+        # 注意：编码器缓存应该始终有足够的空间用于已调度的编码器输入，
+        # 因为驱逐发生在 can_allocate() 时
         assert self.num_free_slots >= num_encoder_embeds
         assert self.num_freeable_slots >= num_encoder_embeds
 
@@ -205,12 +193,14 @@ class EncoderCacheManager:
         self.num_freeable_slots -= num_encoder_embeds
 
     def get_cached_input_ids(self, request: Request) -> set[int]:
-        """Get all cached multimodal input IDs for a request.
+        """获取请求的所有缓存多模态输入 ID。
 
-        Returns the set of input IDs whose `mm_hash` exists in the cache map.
-        This includes entries that are currently unreferenced (and thus present
-        in `freeable`); for such entries, freeing for this request will be a
-        no-op.
+        返回其 mm_hash 存在于缓存映射中的输入 ID 集合。
+        包括当前未引用的条目（因此在 freeable 中）；对于这些条目，
+        为此请求的释放将是空操作。
+
+        Returns:
+            缓存的输入 ID 集合
         """
         return {
             input_id
@@ -219,18 +209,19 @@ class EncoderCacheManager:
         }
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
-        """Free the request's reference to the encoder input (`mm_data`)
+        """释放请求对编码器输入（mm_data）的引用。
 
-        When the reference set for the corresponding `mm_hash` becomes empty,
-        the entry is appended to `freeable` and `num_freeable_slots` is
-        increased by the number of encoder embeddings for that input.
+        当相应 mm_hash 的引用集合变为空时，条目被追加到 freeable，
+        num_freeable_slots 增加该输入的编码器嵌入数量。
+        条目不会立即被物理驱逐，直到需要容量时（例如通过 can_allocate）。
 
-        The entry is NOT physically freed until capacity is needed (e.g., by
-        `can_allocate`).
+        Args:
+            request: 请求
+            input_id: 多模态输入索引
         """
         req_id = request.request_id
         mm_hash = request.mm_features[input_id].identifier
-        # The mm_hash not in cache or the req_id set is empty
+        # mm_hash 不在缓存中或 req_id 集合为空
         if not self.cached.get(mm_hash, None):
             return
         self.cached[mm_hash].discard(req_id)
@@ -240,26 +231,27 @@ class EncoderCacheManager:
             self.num_freeable_slots += num_encoder_embeds
 
     def free(self, request: Request) -> None:
-        """Free all encoder input cache reference held by *request*.
+        """释放请求持有的所有编码器输入缓存引用。
 
-        For each cached input ID, `free_encoder_input` is invoked.
-        The data stays in memory until eviction is triggered by a future
-        attempt allocation called by 'can_allocate'.
+        对于每个缓存的输入 ID，调用 free_encoder_input。
+        数据保留在内存中，直到未来的 can_allocate 调用触发驱逐。
 
-        Typically called when a request is finished, cancelled, or aborted.
+        通常在请求完成、取消或中止时调用。
+
+        Args:
+            request: 要释放的请求
         """
         input_ids = self.get_cached_input_ids(request)
         for input_id in input_ids:
             self.free_encoder_input(request, input_id)
 
     def get_freed_mm_hashes(self) -> list[str]:
-        """Get and clear the list of recently freed encoder cache entries.
+        """获取并清除最近释放的编码器缓存条目列表。
 
         Returns:
-            List of mm_hash strings that were actually evicted since the last
-            call to be used by the scheduler to notify workers about which
-            encoder outputs can be removed from their caches. The internal
-            list is cleared after this call.
+            自上次调用以来实际被驱逐的 mm_hash 字符串列表，
+            供调度器通知工作节点可以从其缓存中移除哪些编码器输出。
+            内部列表在此调用后清除。
         """
         freed = self.freed
         self.freed = []
@@ -270,21 +262,18 @@ def compute_mm_encoder_budget(
     scheduler_config: "SchedulerConfig",
     mm_max_toks_per_item: Mapping[str, int],
 ) -> tuple[int, int]:
-    """Compute the encoder cache budget based on the model and scheduler
-    configurations for a multimodal model.
+    """为多模态模型计算编码器缓存预算。
+
+    基于模型和调度器配置计算编码器缓存预算。
 
     Args:
-        scheduler_config: Scheduler configuration.
-        mm_max_toks_per_item: The maximum number of tokens per item for each
-            non-text modality.
+        scheduler_config: 调度器配置
+        mm_max_toks_per_item: 每种非文本模态每个项目的最大 token 数量
 
     Returns:
-        - Compute budget for encoder execution, measured in number of tokens
-            from the input sequence.
-        - Space budget for encoder cache size, measured in number of tokens
-            from the input sequence.
+        - 编码器计算的 token 预算，以输入序列中的 token 数量为单位
+        - 编码器缓存空间预算，以输入序列中的 token 数量为单位
     """
-
     if not mm_max_toks_per_item:
         logger.warning(
             "All non-text modalities supported by the model have been "
@@ -316,24 +305,39 @@ def compute_mm_encoder_budget(
     return encoder_compute_budget, encoder_cache_size
 
 
-# NOTE (NickLucche): Temporary implementation for encoder-decoder models that only
-# use the manager for scheduling purposes. Encoder-decoder models will eventually
-# utilize the cache and this class will fold into EncoderCacheManager, as
-# differences with MM models shrink.
+# NOTE (NickLucche): 编码器 - 解码器模型的临时实现，仅将管理器用于调度目的。
+# 编码器 - 解码器模型最终将使用缓存，此类将合并到 EncoderCacheManager 中，
+# 因为与多模态模型的差异正在缩小。
 class EncoderDecoderCacheManager(EncoderCacheManager):
+    """编码器 - 解码器缓存管理器。
+
+    用于编码器 - 解码器模型的缓存管理，与多模态模型的缓存管理略有不同。
+    主要差异在于缓存行为更加简单，不涉及复杂的引用计数。
+    """
+
     def __init__(self, cache_size: int):
+        """初始化编码器 - 解码器缓存管理器。
+
+        Args:
+            cache_size: 缓存容量
+        """
         self.cache_size = cache_size
         self.num_free_slots = cache_size
         self.allocated: list[str] = []
         self.to_free: list[str] = []
 
     def reset(self) -> None:
-        """Reset the encoder cache to its initial state."""
+        """重置编码器缓存到初始状态。"""
         self.num_free_slots = self.cache_size
         self.allocated.clear()
         self.to_free.clear()
 
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
+        """检查和更新缓存（编码器 - 解码器模型不使用缓存）。
+
+        Returns:
+            总是返回 False
+        """
         return False
 
     def can_allocate(
@@ -343,16 +347,33 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
         encoder_compute_budget: int,
         num_embeds_to_schedule: int,
     ) -> bool:
+        """检查是否可以分配缓存空间。
+
+        Args:
+            request: 请求
+            input_id: 多模态输入索引
+            encoder_compute_budget: 编码器计算预算
+            num_embeds_to_schedule: 要调度的嵌入数量
+
+        Returns:
+            如果有足够的空闲槽位则返回 True
+        """
         num_encoder_embeds = request.get_num_encoder_embeds(input_id)
-        # Not enough compute budget
+        # 计算预算不足
         if num_encoder_embeds > encoder_compute_budget:
             return False
 
         num_encoder_embeds += num_embeds_to_schedule
-        # Enough free slots
+        # 有足够的空闲槽位
         return num_encoder_embeds <= self.num_free_slots
 
     def allocate(self, request: Request, input_id: int) -> None:
+        """分配缓存空间。
+
+        Args:
+            request: 请求
+            input_id: 多模态输入索引
+        """
         num_encoder_embeds = request.get_num_encoder_embeds(input_id)
         self.num_free_slots -= num_encoder_embeds
 
@@ -360,22 +381,44 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
         self.allocated.append(mm_hash)
 
     def free(self, request: Request) -> None:
+        """释放请求的所有编码器输入缓存。
+
+        Args:
+            request: 请求
+        """
         for input_id in range(len(request.mm_features)):
             self.free_encoder_input(request, input_id)
 
     def get_cached_input_ids(self, request: Request) -> set[int]:
+        """获取缓存的输入 ID。
+
+        Returns:
+            所有输入 ID 的集合
+        """
         return set(range(len(request.mm_features)))
 
     def get_freed_mm_hashes(self) -> list[str]:
-        # As encoder cache is not used for enc-dec models, we can free the entries here
-        # The actual free happens in the runner, *before* the model is executed.
-        # Therefore, `freeable` acts as a buffer to free the entries only after the
-        # model is executed, mimicking the state transition of `EncoderCacheManager`.
+        """获取并清除最近释放的 mm_hash 列表。
+
+        由于编码器 - 解码器模型不使用编码器缓存，我们可以在此处释放条目。
+        实际的释放发生在运行器中，在模型执行之前。
+        因此，freeable 充当缓冲区，仅在模型执行后释放条目，
+        模拟 EncoderCacheManager 的状态转换。
+
+        Returns:
+            要释放的 mm_hash 列表
+        """
         to_free = self.to_free
         self.to_free = self.allocated
         self.allocated = []
         return to_free
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
+        """释放编码器输入。
+
+        Args:
+            request: 请求
+            input_id: 多模态输入索引
+        """
         num_encoder_embeds = request.get_num_encoder_embeds(input_id)
         self.num_free_slots += num_encoder_embeds

@@ -1,5 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Prometheus 指标读取器模块。
+
+本模块提供访问 vLLM Prometheus 指标的 API，负责：
+- 定义指标数据类（Counter、Gauge、Histogram、Vector）
+- 获取 Prometheus 指标的快照
+- 解析直方图和向量指标
+
+主要类：
+- Metric: 指标基类
+- Counter: 单调递增计数器
+- Gauge: 可上下波动的数值
+- Histogram: 分桶观测值
+- Vector: 有序计数器数组（用于 spec decode）
+
+主要函数：
+- get_metrics_snapshot: 获取 Prometheus 指标快照
+"""
 
 from dataclasses import dataclass
 
@@ -10,11 +27,15 @@ from prometheus_client.samples import Sample
 
 @dataclass
 class Metric:
-    """A base class for prometheus metrics.
+    """Prometheus 指标的基类。
 
-    Each metric may be associated with key=value labels, and
-    in some cases a single vLLM instance may have multiple
-    metrics with the same name but different sets of labels.
+    每个指标都可以与 key=value 标签关联，
+    在某些情况下，单个 vLLM 实例可能有多个同名的指标，
+    但具有不同的标签集合。
+
+    Attributes:
+        name: 指标名称
+        labels: 指标标签字典
     """
 
     name: str
@@ -23,17 +44,32 @@ class Metric:
 
 @dataclass
 class Counter(Metric):
-    """A monotonically increasing integer counter."""
+    """单调递增整数计数器。
+
+    计数器只能增加或重置为零，适用于累计事件的计数，
+    如请求总数、生成的 token 总数等。
+
+    Attributes:
+        name: 指标名称
+        labels: 指标标签字典
+        value: 计数器值（整数）
+    """
 
     value: int
 
 
 @dataclass
 class Vector(Metric):
-    """An ordered array of integer counters.
+    """有序整数计数器数组。
 
-    This type - which doesn't exist in Prometheus - models one very
-    specific metric, vllm:spec_decode_num_accepted_tokens_per_pos.
+    这种类型在 Prometheus 中不存在，专门用于建模一个
+    特定的指标：vllm:spec_decode_num_accepted_tokens_per_pos。
+    它为每个推测解码 token 位置记录接受的 token 数量。
+
+    Attributes:
+        name: 指标名称
+        labels: 指标标签字典
+        values: 计数器值列表
     """
 
     values: list[int]
@@ -41,25 +77,37 @@ class Vector(Metric):
 
 @dataclass
 class Gauge(Metric):
-    """A numerical value that can go up or down."""
+    """可上下波动的数值。
+
+    Gauge 可以增加或减少，适用于当前状态的度量，
+    如当前运行中的请求数、GPU 利用率等。
+
+    Attributes:
+        name: 指标名称
+        labels: 指标标签字典
+        value: 数值（浮点数）
+    """
 
     value: float
 
 
 @dataclass
 class Histogram(Metric):
-    """Observations recorded in configurable buckets.
+    """配置分桶中记录的观测值。
 
-    Buckets are represented by a dictionary. The key is
-    the upper limit of the bucket, and the value is the
-    observed count in that bucket. A '+Inf' key always
-    exists.
+    分桶用字典表示，键是分桶的上限，
+    值是该分桶中的观测计数。始终存在 '+Inf' 键。
 
-    The count property is the total count across all
-    buckets, identical to the count of the '+Inf' bucket.
+    count 属性是所有分桶的总计数，与 '+Inf' 分桶的计数相同。
 
-    The sum property is the total sum of all observed
-    values.
+    sum 属性是所有观测值的总和。
+
+    Attributes:
+        name: 指标名称
+        labels: 指标标签字典
+        count: 总观测次数
+        sum: 所有观测值的总和
+        buckets: 分桶字典，键为上限，值为计数
     """
 
     count: int
@@ -68,9 +116,12 @@ class Histogram(Metric):
 
 
 def get_metrics_snapshot() -> list[Metric]:
-    """An API for accessing in-memory Prometheus metrics.
+    """访问内存中 Prometheus 指标的 API。
 
-    Example:
+    该函数收集所有以 "vllm:" 为前缀的指标，并将它们
+    转换为相应的数据类（Counter、Gauge、Histogram、Vector）。
+
+    使用示例:
         >>> for metric in llm.get_metrics():
         ...     if isinstance(metric, Counter):
         ...         print(f"{metric} = {metric.value}")
@@ -82,6 +133,9 @@ def get_metrics_snapshot() -> list[Metric]:
         ...         print(f"    count = {metric.count}")
         ...         for bucket_le, value in metrics.buckets.items():
         ...             print(f"    {bucket_le} = {value}")
+
+    Returns:
+        Metric 对象列表，包含所有 vLLM 指标
     """
     collected: list[Metric] = []
     for metric in REGISTRY.collect():
@@ -97,12 +151,11 @@ def get_metrics_snapshot() -> list[Metric]:
             samples = _get_samples(metric, "_total")
             if metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
                 #
-                # Ugly vllm:num_accepted_tokens_per_pos special case.
+                # 特殊的 vllm:num_accepted_tokens_per_pos 用例。
                 #
-                # This metric is a vector of counters - for each spec
-                # decoding token position, we observe the number of
-                # accepted tokens using a Counter labeled with 'position'.
-                # We convert these into a vector of integer values.
+                # 该指标是计数器向量 - 对于每个推测解码 token 位置，
+                # 我们使用带 'position' 标签的 Counter 记录接受的 token 数量。
+                # 我们将这些转换为整数向量值。
                 #
                 for labels, values in _digest_num_accepted_by_pos_samples(samples):
                     collected.append(
@@ -116,11 +169,10 @@ def get_metrics_snapshot() -> list[Metric]:
 
         elif metric.type == "histogram":
             #
-            # A histogram has a number of '_bucket' samples where
-            # the 'le' label represents the upper limit of the bucket.
-            # We convert these bucketized values into a dict of values
-            # indexed by the value of the 'le' label. The 'le=+Inf'
-            # label is a special case, catching all values observed.
+            # 直方图有多个 '_bucket' 样本，其中
+            # 'le' 标签表示分桶的上限。
+            # 我们将这些分桶值转换为以 'le' 标签值为索引的字典。
+            # 'le=+Inf' 标签是特殊情况，捕获所有观测值。
             #
             bucket_samples = _get_samples(metric, "_bucket")
             count_samples = _get_samples(metric, "_count")
@@ -144,11 +196,29 @@ def get_metrics_snapshot() -> list[Metric]:
 
 
 def _get_samples(metric: PromMetric, suffix: str | None = None) -> list[Sample]:
+    """获取指定后缀的样本列表。
+
+    Args:
+        metric: Prometheus 指标对象
+        suffix: 样本名称后缀（如 "_total"、"_bucket"）
+
+    Returns:
+        匹配的样本列表
+    """
     name = (metric.name + suffix) if suffix is not None else metric.name
     return [s for s in metric.samples if s.name == name]
 
 
 def _strip_label(labels: dict[str, str], key_to_remove: str) -> dict[str, str]:
+    """从标签字典中移除指定的键。
+
+    Args:
+        labels: 标签字典
+        key_to_remove: 要移除的键
+
+    Returns:
+        移除指定键后的标签字典副本
+    """
     labels_copy = labels.copy()
     labels_copy.pop(key_to_remove)
     return labels_copy
@@ -157,29 +227,40 @@ def _strip_label(labels: dict[str, str], key_to_remove: str) -> dict[str, str]:
 def _digest_histogram(
     bucket_samples: list[Sample], count_samples: list[Sample], sum_samples: list[Sample]
 ) -> list[tuple[dict[str, str], dict[str, int], int, float]]:
-    #
-    # In the case of DP, we have an indigestable
-    # per-bucket-per-engine count as a list of labelled
-    # samples, along with total and sum samples
-    #
-    # bucket_samples (in):
-    #   labels = {bucket: 100, idx: 0}, value = 2
-    #   labels = {bucket: 200, idx: 0}, value = 4
-    #   labels = {bucket: Inf, idx: 0}, value = 10
-    #   labels = {bucket: 100, idx: 1}, value = 1
-    #   labels = {bucket: 200, idx: 2}, value = 5
-    #   labels = {bucket: Inf, idx: 3}, value = 7
-    # count_samples (in):
-    #   labels = {idx: 0}, value = 10
-    #   labels = {idx: 1}, value = 7
-    # sum_samples (in):
-    #   labels = {idx: 0}, value = 2000
-    #   labels = {idx: 1}, value = 1200
-    #
-    # output: [
-    #   {idx: 0}, {"100": 2, "200": 4, "Inf": 10}, 10, 2000
-    #   {idx: 1}, {"100": 1, "200": 5, "Inf": 7},   7, 1200
-    # ]
+    """解析直方图样本为结构化数据。
+
+    在 DP（数据并行）情况下，我们有每个分桶每个引擎的计数，
+    作为带标签的样本列表，以及总计和总和样本。
+
+    输入示例:
+        bucket_samples:
+          labels = {le: 100, idx: 0}, value = 2
+          labels = {le: 200, idx: 0}, value = 4
+          labels = {le: Inf, idx: 0}, value = 10
+          labels = {le: 100, idx: 1}, value = 1
+          labels = {le: 200, idx: 2}, value = 5
+          labels = {le: Inf, idx: 3}, value = 7
+        count_samples:
+          labels = {idx: 0}, value = 10
+          labels = {idx: 1}, value = 7
+        sum_samples:
+          labels = {idx: 0}, value = 2000
+          labels = {idx: 1}, value = 1200
+
+    输出:
+        [
+          {idx: 0}, {"100": 2, "200": 4, "Inf": 10}, 10, 2000
+          {idx: 1}, {"100": 1, "200": 5, "Inf": 7},   7, 1200
+        ]
+
+    Args:
+        bucket_samples: 分桶样本列表
+        count_samples: 计数样本列表
+        sum_samples: 总和样本列表
+
+    Returns:
+        (标签，分桶字典，计数值，总和值) 元组列表
+    """
     buckets_by_labels: dict[frozenset[tuple[str, str]], dict[str, int]] = {}
     for s in bucket_samples:
         bucket = s.labels["le"]
@@ -217,24 +298,32 @@ def _digest_histogram(
 def _digest_num_accepted_by_pos_samples(
     samples: list[Sample],
 ) -> list[tuple[dict[str, str], list[int]]]:
-    #
-    # In the case of DP, we have an indigestable
-    # per-position-per-engine count as a list of
-    # labelled samples
-    #
-    # samples (in):
-    #   labels = {pos: 0, idx: 0}, value = 10
-    #   labels = {pos: 1, idx: 0}, value = 7
-    #   labels = {pos: 2, idx: 0}, value = 2
-    #   labels = {pos: 0, idx: 1}, value = 5
-    #   labels = {pos: 1, idx: 1}, value = 3
-    #   labels = {pos: 2, idx: 1}, value = 1
-    #
-    # output: [
-    #   {idx: 0}, [10, 7, 2]
-    #   {idx: 1}, [5, 3, 1]
-    # ]
-    #
+    """解析按位置统计的接受 token 样本。
+
+    在 DP（数据并行）情况下，我们有每个位置每个引擎的计数，
+    作为带标签的样本列表。
+
+    输入示例:
+        samples:
+          labels = {position: 0, idx: 0}, value = 10
+          labels = {position: 1, idx: 0}, value = 7
+          labels = {position: 2, idx: 0}, value = 2
+          labels = {position: 0, idx: 1}, value = 5
+          labels = {position: 1, idx: 1}, value = 3
+          labels = {position: 2, idx: 1}, value = 1
+
+    输出:
+        [
+          {idx: 0}, [10, 7, 2]
+          {idx: 1}, [5, 3, 1]
+        ]
+
+    Args:
+        samples: 样本列表
+
+    Returns:
+        (标签，值列表) 元组列表
+    """
     max_pos = 0
     values_by_labels: dict[frozenset[tuple[str, str]], dict[int, int]] = {}
 

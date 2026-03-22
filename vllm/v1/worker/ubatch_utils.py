@@ -1,21 +1,46 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
-from typing import TypeAlias
+"""微批次（Ubatching）工具函数模块。
+
+本模块提供了微批次相关的工具函数，负责：
+- 创建和管理微批次切片
+- 处理注意力元数据的微批次分割
+- 支持 DBO（Dual Batch Overlap）执行
+- 处理 DP 填充和 CUDA Graph 兼容性
+
+主要类：
+- UBatchSlice: 微批次切片数据类
+
+主要函数：
+- maybe_create_ubatch_slices: 创建微批次切片
+- split_attn_metadata: 分割注意力元数据
+- slice_query_start_locs: 切片 query_start_loc
+"""
 
 import numpy as np
 import torch
 
-from vllm.config import ParallelConfig
 from vllm.v1.attention.backend import CommonAttentionMetadata
 
 
-@dataclass
 class UBatchSlice:
+    """微批次切片数据类。
+
+    表示一个微批次的请求和 token 范围。
+
+    Attributes:
+        request_slice: 请求范围的 slice 对象
+        token_slice: token 范围的 slice 对象
+    """
     request_slice: slice
     token_slice: slice
 
     def is_empty(self) -> bool:
+        """检查切片是否为空。
+
+        Returns:
+            如果切片为空返回 True
+        """
         return (
             self.request_slice.start == self.request_slice.stop
             or self.token_slice.start == self.token_slice.stop
@@ -23,6 +48,11 @@ class UBatchSlice:
 
     @property
     def num_tokens(self) -> int:
+        """获取 token 数量。
+
+        Returns:
+            token 数量
+        """
         return self.token_slice.stop - self.token_slice.start
 
 
@@ -32,12 +62,32 @@ UBatchSlices: TypeAlias = list[UBatchSlice]
 def is_last_ubatch_empty(
     orig_num_tokens: int, padded_num_tokens: int, num_ubatches: int
 ) -> bool:
+    """检查最后一个微批次是否为空。
+
+    Args:
+        orig_num_tokens: 原始 token 数量
+        padded_num_tokens: 填充后的 token 数量
+        num_ubatches: 微批次数量
+
+    Returns:
+        最后一个微批次是否为空
+    """
     return (padded_num_tokens // num_ubatches) * (num_ubatches - 1) >= orig_num_tokens
 
 
 def check_ubatch_thresholds(
     config: ParallelConfig, num_tokens: int, uniform_decode: bool
 ) -> bool:
+    """检查是否满足微批次阈值。
+
+    Args:
+        config: 并行配置
+        num_tokens: token 数量
+        uniform_decode: 是否为均匀解码（只有 decode 请求）
+
+    Returns:
+        是否应该使用微批次
+    """
     if not config.use_ubatching:
         return False
     if uniform_decode:
@@ -46,11 +96,23 @@ def check_ubatch_thresholds(
         return num_tokens >= config.dbo_prefill_token_threshold
 
 
-# This pads the last ubatch slice out to the total number of tokens
-# (num_tokens + padding) since we do `create_ubatch_slices` before applying DP padding.
 def _pad_out_ubatch_slices(
     ubatch_slices: UBatchSlices, num_total_tokens: int, num_reqs_padded: int
 ) -> UBatchSlices:
+    """填充微批次切片到总 token 数。
+
+    这将最后一个微批次切片扩展到总 token 数
+    （num_tokens + padding），因为我们在应用 DP 填充之前
+    调用 create_ubatch_slices。
+
+    Args:
+        ubatch_slices: 微批次切片列表
+        num_total_tokens: 总 token 数
+        num_reqs_padded: 填充后的请求数
+
+    Returns:
+        填充后的微批次切片列表
+    """
     last_slice = ubatch_slices[-1]
     padded_last_request_slice = slice(last_slice.request_slice.start, num_reqs_padded)
     padded_last_token_slice = slice(last_slice.token_slice.start, num_total_tokens)
@@ -68,6 +130,19 @@ def maybe_create_ubatch_slices(
     num_ubatches: int,
     split_point: list[int] | int | None = None,
 ) -> tuple[UBatchSlices | None, UBatchSlices | None]:
+    """可能创建微批次切片。
+
+    Args:
+        should_ubatch: 是否应该使用微批次
+        num_scheduled_tokens: 每个请求调度的 token 数量
+        num_tokens_padded: 填充后的 token 总数
+        num_reqs_padded: 填充后的请求数
+        num_ubatches: 微批次数量
+        split_point: 分割点（可选）
+
+    Returns:
+        (微批次切片列表，填充后的微批次切片列表)，如果不使用微批次则为 (None, None)
+    """
     if not should_ubatch:
         return None, None
 
@@ -76,28 +151,28 @@ def maybe_create_ubatch_slices(
 
     token_split_points = [split_point * i for i in range(1, num_ubatches)]
 
-    # TODO(lucas): Refactor the gpu_model_runner.py so we can pass
-    # in cu_num_tokens directly (i.e. query_start_loc)
+    # TODO(lucas): 重构 gpu_model_runner.py 以便直接传入 cu_num_tokens
+    # （即 query_start_loc）
     cu_num_tokens = np.zeros(len(num_scheduled_tokens) + 1, dtype=np.int32)
     np.cumsum(num_scheduled_tokens, dtype=np.int32, out=cu_num_tokens[1:])
 
     ubatch_slices = []
     start_token = 0
 
-    # Add the end point to the split points to make iteration easier
+    # 将终点添加到分割点以便迭代
     all_points = token_split_points + [cu_num_tokens[-1]]
 
     for end_token in all_points:
         token_slice = slice(start_token, end_token)
 
-        # Determine request slices using exclusive stop semantics
-        # Ubatch includes requests whose tokens overlap [start_token, end_token)
+        # 使用独占停止语义确定请求范围
+        # 微批次包括 token 重叠 [start_token, end_token) 的请求
 
-        # Start at the request that contains the start_token
-        # or the request starting exactly at start_token (if on boundary)
+        # 从包含 start_token 的请求开始
+        # 或者从正好在 start_token 开始的请求开始（如果在边界上）
         req_start = int(np.searchsorted(cu_num_tokens, start_token, side="right") - 1)
 
-        # Stop at the request that starts at or after end_token
+        # 在开始于或超过 end_token 的请求处停止
         req_stop = int(np.searchsorted(cu_num_tokens, end_token, side="left"))
 
         req_slice = slice(req_start, req_stop)
@@ -118,12 +193,17 @@ def slice_query_start_locs(
     query_start_loc: torch.Tensor,
     request_slice: slice,
 ) -> torch.Tensor:
-    """
-    Creates a new query_start_loc that corresponds to the requests in
-    request_slice.
+    """创建与 request_slice 对应的新的 query_start_loc。
 
-    Note: This function creates a new tensor to hold the new query_start_locs.
-    This will break cudagraph compatibility.
+    注意：此函数创建一个新张量来保存新的 query_start_locs。
+    这将破坏 cudagraph 兼容性。
+
+    Args:
+        query_start_loc: 原始 query_start_loc 张量
+        request_slice: 请求范围的 slice
+
+    Returns:
+        新的 query_start_loc 张量
     """
     return (
         query_start_loc[request_slice.start : request_slice.stop + 1]
@@ -134,12 +214,19 @@ def slice_query_start_locs(
 def _make_metadata_with_slice(
     ubatch_slice: UBatchSlice, attn_metadata: CommonAttentionMetadata
 ) -> CommonAttentionMetadata:
-    """
-    This function creates a new CommonAttentionMetadata that corresponds to
-    the requests included in ubatch_slice
-    """
+    """创建与 UBatchSlice 对应的新的 CommonAttentionMetadata。
 
-    assert not ubatch_slice.is_empty(), f"Ubatch slice {ubatch_slice} is empty"
+    Args:
+        ubatch_slice: 微批次切片
+        attn_metadata: 原始注意力元数据
+
+    Returns:
+        新的 CommonAttentionMetadata
+
+    Raises:
+        AssertionError: 如果 ubatch_slice 为空
+    """
+    assert not ubatch_slice.is_empty(), f"微批次切片 {ubatch_slice} 为空"
 
     request_slice = ubatch_slice.request_slice
     token_slice = ubatch_slice.token_slice
@@ -151,15 +238,13 @@ def _make_metadata_with_slice(
     last_tok = token_slice.stop - 1
 
     assert start_locs[first_req] <= first_tok < start_locs[first_req + 1], (
-        "Token slice start outside of first request"
+        "Token 切片开始不在第一个请求范围内"
     )
-    # NOTE: last token can be outside of the last request if we have CG padding.
+    # 注意：如果我们有 CG 填充，最后一个 token 可能在最后一个请求之外
 
-    # If the request is split across ubatches, we have to adjust the metadata.
-    # splits_first_request: The first request in this slice is the continuation of
-    #                       a request that started in a previous slice.
-    # splits_last_request:  The last request in this slice continues into the
-    #                       next slice.
+    # 如果请求在微批次之间分割，我们必须调整元数据
+    # splits_first_request: 此切片中的第一个请求是在前一个切片中开始的请求的延续
+    # splits_last_request: 此切片中的最后一个请求延续到下一个切片
     splits_first_request = first_tok > start_locs[first_req]
     splits_last_request = last_tok < start_locs[last_req + 1] - 1
 
@@ -169,7 +254,7 @@ def _make_metadata_with_slice(
     )
 
     assert len(query_start_loc) >= 2, (
-        f"query_start_loc must have at least 2 elements, got {len(query_start_loc)}"
+        f"query_start_loc 必须至少有 2 个元素，得到 {len(query_start_loc)}"
     )
 
     if splits_first_request:
@@ -180,15 +265,14 @@ def _make_metadata_with_slice(
     seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
 
     if splits_last_request:
-        # NOTE: We use start_locs (the original query_start_loc_cpu) to calculate
-        # the tokens skipped because query_start_loc_cpu might have been modified
-        # if splits_first_request is True.
+        # 注意：我们使用 start_locs（原始 query_start_loc_cpu）来计算
+        # 跳过的 token，因为如果 splits_first_request 为 True，
+        # query_start_loc_cpu 可能已被修改
         tokens_skipped = start_locs[last_req + 1] - token_slice.stop
         query_start_loc[-1] -= tokens_skipped
         query_start_loc_cpu[-1] -= tokens_skipped
 
-        # Make sure we don't modify the seq_lens tensors
-        #  (not cudagraph compatible)
+        # 确保不修改 seq_lens 张量（不兼容 cudagraph）
         seq_lens = seq_lens.clone()
         seq_lens_cpu = seq_lens_cpu.clone()
         seq_lens[-1] -= tokens_skipped
@@ -203,8 +287,7 @@ def _make_metadata_with_slice(
         torch.max(torch.abs(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])).item()
     )
 
-    # This is to account for the case where we are in a dummy
-    # run and query_start_loc_cpu is full of 0s
+    # 这是为了解释我们在 dummy run 中且 query_start_loc_cpu 全是 0 的情况
     if max_query_len == 0:
         max_query_len = attn_metadata.max_query_len
 
@@ -230,11 +313,16 @@ def split_attn_metadata(
     ubatch_slices: list[UBatchSlice],
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
-    """
-    Creates a new CommonAttentionMetadata instance that corresponds to the
-    requests for each UBatchSlice in ubatch_slices.
+    """创建与每个 UBatchSlice 对应的 CommonAttentionMetadata 实例列表。
 
-    Note: This function does not modify common_attn_metadata
+    注意：此函数不修改 common_attn_metadata
+
+    Args:
+        ubatch_slices: 微批次切片列表
+        common_attn_metadata: 原始注意力元数据
+
+    Returns:
+        CommonAttentionMetadata 列表
     """
     results = []
     for ubatch_slice in ubatch_slices:

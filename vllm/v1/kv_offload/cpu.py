@@ -1,5 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""KV 卸载 CPU 规范模块。
+
+本模块实现了 CPU 卸载规范，负责：
+- 解析 CPU 卸载配置
+- 计算 CPU 块数量和大小
+- 创建 LRU/ARC 驱逐策略的卸载管理器
+- 提供 CPU-GPU 双向传输处理程序
+
+主要类：
+- CPUOffloadingSpec: CPU 内存卸载规范实现
+"""
+
 from collections.abc import Iterator
 
 import torch
@@ -20,7 +32,28 @@ from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 
 class CPUOffloadingSpec(OffloadingSpec):
+    """CPU 内存卸载规范实现。
+
+    支持多种驱逐策略（LRU/ARC）和重用频率过滤。
+    配置参数通过 kv_connector_extra_config 传递。
+
+    Attributes:
+        num_blocks: CPU 缓存可容纳的块数量
+        eviction_policy: 驱逐策略（"lru" 或 "arc"）
+        _manager: 调度器侧的卸载管理器实例
+        _handlers: worker 侧的卸载处理程序实例
+    """
+
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
+        """初始化 CPU 卸载规范。
+
+        Args:
+            vllm_config: vLLM 配置
+            kv_cache_config: KV 缓存配置
+
+        Raises:
+            Exception: 如果未指定 cpu_bytes_to_use 参数
+        """
         super().__init__(vllm_config, kv_cache_config)
 
         cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
@@ -29,7 +62,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 "cpu_bytes_to_use must be specified in kv_connector_extra_config"
             )
 
-        # calculate kv_bytes_per_offloaded_block
+        # 计算每个卸载块的 KV 字节数
         assert kv_cache_config is not None
         page_sizes = {
             kv_cache_group.kv_cache_spec.page_size_bytes
@@ -59,6 +92,14 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
 
     def get_manager(self) -> OffloadingManager:
+        """获取卸载管理器。
+
+        根据配置的驱逐策略创建相应的管理器实例。
+        如果配置了重用频率过滤，则包装一层 FilterReusedOffloadingManager。
+
+        Returns:
+            卸载管理器实例
+        """
         if not self._manager:
             kv_events_config = self.vllm_config.kv_events_config
             enable_events = (
@@ -86,9 +127,9 @@ class CPUOffloadingSpec(OffloadingSpec):
                     f"Supported policies: lru, arc"
                 )
 
-            # store_threshold: how many times a block must appear in lookup()
-            # before it is eligible for CPU offloading.  Values < 2 disable
-            # filtering (a threshold of 1 equals no filter; 0 is the default).
+            # store_threshold: 块必须在 lookup() 中出现的次数
+            # 才有资格进行 CPU 卸载。值 < 2 禁用过滤
+            # （阈值 1 等于无过滤；0 是默认值）
             store_threshold = int(self.extra_config.get("store_threshold", 0))
             if store_threshold >= 2:
                 max_tracker_size = int(
@@ -106,6 +147,20 @@ class CPUOffloadingSpec(OffloadingSpec):
         kv_caches: dict[str, torch.Tensor],
         attn_backends: dict[str, type[AttentionBackend]],
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
+        """获取卸载处理程序及其源/目标类型。
+
+        创建 CPU-GPU 双向传输处理程序。
+
+        Args:
+            kv_caches: layer_name -> gpu_kv_cache 张量的字典
+            attn_backends: layer_name -> AttentionBackend 的字典
+
+        Yields:
+            (src_type, dst_type, offloading_handler) 元组
+
+        Raises:
+            Exception: 如果当前平台不支持 CUDA
+        """
         if not self._handlers:
             if not current_platform.is_cuda_alike():
                 raise Exception(

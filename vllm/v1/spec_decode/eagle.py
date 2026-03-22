@@ -1,5 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""EAGLE 推测解码 proposer 模块。
+
+本模块实现了基于 EAGLE（Extrapolation Algorithm for Greater Language-model Efficiency）
+架构的推测解码 proposer，负责：
+- 使用 EAGLE 模型生成候选 token
+- 支持树状注意力机制进行多 token 推测
+- 支持 EAGLE3 架构和辅助隐藏状态
+- 管理草稿模型的注意力层和 KV 缓存
+- 支持并行推测（parallel drafting）
+
+主要类：
+- SpecDecodeBaseProposer: 推测解码基础 proposer 类
+- EagleProposer: EAGLE 推测解码 proposer
+
+EAGLE 架构特点：
+1. 使用目标模型的隐藏状态作为输入
+2. 通过轻量级解码头生成候选 token
+3. 支持树状注意力进行高效多 token 生成
+4. 与目标模型共享嵌入层和 LM 头以节省内存
+"""
+
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
@@ -21,8 +42,8 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
-from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
@@ -57,6 +78,64 @@ logger = init_logger(__name__)
 
 
 class SpecDecodeBaseProposer:
+    """推测解码基础 proposer 类。
+
+    为 EAGLE 和其他推测解码方法提供通用功能。
+    管理输入输出缓冲区、注意力层、CUDA 图调度等。
+
+    Attributes:
+        vllm_config: vLLM 配置
+        speculative_config: 推测解码配置
+        draft_model_config: 草稿模型配置
+        method: 推测方法（eagle/eagle3/mtp/draft_model）
+        pass_hidden_states_to_model: 是否传递隐藏状态到模型
+        runner: 模型运行器
+        device: 设备（CUDA）
+        dtype: 数据类型
+        max_model_len: 最大模型长度
+        dp_rank: 数据并行 rank
+        num_speculative_tokens: 每个请求的草稿 token 数量
+        hidden_size: 隐藏层大小（从草稿模型配置获取）
+        inputs_embeds_size: 输入嵌入大小
+        parallel_drafting: 是否启用并行推测
+        extra_slots_per_request: 每个请求的额外槽位数量
+        net_num_new_slots_per_request: 每个请求的净新增槽位数量
+        needs_extra_input_slots: 是否需要额外输入槽位
+        parallel_drafting_token_id: 并行推测的 token ID
+        parallel_drafting_hidden_state_tensor: 并行推测的隐藏状态张量
+        use_local_argmax_reduction: 是否使用局部 argmax 归约
+        max_num_tokens: 最大 token 数量
+        token_arange_np: token 范围 NumPy 数组
+        mm_registry: 多模态注册表
+        supports_mm_inputs: 是否支持多模态输入
+        draft_attn_groups: 草稿注意力组列表
+        kv_cache_gid: KV 缓存组 ID
+        eagle3_use_aux_hidden_state: EAGLE3 是否使用辅助隐藏状态
+        compilation_config: 编译配置
+        cudagraph_dispatcher: CUDA 图调度器
+        input_ids: 输入 ID 缓冲区
+        uses_mrope: 是否使用 M-RoPE
+        uses_xdrope_dim: XRoPE 维度数
+        draft_uses_xdrope_dim: 草稿模型 XRoPE 维度数
+        mrope_positions: M-RoPE 位置缓冲区
+        xdrope_positions: XRoPE 位置缓冲区
+        positions: 位置缓冲区
+        hidden_states: 隐藏状态缓冲区
+        block_size: 注意力块大小
+        arange: 范围张量
+        is_rejected_token_mask: 被拒绝 token 的掩码
+        is_masked_token_mask: 被屏蔽 token 的掩码
+        inputs_embeds: 输入嵌入缓冲区
+        backup_next_token_ids: 备份下一个 token ID 的 CPU-GPU 缓冲区
+        _slot_mapping_buffer: 槽映射缓冲区
+        allowed_attn_types: 允许的注意力后端类型
+        tree_choices: 树状推测的 token 树选择
+        num_drafts_per_level: 每层的草稿数
+        cu_drafts_per_level: 每层的累积草稿数
+        child_drafts_per_level: 每层的子草稿数
+        tree_draft_pos_offsets: 树状草稿位置偏移
+    """
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -64,6 +143,14 @@ class SpecDecodeBaseProposer:
         pass_hidden_states_to_model: bool,
         runner=None,
     ):
+        """初始化基础 proposer。
+
+        Args:
+            vllm_config: vLLM 配置
+            device: 设备（CUDA）
+            pass_hidden_states_to_model: 是否传递隐藏状态到模型
+            runner: 模型运行器（可选）
+        """
         self.vllm_config = vllm_config
         assert vllm_config.speculative_config is not None
         self.speculative_config = vllm_config.speculative_config
@@ -78,13 +165,12 @@ class SpecDecodeBaseProposer:
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
 
-        # We need to get the hidden size from the draft model config because
-        # the draft model's hidden size can be different from the target model's
-        # hidden size (e.g., Llama 3.3 70B).
+        # 我们需要从草稿模型配置获取隐藏层大小，因为
+        # 草稿模型的隐藏层大小可能与目标模型不同（如 Llama 3.3 70B）
         self.hidden_size = self.draft_model_config.get_hidden_size()
         self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
 
-        # Unifying eagle, draft model, and parallel drafting support
+        # 统一 eagle、草稿模型和并行推测支持
         self.parallel_drafting: bool = self.speculative_config.parallel_drafting
         self.extra_slots_per_request = (
             1 if not self.parallel_drafting else self.num_speculative_tokens
@@ -106,7 +192,7 @@ class SpecDecodeBaseProposer:
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_arange_np = np.arange(self.max_num_tokens)
 
-        # Multi-modal data support
+        # 多模态数据支持
         self.mm_registry = MULTIMODAL_REGISTRY
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             vllm_config.model_config
@@ -120,32 +206,29 @@ class SpecDecodeBaseProposer:
 
         self.compilation_config = self.vllm_config.compilation_config
 
-        # Cudagraph dispatcher for PIECEWISE-only dispatching in eagle.
-        # Keys are initialized later via initialize_cudagraph_keys() called from
-        # gpu_model_runner._check_and_update_cudagraph_mode after
-        # adjust_cudagraph_sizes_for_spec_decode is called.
+        # CUDA 图调度器，仅用于 EAGLE 中的 PIECEWISE 调度
+        # 键在 adjust_cudagraph_sizes_for_spec_decode 调用后通过
+        # initialize_cudagraph_keys() 初始化
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
 
-        # persistent buffers for cuda graph
+        # 持久性缓冲区（用于 CUDA 图）
         self.input_ids = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=device
         )
-        # Use draft model's M-RoPE setting, not target model's
-        # Draft models may be text-only even if target is multimodal
+        # 使用草稿模型的 M-RoPE 设置，而非目标模型的
+        # 即使目标是多模态的，草稿模型也可能是纯文本的
         self.uses_mrope = self.draft_model_config.uses_mrope
         self.uses_xdrope_dim = self.vllm_config.model_config.uses_xdrope_dim
         self.draft_uses_xdrope_dim = self.draft_model_config.uses_xdrope_dim
         if self.uses_mrope:
-            # NOTE: `mrope_positions` is implemented with one additional dummy
-            # position on purpose to make it non-contiguous so that it can work
-            # with torch compile.
-            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+            # 注意：`mrope_positions` 故意多实现了一个额外的虚拟位置
+            # 使其非连续，以便与 torch compile 一起工作
+            # 详见：https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
 
-            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
-            # the modality of inputs. For text-only inputs, each dimension has
-            # identical position IDs, making M-RoPE functionally equivalent to
-            # 1D-RoPE.
-            # See page 5 of https://arxiv.org/abs/2409.12191
+            # 注意：启用 M-RoPE 时，无论输入模态如何，位置 ID 都是 3D 的
+            # 对于纯文本输入，每个维度都有相同的位置 ID，
+            # 使 M-RoPE 功能上等同于 1D-RoPE
+            # 见 https://arxiv.org/abs/2409.12191 第 5 页
             self.mrope_positions = torch.zeros(
                 (3, self.max_num_tokens + 1), dtype=torch.int64, device=device
             )
@@ -156,7 +239,7 @@ class SpecDecodeBaseProposer:
                 device=device,
             )
         else:
-            # RoPE need (max_num_tokens,)
+            # RoPE 需要 (max_num_tokens,)
             self.positions = torch.zeros(
                 self.max_num_tokens, dtype=torch.int64, device=device
             )
@@ -164,11 +247,11 @@ class SpecDecodeBaseProposer:
             (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
         )
 
-        # Will be set when we initialize the attention backend
+        # 将在初始化注意力后端时设置
         self.block_size: int = -1
 
-        # We need +1 here because the arange is used to set query_start_loc,
-        # which has one more element than batch_size.
+        # 我们需要 +1 是因为 arange 用于设置 query_start_loc，
+        # 它比 batch_size 多一个元素
         max_num_slots_for_arange = max(max_batch_size + 1, self.max_num_tokens)
         self.arange = torch.arange(
             max_num_slots_for_arange, device=device, dtype=torch.int32
@@ -182,14 +265,13 @@ class SpecDecodeBaseProposer:
         self.is_rejected_token_mask: torch.Tensor | None = None
         self.is_masked_token_mask: torch.Tensor | None = None
         if self.needs_extra_input_slots:
-            # For draft models and parallel drafting, we need to keep track of
-            # which tokens are rejected to update the slot mapping with padding slots.
+            # 对于草稿模型和并行推测，我们需要跟踪哪些 token 被拒绝
+            # 以便用填充槽位更新槽映射
             self.is_rejected_token_mask = torch.zeros(
                 (self.max_num_tokens,), dtype=torch.bool, device=device
             )
-            # For parallel drafting, we also need to keep track of which tokens
-            # are parallel-padding tokens used to sample at later positions.
-            # We populate this tensor even when using draft models for simplicity.
+            # 对于并行推测，我们还需要跟踪哪些 token 是用于在后续位置采样的
+            # 并行填充 token。为简单起见，即使使用草稿模型也填充此张量
             self.is_masked_token_mask = torch.zeros(
                 (self.max_num_tokens,), dtype=torch.bool, device=device
             )
@@ -212,7 +294,7 @@ class SpecDecodeBaseProposer:
             self.max_num_tokens, dtype=torch.int64, device=device
         )
 
-        # Determine allowed attention backends once during initialization.
+        # 在初始化期间确定允许的注意力后端
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
             from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
@@ -225,13 +307,11 @@ class SpecDecodeBaseProposer:
                 RocmAttentionMetadata,
                 ROCMAiterMLASparseMetadata,
             ]
-            # ROCM_AITER_FA is an optional backend
-            # We check is_enabled() here to avoid importing the backend module during
-            # auto-discovery when VLLM_ROCM_USE_AITER=0, which would trigger aiter
-            # import and JIT compilation warnings. Explicit backend selection via
-            # attention_config still works because the backend module is loaded
-            # directly when selected, not through this auto-discovery path.
-            # Check if backend module exists to allow explicit selection
+            # ROCM_AITER_FA 是可选后端
+            # 这里检查 is_enabled() 以避免在 VLLM_ROCM_USE_AITER=0 时
+            # 自动发现期间导入后端模块，这会触发 aiter 导入和 JIT 编译警告
+            # 通过 attention_config 显式选择后端仍然有效，因为后端模块是
+            # 直接加载的，而不是通过这个自动发现路径
             if find_spec(
                 AttentionBackendEnum.ROCM_AITER_FA.get_path(include_classname=False)
             ):
@@ -241,26 +321,26 @@ class SpecDecodeBaseProposer:
 
                 rocm_types.append(AiterFlashAttentionMetadata)
 
-            # TRITON_MLA backend support for MLA models (e.g., DeepSeek)
+            # TRITON_MLA 后端支持 MLA 模型（如 DeepSeek）
             from vllm.model_executor.layers.attention.mla_attention import (
                 MLACommonMetadata,
             )
 
             rocm_types.append(MLACommonMetadata)
 
-            # FlexAttention backend support
+            # FlexAttention 后端支持
             from vllm.v1.attention.backends.flex_attention import FlexAttentionMetadata
 
             rocm_types.append(FlexAttentionMetadata)
 
             self.allowed_attn_types = tuple(rocm_types)
 
-        # Parse the speculative token tree.
+        # 解析推测 token 树
         spec_token_tree = self.speculative_config.speculative_token_tree
         assert spec_token_tree is not None
         self.tree_choices: list[tuple[int, ...]] = ast.literal_eval(spec_token_tree)
         tree_depth = len(self.tree_choices[-1])
-        # Precompute per-level properties of the tree.
+        # 预计算树的每层属性
         num_drafts_per_level = [0] * tree_depth
         for node in self.tree_choices:
             num_drafts_per_level[len(node) - 1] += 1
@@ -273,12 +353,16 @@ class SpecDecodeBaseProposer:
             self.child_drafts_per_level.append(
                 num_drafts_per_level[level] // num_drafts_per_level[level - 1]
             )
-        # Precompute draft position offsets in flattened tree.
+        # 预计算扁平化树中的草稿位置偏移
         self.tree_draft_pos_offsets = torch.arange(
             1, len(self.tree_choices) + 1, device=device, dtype=torch.int32
         ).repeat(max_batch_size, 1)
 
     def _raise_if_padded_drafter_batch_disabled(self):
+        """如果禁用了填充草稿批次则抛出异常。
+
+        草稿模型或并行推测仅支持填充草稿批次。
+        """
         if self.speculative_config.disable_padded_drafter_batch:
             raise NotImplementedError(
                 "Speculative Decoding with draft models or parallel drafting only "
@@ -287,6 +371,10 @@ class SpecDecodeBaseProposer:
             )
 
     def _raise_if_multimodal(self):
+        """如果启用多模态则抛出异常。
+
+        草稿模型或并行推测尚不支持多模态模型。
+        """
         if self.supports_mm_inputs:
             raise NotImplementedError(
                 "Speculative Decoding with draft models or parallel drafting "
@@ -294,6 +382,10 @@ class SpecDecodeBaseProposer:
             )
 
     def _raise_if_mrope(self):
+        """如果启用 M-RoPE 则抛出异常。
+
+        草稿模型或并行推测尚不支持 M-RoPE。
+        """
         if self.draft_model_config.uses_mrope:
             raise NotImplementedError(
                 "Speculative Decoding with draft models or parallel drafting "
@@ -301,10 +393,11 @@ class SpecDecodeBaseProposer:
             )
 
     def _init_parallel_drafting_params(self):
-        # For parallel drafting, we need the token ID to use for masked slots
-        # And for EAGLE + parallel drafting, we need the hidden state tensor to use
-        # for those masked slots.
+        """初始化并行推测参数。
 
+        对于并行推测，我们需要为屏蔽槽位使用特定的 token ID，
+        对于 EAGLE + 并行推测，我们需要为这些屏蔽槽位使用隐藏状态张量。
+        """
         model_hf_config = self.draft_model_config.hf_config
         if hasattr(model_hf_config, "pard_token"):
             self.parallel_drafting_token_id = model_hf_config.pard_token
@@ -322,6 +415,14 @@ class SpecDecodeBaseProposer:
             )
 
     def _get_positions(self, num_tokens: int):
+        """获取位置张量。
+
+        Args:
+            num_tokens: token 数量
+
+        Returns:
+            位置张量
+        """
         if self.uses_mrope:
             return self.mrope_positions[:, :num_tokens]
         if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
@@ -329,14 +430,19 @@ class SpecDecodeBaseProposer:
         return self.positions[:num_tokens]
 
     def _set_positions(self, num_tokens: int, positions: torch.Tensor):
+        """设置位置张量。
+
+        Args:
+            num_tokens: token 数量
+            positions: 要设置的位置张量
+        """
         if self.uses_mrope:
             self.mrope_positions[:, :num_tokens] = positions
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions[:, :num_tokens] = positions
         else:
-            # Convert M-RoPE positions if target model uses M-RoPE
-            # but draft doesn't, For text inputs, all M-RoPE
-            # dimensions are identical
+            # 如果目标模型使用 M-RoPE 但草稿模型不使用，则转换 M-RoPE 位置
+            # 对于文本输入，所有 M-RoPE 维度都是相同的
             if self.vllm_config.model_config.uses_mrope:
                 positions = positions[0]
             self.positions[:num_tokens] = positions
@@ -346,9 +452,16 @@ class SpecDecodeBaseProposer:
         num_tokens: int,
         slot_mapping: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Return slot_mapping dict for EAGLE layers.
+        """为 EAGLE 层返回槽映射字典。
 
-        If slot_mapping is provided, copies it into the buffer first.
+        如果提供了 slot_mapping，首先复制到缓冲区中。
+
+        Args:
+            num_tokens: token 数量
+            slot_mapping: 槽映射张量（可选）
+
+        Returns:
+            槽映射字典
         """
         if slot_mapping is not None:
             num_actual = slot_mapping.shape[0]
@@ -360,10 +473,13 @@ class SpecDecodeBaseProposer:
         return {name: view for name in self._draft_attn_layer_names}
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
-        """Initialize cudagraph dispatcher keys for eagle.
+        """为 EAGLE 初始化 CUDA 图调度器键。
 
-        Eagle only supports PIECEWISE cudagraphs (via mixed_mode).
-        This should be called after adjust_cudagraph_sizes_for_spec_decode.
+        EAGLE 仅支持 PIECEWISE CUDA 图（通过 mixed_mode）。
+        应在 adjust_cudagraph_sizes_for_spec_decode 调用后调用此方法。
+
+        Args:
+            cudagraph_mode: CUDA 图模式
         """
         if (
             not self.speculative_config.enforce_eager
@@ -377,7 +493,14 @@ class SpecDecodeBaseProposer:
         self.cudagraph_dispatcher.initialize_cudagraph_keys(eagle_cudagraph_mode)
 
     def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Greedy-sample draft tokens from hidden states."""
+        """从隐藏状态贪婪采样草稿 token。
+
+        Args:
+            hidden_states: 隐藏状态张量
+
+        Returns:
+            采样的草稿 token ID
+        """
         if self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
         return self.model.compute_logits(hidden_states).argmax(dim=-1)
@@ -401,6 +524,25 @@ class SpecDecodeBaseProposer:
         | list[dict[str, torch.Tensor]]
         | None = None,
     ) -> torch.Tensor:
+        """生成草稿 token。
+
+        使用 EAGLE 模型基于目标模型的隐藏状态生成候选 token。
+
+        Args:
+            target_token_ids: 目标 token ID [num_tokens]
+            target_positions: 目标位置 [num_tokens] 或 [3, num_tokens]（M-RoPE）
+            target_hidden_states: 目标隐藏状态 [num_tokens, hidden_size]
+            next_token_ids: 下一个 token ID [batch_size]
+            token_indices_to_sample: 要采样的 token 索引
+            common_attn_metadata: 通用注意力元数据
+            sampling_metadata: 采样元数据
+            mm_embed_inputs: 多模态嵌入输入（可选）
+            num_rejected_tokens_gpu: GPU 上的被拒绝 token 数量（可选）
+            slot_mappings: 槽映射（可选）
+
+        Returns:
+            草稿 token ID 张量 [batch_size, num_speculative_tokens]
+        """
         batch_size = common_attn_metadata.batch_size()
 
         if self.method == "eagle3":
@@ -480,7 +622,7 @@ class SpecDecodeBaseProposer:
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
-        # Early exit if there is only one draft token to be generated.
+        # 如果只有一个草稿 token 要生成，提前退出
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
             draft_token_ids = self._greedy_sample(sample_hidden_states)
             return draft_token_ids.view(-1, self.num_speculative_tokens)
@@ -492,7 +634,7 @@ class SpecDecodeBaseProposer:
         hidden_states = hidden_states[token_indices_to_sample]
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
-            # Draft using tree attention - requires full logits for top-k
+            # 使用树状注意力进行草稿 - 需要完整 logits 进行 top-k 采样
             logits = self.model.compute_logits(sample_hidden_states)
             draft_token_ids_list = self.propose_tree(
                 batch_size=batch_size,
@@ -517,7 +659,7 @@ class SpecDecodeBaseProposer:
                 f"{self.allowed_attn_types}"
             )
 
-        # Generate the remaining draft tokens.
+        # 生成剩余的草稿 token
         draft_token_ids_list = [draft_token_ids]
 
         cudagraph_runtime_mode, input_batch_size, batch_size_across_dp = (
@@ -531,26 +673,24 @@ class SpecDecodeBaseProposer:
             self.token_arange_np[: batch_size + 1]
         ).clone()
 
-        # In padded drafter batch, we need to adjust the sequence lengths
-        # to remove the "padding" (i.e. rejected tokens).
-        # Only apply this adjustment when we have rejected tokens
-        # (i.e., not the first proposal).
+        # 在填充草稿批次中，我们需要调整序列长度
+        # 以移除"填充"（即被拒绝的 token）
+        # 仅在我们有被拒绝 token 时应用此调整（即不是第一次提案）
         if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
-            # Invalidate the CPU-side shadows to avoid H<>D sync.
+            # 使 CPU 端影子无效以避免 H<>D 同步
             common_attn_metadata._seq_lens_cpu = None
             common_attn_metadata._num_computed_tokens_cpu = None
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
         for token_index in range(self.num_speculative_tokens - 1):
-            # Update the inputs.
-            # cast to int32 is crucial when eagle model is compiled.
-            # tensor.argmax() returns int64 by default.
+            # 更新输入
+            # 当 eagle 模型被编译时，转换为 int32 至关重要
+            # tensor.argmax() 默认返回 int64
             input_ids = draft_token_ids_list[-1].int()
-            # Use fused kernel for slot mapping and metadata updates.
-            # Write clamped positions directly into the positions buffer to
-            # avoid an extra D2D copy for the common (non-mrope) case.
+            # 对槽映射和元数据更新使用融合 kernel
+            # 直接写入位置缓冲区以避免额外 D2D 复制（常见非 mrope 情况）
             positions_1d = positions[0] if self.uses_mrope else positions
             if self.uses_mrope:
                 out_pos = self.mrope_positions[0, :batch_size]
@@ -581,21 +721,21 @@ class SpecDecodeBaseProposer:
                 positions = self.xdrope_positions[0, :batch_size]
             else:
                 positions = self.positions[:batch_size]
-            # Increment the maximum sequence length. We increment max_seq_len
-            # unconditionally even though some seq_lens may have been capped above,
-            # as max_seq_len serves as an upper bound for sequence lengths.
+            # 增加最大序列长度。我们无条件增加 max_seq_len，
+            # 即使某些 seq_lens 可能已在上面被限制，
+            # 因为 max_seq_len 作为序列长度的上限
             common_attn_metadata.max_seq_len = min(
                 common_attn_metadata.max_seq_len + 1, self.max_model_len
             )
 
-            # Also update the CPU-side shadow; NOTE: this is hacky and should be
-            # removed in when common_attn_metadata.seq_lens_cpu is deprecated.
+            # 同时更新 CPU 端影子；注意：这是临时的，应在
+            # common_attn_metadata.seq_lens_cpu 弃用时移除
             if common_attn_metadata._seq_lens_cpu is not None:
                 common_attn_metadata._seq_lens_cpu += 1
             if common_attn_metadata._num_computed_tokens_cpu is not None:
                 common_attn_metadata._num_computed_tokens_cpu += 1
 
-            # Rebuild attention metadata
+            # 重建注意力元数据
             for attn_group in self.draft_attn_groups:
                 attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
                     common_attn_metadata=common_attn_metadata,
@@ -604,7 +744,7 @@ class SpecDecodeBaseProposer:
                 for layer_name in attn_group.layer_names:
                     per_layer_attn_metadata[layer_name] = attn_metadata
 
-            # copy inputs to buffer for cudagraph
+            # 复制输入到缓冲区用于 CUDA 图
             self.input_ids[:batch_size] = input_ids
             self.hidden_states[:batch_size] = hidden_states
             if self.supports_mm_inputs:
@@ -616,7 +756,7 @@ class SpecDecodeBaseProposer:
                 input_ids = self.input_ids[:input_batch_size]
                 inputs_embeds = None
 
-            # Run the model.
+            # 运行模型
             model_kwargs = {
                 "input_ids": input_ids,
                 "positions": self._get_positions(input_batch_size),
@@ -658,22 +798,37 @@ class SpecDecodeBaseProposer:
         cad: CommonAttentionMetadata,
         num_rejected_tokens_gpu: torch.Tensor | None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
+        """设置第一次传递的输入。
+
+        准备 EAGLE 模型的输入，包括 token ID、位置和隐藏状态。
+
+        Args:
+            target_token_ids: 目标 token ID
+            next_token_ids: 下一个 token ID
+            target_positions: 目标位置
+            target_hidden_states: 目标隐藏状态
+            token_indices_to_sample: 要采样的 token 索引
+            cad: 通用注意力元数据
+            num_rejected_tokens_gpu: GPU 上的被拒绝 token 数量
+
+        Returns:
+            (token 数量，要采样的 token 索引，更新后的注意力元数据)
+        """
         if not self.needs_extra_input_slots:
-            # Default EAGLE pathway: no reshaping of input tensors needed.
-            # Simply rotate the input ids and leave the positions unchanged,
-            # Inserting the next token ids at the last slot in each request.
+            # 默认 EAGLE 路径：不需要重塑输入张量
+            # 只需旋转 token ID，将下一个 token ID 插入每个请求的最后一个位置
             if token_indices_to_sample is None:
                 token_indices_to_sample = cad.query_start_loc[1:] - 1
 
             num_tokens = target_token_ids.shape[0]
-            # Shift the input ids by one token.
-            # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
+            # 将 token ID 移位一个 token
+            # 例如：[a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
             self.input_ids[: num_tokens - 1] = target_token_ids[1:]
-            # Replace the last token with the next token.
-            # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
+            # 替换最后一个 token 为下一个 token
+            # 例如：[b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
             self.input_ids[token_indices_to_sample] = next_token_ids
 
-            # copy inputs to buffer for cudagraph
+            # 复制输入到缓冲区用于 CUDA 图
             if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
                 target_positions = target_positions[0]
             self._set_positions(num_tokens, target_positions)
@@ -685,12 +840,11 @@ class SpecDecodeBaseProposer:
             assert self.is_rejected_token_mask is not None
             assert self.is_masked_token_mask is not None
             # 1.
-            # Call a custom triton kernel to copy input_ids and positions
-            # into the correct slots in the preallocated buffers self.input_ids,
-            # self.positions.
+            # 调用自定义 triton kernel 将 input_ids 和 positions
+            # 复制到预分配的缓冲区 self.input_ids, self.positions 的正确位置
             batch_size = cad.batch_size()
-            # Since we might have to copy a lot of data for prefills, we select the
-            # block size based on the max query length and limit to max 256 slots/block.
+            # 由于我们可能必须为预填充复制大量数据，
+            # 我们基于最大查询长度选择块大小并限制最大 256 个槽位/块
             max_num_tokens_per_request = (
                 cad.max_query_len + self.net_num_new_slots_per_request
             )
@@ -711,36 +865,36 @@ class SpecDecodeBaseProposer:
                 device=self.device,
             )
 
-            # Destination indices to write target_hidden_states into drafting buffer.
+            # 目标隐藏状态写入草稿缓冲区的目标索引
             out_hidden_state_mapping = torch.empty(
                 total_num_input_tokens, dtype=torch.int32, device=self.device
             )
 
-            # Kernel grid: one program per request (row)
+            # Kernel 网格：每行（每个请求）一个程序
             grid = (batch_size, num_blocks)
             query_start_loc = cad.query_start_loc
             query_end_loc = cad.query_start_loc[1:] - 1
             if num_rejected_tokens_gpu is not None:
                 query_end_loc = query_end_loc - num_rejected_tokens_gpu
             copy_and_expand_eagle_inputs_kernel[grid](
-                # (Padded) Inputs from the target model
+                # 来自目标模型的（填充）输入
                 target_token_ids_ptr=target_token_ids,
                 target_positions_ptr=target_positions,
-                next_token_ids_ptr=next_token_ids,  # sampled tokens, one per request
-                # Outputs to the drafting buffers
+                next_token_ids_ptr=next_token_ids,  # 每个请求一个采样 token
+                # 写入草稿缓冲区
                 out_input_ids_ptr=self.input_ids,
-                out_positions_ptr=self.positions,  # Doesn't support mrope for now
+                out_positions_ptr=self.positions,  # 暂不支持 mrope
                 out_is_rejected_token_mask_ptr=self.is_rejected_token_mask,
                 out_is_masked_token_mask_ptr=self.is_masked_token_mask,
                 out_new_token_indices_ptr=token_indices_to_sample,
                 out_hidden_state_mapping_ptr=out_hidden_state_mapping,
-                # Input metadata
+                # 输入元数据
                 query_start_loc_ptr=query_start_loc,
                 query_end_loc_ptr=query_end_loc,
                 padding_token_id=0,
                 parallel_drafting_token_id=self.parallel_drafting_token_id,
-                # Sizing info
-                # Note that we can deduce batch_size for free from the grid size
+                # 尺寸信息
+                # 注意我们可以从网格大小免费推导 batch_size
                 total_input_tokens=total_num_input_tokens,
                 num_padding_slots_per_request=self.extra_slots_per_request,
                 shift_input_ids=self.pass_hidden_states_to_model,
@@ -749,7 +903,7 @@ class SpecDecodeBaseProposer:
             if self.pass_hidden_states_to_model:
                 assert self.parallel_drafting_hidden_state_tensor is not None
                 self.hidden_states[out_hidden_state_mapping] = target_hidden_states
-                # Use torch.where to avoid DtoH sync from boolean indexing
+                # 使用 torch.where 避免 DtoH 同步从布尔索引
                 mask = self.is_masked_token_mask[:total_num_output_tokens]
                 torch.where(
                     mask.unsqueeze(1),
@@ -759,8 +913,7 @@ class SpecDecodeBaseProposer:
                 )
 
             # 2.
-            # Recompute the slot mapping based on the new positions and
-            # rejection mask.
+            # 基于新位置和拒绝掩码重新计算槽映射
             assert self.block_size > 0, "block_size has not been initialized."
             new_slot_mapping = compute_new_slot_mapping(
                 cad=cad,
@@ -773,7 +926,7 @@ class SpecDecodeBaseProposer:
                 max_model_len=self.max_model_len,
             )
 
-            # 3. Update the common attention metadata with the new (meta)data
+            # 3. 用新的（元）数据更新通用注意力元数据
             new_cad = extend_all_queries_by_N(
                 cad,
                 N=self.net_num_new_slots_per_request,
@@ -784,6 +937,11 @@ class SpecDecodeBaseProposer:
             return total_num_output_tokens, token_indices_to_sample, new_cad
 
     def model_returns_tuple(self) -> bool:
+        """检查模型是否返回元组。
+
+        Returns:
+            如果模型返回 (last_hidden_states, hidden_states) 元组则返回 True
+        """
         return self.method not in ("mtp", "draft_model")
 
     def prepare_next_token_ids_cpu(
@@ -793,22 +951,30 @@ class SpecDecodeBaseProposer:
         gpu_input_batch: InputBatch,
         num_scheduled_tokens: dict[str, int],
     ) -> torch.Tensor:
-        """
-        This function is used to prepare the inputs for speculative decoding.
-        It calculates the next token ids for each request based on the sampled
-        token ids from the CPU. If a request has no sampled token ids (e.g.,
-        during the initial decoding steps), it falls back to using the request
-        state to get the next token id.
+        """从 CPU 准备下一个 token ID。
+
+        基于 CPU 上的采样 token ID 计算每个请求的下一个 token ID。
+        如果请求没有采样 token ID（如在初始解码步骤），
+        则回退使用请求状态获取下一个 token ID。
+
+        Args:
+            sampled_token_ids: 采样的 token ID 列表
+            requests: 请求状态字典
+            gpu_input_batch: GPU 输入批次
+            num_scheduled_tokens: 每个请求的调度 token 数量
+
+        Returns:
+            下一个 token ID 张量
         """
         req_ids = gpu_input_batch.req_ids
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(sampled_token_ids):
             if token_ids:
-                # Common case.
+                # 常见情况
                 next_token_id = token_ids[-1]
             else:
-                # Partial prefill (rare case).
-                # Get the next token id from the request state.
+                # 部分预填充（罕见情况）
+                # 从请求状态获取下一个 token ID
                 req_id = req_ids[i]
                 req_state = requests[req_id]
                 seq_len = req_state.num_computed_tokens + num_scheduled_tokens[req_id]
@@ -827,14 +993,23 @@ class SpecDecodeBaseProposer:
         gpu_input_batch: InputBatch,
         discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """准备填充模式的下一个 token ID。
+
+        计算每个请求的下一个 token ID 和有效采样 token 数量，
+        考虑"丢弃"请求（其下一个 token 未采样，来自 request.get_token_id()）
+        的"备份"token ID。还通过 sampled_token_ids 计算被拒绝 token 数量。
+
+        Args:
+            common_attn_metadata: 通用注意力元数据
+            sampled_token_ids: 采样的 token ID [batch_size, num_tokens]
+            requests: 请求状态字典
+            gpu_input_batch: GPU 输入批次
+            discard_request_mask: 丢弃请求掩码
+
+        Returns:
+            (下一个 token ID, 有效采样 token 数量)
         """
-        This function is used to prepare the inputs for speculative decoding.
-        It calculates the next token ids and the number of valid sampled tokens
-        for each request, considering the "discarded" requests whose next token
-        is not sampled and comes from `request.get_token_id()` instead. This is denoted
-        the "backup" token id. It also counts rejected tokens via `sampled_token_ids`.
-        """
-        # Precompute get_token_id for when there is no valid next token
+        # 当没有有效下一个 token 时预计算 get_token_id
         num_reqs = gpu_input_batch.num_reqs
         self.backup_next_token_ids.np[:num_reqs] = np.array(
             [
@@ -857,10 +1032,10 @@ class SpecDecodeBaseProposer:
         next_token_ids = torch.empty(batch_size, dtype=torch.int32, device=device)
         valid_sampled_tokens_count = next_token_ids.new_empty(batch_size)
 
-        # Kernel grid: one program per request (row)
+        # Kernel 网格：每行（每个请求）一个程序
         grid = (batch_size,)
 
-        # Find the next power of 2 for block sizes
+        # 找到块大小的下一个 2 的幂
         BLOCK_SIZE_TOKENS = triton.next_power_of_2(num_tokens)
         eagle_prepare_next_token_padded_kernel[grid](
             sampled_token_ids,
@@ -883,13 +1058,20 @@ class SpecDecodeBaseProposer:
         spec_decode_metadata: SpecDecodeMetadata,
         valid_sampled_tokens_count: torch.Tensor,
     ) -> tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
-        """
-        This function is used to prepare the inputs for speculative decoding
-        It updates the common_attn_metadata for speculative decoding,
-        but does not consider the rejected tokens. Instead, all tokens
-        are included as inputs to the speculator, with the rejected tokens
-        used as padding and filtered out later by `token_indices_to_sample`.
-        No blocking CPU operations should be introduced in this function.
+        """准备填充模式的输入。
+
+        更新 common_attn_metadata 用于推测解码，
+        但不考虑被拒绝 token。所有 token 都作为输入包含给推测器，
+        被拒绝 token 用作填充并在稍后通过 token_indices_to_sample 过滤。
+        此函数中不应引入阻塞 CPU 操作。
+
+        Args:
+            common_attn_metadata: 通用注意力元数据
+            spec_decode_metadata: 推测解码元数据
+            valid_sampled_tokens_count: 有效采样 token 数量
+
+        Returns:
+            (更新后的注意力元数据，要采样的 token 索引，被拒绝 token 数量)
         """
         num_reqs = common_attn_metadata.num_reqs
         device = valid_sampled_tokens_count.device
@@ -901,6 +1083,7 @@ class SpecDecodeBaseProposer:
             (num_reqs,), dtype=torch.int32, device=device
         )
 
+        # Kernel 网格：每行（每个请求）一个程序
         grid = (num_reqs,)
         eagle_prepare_inputs_padded_kernel[grid](
             spec_decode_metadata.cu_num_draft_tokens,
@@ -952,12 +1135,28 @@ class SpecDecodeBaseProposer:
         | list[dict[str, torch.Tensor]]
         | None = None,
     ) -> list[torch.Tensor]:
+        """使用树状注意力生成草稿 token。
+
+        基于预定义的 token 树结构，使用树状注意力机制
+        并行生成多个草稿 token。
+
+        Args:
+            batch_size: 批次大小
+            logits: logits 张量 [num_tokens, vocab_size]
+            positions: 位置张量 [num_tokens]
+            hidden_states: 隐藏状态 [num_tokens, hidden_size]
+            common_attn_metadata: 通用注意力元数据
+            slot_mappings: 槽映射（可选）
+
+        Returns:
+            每层的草稿 token ID 列表
+        """
         tree_attn_metadata_builder = self.draft_attn_groups[0].get_metadata_builder()
         assert isinstance(tree_attn_metadata_builder, TreeAttentionMetadataBuilder)
 
         total_num_drafts = self.cu_drafts_per_level[0]
         level_num_drafts = total_num_drafts
-        # Sample a draft token for each child at the tree root level.
+        # 在树根层为每个子节点采样一个草稿 token
         num_children = self.child_drafts_per_level[0]
         if num_children == 1:
             draft_token_ids = logits.argmax(dim=-1).view(batch_size, -1)
@@ -968,7 +1167,7 @@ class SpecDecodeBaseProposer:
         draft_token_ids_list = [draft_token_ids]
         draft_hidden_states = hidden_states.view(batch_size, 1, -1)
 
-        # Initialize empty tensors for concatenation with the level outputs.
+        # 初始化空张量用于与层输出拼接
         tree_input_ids = torch.empty(
             0, device=self.input_ids.device, dtype=self.input_ids.dtype
         )
@@ -978,17 +1177,17 @@ class SpecDecodeBaseProposer:
         tree_hidden_states = torch.empty(
             0, device=self.hidden_states.device, dtype=self.hidden_states.dtype
         )
-        # Precompute the draft token positions.
+        # 预计算草稿 token 位置
         flattened_draft_positions = (
             positions.view(batch_size, -1) + self.tree_draft_pos_offsets[:batch_size, :]
         )
         tree_depth = len(self.cu_drafts_per_level)
         for level in range(tree_depth - 1):
-            # Get draft positions for RoPE.
+            # 获取 RoPE 的草稿位置
             draft_positions = positions + (level + 1)
             exceeds_max_model_len = (positions + total_num_drafts) >= self.max_model_len
-            # Mask out the position ids that exceed the max model length.
-            # Otherwise, we may get out-of-range error in RoPE.
+            # 屏蔽超出最大模型长度的位置 ID
+            # 否则我们可能在 RoPE 中得到越界错误
             draft_positions = torch.where(
                 exceeds_max_model_len,
                 0,
@@ -996,26 +1195,26 @@ class SpecDecodeBaseProposer:
             ).view(batch_size, -1)
 
             if level_num_drafts > 1:
-                # Repeat the positions for each draft at this level.
+                # 为每个草稿重复位置
                 draft_positions = draft_positions.repeat_interleave(
                     level_num_drafts, dim=1
                 )
 
             if num_children > 1:
-                # Repeat draft hidden states for each child.
+                # 为每个子节点重复草稿隐藏状态
                 draft_hidden_states = draft_hidden_states.repeat_interleave(
                     num_children, dim=1
                 )
 
-            # Concatenate the draft tokens, positions, and hidden states.
+            # 拼接草稿 token、位置和隐藏状态
             tree_input_ids = torch.cat([tree_input_ids, draft_token_ids], dim=1)
             tree_positions = torch.cat([tree_positions, draft_positions], dim=1)
             tree_hidden_states = torch.cat(
                 [tree_hidden_states, draft_hidden_states], dim=1
             )
 
-            # Build new attention metadata for the next level of drafts.
-            # This is necessary to support tree attention.
+            # 为下一层草稿构建新的注意力元数据
+            # 这对支持树状注意力是必要的
             query_len = total_num_drafts
             common_attn_metadata = replace(
                 common_attn_metadata,
@@ -1028,33 +1227,32 @@ class SpecDecodeBaseProposer:
                 common_attn_metadata=common_attn_metadata, draft_index=level + 1
             )
 
-            # Apply new attention metadata to all draft layers.
+            # 对所有草稿层应用新的注意力元数据
             per_layer_attn_metadata = {}
             for attn_group in self.draft_attn_groups:
                 for layer_name in attn_group.layer_names:
                     per_layer_attn_metadata[layer_name] = attn_metadata
 
-            # Consider max model length.
+            # 考虑最大模型长度
             attn_metadata.max_seq_len = min(
                 attn_metadata.max_seq_len, self.max_model_len
             )
-            # For the requests that exceed the max model length, we set the
-            # sequence length to 1 to minimize their overheads in attention.
+            # 对于超过最大模型长度的请求，我们将序列长度设置为 1
+            # 以最小化注意力开销
             attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
 
-            # Compute the slot mapping.
+            # 计算槽映射
             block_size = tree_attn_metadata_builder.kv_cache_spec.block_size
             query_positions = flattened_draft_positions[:, level : level + query_len]
             block_numbers = query_positions // block_size
             block_ids = attn_metadata.block_table.gather(dim=1, index=block_numbers)
             slot_mapping = block_ids * block_size + query_positions % block_size
-            # Mask out the slot mappings that exceed the max model length.
-            # Otherwise, the KV cache will be inadvertently updated with the
-            # padding tokens.
+            # 屏蔽超出最大模型长度的槽映射
+            # 否则 KV 缓存将意外地用填充 token 更新
             slot_mapping[exceeds_max_model_len] = PADDING_SLOT_ID
             attn_metadata.slot_mapping = slot_mapping.view(-1)
 
-            # Copy inputs to buffer for cudagraph.
+            # 复制输入到缓冲区用于 CUDA 图
             num_tokens = attn_metadata.num_actual_tokens
             input_ids = tree_input_ids.view(-1)
             self.input_ids[:num_tokens] = input_ids
@@ -1065,7 +1263,7 @@ class SpecDecodeBaseProposer:
                 num_tokens
             )
             num_input_tokens = batch_desc.num_tokens
-            # Run the model.
+            # 运行模型
             with set_forward_context(
                 per_layer_attn_metadata,
                 self.vllm_config,
@@ -1082,7 +1280,7 @@ class SpecDecodeBaseProposer:
                     inputs_embeds=None,
                 )
 
-            # Get the output hidden states for the draft tokens.
+            # 获取草稿 token 的输出隐藏状态
             draft_hidden_states = hidden_states[:num_tokens].view(
                 batch_size, query_len, -1
             )[:, -level_num_drafts:]
@@ -1090,12 +1288,12 @@ class SpecDecodeBaseProposer:
                 batch_size, query_len, -1
             )[:, -level_num_drafts:]
 
-            # Get the output logits for the draft tokens.
+            # 获取草稿 token 的输出 logits
             logits = self.model.compute_logits(
                 draft_last_hidden_states.reshape(batch_size * level_num_drafts, -1)
             )
 
-            # Sample a draft token for each child at the next tree level.
+            # 在下一树层为每个子节点采样一个草稿 token
             num_children = self.child_drafts_per_level[level + 1]
             if num_children == 1:
                 draft_token_ids = logits.argmax(dim=-1).view(batch_size, -1)
@@ -1105,7 +1303,7 @@ class SpecDecodeBaseProposer:
                 )
             draft_token_ids_list.append(draft_token_ids)
 
-            # Update the # drafts counters for the next tree level.
+            # 更新下一树层的草稿数计数器
             level_num_drafts = self.cu_drafts_per_level[level + 1] - total_num_drafts
             total_num_drafts = self.cu_drafts_per_level[level + 1]
         return draft_token_ids_list
@@ -1116,20 +1314,27 @@ class SpecDecodeBaseProposer:
         sampled_token_ids: list[list[int]],
         num_draft_tokens: list[int],
     ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
+        """准备输入。
+
+        更新 common_attn_metadata 以考虑被拒绝 token 和新采样 token。
+        还返回应输入到推测器的 token 索引。
+
+        Args:
+            common_attn_metadata: 通用注意力元数据
+            sampled_token_ids: 采样的 token ID 列表
+            num_draft_tokens: 每个请求的草稿 token 数量
+
+        Returns:
+            (更新后的注意力元数据，token 索引)
         """
-        This function is used to prepare the inputs for speculative decoding.
-        It updates to the common_attn_metadata to account for the rejected
-        tokens (and newly sampled tokens). It also returns the token indices
-        of the tokens that should be fed to the speculator.
-        """
-        # E.g.
+        # 例如：
         #  common_attn_metadata.query_start_loc{_cpu}:
         #       [0, q1, q1 + q2, q1 + q2 + q3]
         #  common_attn_metadata.seq_lens{_cpu}: [s1, s2, s3]
         #  num_rejected_tokens: [n1, n2, n3]
-        # This function computes the intermediate values:
+        # 此函数计算中间值：
         #  num_tokens_per_req: [q1 - n1, q2 - n2, q3 - n3]
-        # And returns:
+        # 并返回：
         #  common_attn_metadata.query_start_loc{_cpu}:
         #       [0, q1 - n1, q1 + q2 - n1 - n2, q1 + q2 + q3 - n1 - n2 - n3]
         #  common_attn_metadata.seq_lens{_cpu}:
@@ -1165,8 +1370,8 @@ class SpecDecodeBaseProposer:
         np.cumsum(new_num_tokens_per_req_np, out=new_query_start_loc_np[1:])
 
         total_num_tokens = new_query_start_loc_np[-1]
-        # Example assuming num_tokens_per_req_np = [2, 4, 3]
-        # this implies that `new_query_start_locs` is:
+        # 例如假设 num_tokens_per_req_np = [2, 4, 3]
+        # 这意味着 `new_query_start_locs` 是：
         # [0, 2, 6, 9] ->
         # [0, 0, 2, 2, 2, 2, 6, 6, 6]
         #  _r1_  ____r2____  ___r3__
@@ -1180,14 +1385,14 @@ class SpecDecodeBaseProposer:
             self.token_arange_np[:total_num_tokens] - new_query_start_locs_expanded
         )
 
-        # Expand starting positions to match token pattern
+        # 扩展起始位置以匹配 token 模式
         # [0, q1, q1 + q2] ->
         # [0, 0, q1, q1, q1, q1, q1 + q2, q1 + q2, q1 + q2]
         #  _r1_  _____r2_______  ___________r3____________
         old_query_start_locs_expanded = np.repeat(
             query_start_loc_cpu[:-1].numpy(), new_num_tokens_per_req_np
         )
-        # Final token indices are:
+        # 最终 token 索引是：
         # [0, 1,                                // req 1
         #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2
         #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2] // req 3
@@ -1213,14 +1418,25 @@ class SpecDecodeBaseProposer:
         return spec_common_attn_metadata, token_indices
 
     def get_model_name(self, model: nn.Module) -> str:
-        if hasattr(model, "module"):  # multi-GPU
+        """获取模型名称。
+
+        Args:
+            model: 模型
+
+        Returns:
+            模型类名
+        """
+        if hasattr(model, "module"):  # 多 GPU
             model = model.module
         return model.__class__.__name__
 
     def _get_model(self) -> nn.Module:
-        """
-        Default method to call get_model(). Can be overridden by subclasses which
-        need to customize model loading.
+        """获取模型。
+
+        获取模型的默认方法。子类可以重写此方法以自定义模型加载。
+
+        Returns:
+            加载的模型
         """
         from vllm.compilation.backends import set_model_tag
 
@@ -1233,6 +1449,13 @@ class SpecDecodeBaseProposer:
         return model
 
     def load_model(self, target_model: nn.Module) -> None:
+        """加载模型。
+
+        加载草稿模型并识别草稿注意力层，共享嵌入层和 LM 头。
+
+        Args:
+            target_model: 目标模型
+        """
         target_attn_layer_names = set(
             get_layers_from_vllm_config(
                 self.vllm_config,
@@ -1242,7 +1465,7 @@ class SpecDecodeBaseProposer:
 
         self.model = self._get_model()
 
-        # Find draft layers (attention layers added by draft model)
+        # 找到草稿层（草稿模型添加的注意力层）
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
@@ -1252,8 +1475,7 @@ class SpecDecodeBaseProposer:
         )
 
         if self.supports_mm_inputs:
-            # Even if the target model is multimodal, we can also use
-            # text-only draft models
+            # 即使目标模型是多模态的，我们也可以使用纯文本草稿模型
             try:
                 dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
                 self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
@@ -1265,7 +1487,7 @@ class SpecDecodeBaseProposer:
                 self.supports_mm_inputs = False
 
         if supports_multimodal(target_model):
-            # handle multimodality
+            # 处理多模态
             assert hasattr(target_model, "config")
             if self.get_model_name(target_model) in [
                 "Qwen2_5_VLForConditionalGeneration",
@@ -1309,11 +1531,14 @@ class SpecDecodeBaseProposer:
             )
 
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
-        """
-        Some draft models may not have their own embedding layers, and some may
-        have a duplicate copy of the target model's embedding layers. In these cases,
-        we share the target model's embedding layers with the draft model to save
-        memory.
+        """可能共享嵌入层。
+
+        一些草稿模型可能没有自己的嵌入层，或者可能有目标模型
+        嵌入层的重复副本。在这些情况下，我们共享目标模型的
+        嵌入层以节省内存。
+
+        Args:
+            target_language_model: 目标语言模型
         """
         if get_pp_group().world_size == 1:
             inner_model = getattr(target_language_model, "model", None)
@@ -1330,7 +1555,7 @@ class SpecDecodeBaseProposer:
 
             share_embeddings = False
             if hasattr(self.model, "has_own_embed_tokens"):
-                # EAGLE model
+                # EAGLE 模型
                 if not self.model.has_own_embed_tokens:
                     share_embeddings = True
                     logger.info(
@@ -1341,8 +1566,8 @@ class SpecDecodeBaseProposer:
                 elif (
                     isinstance(target_embed_tokens.weight, torch.Tensor)
                     and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
-                    # TODO: Offload to CPU for comparison to avoid extra GPU memory
-                    # usage in CI testing environments with limited GPU memory
+                    # TODO: 卸载到 CPU 进行比较以避免在 CI 测试环境中
+                    # 额外使用 GPU 内存（GPU 内存有限）
                     and torch.equal(
                         target_embed_tokens.weight.cpu(),
                         self.model.model.embed_tokens.weight.cpu(),
@@ -1360,7 +1585,7 @@ class SpecDecodeBaseProposer:
                         "Keeping separate embedding weights from the target model."
                     )
             else:
-                # MTP model
+                # MTP 模型
                 share_embeddings = True
                 logger.info(
                     "Detected MTP model. "
@@ -1378,14 +1603,18 @@ class SpecDecodeBaseProposer:
             )
 
     def _maybe_share_lm_head(self, target_language_model: nn.Module) -> None:
-        """
-        Some draft models may not have their own LM head, and some may have a
-        duplicate copy of the target model's LM head. In these cases, we share
-        the target model's LM head with the draft model to save memory.
+        """可能共享 LM 头。
+
+        一些草稿模型可能没有自己的 LM 头，或者可能有目标模型
+        LM 头的重复副本。在这些情况下，我们共享目标模型的
+        LM 头以节省内存。
+
+        Args:
+            target_language_model: 目标语言模型
         """
         share_lm_head = False
         if hasattr(self.model, "has_own_lm_head"):
-            # EAGLE model
+            # EAGLE 模型
             if not self.model.has_own_lm_head:
                 share_lm_head = True
                 logger.info(
@@ -1396,8 +1625,8 @@ class SpecDecodeBaseProposer:
                 hasattr(target_language_model, "lm_head")
                 and isinstance(target_language_model.lm_head.weight, torch.Tensor)
                 and isinstance(self.model.lm_head.weight, torch.Tensor)
-                # TODO: Offload to CPU for comparison to avoid extra GPU memory
-                # usage in CI testing environments with limited GPU memory
+                # TODO: 卸载到 CPU 进行比较以避免在 CI 测试环境中
+                # 额外使用 GPU 内存（GPU 内存有限）
                 and torch.equal(
                     target_language_model.lm_head.weight.cpu(),
                     self.model.lm_head.weight.cpu(),
@@ -1414,7 +1643,7 @@ class SpecDecodeBaseProposer:
                     "Keeping separate lm_head weights from the target model."
                 )
         else:
-            # MTP model
+            # MTP 模型
             share_lm_head = True
             logger.info(
                 "Detected MTP model. "
@@ -1426,11 +1655,11 @@ class SpecDecodeBaseProposer:
                 del self.model.lm_head
             self.model.lm_head = target_language_model.lm_head
 
-            # MTP models call compute_logits via shared_head.head (a
-            # ParallelLMHead inside each MTP layer), not self.model.lm_head.
-            # If the checkpoint omits a copy of the lm_head weights at the
-            # MTP layer path, shared_head.head stays uninitialised and
-            # produces NaN logits. Always share it explicitly.
+            # MTP 模型通过 shared_head.head（每个 MTP 层内的 ParallelLMHead）
+            # 调用 compute_logits，而不是 self.model.lm_head
+            # 如果检查点在 MTP 层路径省略了 lm_head 权重副本，
+            # shared_head.head 会保持未初始化并产生 NaN logits
+            # 总是显式共享它
             inner = getattr(self.model, "model", None)
             layers = getattr(inner, "layers", None) if inner else None
             if layers is not None:
@@ -1451,8 +1680,8 @@ class SpecDecodeBaseProposer:
                     f"{self.model.__class__.__name__} does not implement "
                     "get_top_tokens()."
                 )
-            # Warn if draft model has vocab remapping, which forces fallback
-            # to the full-logits path (negating the optimization).
+            # 如果草稿模型有词表重映射则警告，这会强制回退到
+            # 完整 logits 路径（抵消优化）
             if (
                 hasattr(self.model, "draft_id_to_target_id")
                 and self.model.draft_id_to_target_id is not None
@@ -1477,8 +1706,18 @@ class SpecDecodeBaseProposer:
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
-        # FIXME: when using tree-based specdec, adjust number of forward-passes
-        # according to the depth of the tree.
+        """运行虚拟推理。
+
+        用于初始化模型和 CUDA 图。
+
+        Args:
+            num_tokens: token 数量
+            use_cudagraphs: 是否使用 CUDA 图
+            is_graph_capturing: 是否正在捕获图
+            slot_mappings: 槽映射（可选）
+        """
+        # 注意：当使用基于树的推测解码时，根据树的深度
+        # 调整前向传递次数
         for fwd_idx in range(
             self.num_speculative_tokens if not is_graph_capturing else 1
         ):
@@ -1489,7 +1728,7 @@ class SpecDecodeBaseProposer:
                     )
                 )
 
-            # Make sure to use EAGLE's own buffer during cudagraph capture.
+            # 确保在 CUDA 图捕获期间使用 EAGLE 自己的缓冲区
             if (
                 self._draft_attn_layer_names
                 and slot_mappings is not None
@@ -1524,15 +1763,19 @@ class SpecDecodeBaseProposer:
                 self.model(**kwargs)
 
     def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
-        """
-        Some eagle3 heads (e.g., nvidia/gpt-oss-120b-Eagle3-v2) do not use auxiliary
-        hidden states and directly uses the last layer output just like eagle1.
-        They might indicate this by setting "use_aux_hidden_state" to False
-        inside the "eagle_config" dict of their hf_config.
+        """从配置获取 EAGLE3 是否使用辅助隐藏状态。
+
+        一些 EAGLE3 头（如 nvidia/gpt-oss-120b-Eagle3-v2）不使用辅助隐藏状态，
+        直接使用最后一层输出，就像 EAGLE1 一样。
+        它们可能通过在 hf_config 的"eagle_config"字典中设置
+        "use_aux_hidden_state"为 False 来表明这一点。
+
+        Returns:
+            如果使用辅助隐藏状态则返回 True
         """
         if self.method != "eagle3":
             return False
-        # Assume that eagle3 heads use aux hidden states by default
+        # 默认假设 EAGLE3 头使用辅助隐藏状态
         use_aux_hidden_state = True
         eagle_config = getattr(self.draft_model_config.hf_config, "eagle_config", None)
         if eagle_config is not None:
@@ -1540,11 +1783,13 @@ class SpecDecodeBaseProposer:
         return use_aux_hidden_state
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
-        """
-        Validate that all drafting layers belong to the same KVCacheGroup.
-        Need this assumption to ensure all drafting layers can use the
-        same AttentionMetadata.
-        May extend to multiple AttentionMetadata in the future.
+        """验证所有草稿层属于同一个 KV 缓存组。
+
+        需要这个假设以确保所有草稿层可以使用相同的注意力元数据。
+        未来可能扩展到多个注意力元数据。
+
+        Args:
+            kv_cache_config: KV 缓存配置
         """
         kv_cache_groups: dict[str, int] = {}
         for id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
@@ -1567,16 +1812,21 @@ class SpecDecodeBaseProposer:
         kv_cache_config: KVCacheConfig,
         kernel_block_sizes: list[int] | None = None,
     ) -> None:
-        """
-        Initialize AttentionGroups for draft layers using kv_cache_config.
-        Called from the model runner's initialize_metadata_builders.
+        """初始化草稿层的注意力后端。
+
+        使用 kv_cache_config 为草稿层创建 AttentionGroups。
+        从模型运行器的 initialize_metadata_builders 调用。
+
+        Args:
+            kv_cache_config: KV 缓存配置
+            kernel_block_sizes: kernel 块大小列表（可选）
         """
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
 
-        # Find which kv_cache_group the draft layers belong to
+        # 找到草稿层属于哪个 kv_cache_group
         self.validate_same_kv_cache_group(kv_cache_config)
         kv_cache_spec = None
         for gid, group in enumerate(kv_cache_config.kv_cache_groups):
@@ -1629,15 +1879,25 @@ class SpecDecodeBaseProposer:
         num_tokens: int,
         use_cudagraphs: bool = True,
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
+        """确定批次执行和填充策略。
+
+        根据 CUDA 图模式和数据并行配置确定如何执行批次。
+
+        Args:
+            num_tokens: token 数量
+            use_cudagraphs: 是否使用 CUDA 图
+
+        Returns:
+            (CUDA 图模式，填充后的 token 数量，跨数据并行的 token 数量)
+        """
         cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
             num_tokens,
             valid_modes=({CUDAGraphMode.NONE} if not use_cudagraphs else None),
         )
         num_tokens_padded = batch_desc.num_tokens
 
-        # Extra coordination when running data-parallel since we need to
-        # coordinate across ranks
-        # TODO(Flechman): support DBO ubatching
+        # 运行数据并行时需要额外协调，因为我们需要跨 ranks 协调
+        # TODO(Flechman): 支持 DBO 微批次
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
@@ -1651,18 +1911,17 @@ class SpecDecodeBaseProposer:
             )
             assert not should_ubatch, "DBO ubatching not implemented for EAGLE"
 
-            # Extract DP-synced values
+            # 提取 DP 同步值
             if num_tokens_across_dp is not None:
                 dp_rank = self.dp_rank
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
-                # Re-dispatch with DP padding so we have the correct
-                # batch_descriptor
+                # 重新调度以获得正确的 batch_descriptor
                 cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
                     num_tokens_padded,
                     valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
                 )
-                # Assert to make sure the agreed upon token count is correct
-                # otherwise num_tokens_across_dp will no-longer be valid
+                # 断言确保商定的 token 计数正确
+                # 否则 num_tokens_across_dp 将不再有效
                 assert batch_desc.num_tokens == num_tokens_padded
                 num_tokens_across_dp[dp_rank] = num_tokens_padded
 
@@ -1670,12 +1929,26 @@ class SpecDecodeBaseProposer:
 
 
 class EagleProposer(SpecDecodeBaseProposer):
+    """EAGLE 推测解码 proposer。
+
+    继承自 SpecDecodeBaseProposer，专门用于 EAGLE 架构。
+    与基础类的主要区别是 pass_hidden_states_to_model=True，
+    这意味着 EAGLE 模型接收目标模型的隐藏状态作为输入。
+    """
+
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
         runner=None,
     ):
+        """初始化 EAGLE proposer。
+
+        Args:
+            vllm_config: vLLM 配置
+            device: 设备（CUDA）
+            runner: 模型运行器（可选）
+        """
         super().__init__(
             vllm_config,
             device,
@@ -1684,45 +1957,56 @@ class EagleProposer(SpecDecodeBaseProposer):
         )
 
 
-# NOTE(woosuk): Currently, the below code is not used and we always use argmax
-# to sample the draft tokens. We will use this after we find a way to manage
-# the draft prob tensor.
-# Refer to https://github.com/vllm-project/vllm/pull/16899 for the details.
-# FIXME(woosuk): The logic here is duplicated with the main sampling code.
-# We should refactor this to reuse the same sampling implementation.
+# 注意（woosuk）：以下代码目前未使用，我们总是使用 argmax
+# 来采样草稿 token。我们将在找到管理草稿概率张量的方法后使用此代码。
+# 参考 https://github.com/vllm-project/vllm/pull/16899 了解详情。
+# 注意（woosuk）：这里的逻辑与主采样代码重复。
+# 我们应该重构此代码以重用相同的采样实现。
 def compute_probs_and_sample_next_token(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """计算概率并采样下一个 token。
+
+    根据采样参数从 logits 计算概率并采样下一个 token。
+    目前未使用，保留供未来使用。
+
+    Args:
+        logits: logits 张量
+        sampling_metadata: 采样元数据
+
+    Returns:
+        (下一个 token ID, 概率)
+    """
     if sampling_metadata.all_greedy:
-        # For greedy requests, draft_probs is not used in rejection sampling.
-        # Therefore, we can just return the logits.
+        # 对于贪婪请求，草稿概率在拒绝采样中未使用
+        # 因此我们可以只返回 logits
         probs = logits
         next_token_ids = logits.argmax(dim=-1)
         return next_token_ids, probs
 
     assert sampling_metadata.temperature is not None
 
-    # Use epsilon comparison to detect greedy sampling (temperature ~ 0.0)
-    # consistent with sampler.py's _SAMPLING_EPS threshold
+    # 使用 epsilon 比较检测贪婪采样（温度约 0.0）
+    # 与 sampler.py 的_SAMPLING_EPS 阈值一致
     temperature = sampling_metadata.temperature
-    # Avoid division by zero if there are greedy requests.
+    # 避免除以零（如果有贪婪请求）
     if not sampling_metadata.all_random:
         is_greedy = temperature < _SAMPLING_EPS
         temperature = torch.where(is_greedy, 1.0, temperature)
     logits.div_(temperature.view(-1, 1))
     probs = logits.softmax(dim=-1, dtype=torch.float32)
 
-    # NOTE(woosuk): Currently, we ignore most of the sampling parameters in
-    # generating the draft tokens. We only use the temperature. While this
-    # could degrade the acceptance rate, it does not affect the distribution
-    # of the generated tokens after rejection sampling.
+    # 注意（woosuk）：我们忽略了大多数采样参数
+    # 在生成草稿 token 时。我们只使用温度。虽然这
+    # 可能会降低接受率，但它不会影响拒绝采样后
+    # 生成 token 的分布。
 
-    # TODO(woosuk): Consider seeds.
+    # TODO(woosuk): 考虑随机种子
     q = torch.empty_like(probs)
     q.exponential_()
-    # NOTE(woosuk): We shouldn't use `probs.div_(q)` because the draft_probs
-    # will be used later for rejection sampling.
+    # 注意（woosuk）：我们不应该使用`probs.div_(q)` 因为草稿概率
+    # 稍后将用于拒绝采样
     next_token_ids = probs.div(q).argmax(dim=-1).view(-1)
     if not sampling_metadata.all_random:
         greedy_token_ids = probs.argmax(dim=-1)

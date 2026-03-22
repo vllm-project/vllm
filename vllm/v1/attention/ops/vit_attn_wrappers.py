@@ -1,15 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This file contains ops for ViT attention to be compatible with torch.compile
-as there are operations here not supported by torch.compile (for instance,
-`.item()` in flash attention)
+"""ViT 注意力操作封装模块。
 
-Using these ops and wrapping vision blocks with `torch.compile` can speed up
-throughput in vision models by ~5% relative on H100, and improve token
-latencies by ~7% (see qwen2_5_vl for example usage)
+本文件包含 ViT（Vision Transformer）注意力操作，与 torch.compile 兼容。
+由于某些操作不被 torch.compile 支持（例如 flash attention 中的 `.item()`），
+使用这些操作并将 vision 块用 `torch.compile` 包装可以在 H100 上提升
+约 5% 的吞吐量，并改善约 7% 的 token 延迟。
 
-To use these ops, you must have a recent version of PyTorch installed (>= 2.4.0)
+要使用这些操作，需要较新版本的 PyTorch（>= 2.4.0）。
+
+主要函数：
+- flash_attn_maxseqlen_wrapper: Flash Attention 包装函数
+- vit_flash_attn_wrapper: ViT Flash Attention 封装
+- triton_attn_wrapper: Triton 注意力包装函数
+- vit_triton_attn_wrapper: ViT Triton 注意力封装
+- torch_sdpa_wrapper: PyTorch SDPA 包装函数
+- vit_torch_sdpa_wrapper: ViT PyTorch SDPA 封装
+- flashinfer_wrapper: FlashInfer 包装函数
+- vit_flashinfer_wrapper: ViT FlashInfer 封装
 """
 
 import einops
@@ -31,6 +39,24 @@ def flash_attn_maxseqlen_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Flash Attention 可变长度包装函数。
+
+    支持 ROCm Aiter 和 CUDA Flash Attention 后端。
+
+    Args:
+        q: Query 张量
+        k: Key 张量
+        v: Value 张量
+        batch_size: 批次大小
+        is_rocm_aiter: 是否使用 ROCm Aiter
+        fa_version: Flash Attention 版本
+        scale: 缩放因子（可选）
+        cu_seqlens: 累积序列长度（可选）
+        max_seqlen: 最大序列长度（可选）
+
+    Returns:
+        注意力输出张量
+    """
     kwargs = {}
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
@@ -97,6 +123,24 @@ def vit_flash_attn_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """ViT Flash Attention 封装函数。
+
+    调用已注册的自定义操作执行 Flash Attention。
+
+    Args:
+        q: Query 张量
+        k: Key 张量
+        v: Value 张量
+        batch_size: 批次大小
+        is_rocm_aiter: 是否使用 ROCm Aiter
+        fa_version: Flash Attention 版本
+        scale: 缩放因子（可选）
+        cu_seqlens: 累积序列长度（可选）
+        max_seqlen: 最大序列长度（可选）
+
+    Returns:
+        注意力输出张量
+    """
     return torch.ops.vllm.flash_attn_maxseqlen_wrapper(
         q,
         k,
@@ -119,6 +163,22 @@ def triton_attn_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Triton 注意力包装函数。
+
+    使用 Triton kernel 执行 ViT 注意力计算。
+
+    Args:
+        q: Query 张量
+        k: Key 张量
+        v: Value 张量
+        batch_size: 批次大小
+        scale: 缩放因子（可选）
+        cu_seqlens: 累积序列长度（可选）
+        max_seqlen: 最大序列长度（可选）
+
+    Returns:
+        注意力输出张量
+    """
     from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 
     q_len = q.size(1)
@@ -194,9 +254,17 @@ def apply_sdpa(
     scale: float | None = None,
     enable_gqa: bool = False,
 ) -> torch.Tensor:
-    """
-    Input shape:
-    (batch_size x seq_len x num_heads x head_size)
+    """应用 PyTorch 缩放点积注意力。
+
+    Args:
+        q: Query 张量 (batch_size x seq_len x num_heads x head_size)
+        k: Key 张量
+        v: Value 张量
+        scale: 缩放因子（可选）
+        enable_gqa: 是否启用分组查询注意力
+
+    Returns:
+        注意力输出张量
     """
     q, k, v = (einops.rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
     output = F.scaled_dot_product_attention(
@@ -216,6 +284,21 @@ def torch_sdpa_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     enable_gqa: bool = False,
 ) -> torch.Tensor:
+    """PyTorch SDPA 包装函数。
+
+    支持可变长度序列和分组查询注意力。
+
+    Args:
+        q: Query 张量
+        k: Key 张量
+        v: Value 张量
+        scale: 缩放因子（可选）
+        cu_seqlens: 累积序列长度（可选）
+        enable_gqa: 是否启用分组查询注意力
+
+    Returns:
+        注意力输出张量
+    """
     # Never remove the contiguous logic for ROCm
     # Without it, hallucinations occur with the backend
     if current_platform.is_rocm():
@@ -265,6 +348,21 @@ def vit_torch_sdpa_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     enable_gqa: bool = False,
 ) -> torch.Tensor:
+    """ViT PyTorch SDPA 封装函数。
+
+    调用已注册的自定义操作执行 PyTorch SDPA。
+
+    Args:
+        q: Query 张量
+        k: Key 张量
+        v: Value 张量
+        scale: 缩放因子（可选）
+        cu_seqlens: 累积序列长度（可选）
+        enable_gqa: 是否启用分组查询注意力
+
+    Returns:
+        注意力输出张量
+    """
     return torch.ops.vllm.torch_sdpa_wrapper(
         q, k, v, scale, cu_seqlens, enable_gqa=enable_gqa
     )
@@ -280,6 +378,23 @@ def flashinfer_wrapper(
     max_seqlen: torch.Tensor | None = None,
     sequence_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """FlashInfer 包装函数。
+
+    使用 FlashInfer 的 cudnn_batch_prefill_with_kv_cache 执行注意力计算。
+
+    Args:
+        q: Query 张量
+        k: Key 张量
+        v: Value 张量
+        scale: 缩放因子
+        workspace_buffer: 工作区缓冲区
+        cu_seqlens: 累积序列长度（可选）
+        max_seqlen: 最大序列长度（可选）
+        sequence_lengths: 序列长度（可选）
+
+    Returns:
+        注意力输出张量
+    """
     from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
 
     is_reshaped = q.dim() == 4
@@ -353,6 +468,23 @@ def vit_flashinfer_wrapper(
     max_seqlen: torch.Tensor | None = None,
     sequence_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """ViT FlashInfer 封装函数。
+
+    调用已注册的自定义操作执行 FlashInfer 注意力计算。
+
+    Args:
+        q: Query 张量
+        k: Key 张量
+        v: Value 张量
+        scale: 缩放因子
+        workspace_buffer: 工作区缓冲区
+        cu_seqlens: 累积序列长度（可选）
+        max_seqlen: 最大序列长度（可选）
+        sequence_lengths: 序列长度（可选）
+
+    Returns:
+        注意力输出张量
+    """
     return torch.ops.vllm.flashinfer_wrapper(
         q, k, v, scale, workspace_buffer, cu_seqlens, max_seqlen, sequence_lengths
     )

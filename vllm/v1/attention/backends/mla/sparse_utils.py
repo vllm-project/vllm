@@ -1,6 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Utility functions for sparse MLA backends."""
+"""稀疏 MLA 后端工具函数模块。
+
+本模块包含稀疏 MLA 后端的通用工具函数，负责：
+- 实现 Triton kernel 将请求索引转换为全局索引
+- 支持预填充工作区映射（HAS_PREFILL_WORKSPACE）
+- 支持有效计数统计（COUNT_VALID）
+- 用于 FlashMLA Sparse 和 FlashInfer MLA Sparse 后端
+
+主要函数：
+- _convert_req_index_to_global_index_kernel: Triton kernel
+- triton_convert_req_index_to_global_index: 封装函数
+"""
 
 import torch
 

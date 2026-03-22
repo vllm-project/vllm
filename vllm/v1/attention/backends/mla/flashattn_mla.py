@@ -1,5 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""FlashAttention MLA 后端模块。
+
+本模块实现了基于 Flash Attention 的多头潜在注意力（MLA）后端，负责：
+- 实现 FlashAttnMLABackend 类（仅支持 Hopper 架构，compute capability 9.0）
+- 实现 FlashAttnMLAMetadataBuilder 用于构建注意力元数据
+- 实现 FlashAttnMLAImpl 用于执行 MLA 前向传播
+- 支持 FP8 KV 缓存（尚未完全实现）
+- 支持 CUDA 图和优化调度
+
+主要类和函数：
+- FlashAttnMLABackend: MLA 后端类
+- FlashAttnMLADecodeMetadata: 解码阶段的元数据
+- FlashAttnMLAMetadata: 注意力元数据
+- FlashAttnMLAMetadataBuilder: 元数据构建器
+- FlashAttnMLAImpl: MLA 实现类
+"""
 
 from dataclasses import dataclass
 from typing import ClassVar

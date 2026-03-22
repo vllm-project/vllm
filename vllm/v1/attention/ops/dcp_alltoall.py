@@ -1,23 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-DCP All-to-All communication backend for attention.
+"""DCP All-to-All 注意力通信后端模块。
 
-Provides All-to-All (A2A) communication as an alternative to
-AllGather + ReduceScatter (AG+RS) for Decode Context Parallel (DCP).
-Instead of gathering the full Q tensor and scattering partial outputs,
-A2A exchanges partial attention outputs and their LSE values across
-ranks, then combines them with exact LSE-weighted reduction.
+本模块为 Decode Context Parallel (DCP) 提供 All-to-All (A2A) 通信能力，
+作为 AllGather + ReduceScatter (AG+RS) 的替代方案。
 
-This reduces the number of NCCL calls per attention layer from 3
-(AG for Q, AG for K metadata, RS for output) to 2 (A2A for output,
-A2A for LSE), lowering per-step communication overhead for long-context
-decode where NCCL latency is a significant fraction of step time.
+主要特点：
+- 不聚合完整的 Q 张量和分散部分输出，而是跨 rank 交换部分注意力输出和 LSE 值
+- 使用精确的 LSE 加权约减组合部分结果
+- 将每层注意力的 NCCL 调用次数从 3 次减少到 2 次，降低通信开销
 
-Usage:
+使用方式：
     vllm serve model --tp 16 --dcp 16 --dcp-comm-backend a2a
 
-Reference: https://arxiv.org/abs/2507.07120
+参考资料：https://arxiv.org/abs/2507.07120
 """
 
 from __future__ import annotations
@@ -40,24 +36,23 @@ def _lse_weighted_combine(
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    CPU reference implementation for LSE-weighted combination.
+    """LSE 加权组合的 CPU 参考实现。
 
-    This is a pure PyTorch implementation used for testing and validation.
-    For GPU execution, use dcp_lse_combine_triton instead.
+    这是纯 PyTorch 实现，用于测试和验证。
+    对于 GPU 执行，请使用 dcp_lse_combine_triton。
 
     Args:
-        outputs: Partial attention outputs [N, B, H, D]
-                 N = number of KV shards (ranks)
-                 B = batch size (num_tokens)
-                 H = number of heads per rank
-                 D = head dimension
-        lses: Log-sum-exp values [N, B, H]
-        return_lse: If True, also return the global LSE
-        is_lse_base_on_e: If True, LSE is base e; if False, base 2
+        outputs: 部分注意力输出 [N, B, H, D]
+                 N = KV 分片数（rank 数）
+                 B = 批次大小（token 数）
+                 H = 每个 rank 的头数
+                 D = 头维度
+        lses: Log-sum-exp 值 [N, B, H]
+        return_lse: 如果为 True，同时返回全局 LSE
+        is_lse_base_on_e: 如果为 True，LSE 以 e 为底；如果为 False，以 2 为底
 
     Returns:
-        Combined output [B, H, D], and optionally global LSE [B, H]
+        组合后的输出 [B, H, D]，以及可选的全局 LSE [B, H]
     """
     N, B, H, D = outputs.shape
 
@@ -129,17 +124,16 @@ def _dcp_lse_combine_kernel(
     IS_BASE_E: tl.constexpr,
     RETURN_LSE: tl.constexpr,
 ):
-    """
-    Triton kernel for LSE-weighted combination of partial attention outputs.
+    """DCP LSE 加权组合的 Triton kernel。
 
-    After All-to-All, each rank has:
-    - recv_output [N, B, H_local, D]: partial outputs from all KV shards
-    - recv_lse [N, B, H_local]: partial LSEs from all KV shards
+    All-to-All 之后，每个 rank 拥有：
+    - recv_output [N, B, H_local, D]: 来自所有 KV 分片的部分输出
+    - recv_lse [N, B, H_local]: 来自所有 KV 分片的部分 LSE
 
-    This kernel computes the weighted combination locally (no communication).
+    该 kernel 在本地计算加权组合（无需通信）。
 
     Grid: (B, H_local)
-    Each program handles one (batch, head) and processes all D elements.
+    每个程序处理一个 (batch, head) 并处理所有 D 元素。
     """
     batch_idx = tl.program_id(0).to(tl.int64)
     head_idx = tl.program_id(1).to(tl.int64)
@@ -221,18 +215,17 @@ def dcp_lse_combine_triton(
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    Triton-accelerated LSE-weighted combination for DCP A2A.
+    """DCP A2A 的 Triton 加速 LSE 加权组合。
 
     Args:
-        recv_output: [N, B, H_local, D] - partial outputs from all KV shards
-        recv_lse: [N, B, H_local] - partial LSEs from all KV shards
-        return_lse: If True, also return the global LSE
-        is_lse_base_on_e: If True, LSE is base e; if False, base 2
+        recv_output: [N, B, H_local, D] - 来自所有 KV 分片的部分输出
+        recv_lse: [N, B, H_local] - 来自所有 KV 分片的部分 LSE
+        return_lse: 如果为 True，同时返回全局 LSE
+        is_lse_base_on_e: 如果为 True，LSE 以 e 为底；如果为 False，以 2 为底
 
     Returns:
-        Combined output [B, H_local, D]
-        If return_lse=True, also returns global_lse [B, H_local]
+        组合后的输出 [B, H_local, D]
+        如果 return_lse=True，同时返回 global_lse [B, H_local]
     """
     N, B, H_local, D = recv_output.shape
 
@@ -287,32 +280,30 @@ def dcp_a2a_lse_reduce(
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    Combine partial attention outputs across DCP ranks using All-to-All.
+    """使用 All-to-All 组合 DCP rank 间的部分注意力输出。
 
-    Each rank holds attention output for all heads but only a local shard
-    of the KV cache. This function:
-    1. Exchanges partial outputs across ranks via All-to-All
-    2. Exchanges LSE values via All-to-All
-    3. Combines them with exact LSE-weighted reduction (Triton kernel)
+    每个 rank 拥有所有头的注意力输出，但只拥有 KV 缓存的本地分片。该函数：
+    1. 通过 All-to-All 跨 rank 交换部分输出
+    2. 通过 All-to-All 交换 LSE 值
+    3. 使用精确的 LSE 加权约减组合它们（Triton kernel）
 
-    Tensor flow:
-        Input:  cp_attn_out [B, H, D] - all heads, local KV shard
-        Reshape: [N, B, H/N, D] - split heads across ranks
-        A2A:    Two all_to_all_single calls (output and LSE)
-        Combine: recv [N, B, H/N, D] + lse [N, B, H/N] -> [B, H/N, D]
+    张量流程：
+        输入：cp_attn_out [B, H, D] - 所有头，本地 KV 分片
+        重塑：[N, B, H/N, D] - 跨 rank 分割头
+        A2A: 两次 all_to_all_single 调用（输出和 LSE）
+        组合：接收 [N, B, H/N, D] + lse [N, B, H/N] -> [B, H/N, D]
 
     Args:
-        cp_attn_out: [B, H, D] where B=num_tokens, H=total_heads, D=head_dim
-        cp_attn_lse: [B, H] log-sum-exp values (fp32)
-        cp_group: GroupCoordinator for DCP communication
-        ctx: CPTritonContext (unused, for signature compatibility)
-        return_lse: If True, also return the combined global LSE
-        is_lse_base_on_e: If True, LSE is base e; if False, base 2
+        cp_attn_out: [B, H, D] 其中 B=num_tokens, H=total_heads, D=head_dim
+        cp_attn_lse: [B, H] log-sum-exp 值 (fp32)
+        cp_group: DCP 通信的 GroupCoordinator
+        ctx: CPTritonContext（未使用，用于签名兼容性）
+        return_lse: 如果为 True，同时返回组合后的全局 LSE
+        is_lse_base_on_e: 如果为 True，LSE 以 e 为底；如果为 False，以 2 为底
 
     Returns:
-        Combined output [B, H/N, D] (head-scattered)
-        If return_lse=True, also returns global_lse [B, H/N]
+        组合后的输出 [B, H/N, D]（头分散）
+        如果 return_lse=True，同时返回 global_lse [B, H/N]
     """
     world_size = cp_group.world_size
 

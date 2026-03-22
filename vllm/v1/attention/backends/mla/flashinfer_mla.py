@@ -1,5 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""FlashInfer MLA 后端模块。
+
+本模块实现了基于 FlashInfer 的 MLA 后端（仅支持 SM100/Blackwell 架构），负责：
+- 实现 FlashInferMLABackend 类（仅支持 compute capability 10.0）
+- 实现 FlashInferMLAMetadataBuilder 用于构建注意力元数据
+- 实现 FlashInferMLAImpl 用于执行 MLA 前向传播
+- 支持 FP8 KV 缓存
+- 使用 trtllm_batch_decode_with_kv_cache_mla 执行解码
+- 要求 qk_nope_head_dim 在 [64, 128, 192] 范围内
+- 要求 KV 缓存布局为 HND
+
+主要类和函数：
+- FlashInferMLABackend: MLA 后端类
+- FlashInferMLAMetadataBuilder: 元数据构建器
+- FlashInferMLAImpl: MLA 实现类
+"""
 
 from typing import ClassVar
 

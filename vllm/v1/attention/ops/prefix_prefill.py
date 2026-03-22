@@ -1,5 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""前缀预填充注意力操作模块。
+
+本模块实现了上下文注意力（Context Attention）的前向传播操作，负责：
+- 实现 Triton 前向传播 kernel（支持非标准块大小如 544）
+- 支持 FP8 KV 缓存反量化
+- 支持滑动窗口注意力
+- 支持 Sink token
+- 支持 ALIBI 斜率
+- 支持 FP8 输出量化
+- 支持分页 KV 缓存
+
+主要函数：
+- _fwd_kernel: 主前向传播 Triton kernel
+- _fwd_kernel_alibi: 支持 ALIBI 的 Triton kernel
+- context_attention_fwd: 上下文注意力前向传播封装函数
+"""
 
 # The kernels in this file are adapted from LightLLM's context_attention_fwd:
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
@@ -9,18 +25,17 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-# Static kernels parameters
+# 静态 kernel 参数
 BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
 NUM_WARPS = 4 if current_platform.is_rocm() else 8
 
-# To check compatibility
+# 兼容性检查
 IS_TURING = current_platform.get_device_capability() == (7, 5)
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
-# Here's an example autotuner config for this kernel. This config does provide
-# a performance improvement, but dramatically increases first call latency in
-# triton 3.2. Because of this tradeoff, it's currently commented out.
+# 以下是 autotuning 配置示例。该配置确实能提供性能提升，但会显著增加
+# triton 3.2 中首次调用的延迟。由于这种权衡，目前注释掉。
 # @triton.autotune(
 #     configs=[
 #         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, \
@@ -92,6 +107,74 @@ def _fwd_kernel(
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
+    """前向传播 Triton kernel。
+
+    实现上下文注意力的前向传播计算，支持：
+    - 非标准块大小（如 544）
+    - FP8 KV 缓存反量化
+    - 滑动窗口注意力
+    - Sink token
+    - FP8 输出量化
+    - 分页 KV 缓存
+
+    Args:
+        Q: Query 张量指针
+        K: Key 张量指针
+        V: Value 张量指针
+        K_cache: Key 缓存指针
+        V_cache: Value 缓存指针
+        sink_ptr: Sink 指针
+        B_Loc: 块表指针
+        sm_scale: Softmax 缩放因子
+        k_scale: K 缩放因子
+        v_scale: V 缩放因子
+        out_scale_inv: 输出缩放因子的倒数
+        B_Start_Loc: 批次起始位置指针
+        B_Seqlen: 序列长度指针
+        x: K 缓存分块参数
+        Out: 输出张量指针
+        stride_b_loc_b: 块表第 B 维步幅
+        stride_b_loc_s: 块表第 S 维步幅
+        stride_qbs: Q 第 0 维步幅
+        stride_qh: Q 第 H 维步幅
+        stride_qd: Q 第 D 维步幅
+        stride_kbs: K 第 0 维步幅
+        stride_kh: K 第 H 维步幅
+        stride_kd: K 第 D 维步幅
+        stride_vbs: V 第 0 维步幅
+        stride_vh: V 第 H 维步幅
+        stride_vd: V 第 D 维步幅
+        stride_obs: 输出第 0 维步幅
+        stride_oh: 输出第 H 维步幅
+        stride_od: 输出第 D 维步幅
+        stride_k_cache_bs: K 缓存第 0 维步幅
+        stride_k_cache_h: K 缓存第 H 维步幅
+        stride_k_cache_d: K 缓存第 D 维步幅
+        stride_k_cache_bl: K 缓存块大小维步幅
+        stride_k_cache_x: K 缓存 x 维步幅
+        stride_v_cache_bs: V 缓存第 0 维步幅
+        stride_v_cache_h: V 缓存第 H 维步幅
+        stride_v_cache_d: V 缓存第 D 维步幅
+        stride_v_cache_bl: V 缓存块大小维步幅
+        num_queries_per_kv: 每个 KV 头对应的 Query 头数（GQA 比例）
+        IN_PRECISION: 输入精度
+        BLOCK_M: M 维度块大小
+        BLOCK_DMODEL: 头维度
+        BLOCK_DMODEL_PADDED: 填充后的头维度（2 的幂）
+        BLOCK_SIZE: 块大小
+        PHYSICAL_BLOCK_SIZE: 物理块大小
+        BLOCK_N: N 维度块大小
+        SLIDING_WINDOW: 滑动窗口大小
+        num_unroll_cache: 缓存循环展开数
+        num_unroll_request: 请求循环展开数
+        SKIP_DECODE: 是否跳图解码
+        USE_SINKS: 是否使用 sink
+        USE_FP8: 是否使用 FP8
+        MAX_Q_LEN: 最大 Query 长度
+        MAX_CTX_LEN: 最大上下文长度
+        FP8_MIN: FP8 最小值
+        FP8_MAX: FP8 最大值
+    """
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
     start_m = tl.program_id(2)
@@ -399,6 +482,58 @@ def _fwd_kernel_alibi(
     BLOCK_N: tl.constexpr,
     SKIP_DECODE: tl.constexpr,
 ):
+    """支持 ALIBI 的前向传播 Triton kernel。
+
+    实现带有 ALIBI（Attention with Linear Biases）的上下文注意力计算。
+    ALIBI 通过添加与距离成比例的偏置来扩展模型的上下文长度。
+
+    Args:
+        Q: Query 张量指针
+        K: Key 张量指针
+        V: Value 张量指针
+        K_cache: Key 缓存指针
+        V_cache: Value 缓存指针
+        B_Loc: 块表指针
+        sm_scale: Softmax 缩放因子
+        k_scale: K 缩放因子
+        v_scale: V 缩放因子
+        B_Start_Loc: 批次起始位置指针
+        B_Seqlen: 序列长度指针
+        Alibi_slopes: ALIBI 斜率指针
+        block_size: 块大小
+        x: K 缓存分块参数
+        Out: 输出张量指针
+        stride_b_loc_b: 块表第 B 维步幅
+        stride_b_loc_s: 块表第 S 维步幅
+        stride_qbs: Q 第 0 维步幅
+        stride_qh: Q 第 H 维步幅
+        stride_qd: Q 第 D 维步幅
+        stride_kbs: K 第 0 维步幅
+        stride_kh: K 第 H 维步幅
+        stride_kd: K 第 D 维步幅
+        stride_vbs: V 第 0 维步幅
+        stride_vh: V 第 H 维步幅
+        stride_vd: V 第 D 维步幅
+        stride_obs: 输出第 0 维步幅
+        stride_oh: 输出第 H 维步幅
+        stride_od: 输出第 D 维步幅
+        stride_k_cache_bs: K 缓存第 0 维步幅
+        stride_k_cache_h: K 缓存第 H 维步幅
+        stride_k_cache_d: K 缓存第 D 维步幅
+        stride_k_cache_bl: K 缓存块大小维步幅
+        stride_k_cache_x: K 缓存 x 维步幅
+        stride_v_cache_bs: V 缓存第 0 维步幅
+        stride_v_cache_h: V 缓存第 H 维步幅
+        stride_v_cache_d: V 缓存第 D 维步幅
+        stride_v_cache_bl: V 缓存块大小维步幅
+        num_queries_per_kv: 每个 KV 头对应的 Query 头数
+        IN_PRECISION: 输入精度
+        BLOCK_M: M 维度块大小
+        BLOCK_DMODEL: 头维度
+        BLOCK_DMODEL_PADDED: 填充后的头维度（2 的幂）
+        BLOCK_N: N 维度块大小
+        SKIP_DECODE: 是否跳图解码
+    """
     # attn_bias[]
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -655,6 +790,39 @@ def context_attention_fwd(
     sinks=None,
     is_block_table_ptr: bool = False,
 ):
+    """上下文注意力前向传播封装函数。
+
+    该函数处理上下文注意力（Context Attention）的前向传播计算，支持：
+    - FP8 KV 缓存反量化
+    - 滑动窗口注意力
+    - ALIBI 斜率
+    - Sink token
+    - FP8 输出量化
+    - 非标准块大小（如 544）
+
+    Args:
+        q: Query 张量
+        k: Key 张量
+        v: Value 张量
+        o: 输出张量
+        kv_cache_dtype: KV 缓存数据类型
+        k_cache: Key 缓存
+        v_cache: Value 缓存
+        b_loc: 块表
+        b_start_loc: 批次起始位置
+        b_seq_len: 序列长度
+        max_seq_len: 最大序列长度
+        max_input_len: 最大输入长度
+        k_scale: K 缩放因子
+        v_scale: V 缩放因子
+        alibi_slopes: ALIBI 斜率（可选）
+        sliding_window: 滑动窗口大小（可选）
+        sm_scale: Softmax 缩放因子（可选）
+        skip_decode: 是否跳图解码
+        fp8_out_scale: FP8 输出缩放因子（可选）
+        sinks: Sink token 张量（可选）
+        is_block_table_ptr: b_loc 是否为指针
+    """
     q_dtype_is_f32 = q.dtype is torch.float32
 
     # Turing does have tensor core for float32 multiplication

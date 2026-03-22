@@ -1,6 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Backend for GatedDeltaNet attention."""
+"""GDN（Gated DeltaNet）注意力后端模块。
+
+本模块实现了基于 Gated DeltaNet 的注意力后端，负责：
+- 实现 GDN 注意力后端类
+- 支持 Mamba 状态空间模型
+- 支持 speculative decoding
+
+主要类：
+- GDNAttentionBackend: GDN 注意力后端类
+- GDNAttentionMetadata: GDN 注意力元数据类
+- GDNAttentionMetadataBuilder: 元数据构建器
+"""
 
 from dataclasses import dataclass
 
@@ -23,49 +34,125 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 
 class GDNAttentionBackend(AttentionBackend):
+    """GDN 注意力后端类。
+
+    基于 Gated DeltaNet 实现的注意力后端。
+    """
     @staticmethod
     def get_name() -> str:
+        """获取后端名称。
+
+        Returns:
+            后端名称 "GDN_ATTN"
+        """
         return "GDN_ATTN"
 
     @staticmethod
     def get_builder_cls() -> type["GDNAttentionMetadataBuilder"]:
+        """获取元数据构建器类。
+
+        Returns:
+            GDNAttentionMetadataBuilder 类
+        """
         return GDNAttentionMetadataBuilder
 
 
 @dataclass
 class GDNAttentionMetadata:
+    """GDN 注意力元数据类。
+
+    存储 GDN 注意力前向传播所需的元数据信息。
+
+    Attributes:
+        num_prefills: 预填充请求数
+        num_prefill_tokens: 预填充 token 数
+        num_decodes: 解码请求数
+        num_decode_tokens: 解码 token 数
+        num_spec_decodes: 预测解码请求数
+        num_spec_decode_tokens: 预测解码 token 数
+        num_actual_tokens: 实际 token 数
+        has_initial_state: 是否有初始状态
+        spec_query_start_loc: 预测 query 起始位置
+        non_spec_query_start_loc: 非预测 query 起始位置
+        spec_state_indices_tensor: 预测状态索引张量
+        non_spec_state_indices_tensor: 非预测状态索引张量
+        spec_sequence_masks: 预测序列掩码
+        spec_token_indx: 预测 token 索引
+        non_spec_token_indx: 非预测 token 索引
+        num_accepted_tokens: 接受的 token 数
+        nums_dict: causal_conv1d 的 nums 字典
+        batch_ptr: 批次指针
+        token_chunk_offset_ptr: token 块偏移指针
+    """
     num_prefills: int
+    """预填充请求数。"""
+
     num_prefill_tokens: int
+    """预填充 token 数。"""
+
     num_decodes: int
+    """解码请求数。"""
+
     num_decode_tokens: int
+    """解码 token 数。"""
+
     num_spec_decodes: int
+    """预测解码请求数。"""
+
     num_spec_decode_tokens: int
+    """预测解码 token 数。"""
+
     num_actual_tokens: int
+    """实际 token 数。"""
 
     has_initial_state: torch.Tensor | None = None
+    """是否有初始状态。"""
 
-    spec_query_start_loc: torch.Tensor | None = None  # shape: [num_spec_decodes + 1,]
-    non_spec_query_start_loc: torch.Tensor | None = (
-        None  # shape: [batch - num_spec_decodes + 1,]
-    )
+    spec_query_start_loc: torch.Tensor | None = None
+    """预测 query 起始位置，形状：[num_spec_decodes + 1,]"""
 
-    spec_state_indices_tensor: torch.Tensor | None = None  # shape: [batch, num_spec]
-    non_spec_state_indices_tensor: torch.Tensor | None = (
-        None  # shape: [batch - num_spec_decodes,]
-    )
-    spec_sequence_masks: torch.Tensor | None = None  # shape: [batch,]
+    non_spec_query_start_loc: torch.Tensor | None = None
+    """非预测 query 起始位置，形状：[batch - num_spec_decodes + 1,]"""
+
+    spec_state_indices_tensor: torch.Tensor | None = None
+    """预测状态索引张量，形状：[batch, num_spec]"""
+
+    non_spec_state_indices_tensor: torch.Tensor | None = None
+    """非预测状态索引张量，形状：[batch - num_spec_decodes,]"""
+
+    spec_sequence_masks: torch.Tensor | None = None
+    """预测序列掩码，形状：[batch,]"""
+
     spec_token_indx: torch.Tensor | None = None
+    """预测 token 索引。"""
+
     non_spec_token_indx: torch.Tensor | None = None
+    """非预测 token 索引。"""
 
-    num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
+    num_accepted_tokens: torch.Tensor | None = None
+    """接受的 token 数，形状：[batch,]"""
 
-    # The following attributes are for triton implementation of causal_conv1d
+    # 以下属性用于 triton 实现的 causal_conv1d
     nums_dict: dict | None = None
+    """causal_conv1d 的 nums 字典。"""
+
     batch_ptr: torch.Tensor | None = None
+    """批次指针。"""
+
     token_chunk_offset_ptr: torch.Tensor | None = None
+    """token 块偏移指针。"""
 
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
+    """GDN 注意力元数据构建器类。
+
+    负责构建 GDN 注意力运行所需的元数据对象。
+    支持 speculative decoding 和 CUDA 图。
+
+    Class Attributes:
+        _cudagraph_support: CUDA 图支持级别
+        reorder_batch_threshold: 重排序批次阈值
+    """
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
     reorder_batch_threshold: int = 1
@@ -77,6 +164,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        """初始化 GDN 元数据构建器。
+
+        Args:
+            kv_cache_spec: KV 缓存规格
+            layer_names: 层名称列表
+            vllm_config: vLLM 配置
+            device: 设备类型
+        """
         assert isinstance(kv_cache_spec, MambaSpec)
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
@@ -104,6 +199,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 self.compilation_config.max_cudagraph_capture_size,
             )
 
+        # 为 CUDA 图预分配持久化缓冲区
         self.spec_state_indices_tensor: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs, self.num_spec + 1),
             dtype=torch.int32,
@@ -153,6 +249,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
     ) -> GDNAttentionMetadata:
+        """构建 GDN 注意力元数据。
+
+        Args:
+            common_prefix_len: 公共前缀长度
+            common_attn_metadata: 通用注意力元数据
+            num_accepted_tokens: 接受的 token 数
+            num_decode_draft_tokens_cpu: 解码 draft token 数（CPU）
+            fast_build: 是否快速构建
+
+        Returns:
+            构建的 GDNAttentionMetadata 对象
+        """
         m = common_attn_metadata
 
         query_start_loc = m.query_start_loc
@@ -167,6 +275,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         spec_sequence_masks_cpu: torch.Tensor | None = None
+        # 检查是否使用预测解码
         if (
             not self.use_spec_decode
             or num_decode_draft_tokens_cpu is None
@@ -175,9 +284,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             .item()
             == 0
         ):
+            # 不使用预测解码
             spec_sequence_masks = None
             num_spec_decodes = 0
         else:
+            # 使用预测解码
             spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
             num_spec_decodes = spec_sequence_masks_cpu.sum().item()
             if num_spec_decodes == 0:
@@ -189,6 +300,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
 
         if spec_sequence_masks is None:
+            # 无预测解码路径
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
                 split_decodes_and_prefills(m, decode_threshold=1)
             )
@@ -302,6 +414,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks]
 
         if num_prefills > 0:
+            # 预填充路径：计算初始状态
             has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks]
@@ -315,16 +428,16 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         else:
             has_initial_state = None
 
-        # Function code counted on either presency non-spec decode or spec decode,
-        # but not both.
+        # 函数代码依赖于非预测解码或预测解码的存在，但不能同时存在
         assert not (num_decodes > 0 and num_spec_decodes > 0), (
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
-        # Prepare tensors for cudagraph
-        # Note: m.num_actual_tokens is already padded by the model runner for CUDAGraph
+        # 为 CUDA 图准备张量
+        # 注意：m.num_actual_tokens 已经被 model runner 为 CUDAGraph 填充
         batch_size = m.num_actual_tokens
 
+        # 全 CUDA 图路径：预测解码
         if (
             self.use_full_cuda_graph
             and num_prefills == 0
@@ -371,6 +484,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
 
+        # 全 CUDA 图路径：仅解码（无预测解码）
         if (
             self.use_full_cuda_graph
             and num_prefills == 0
@@ -392,6 +506,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
+        # 构建并返回注意力元数据
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -417,10 +532,16 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
-    ):
-        """
-        This method builds the metadata for full cudagraph capture.
-        Currently, only decode is supported for full cudagraphs with Mamba.
+    ) -> GDNAttentionMetadata:
+        """为完整 CUDA 图捕获构建元数据。
+
+        目前，Mamba 仅支持解码的完整 CUDA 图。
+
+        Args:
+            common_attn_metadata: 通用注意力元数据
+
+        Returns:
+            构建的 GDNAttentionMetadata 对象
         """
         m = common_attn_metadata
 

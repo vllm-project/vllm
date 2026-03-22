@@ -1,5 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""XPU MLA Sparse Attention 后端模块。
+
+本模块实现了基于 XPU 的稀疏 MLA 后端，负责：
+- 实现 XPUMLASparseBackend 类
+- 实现 XPUMLASparseMetadataBuilder 用于构建注意力元数据
+- 实现 XPUMLASparseImpl 用于执行稀疏 MLA 前向传播
+- 支持 DeepSeek-V3.2 等使用 index_topk 的稀疏注意力模型
+- 使用 triton_bf16_mla_sparse_interface 执行 BF16 稀疏 MLA 计算
+- 使用 Triton kernel 将请求索引转换为全局索引
+
+主要类和函数：
+- XPUMLASparseBackend: 稀疏 MLA 后端类
+- XPUMLASparseMetadata: 稀疏注意力元数据
+- XPUMLASparseMetadataBuilder: 元数据构建器
+- XPUMLASparseImpl: 稀疏 MLA 实现类
+"""
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Optional

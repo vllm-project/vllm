@@ -1,5 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Ray 工具模块。
+
+本模块提供 Ray 相关的工具函数和类，负责：
+- Ray 集群初始化
+- Placement Group 管理
+- Ray worker 包装器
+- 资源验证和等待
+
+主要类：
+- RayWorkerWrapper: Ray worker 包装器
+- FutureWrapper: Ray 输出引用的包装器
+
+主要函数：
+- initialize_ray_cluster: 初始化 Ray 集群
+- _verify_bundles: 验证 placement group bundles
+- _wait_until_pg_ready: 等待 placement group 就绪
+- get_num_tpu_nodes: 获取 TPU 节点数量
+"""
 
 import os
 import time
@@ -34,39 +52,61 @@ try:
     try:
         from ray._private.state import available_resources_per_node
     except ImportError:
-        # Ray 2.9.x doesn't expose `available_resources_per_node`
+        # Ray 2.9.x 不暴露 `available_resources_per_node`
         from ray._private.state import state as _state
 
         available_resources_per_node = _state._available_resources_per_node
 
     class RayWorkerWrapper(WorkerWrapperBase):
-        """Ray wrapper for vllm.worker.Worker, allowing Worker to be
-        lazily initialized after Ray sets CUDA_VISIBLE_DEVICES."""
+        """vllm.worker.Worker 的 Ray 包装器，允许 Worker 在 Ray 设置 CUDA_VISIBLE_DEVICES 后延迟初始化。
+
+        主要功能：
+        - 在 Ray 环境中包装 worker
+        - 支持 Ray Compiled DAG 执行
+        - 处理设备设置和中间张量传输
+
+        Attributes:
+            compiled_dag_cuda_device_set: 是否在编译 DAG 线程上调用了 cuda.set_device
+        """
 
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)
-            # Since the compiled DAG runs a main execution
-            # in a different thread that calls cuda.set_device.
-            # The flag indicates is set_device is called on
-            # that thread.
+            # 由于编译 DAG 在不同线程中运行主执行
+            # 调用 cuda.set_device，此标志表示是否在该线程上调用了 set_device
             self.compiled_dag_cuda_device_set = False
 
         def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
-            """
-            Adjust the rpc_rank based on the given mapping.
-            It is only used during the initialization of the executor,
-            to adjust the rpc_rank of workers after we create all workers.
+            """根据给定映射调整 rpc_rank。
+
+            仅在执行器初始化期间使用，在创建所有 workers 后
+            调整 workers 的 rpc_rank。
+
+            Args:
+                rank_mapping: rank 映射字典
             """
             if self.rpc_rank in rank_mapping:
                 self.rpc_rank = rank_mapping[self.rpc_rank]
 
         def execute_method(self, method: str | bytes, *args, **kwargs):
+            """执行方法。
+
+            Args:
+                method: 方法名或字节码
+                *args: 位置参数
+                **kwargs: 关键字参数
+
+            Returns:
+                方法执行结果
+
+            Raises:
+                Exception: 方法执行异常
+            """
             try:
                 return run_method(self, method, args, kwargs)
             except Exception as e:
-                # if the driver worker also execute methods,
-                # exceptions in the rest worker may cause deadlock in rpc
-                # see https://github.com/vllm-project/vllm/issues/3455
+                # 如果 driver worker 也执行方法，
+                # 其他 worker 的异常可能导致 rpc 死锁
+                # 参考 https://github.com/vllm-project/vllm/issues/3455
                 msg = (
                     f"Error executing method {method!r}. "
                     "This might cause deadlock in distributed execution."
@@ -75,9 +115,19 @@ try:
                 raise e
 
         def get_node_ip(self) -> str:
+            """获取节点 IP 地址。
+
+            Returns:
+                节点 IP 地址
+            """
             return get_ip()
 
         def get_node_and_gpu_ids(self) -> tuple[str, list[int]]:
+            """获取节点 ID 和 GPU ID 列表。
+
+            Returns:
+                二元组：(node_id, gpu_ids)
+            """
             node_id = ray.get_runtime_context().get_node_id()
             device_key = vllm.platforms.current_platform.ray_device_key
             if not device_key:
@@ -89,14 +139,16 @@ try:
             return node_id, gpu_ids
 
         def setup_device_if_necessary(self):
-            # TODO(swang): This is needed right now because Ray CG executes
-            # on a background thread, so we need to reset torch's current
-            # device.
-            # We can remove this API after it is fixed in compiled graph.
+            """必要时设置设备。
+
+            TODO(swang): 这是必需的，因为 Ray CG 在后台线程上执行，
+            所以我们需要重置 torch 的当前设备。
+            在编译图中修复后可以移除此 API。
+            """
             assert self.worker is not None, "Worker is not initialized"
             if not self.compiled_dag_cuda_device_set:
                 if current_platform.is_tpu():
-                    # Not needed
+                    # 不需要
                     pass
                 else:
                     assert self.worker.device is not None
@@ -112,8 +164,17 @@ try:
             "ModelRunnerOutput",
             tuple["SchedulerOutput", "GrammarOutput", "IntermediateTensors"],
         ]:
-            # This method is used by Ray Compiled Graph to execute the model,
-            # and it needs a special logic of self.setup_device_if_necessary()
+            """使用 Ray Compiled Graph 执行模型。
+
+            此方法被 Ray Compiled Graph 用于执行模型，
+            需要特殊的 self.setup_device_if_necessary() 逻辑。
+
+            Args:
+                execute_model_input: 执行模型输入，包含调度器输出、语法输出和可选的中间张量
+
+            Returns:
+                模型 runner 输出或 (scheduler_output, grammar_output, intermediate_tensors)
+            """
             self.setup_device_if_necessary()
             assert self.worker is not None, "Worker is not initialized"
             if len(execute_model_input) == 3:
@@ -132,12 +193,11 @@ try:
                     self.worker.model_runner.supports_mm_inputs
                     and get_pp_group().is_first_rank
                 ):
-                    # Strip mm_features before Ray forwards it to the next PP Stage.
-                    # PP Stage>0 only needs the intermediate tensors,
-                    # not preprocessed multimodal data.
+                    # 在 Ray 转发到下一个 PP Stage 之前剥离 mm_features
+                    # PP Stage>0 只需要中间张量，不需要预处理的多模态数据
 
-                    # scheduled_new_reqs is a required field of SchedulerOutput,
-                    # so accessing it directly will raise AttributeError if missing.
+                    # scheduled_new_reqs 是 SchedulerOutput 的必需字段，
+                    # 所以如果缺少它，访问它会引发 AttributeError
                     for req in scheduler_output.scheduled_new_reqs:
                         req.mm_features = []
                 return scheduler_output, grammar_output, output
@@ -145,45 +205,64 @@ try:
             if isinstance(output, AsyncModelRunnerOutput):
                 output = output.get_output()
             if not self._is_last_rank():
-                # Case where there are no scheduled requests
-                # but may still be finished requests.
+                # 没有调度请求但仍可能有已完成请求的情况
                 assert not output or not output.req_ids
                 output = scheduler_output, grammar_output, None
             elif output is None:
                 output = self.worker.model_runner.sample_tokens(grammar_output)
-                # Ensure outputs crossing Ray compiled DAG are serializable.
-                # AsyncModelRunnerOutput holds CUDA events and cannot be
-                # pickled.
+                # 确保跨越 Ray Compiled DAG 的输出是可序列化的
+                # AsyncModelRunnerOutput 持有 CUDA 事件且无法 pickled
                 if isinstance(output, AsyncModelRunnerOutput):
                     output = output.get_output()
             return output
 
         def override_env_vars(self, vars: dict[str, str]):
+            """覆盖环境变量。
+
+            Args:
+                vars: 环境变量字典
+            """
             os.environ.update(vars)
 
         def _is_intermediate_tensors(self, output) -> bool:
+            """检查输出是否为中间张量。
+
+            Args:
+                output: 输出
+
+            Returns:
+                是否为中间张量
+            """
             return isinstance(output, IntermediateTensors)
 
         def _is_last_rank(self) -> bool:
+            """是否是最后一个 rank。
+
+            Returns:
+                是否是最后一个 rank
+            """
             return get_pp_group().is_last_rank
 
     ray_import_err = None
 
 except ImportError as e:
     ray = None  # type: ignore
-    # only capture string to avoid variable references in the traceback that can
-    # prevent garbage collection in some cases
+    # 仅捕获字符串以避免在某些情况下阻止垃圾回收的 traceback 中的变量引用
     ray_import_err = str(e)
     RayWorkerWrapper = None  # type: ignore
 
 
 class FutureWrapper(Future):
-    """A wrapper around Ray output reference to meet the interface
-    of .execute_model(): The top level (core busy loop) expects .result() api
-    to block and return a single output.
+    """Ray 输出引用的包装器，用于满足 .execute_model() 的接口要求。
 
-    If aggregator is provided, the outputs from all workers are aggregated upon
-    the result() call. If not only the first worker's output is returned.
+    顶层（核心忙循环）期望 .result() API 阻塞并返回单个输出。
+
+    如果提供了 aggregator，则所有 workers 的输出将在 result() 调用时聚合。
+    如果未提供，则仅返回第一个 worker 的输出。
+
+    Attributes:
+        ref_or_refs: Ray 引用或引用列表
+        aggregator: KV 输出聚合器
     """
 
     def __init__(self, ref_or_refs, aggregator: KVOutputAggregator | None = None):
@@ -192,6 +271,14 @@ class FutureWrapper(Future):
         self.aggregator = aggregator
 
     def result(self, timeout=None):
+        """获取结果。
+
+        Args:
+            timeout: 超时时间
+
+        Returns:
+            聚合后的输出
+        """
         outputs = ray.get(self.ref_or_refs, timeout=timeout)
         if self.aggregator is None:
             return outputs
@@ -200,12 +287,20 @@ class FutureWrapper(Future):
 
 
 def ray_is_available() -> bool:
-    """Returns True if Ray is available."""
+    """返回 Ray 是否可用。
+
+    Returns:
+        Ray 是否可用
+    """
     return ray is not None
 
 
 def assert_ray_available():
-    """Raise an exception if Ray is not available."""
+    """如果 Ray 不可用则抛出异常。
+
+    Raises:
+        ValueError: Ray 未安装
+    """
     if ray is None:
         raise ValueError(
             f"Failed to import Ray: {ray_import_err}."
@@ -216,11 +311,19 @@ def assert_ray_available():
 def _verify_bundles(
     placement_group: "PlacementGroup", parallel_config: ParallelConfig, device_str: str
 ):
-    """Verify a given placement group has bundles located in the right place.
+    """验证给定 placement group 的 bundles 位于正确位置。
 
-    There are 2 rules.
-    - Warn if all tensor parallel workers cannot fit in a single node.
-    - Fail if driver node is not included in a placement group.
+    有 2 个规则：
+    - 如果所有 tensor parallel workers 无法放入单个节点则发出警告
+    - 如果 driver node 未包含在 placement group 中则失败
+
+    Args:
+        placement_group: 放置组
+        parallel_config: 并行配置
+        device_str: 设备字符串（如 "GPU"）
+
+    Raises:
+        RuntimeError: 如果 driver node 未包含在 placement group 中
     """
     assert ray.is_initialized(), (
         "Ray is not initialized although distributed-executor-backend is ray."
@@ -228,9 +331,9 @@ def _verify_bundles(
     pg_data = placement_group_table(placement_group)
     # bundle_idx -> node_id
     bundle_to_node_ids = pg_data["bundles_to_node_id"]
-    # bundle_idx -> bundle (e.g., {"GPU": 1})
+    # bundle_idx -> bundle (例如，{"GPU": 1})
     bundles = pg_data["bundles"]
-    # node_id -> List of bundle (e.g., {"GPU": 1})
+    # node_id -> bundle 列表 (例如，{"GPU": 1})
     node_id_to_bundle: dict[str, list[dict[str, float]]] = defaultdict(list)
 
     for bundle_idx, node_id in bundle_to_node_ids.items():
@@ -267,15 +370,19 @@ def _verify_bundles(
 
 
 def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
-    """Wait until a placement group is ready.
+    """等待 placement group 就绪。
 
-    It prints the informative log messages if the placement group is
-    not created within time.
+    如果 placement group 未在规定时间内创建，
+    它打印信息性日志消息。
 
+    Args:
+        current_placement_group: 当前放置组
+
+    Raises:
+        ValueError: 如果无法在规定时间内提供 placement group
     """
-    # Wait until PG is ready - this will block until all
-    # requested resources are available, and will time out
-    # if they cannot be provisioned.
+    # 等待 PG 就绪 - 这将阻塞直到所有
+    # 请求的资源可用，如果无法配置将超时
     placement_group_specs = current_placement_group.bundle_specs
 
     s = time.time()
@@ -286,7 +393,7 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
         if len(ready) > 0:
             break
 
-        # Exponential backoff for warning print.
+        # 指数退避警告打印
         wait_interval *= 2
         logger.info(
             "Waiting for creating a placement group of specs for "
@@ -302,13 +409,11 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
     try:
         ray.get(pg_ready_ref, timeout=0)
     except ray.exceptions.GetTimeoutError:
-        # Provide more helpful error message when GPU count is exceeded
+        # 当 GPU 数量超额时提供更有用的错误消息
         total_gpu_required = sum(spec.get("GPU", 0) for spec in placement_group_specs)
-        # If more than one GPU is required for the placement group, provide a
-        # more specific error message.
-        # We use >1 here because multi-GPU (tensor parallel) jobs are more
-        # likely to fail due to insufficient cluster resources, and users may
-        # need to adjust tensor_parallel_size to fit available GPUs.
+        # 如果需要多个 GPU，提供更具体的错误消息
+        # 我们在这里使用 >1，因为多 GPU（tensor parallel）作业更可能
+        # 因集群资源不足而失败，用户可能需要调整 tensor_parallel_size
         if total_gpu_required > 1:
             raise ValueError(
                 f"Cannot provide a placement group requiring "
@@ -332,6 +437,11 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
 
 
 def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
+    """等待 placement group 被移除。
+
+    Args:
+        current_placement_group: 当前放置组
+    """
     ray.util.remove_placement_group(current_placement_group)
     s = time.time()
     wait_interval = 10
@@ -340,7 +450,7 @@ def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
         if pg is None:
             break
 
-        # Exponential backoff for warning print.
+        # 指数退避警告打印
         wait_interval *= 2
         logger.info(
             "Waiting for removing a placement group of specs for %d seconds.",
@@ -353,21 +463,19 @@ def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     ray_address: str | None = None,
 ):
-    """Initialize the distributed cluster with Ray.
+    """使用 Ray 初始化分布式集群。
 
-    it will connect to the Ray cluster and create a placement group
-    for the workers, which includes the specification of the resources
-    for each distributed worker.
+    连接到 Ray 集群并为 workers 创建放置组，
+    其中包括每个分布式 worker 的资源规格。
 
     Args:
-        parallel_config: The configurations for parallel execution.
-        ray_address: The address of the Ray cluster. If None, uses
-            the default Ray cluster address.
+        parallel_config: 并行执行配置
+        ray_address: Ray 集群地址，如果为 None 则使用默认 Ray 集群地址
     """
     assert_ray_available()
     from vllm.platforms import current_platform
 
-    # Prevalidate GPU requirements before Ray processing
+    # 在 Ray 处理之前预验证 GPU 需求
     if current_platform.is_cuda() and parallel_config.world_size > 1:
         from vllm.utils.torch_utils import cuda_device_count_stateless
 
@@ -387,7 +495,7 @@ def initialize_ray_cluster(
     if ray.is_initialized():
         logger.info("Ray is already initialized. Skipping Ray initialization.")
     elif current_platform.is_rocm() or current_platform.is_xpu():
-        # Try to connect existing ray instance and create a new one if not found
+        # 尝试连接现有 ray 实例，如果找不到则创建新实例
         try:
             ray.init("auto")
         except ConnectionError:
@@ -409,7 +517,7 @@ def initialize_ray_cluster(
             f"current platform {current_platform.device_name} does not support ray."
         )
 
-    # Create or get the placement group for worker processes
+    # 为 worker 进程创建或获取放置组
     if parallel_config.placement_group:
         current_placement_group = parallel_config.placement_group
     else:
@@ -418,9 +526,9 @@ def initialize_ray_cluster(
     if current_placement_group:
         logger.info("Using the existing placement group")
 
-        # We are in a placement group
+        # 我们在放置组中
         bundles = current_placement_group.bundle_specs
-        # Verify that we can use the placement group.
+        # 验证我们可以使用放置组
         device_bundles = 0
         for bundle in bundles:
             bundle_devices = bundle.get(device_str, 0)
@@ -440,9 +548,8 @@ def initialize_ray_cluster(
     else:
         logger.info("No current placement group found. Creating a new placement group.")
         num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
-        # Log a warning message and delay resource allocation failure response.
-        # Avoid immediate rejection to allow user-initiated placement group
-        # created and wait cluster to be ready
+        # 记录警告消息并延迟资源分配失败响应
+        # 避免立即拒绝以允许用户创建的放置组并等待集群就绪
         if parallel_config.world_size > num_devices_in_cluster:
             logger.warning(
                 "The number of required %ss exceeds the total "
@@ -450,14 +557,14 @@ def initialize_ray_cluster(
                 device_str,
                 device_str,
             )
-        # Create a new placement group
+        # 创建新放置组
         placement_group_specs: list[dict[str, float]] = [
             {device_str: 1.0} for _ in range(parallel_config.world_size)
         ]
 
-        # vLLM engine is also a worker to execute model with an accelerator,
-        # so it requires to have the device in a current node. Check if
-        # the current node has at least one device.
+        # vLLM engine 也是使用加速器执行模型的 worker，
+        # 所以它需要在当前节点中有设备。检查当前节点
+        # 是否至少有一个设备
         current_ip = get_ip()
         current_node_id = ray.get_runtime_context().get_node_id()
         current_node_resource = available_resources_per_node()[current_node_id]
@@ -468,11 +575,10 @@ def initialize_ray_cluster(
                 f"{device_str}. Make sure you have at least 1 {device_str} "
                 f"available in a node {current_node_id=} {current_ip=}."
             )
-        # This way, at least bundle is required to be created in a current
-        # node.
+        # 这样，至少需要在当前节点中创建 bundle
         placement_group_specs[0][f"node:{current_ip}"] = 0.001
 
-        # By default, Ray packs resources as much as possible.
+        # 默认情况下，Ray 尽可能打包资源
         current_placement_group = ray.util.placement_group(
             placement_group_specs, strategy="PACK"
         )
@@ -480,11 +586,16 @@ def initialize_ray_cluster(
 
     assert current_placement_group is not None
     _verify_bundles(current_placement_group, parallel_config, device_str)
-    # Set the placement group in the parallel config
+    # 在并行配置中设置放置组
     parallel_config.placement_group = current_placement_group
 
 
 def get_num_tpu_nodes() -> int:
+    """获取 TPU 节点数量。
+
+    Returns:
+        TPU 节点数量
+    """
     from ray._private.accelerators import TPUAcceleratorManager
 
     cluster_resources = ray.cluster_resources()
@@ -495,6 +606,11 @@ def get_num_tpu_nodes() -> int:
 
 
 def get_num_nodes_in_placement_group() -> int:
+    """获取放置组中的节点数量。
+
+    Returns:
+        放置组中的节点数量
+    """
     pg_table = ray.util.placement_group_table()
     current_pg = ray.util.get_current_placement_group()
     num_nodes = 0
