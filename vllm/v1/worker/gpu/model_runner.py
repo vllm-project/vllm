@@ -141,8 +141,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.is_first_pp_rank = True
             self.is_last_pp_rank = True
         # Persistent buffer for intermediate tensors (non-first PP ranks).
-        # Populated during capture_model() so piecewise CUDA graphs can
-        # replay from stable memory addresses.
         self.intermediate_tensors: IntermediateTensors | None = None
 
         # Data parallelism.
@@ -305,6 +303,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.is_pooling_model and self.is_last_pp_rank:
             self.pooling_runner = PoolingRunner(self.model)
 
+        if not self.is_first_pp_rank:
+            # For non-first PP ranks, create intermediate tensors sized
+            # for the max capture size so they can be sliced per batch.
+            # Save as persistent member so runtime can copy received data
+            # into the same addresses that the CUDA graphs captured.
+            self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                batch_size=self.max_num_tokens,
+                dtype=self.model_config.dtype,
+                device=self.device,
+            )
+
     def get_model(self) -> nn.Module:
         return self.model
 
@@ -400,14 +409,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Disable any use of KVConnector for dummy runs.
         self.kv_connector.set_disabled(True)
 
-        # For non-first PP ranks, create dummy intermediate_tensors.
+        # Get the intermediate tensors for the dummy run.
         intermediate_tensors = None
         if not self.is_first_pp_rank:
-            intermediate_tensors = self.model.make_empty_intermediate_tensors(
-                batch_size=num_tokens,
-                dtype=self.model_config.dtype,
-                device=self.device,
-            )
+            assert self.intermediate_tensors is not None
+            intermediate_tensors = self.intermediate_tensors[:num_tokens]
 
         # Execute the model.
         self.execute_model(
@@ -538,23 +544,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
-            # For non-first PP ranks, create intermediate tensors sized
-            # for the max capture size so they can be sliced per batch.
-            # Save as persistent member so runtime can copy received data
-            # into the same addresses that the CUDA graphs captured.
-            intermediate_tensors = None
-            if not self.is_first_pp_rank:
-                intermediate_tensors = self.model.make_empty_intermediate_tensors(
-                    batch_size=self.max_num_tokens,
-                    dtype=self.model_config.dtype,
-                    device=self.device,
-                )
-                self.intermediate_tensors = intermediate_tensors
-
             self.cudagraph_manager.capture(
                 self.model,
                 self.model_state,
                 self.input_buffers,
+                self.intermediate_tensors,
                 self.block_tables,
                 self.attn_groups,
                 self.kv_cache_config,
@@ -1019,7 +1013,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             "input_ids": input_batch.input_ids,
             "positions": input_batch.positions,
             "inputs_embeds": inputs_embeds,
-            "intermediate_tensors": intermediate_tensors,
             # NOTE: Values returned by `prepare_inputs` will override the default
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
@@ -1028,7 +1021,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update for non-first PP ranks.
             model_inputs["input_ids"] = None
             model_inputs["inputs_embeds"] = None
+
+            # Prepare the intermediate tensors.
             assert intermediate_tensors is not None
+            assert self.intermediate_tensors is not None
+            n = input_batch.num_tokens_after_padding
+            intermediate_tensors = IntermediateTensors(
+                {
+                    k: v[:n].copy_(intermediate_tensors.tensors[k][:n])
+                    for k, v in self.intermediate_tensors.tensors.items()
+                },
+                intermediate_tensors.kv_connector_output,
+            )
+            model_inputs["intermediate_tensors"] = intermediate_tensors
 
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -1044,18 +1049,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 aux_hidden_states = None
         else:
             # For piecewise and eager mode, just call model().
-            # For non-first PP ranks with CUDA graph capture, copy received
-            # intermediate tensors into the persistent buffer so piecewise
-            # graphs replay from stable memory addresses.
-            if not self.is_first_pp_rank and self.intermediate_tensors is not None:
-                assert intermediate_tensors is not None
-                n = input_batch.num_tokens_after_padding
-                for k, v in intermediate_tensors.tensors.items():
-                    self.intermediate_tensors[k][:n].copy_(v[:n])
-                model_inputs["intermediate_tensors"] = IntermediateTensors(
-                    {k: v[:n] for k, v in self.intermediate_tensors.tensors.items()}
-                )
-
             batch_descriptor = BatchDescriptor(
                 num_tokens=input_batch.num_tokens_after_padding,
                 has_lora=self.lora_config is not None,

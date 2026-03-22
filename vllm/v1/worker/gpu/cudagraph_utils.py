@@ -11,11 +11,16 @@ from tqdm import tqdm
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
+from vllm.distributed.parallel_state import (
+    get_pp_group,
+    graph_capture,
+    is_global_first_rank,
+)
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -87,7 +92,15 @@ class CudaGraphManager:
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
+
         self.dp_size = vllm_config.parallel_config.data_parallel_size
+        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        if self.pp_size > 1:
+            self.is_first_pp_rank = get_pp_group().is_first_rank
+            self.is_last_pp_rank = get_pp_group().is_last_rank
+        else:
+            self.is_first_pp_rank = True
+            self.is_last_pp_rank = True
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
@@ -272,6 +285,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         model: nn.Module,
         model_state: ModelState,
         input_buffers: InputBuffers,
+        intermediate_tensors: IntermediateTensors | None,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
@@ -292,6 +306,12 @@ class ModelCudaGraphManager(CudaGraphManager):
                 if self.dp_size > 1
                 else None
             )
+            if not self.is_first_pp_rank:
+                assert intermediate_tensors is not None
+                intermediate_tensors_sliced = intermediate_tensors[:num_tokens]
+            else:
+                intermediate_tensors_sliced = None
+
             attn_metadata, slot_mappings = prepare_inputs_to_capture(
                 num_reqs,
                 num_tokens,
@@ -320,12 +340,16 @@ class ModelCudaGraphManager(CudaGraphManager):
                     model_inputs = {
                         "input_ids": input_buffers.input_ids[:num_tokens],
                         "positions": input_buffers.positions[:num_tokens],
-                        # TODO: Pass intermediate_tensors for PP CUDA graph
-                        # support (https://github.com/vllm-project/vllm/pull/35162).
-                        "intermediate_tensors": None,
+                        "intermediate_tensors": intermediate_tensors_sliced,
                         **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
                     }
                     model_output = model(**model_inputs)
+
+                    if not self.is_last_pp_rank:
+                        # The output is IntermediateTensors, not hidden states.
+                        # FIXME(woosuk): Support FULL CUDA graph.
+                        return None
+
                     if self.use_aux_hidden_state_outputs:
                         hidden_states, aux_hidden_states = model_output
                     else:
