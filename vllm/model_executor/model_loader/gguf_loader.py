@@ -141,6 +141,37 @@ class GGUFModelLoader(BaseModelLoader):
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
                     )
                 )
+        if model_type in ("qwen3_5_text", "qwen3_5_moe_text"):
+            is_moe = model_type == "qwen3_5_moe_text"
+            model_type = "qwen35moe" if is_moe else "qwen35"
+            # Qwen3.5 hybrid models have bare nn.Parameter tensors (A_log,
+            # dt_bias) that lack .weight/.bias suffixes in HF state_dict.
+            # Additionally, the gguf tensor map uses "dt_proj" while HF uses
+            # "dt_bias". Both issues require manual GGUF-to-HF mapping.
+            for idx in range(text_config.num_hidden_layers):
+                gguf_to_hf_name_map[f"blk.{idx}.ssm_a.weight"] = (
+                    f"model.layers.{idx}.linear_attn.A_log"
+                )
+                gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.weight"] = (
+                    f"model.layers.{idx}.linear_attn.dt_bias"
+                )
+            if is_moe:
+                for idx in range(text_config.num_hidden_layers):
+                    gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
+                        f"model.layers.{idx}.mlp.experts.0.down_proj.weight"
+                    )
+                    gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = (
+                        f"model.layers.{idx}.mlp.experts.0.gate_proj.weight"
+                    )
+                    gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
+                        f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
+                    )
+                    sideload_params.append(
+                        re.compile(
+                            f"model\\.layers\\.{idx}"
+                            r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
+                        )
+                    )
 
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():
