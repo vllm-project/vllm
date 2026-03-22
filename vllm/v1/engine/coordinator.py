@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""数据并行（DP）协调器模块。
+
+本模块实现了 vLLM V1 引擎的数据并行协调器，用于多 DP 引擎部署场景：
+- 收集每个 DP 引擎的统计信息（等待和运行队列长度）
+- 发布统计信息到前端 API 服务器用于负载均衡决策
+- 跟踪当前 DP"请求波次"编号和引擎运行状态
+- 广播 START_DP_WAVE 消息以协调引擎从暂停状态进入运行状态
+- 支持弹性 EP 扩缩容场景
+"""
 import copy
 import multiprocessing
 import multiprocessing.connection
@@ -21,42 +30,37 @@ logger = init_logger(__name__)
 
 
 class DPCoordinator:
-    """Coordinator process used for data-parallel deployments (DP>1).
+    """用于数据并行部署（DP>1）的协调器进程。
 
-    Intermediates between multiple DP engine rank processes and one or more
-    front-end API server processes.
+    在多个 DP 引擎进程和一个或多个前端 API 服务器进程之间进行中介。
 
-    * Collects stats from each DP engine (currently just waiting and running
-      queue lengths), and publishes these to all front-ends for use in
-      load-balancing decisions.
+    主要功能：
+    - 收集每个 DP 引擎的统计信息（当前仅为等待和运行队列长度），
+      并发布到所有前端用于负载均衡决策
+    - 跟踪当前 DP"请求波次"编号和引擎运行状态，由 DP rank 0 引擎
+      接收并发布到前端进程
+    - 广播 START_DP_WAVE 消息使引擎从暂停状态进入运行状态
 
-    * Keeps track of the current DP "request wave" number and running state
-      of the engines. This is received from the DP rank 0 engine and published
-      to the front-end processes along with the current load stats.
+    引擎在以下情况下进入运行状态：
+    1. 前端在引擎暂停时发送新请求，并发通知协调器
+    2. 引擎在暂停状态下接收到过时波次的请求时通知协调器
 
-      The engines alternate between a global running/paused state. The global
-      "request wave" number is a count of the number of times that the workers
-      collectively move from a running state to a paused state. This transition
-      is synchronized via the all-reduce operation performed in the
-      DPEngineCoreProc._has_global_unfinished_reqs method.
-
-    * Broadcasts the START_DP_WAVE message to engines to move them from paused
-      to running state when one engine receives a new request. This can happen
-      in two cases:
-      1) A front-end sending a new request while the engines are paused will
-         concurrently notify the coordinator.
-      2) An engine receiving a request for a stale request wave while in paused
-         state will notify the coordinator.
-
-    Engines will move into running state when receiving a new request or
-    START_DP_WAVE message.
-
-    Note that when deployed in External LB mode, no stats will be published by
-    the engines and thus updates will only be sent to front-ends when the
-    request wave / running state changes.
+    注意：在外部 LB 模式下部署时，引擎不会发布统计信息，
+    因此仅在请求波次/运行状态变化时发送更新到前端。
     """
 
     def _wait_for_zmq_addrs(self, zmq_addr_pipe) -> tuple[str, str, str]:
+        """等待 ZMQ 地址报告。
+
+        Args:
+            zmq_addr_pipe: ZMQ 地址管道
+
+        Returns:
+            (front_publish_address, back_output_address, back_publish_address) 元组
+
+        Raises:
+            RuntimeError: 超时或进程失败时抛出
+        """
         try:
             ready = multiprocessing.connection.wait(
                 [zmq_addr_pipe, self.proc.sentinel], timeout=30
@@ -78,16 +82,21 @@ class DPCoordinator:
     def __init__(
         self, parallel_config: ParallelConfig, enable_wave_coordination: bool = True
     ):
+        """初始化 DP 协调器。
+
+        Args:
+            parallel_config: 并行配置
+            enable_wave_coordination: 是否启用波次协调
+        """
         dp_size = parallel_config.data_parallel_size
         assert dp_size > 1, "Coordinator only used for data parallel"
 
         host = parallel_config.data_parallel_master_ip
 
-        # Assume coordinator is colocated with front-end procs when not in
-        # either external or hybrid DP LB mode.
+        # 当不在外部或混合 DP LB 模式时，假设协调器与前端进程共存
         local_only = not parallel_config.local_engines_only
         local_only_eng = dp_size == parallel_config.data_parallel_size_local
-        # NOTE(yongji): handling scaling from intra-node to inter-node
+        # NOTE(yongji): 处理从节点内到节点间的扩展
         if parallel_config.enable_elastic_ep:
             local_only_eng = False
 
@@ -98,9 +107,10 @@ class DPCoordinator:
                 else get_tcp_uri(host, 0)
             )
 
-        front_publish_address = bind_address(local_only)
-        back_publish_address = bind_address(local_only_eng)
-        back_output_address = bind_address(local_only_eng)
+        # 绑定三个 ZMQ 地址
+        front_publish_address = bind_address(local_only)  # 前端发布
+        back_output_address = bind_address(local_only_eng)  # 后端输出
+        back_publish_address = bind_address(local_only_eng)  # 后端发布
 
         context = get_mp_context()
         parent_zmq_addr_pipe, child_zmq_addr_pipe = context.Pipe(duplex=False)
@@ -131,30 +141,62 @@ class DPCoordinator:
         self._finalizer = weakref.finalize(self, shutdown, [self.proc])
 
     def get_stats_publish_address(self) -> str:
+        """返回统计信息发布地址。"""
         return self.stats_publish_address
 
     def get_engine_socket_addresses(self) -> tuple[str, str]:
-        """Returns tuple of ZMQ input address, output address."""
+        """返回引擎套接字地址元组。
+
+        Returns:
+            (ZMQ 输入地址，ZMQ 输出地址) 元组
+        """
         return self.coord_in_address, self.coord_out_address
 
     def shutdown(self, timeout: float | None = None) -> None:
-        """Shutdown coordinator process with configurable timeout."""
+        """关闭协调器进程。
+
+        Args:
+            timeout: 关闭超时时间（秒）
+        """
         if self._finalizer.detach() is not None:
             shutdown([self.proc], timeout=timeout)
 
 
 class EngineState:
+    """引擎状态类，用于跟踪请求计数。
+
+    Attributes:
+        request_counts: 请求计数列表 [waiting, running]
+    """
+
     def __init__(self):
         self.request_counts = [0, 0]  # [waiting, running]
 
 
 class DPCoordinatorProc:
+    """DP 协调器进程实现类。
+
+    负责处理 ZMQ 套接字通信、统计信息收集和波次协调。
+
+    Attributes:
+        engines: 引擎状态列表
+        stats_update_interval_ms: 统计信息更新间隔（毫秒）
+        enable_wave_coordination: 是否启用波次协调
+    """
+
     def __init__(
         self,
         engine_count: int,
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
     ):
+        """初始化 DP 协调器进程。
+
+        Args:
+            engine_count: 引擎数量
+            min_stats_update_interval_ms: 最小统计信息更新间隔（毫秒）
+            enable_wave_coordination: 是否启用波次协调
+        """
         set_process_title("DPCoordinator")
         self.ctx = zmq.Context()
 
@@ -173,6 +215,17 @@ class DPCoordinatorProc:
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
     ):
+        """运行协调器的主入口函数。
+
+        Args:
+            engine_count: 引擎数量
+            front_publish_address: 前端发布地址
+            back_output_address: 后端输出地址
+            back_publish_address: 后端发布地址
+            zmq_addr_pipe: ZMQ 地址管道
+            min_stats_update_interval_ms: 最小统计信息更新间隔
+            enable_wave_coordination: 是否启用波次协调
+        """
         coordinator = DPCoordinatorProc(
             engine_count=engine_count,
             min_stats_update_interval_ms=min_stats_update_interval_ms,
@@ -198,13 +251,27 @@ class DPCoordinatorProc:
         back_publish_address: str,
         zmq_addr_pipe=None,
     ):
+        """处理输入套接字的主循环。
+
+        负责：
+        - 监听前端和后端的 ZMQ 消息
+        - 收集引擎统计信息并发布到前端
+        - 处理波次协调逻辑
+        - 处理弹性 EP 扩缩容通知
+
+        Args:
+            front_publish_address: 前端发布地址
+            back_output_address: 后端输出地址
+            back_publish_address: 后端发布地址
+            zmq_addr_pipe: ZMQ 地址管道
+        """
         decoder = MsgpackDecoder(EngineCoreOutputs)
 
-        # For tracking request wave progression.
+        # 用于跟踪请求波次进度
         current_wave = 0
         engines_running = False
 
-        # For tracking request counts for internal load-balancing.
+        # 用于跟踪内部负载均衡的请求计数
         stats_changed = False
         last_stats_step = -1
         last_stats_wave = -1
@@ -241,7 +308,7 @@ class DPCoordinatorProc:
                     )
                 finally:
                     zmq_addr_pipe.close()
-            # Wait until all engines subscribe.
+            # 等待所有引擎订阅
             for _ in self.engines:
                 if publish_back.recv() != b"\x01":
                     logger.error(
@@ -249,7 +316,7 @@ class DPCoordinatorProc:
                         "waiting for engines to subscribe"
                     )
                     return
-            # Send ready message to engines.
+            # 发送就绪消息到引擎
             publish_back.send(b"READY")
 
             logger.info("All engine subscriptions received by DP coordinator")
@@ -261,17 +328,16 @@ class DPCoordinatorProc:
             last_publish_time = 0
             while True:
                 elapsed = int(time.time() * 1000) - last_publish_time
-                # Send at stats_update_interval_ms interval if the stats have
-                # changed, or otherwise every 5 seconds.
+                # 如果统计信息已变化，则按 stats_update_interval_ms 间隔发送
+                # 否则每 5 秒发送一次
                 wait_for = self.stats_update_interval_ms if stats_changed else 5000
 
-                # Wait at least 50ms to ensure we've received all stats for
-                # the current step.
+                # 等待至少 50ms 以确保已收到当前步的所有统计信息
                 min_timeout = 50 if last_step_counts is None else 0
 
                 events = poller.poll(timeout=max(min_timeout, wait_for - elapsed))
                 if not events:
-                    # Poller timeout - publish current stats to front-ends.
+                    # Poller 超时 - 发布当前统计信息到前端
                     if last_step_counts is not None:
                         engine_req_counts_list = last_step_counts
                         last_step_counts = None
@@ -290,13 +356,11 @@ class DPCoordinatorProc:
                 if publish_back in events:
                     buffer = publish_back.recv()
                     if buffer == b"\x01":
-                        # NOTE(yongji): newly started engine subscribed
-                        # We need to send READY message here instead of receiving
-                        # SCALE_ELASTIC_EP notification from engine core client
-                        # as SCALE_ELASTIC_EP is only sent when
-                        # new engines finished initialization.
-                        # Subscription message, on the other hand, is sent
-                        # by each engine during initialization
+                        # NOTE(yongji): 新启动的引擎已订阅
+                        # 我们需要在此处发送 READY 消息，而不是从引擎核心客户端
+                        # 接收 SCALE_ELASTIC_EP 通知，因为 SCALE_ELASTIC_EP
+                        # 仅在新引擎完成初始化后才会发送
+                        # 订阅消息则由每个引擎在初始化期间发送
                         publish_back.send(b"READY")
                     elif buffer != b"\x00":
                         logger.error(
@@ -306,7 +370,7 @@ class DPCoordinatorProc:
                 if publish_front in events:
                     buffer = publish_front.recv()
                     if buffer in (b"\x01", b"\x00"):
-                        # Ignore subscription messages.
+                        # 忽略订阅消息
                         continue
 
                     decoded = msgspec.msgpack.decode(buffer)
@@ -315,22 +379,18 @@ class DPCoordinatorProc:
                         and len(decoded) == 2
                         and decoded[0] == "SCALE_ELASTIC_EP"
                     ):
-                        # Handle scale up notification
+                        # 处理扩展通知
                         new_engine_count = decoded[1]
                         current_count = len(self.engines)
                         if new_engine_count > current_count:
                             for _ in range(new_engine_count - current_count):
                                 self.engines.append(EngineState())
-                            # NOTE(yongji): handle the case
-                            # where newly started engines have current_wave = 0
-                            # if existing engines just finished a wave
-                            # and engine_running isn't updated yet at
-                            # CoordinatorProc requests routed to newly started
-                            # engines may not wake up existing engines, as long
-                            # as 0 < request.wave < existing engines'
+                            # NOTE(yongji): 处理新引擎 current_wave = 0 的情况
+                            # 如果现有引擎刚刚完成波次且 engine_running 尚未在
+                            # CoordinatorProc 更新，路由到新引擎的请求可能无法
+                            # 唤醒现有引擎，因为 0 < request.wave < 现有引擎的
                             # current_wave
-                            # we note that 0 is the wave number for the new
-                            # engine
+                            # 注意 0 是新引擎的波次编号
                             logger.info(
                                 "DPCoordinator scaled up from %s to %s engines",
                                 current_count,
@@ -343,20 +403,18 @@ class DPCoordinatorProc:
                                 current_count,
                                 new_engine_count,
                             )
-                        continue  # Skip normal engine notification processing
+                        continue  # 跳过正常的引擎通知处理
 
-                    # Wave coordination: handle new-request messages from front-end.
-                    # Only process these when wave coordination is enabled
+                    # 波次协调：处理来自前端的新请求消息
+                    # 仅在启用波次协调时处理
                     if self.enable_wave_coordination:
-                        # We received a message on the front-end XPUB socket,
-                        # from an API server sending a new request while the
-                        # engines are paused, so that we can wake the other
-                        # engines.
+                        # 在前端 XPUB 套接字上收到消息
+                        # 来自 API 服务器在引擎暂停时发送新请求
+                        # 以便唤醒其他引擎
                         engine_to_exclude, wave = decoded
                         if not engines_running:
                             if wave < current_wave:
-                                # If the wave number is stale, ensure the message
-                                # is handled by all the engines.
+                                # 如果波次编号过时，确保消息被所有引擎处理
                                 engine_to_exclude = None
 
                             engines_running = True
@@ -366,7 +424,7 @@ class DPCoordinatorProc:
                             )
 
                 if output_back in events:
-                    # We received a message from one of the engines.
+                    # 从引擎收到消息
 
                     buffer = output_back.recv()
                     outputs: EngineCoreOutputs = decoder.decode(buffer)
@@ -377,8 +435,7 @@ class DPCoordinatorProc:
                     eng_index = outputs.engine_index
                     scheduler_stats = outputs.scheduler_stats
                     if scheduler_stats:
-                        # 1. Updated request load stats - update our local
-                        # state with these.
+                        # 1. 更新的请求负载统计 - 更新本地状态
                         stats = self.engines[eng_index].request_counts
                         stats_step = scheduler_stats.step_counter
                         stats_wave = scheduler_stats.current_wave
@@ -408,13 +465,12 @@ class DPCoordinatorProc:
                         stats[1] = scheduler_stats.num_running_reqs
                         stats_changed = True
 
-                    # Wave coordination: handle wave completion and start notifications
-                    # Only process these when wave coordination is enabled
+                    # 波次协调：处理波次完成和启动通知
+                    # 仅在启用波次协调时处理
                     if self.enable_wave_coordination:
                         if (wave := outputs.wave_complete) is not None:
-                            # 2. Notification from rank 0 engine that we've
-                            # moved into the global paused state
-                            # (engines_running==False).
+                            # 2. 来自 rank 0 引擎的通知，表示已进入全局暂停状态
+                            # (engines_running==False)
                             if current_wave <= wave:
                                 new_wave = wave + 1
                                 logger.debug(
@@ -429,9 +485,8 @@ class DPCoordinatorProc:
                             wave > current_wave
                             or (wave == current_wave and not engines_running)
                         ):
-                            # 3. The engine received request for a non-current wave
-                            # so we must ensure that other engines progress to the
-                            # next wave (race condition handling).
+                            # 3. 引擎接收到非当前波次的请求
+                            # 必须确保其他引擎进入下一波次（竞态条件处理）
                             logger.debug(
                                 "Starting wave %d after notification of "
                                 "stale wave request from engine.",
@@ -450,16 +505,28 @@ class DPCoordinatorProc:
     def _send_start_wave(
         socket: zmq.Socket, wave: int, exclude_engine_index: int | None
     ):
-        """Broadcast the START_DP_WAVE message to all the engines.
-        It includes the current wave number and index of engine which
-        has already received a request with this wave number and so doesn't
-        require additional notification.
+        """向所有引擎广播 START_DP_WAVE 消息。
+
+        消息包含当前波次编号和已收到该波次请求的引擎索引
+        （该引擎不需要额外的通知）。
+
+        Args:
+            socket: ZMQ 套接字
+            wave: 波次编号
+            exclude_engine_index: 要排除的引擎索引
         """
         wave_encoded = msgspec.msgpack.encode((wave, exclude_engine_index))
         socket.send_multipart((EngineCoreRequestType.START_DP_WAVE.value, wave_encoded))
 
     def _get_engine_counts(self, do_copy=False) -> list[list[int]]:
-        """Return list of [waiting, running] count lists for each engine."""
+        """返回每个引擎的 [waiting, running] 计数列表。
+
+        Args:
+            do_copy: 是否返回副本
+
+        Returns:
+            每个引擎的请求计数列表
+        """
         if do_copy:
             return [copy.copy(e.request_counts) for e in self.engines]
         return [e.request_counts for e in self.engines]

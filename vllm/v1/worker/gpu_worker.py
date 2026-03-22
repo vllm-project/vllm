@@ -1,6 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""A GPU worker class."""
+"""GPU Worker 类模块。
+
+本模块实现了 GPU Worker 类，负责：
+- 管理 GPU 设备的初始化和分布式环境
+- 加载模型和分配 KV 缓存
+- 执行模型前向传播和采样
+- 支持睡眠/唤醒模式以节省内存
+- 支持权重传输和弹性 EP 执行
+- 支持 CPU/CUDA 性能分析
+
+主要类：
+- AsyncIntermediateTensors: 带懒同步的 IntermediateTensors
+- Worker: GPU Worker 实现类
+
+主要函数：
+- init_worker_distributed_environment: 初始化 Worker 分布式环境
+"""
 
 import gc
 import os
@@ -71,7 +87,16 @@ if TYPE_CHECKING:
 
 
 class AsyncIntermediateTensors(IntermediateTensors):
-    """IntermediateTensors with lazy comm synchronization"""
+    """带懒通信同步的 IntermediateTensors。
+
+    用于流水线并行中异步接收中间张量，
+    通过懒同步机制避免不必要的阻塞等待。
+
+    Attributes:
+        _comm_handles: 通信句柄列表
+        _comm_postprocess: 通信后处理函数列表
+        _comm_waited: 是否已等待通信完成
+    """
 
     def __init__(
         self,
@@ -79,12 +104,23 @@ class AsyncIntermediateTensors(IntermediateTensors):
         comm_handles: list[Handle] | None = None,
         comm_postprocess: list[Callable[[], None]] | None = None,
     ) -> None:
+        """初始化异步中间张量。
+
+        Args:
+            tensors: 张量字典
+            comm_handles: 通信句柄列表（可选）
+            comm_postprocess: 通信后处理函数列表（可选）
+        """
         super().__init__(tensors)
         self._comm_handles = comm_handles
         self._comm_postprocess = comm_postprocess
         self._comm_waited = False
 
     def wait_for_comm(self) -> None:
+        """等待通信完成。
+
+        等待所有异步通信句柄完成，并执行后处理函数。
+        """
         if self._comm_waited:
             return
         if self._comm_handles:
@@ -96,13 +132,43 @@ class AsyncIntermediateTensors(IntermediateTensors):
         self._comm_waited = True
 
     def __getattribute__(self, name: str):
-        # ensure `.tensors` is ready before use
+        """属性访问钩子。
+
+        确保在访问 tensors 之前通信已完成。
+
+        Args:
+            name: 属性名
+
+        Returns:
+            属性值
+        """
+        # 确保在访问 .tensors 之前通信已完成
         if name == "tensors" and not object.__getattribute__(self, "_comm_waited"):
             object.__getattribute__(self, "wait_for_comm")()
         return object.__getattribute__(self, name)
 
 
 class Worker(WorkerBase):
+    """GPU Worker 实现类。
+
+    在 GPU 设备上执行模型推理的 Worker 类，负责：
+    - 设备初始化和分布式环境设置
+    - 模型加载和权重管理
+    - KV 缓存分配和初始化
+    - 模型预热和编译
+    - 执行模型前向传播
+    - 支持睡眠/唤醒模式
+    - 支持性能分析
+
+    Attributes:
+        elastic_ep_executor: 弹性 EP 执行器
+        _sleep_saved_buffers: 睡眠前保存的缓冲区
+        weight_transfer_engine: 权重传输引擎
+        profiler: 性能分析器
+        use_v2_model_runner: 是否使用 V2 模型运行器
+        _pp_send_work: 待处理的 PP 发送工作
+    """
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -111,6 +177,15 @@ class Worker(WorkerBase):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
+        """初始化 GPU Worker。
+
+        Args:
+            vllm_config: vLLM 配置
+            local_rank: 本地设备索引
+            rank: 分布式全局索引
+            distributed_init_method: 分布式初始化方法
+            is_driver_worker: 是否负责 driver 职责
+        """
         super().__init__(
             vllm_config=vllm_config,
             local_rank=local_rank,
@@ -119,7 +194,7 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
-        # configure float32 matmul precision according to vLLM env.
+        # 根据 vLLM 环境变量配置浮点矩阵乘法精度
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
         torch.set_float32_matmul_precision(precision)
 
@@ -127,10 +202,10 @@ class Worker(WorkerBase):
 
         self.elastic_ep_executor = ElasticEPScalingExecutor(self)
 
-        # Buffers saved before sleep
+        # 睡眠前保存的缓冲区
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
-        # Weight transfer engine (initialized on-demand)
+        # 权重传输引擎（按需初始化）
         self.weight_transfer_engine = (
             WeightTransferEngineFactory.create_engine(
                 self.vllm_config.weight_transfer_config,
@@ -140,18 +215,18 @@ class Worker(WorkerBase):
             else None
         )
 
-        # Torch/CUDA profiler. Enabled and configured through profiler_config.
-        # Profiler wrapper is created lazily in profile() when start is called,
-        # so we have all the information needed for proper trace naming.
+        # Torch/CUDA 性能分析器。通过 profiler_config 启用和配置。
+        # Profiler 包装器在 profile() 中惰性创建，
+        # 以便我们拥有正确的跟踪命名所需的所有信息。
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
 
-        # Only validate profiler config is valid, don't instantiate yet
+        # 仅验证 profiler_config 是否有效，暂不实例化
         if self.profiler_config.profiler not in ("torch", "cuda", None):
-            raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
+            raise ValueError(f"未知的分析器类型：{self.profiler_config.profiler}")
 
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
-        # pending non-blocking PP send work from the previous iteration
+        # 来自前一次迭代的非阻塞 PP 发送工作
         self._pp_send_work: list[Handle] = []
 
     def sleep(self, level: int = 1) -> None:

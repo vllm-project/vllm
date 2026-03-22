@@ -1,5 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""注意力工具函数模块。
+
+本模块提供注意力机制相关的辅助函数，负责：
+- 获取 KV 缓存规范
+- 初始化注意力后端
+- 分配和重塑 KV 缓存
+- 构建 slot mappings 和注意力元数据
+
+主要函数：
+- get_kv_cache_spec: 获取 KV 缓存规范
+- init_attn_backend: 初始化注意力后端
+- init_kv_cache: 初始化 KV 缓存
+- build_slot_mappings_by_layer: 按层构建 slot mappings
+- build_attn_metadata: 构建注意力元数据
+"""
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -19,11 +34,21 @@ from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
+    """从 vLLM 配置获取 KV 缓存规范。
+
+    遍历所有注意力层，收集需要 KV 缓存的模块的规范。
+
+    Args:
+        vllm_config: vLLM 配置
+
+    Returns:
+        层名到 KV 缓存规范的映射字典
+    """
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
-        # Skip modules that don't need KV cache (eg encoder-only attention)
+        # 跳过不需要 KV 缓存的模块（例如仅编码器注意力）
         if spec := attn_module.get_kv_cache_spec(vllm_config):
             kv_cache_spec[layer_name] = spec
     return kv_cache_spec
@@ -34,7 +59,24 @@ def init_attn_backend(
     vllm_config: VllmConfig,
     device: torch.device,
     active_layer_names: set[str] | None = None,
-):
+) -> tuple[dict[str, type[AttentionBackend]], list[list[AttentionGroup]]]:
+    """初始化注意力后端和注意力组。
+
+    此函数执行以下操作：
+    1. 为每个 KV 缓存组创建注意力后端
+    2. 将具有相同后端和 KV 缓存规范的层分组到 AttentionGroup
+    3. 为每个组创建元数据构建器
+    4. 设置共享的工作区缓冲区
+
+    Args:
+        kv_cache_config: KV 缓存配置
+        vllm_config: vLLM 配置
+        device: 设备类型
+        active_layer_names: 活动层名集合（可选）
+
+    Returns:
+        (注意力后端字典，注意力组列表) 元组
+    """
     attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_groups: list[list[AttentionGroup]] = []
     attn_backend_workspace: torch.Tensor | None = None
@@ -90,7 +132,18 @@ def init_attn_backend(
     return attn_backends, attn_groups
 
 
-def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
+def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device) -> dict[str, torch.Tensor]:
+    """分配 KV 缓存原始张量。
+
+    为每个 KV 缓存张量分配内存，并处理共享同一张量的层。
+
+    Args:
+        kv_cache_config: KV 缓存配置
+        device: 设备类型
+
+    Returns:
+        层名到原始 KV 缓存张量的映射
+    """
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
@@ -102,7 +155,7 @@ def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
         for layer_name in group.layer_names:
             layer_names.add(layer_name)
     assert layer_names == set(kv_cache_raw_tensors.keys()), (
-        "Some layers are not correctly initialized"
+        "有些层未正确初始化"
     )
     return kv_cache_raw_tensors
 
@@ -113,6 +166,20 @@ def _reshape_kv_cache(
     attn_backends: dict[str, AttentionBackend],
     cache_dtype: str,
 ) -> dict[str, torch.Tensor]:
+    """重塑 KV 缓存张量为正确的形状。
+
+    根据注意力后端的 KV 缓存形状和步幅顺序，将原始张量重塑
+    为适合注意力计算的格式。
+
+    Args:
+        kv_cache_config: KV 缓存配置
+        kv_cache_raw_tensors: 原始 KV 缓存张量
+        attn_backends: 注意力后端
+        cache_dtype: 缓存数据类型
+
+    Returns:
+        层名到重塑后的 KV 缓存张量的映射
+    """
     kv_caches: dict[str, torch.Tensor] = {}
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
         kv_cache_spec = kv_cache_group_spec.kv_cache_spec
@@ -131,7 +198,7 @@ def _reshape_kv_cache(
                 cache_dtype,
             )
 
-            # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
+            # FIXME(woosuk): 将 kv_cache_stride_order 添加到所有注意力后端
             try:
                 kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
                 assert len(kv_cache_stride_order) == len(kv_cache_shape)
@@ -159,6 +226,21 @@ def init_kv_cache(
     device: torch.device,
     cache_dtype: str,
 ) -> dict[str, torch.Tensor]:
+    """初始化 KV 缓存。
+
+    分配原始 KV 缓存张量，重塑为正确的形状，并绑定到前向上下文。
+
+    Args:
+        runner_kv_caches: 运行器 KV 缓存列表
+        forward_context: 前向上下文
+        kv_cache_config: KV 缓存配置
+        attn_backends: 注意力后端
+        device: 设备类型
+        cache_dtype: 缓存数据类型
+
+    Returns:
+        层名到 KV 缓存张量的映射
+    """
     kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
     kv_caches = _reshape_kv_cache(
         kv_cache_config, kv_cache_raw_tensors, attn_backends, cache_dtype
@@ -170,6 +252,17 @@ def init_kv_cache(
 def build_slot_mappings_by_layer(
     slot_mappings: torch.Tensor, kv_cache_config: KVCacheConfig
 ) -> dict[str, torch.Tensor]:
+    """按层构建 slot mappings。
+
+    将 slot mappings 映射到每个注意力层。
+
+    Args:
+        slot_mappings: slot mappings 张量
+        kv_cache_config: KV 缓存配置
+
+    Returns:
+        层名到 slot mapping 张量的映射
+    """
     slot_mappings_by_layer: dict[str, torch.Tensor] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
     for slot_mapping, kv_cache_group in zip(slot_mappings, kv_cache_groups):
@@ -193,6 +286,29 @@ def build_attn_metadata(
     dcp_local_seq_lens: torch.Tensor | None = None,
     encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]] | None = None,
 ) -> dict[str, Any]:
+    """构建注意力元数据。
+
+    为每个注意力组构建注意力元数据，包含查询位置、序列长度、
+    块表、slot mapping 等信息。
+
+    Args:
+        attn_groups: 注意力组列表
+        num_reqs: 请求数量
+        num_tokens: token 数量
+        query_start_loc_gpu: GPU 上的查询起始位置
+        query_start_loc_cpu: CPU 上的查询起始位置
+        max_query_len: 最大查询长度
+        seq_lens: 序列长度
+        max_seq_len: 最大序列长度
+        block_tables: 块表
+        slot_mappings: slot mappings
+        kv_cache_config: KV 缓存配置
+        dcp_local_seq_lens: DCP 本地序列长度（可选）
+        encoder_seq_lens: 编码器序列长度（可选）
+
+    Returns:
+        层名到注意力元数据的映射字典
+    """
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]

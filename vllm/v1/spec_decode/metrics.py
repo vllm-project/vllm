@@ -1,5 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""推测解码指标模块。
+
+本模块实现了推测解码的性能指标统计和日志记录，负责：
+- 统计草稿 token 和接受 token 数量
+- 计算接受率和吞吐量
+- 记录日志和 Prometheus 指标
+
+主要类：
+- SpecDecodingStats: 单步迭代的解码统计
+- SpecDecodingLogging: 日志记录器（聚合多步指标）
+- SpecDecodingProm: Prometheus 指标记录器
+
+指标说明：
+- 接受率 = 接受 token 数 / 草稿 token 数
+- 平均接受长度 = 1 + (接受 token 数 / 草稿数)，包含 bonus token
+- 吞吐量 = token 数 / 时间
+"""
 
 import time
 from dataclasses import dataclass, field
@@ -16,11 +33,17 @@ logger = init_logger(__name__)
 
 @dataclass
 class SpecDecodingStats:
-    """Per-step iteration decoding stats from scheduler.
+    """单步迭代的推测解码统计。
 
-    Each scheduler step, statistics on spec decoding performance are
-    aggregated across requests by the scheduler and returned to the
-    frontend in EngineCoreOutputs->SchedulerStats.
+    每个调度步骤聚合所有请求的统计信息，并通过
+    EngineCoreOutputs->SchedulerStats 返回给前端。
+
+    Attributes:
+        num_spec_tokens: 每个请求的最大草稿 token 数量
+        num_drafts: 草稿请求总数（累计）
+        num_draft_tokens: 草稿 token 总数（累计）
+        num_accepted_tokens: 接受的 token 总数（累计）
+        num_accepted_tokens_per_pos: 每个位置接受的 token 数列表
     """
 
     num_spec_tokens: int
@@ -31,12 +54,28 @@ class SpecDecodingStats:
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "SpecDecodingStats":
+        """创建新的统计实例。
+
+        Args:
+            num_spec_tokens: 每个请求的最大草稿 token 数量
+
+        Returns:
+            初始化的 SpecDecodingStats 实例
+        """
         return cls(
             num_spec_tokens=num_spec_tokens,
             num_accepted_tokens_per_pos=[0] * num_spec_tokens,
         )
 
     def observe_draft(self, num_draft_tokens: int, num_accepted_tokens: int):
+        """观察一次草稿生成结果。
+
+        更新累计统计信息，包括草稿数、token 数和每个位置的接受数。
+
+        Args:
+            num_draft_tokens: 本次草稿的 token 数量
+            num_accepted_tokens: 本次接受的 token 数量
+        """
         self.num_drafts += 1
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
@@ -46,17 +85,25 @@ class SpecDecodingStats:
 
 
 class SpecDecodingLogging:
-    """Aggregate and log spec decoding metrics.
+    """聚合并记录推测解码指标到日志。
 
-    LoggingStatLogger aggregates per-iteration metrics over a set
-    time interval using observe() and then logs them using log()
-    before resetting to zero.
+    使用 observe() 聚合指定时间间隔内的每步指标，
+    然后使用 log() 记录并重置为零。
+
+    Attributes:
+        num_drafts: 每步的草稿数列表
+        num_draft_tokens: 每步的草稿 token 数列表
+        num_accepted_tokens: 每步的接受 token 数列表
+        accepted_tokens_per_pos_lists: 每步的每位置接受数列表
+        last_log_time: 上次日志记录时间
     """
 
     def __init__(self):
+        """初始化日志记录器。"""
         self.reset()
 
     def reset(self):
+        """重置所有统计为零。"""
         self.num_drafts: list[int] = []
         self.num_draft_tokens: list[int] = []
         self.num_accepted_tokens: list[int] = []
@@ -64,6 +111,11 @@ class SpecDecodingLogging:
         self.last_log_time = time.monotonic()
 
     def observe(self, spec_decoding_stats: SpecDecodingStats):
+        """观察并聚合一步的统计信息。
+
+        Args:
+            spec_decoding_stats: 单步统计信息
+        """
         self.num_drafts.append(spec_decoding_stats.num_drafts)
         self.num_draft_tokens.append(spec_decoding_stats.num_draft_tokens)
         self.num_accepted_tokens.append(spec_decoding_stats.num_accepted_tokens)
@@ -72,6 +124,11 @@ class SpecDecodingLogging:
         )
 
     def log(self, log_fn=logger.info):
+        """记录聚合的指标到日志。
+
+        Args:
+            log_fn: 日志函数，默认为 logger.info
+        """
         if not self.num_drafts:
             return
         num_drafts = np.sum(self.num_drafts)
@@ -91,7 +148,7 @@ class SpecDecodingLogging:
             else float("nan")
         )
 
-        # Conventionally, mean acceptance length includes the bonus token
+        # 按照惯例，平均接受长度包含 bonus token
         mean_acceptance_length = 1 + (num_accepted_tokens / num_drafts)
 
         pos_matrix = np.array(self.accepted_tokens_per_pos_lists)
@@ -119,24 +176,30 @@ class SpecDecodingLogging:
 
 
 class SpecDecodingProm:
-    """Record spec decoding metrics in Prometheus.
+    """记录推测解码指标到 Prometheus。
 
-    The acceptance rate can be calculated using a PromQL query:
+    接受率可以使用 PromQL 查询计算：
 
       rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
       rate(vllm:spec_decode_num_draft_tokens_total[$interval])
 
-    The mean acceptance length (conventionally including bonus tokens)
-    can be calculated using:
+    平均接受长度（惯例包含 bonus token）可以使用：
 
       1 + (
       rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
       rate(vllm:spec_decode_num_drafts[$interval]))
 
-    A per-position acceptance rate vector can be computed using
+    每位置接受率向量可以使用：
 
       vllm:spec_decode_num_accepted_tokens_per_pos[$interval] /
       vllm:spec_decode_num_drafts[$interval]
+
+    Attributes:
+        spec_decoding_enabled: 是否启用了推测解码
+        counter_spec_decode_num_drafts: 草稿数计数器
+        counter_spec_decode_num_draft_tokens: 草稿 token 数计数器
+        counter_spec_decode_num_accepted_tokens: 接受 token 数计数器
+        counter_spec_decode_num_accepted_tokens_per_pos: 每位置接受数计数器
     """
 
     _counter_cls = prometheus_client.Counter
@@ -147,6 +210,13 @@ class SpecDecodingProm:
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
     ):
+        """初始化 Prometheus 指标。
+
+        Args:
+            speculative_config: 推测解码配置
+            labelnames: Prometheus 标签名列表
+            per_engine_labelvalues: 每个引擎的标签值映射
+        """
         self.spec_decoding_enabled = speculative_config is not None
         if not self.spec_decoding_enabled:
             return
@@ -198,6 +268,12 @@ class SpecDecodingProm:
         }
 
     def observe(self, spec_decoding_stats: SpecDecodingStats, engine_idx: int = 0):
+        """观察并更新 Prometheus 指标。
+
+        Args:
+            spec_decoding_stats: 单步统计信息
+            engine_idx: 引擎索引（默认为 0）
+        """
         if not self.spec_decoding_enabled:
             return
         self.counter_spec_decode_num_drafts[engine_idx].inc(

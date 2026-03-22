@@ -1,5 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""单一类型 KV 缓存管理器模块。
+
+本模块实现了针对不同类型注意力层的 KV 缓存管理器，负责：
+- 为每种注意力类型（Full Attention、Sliding Window、Mamba 等）提供专门的缓存管理
+- 处理前缀缓存查找和块分配
+- 支持滑动窗口、分块局部注意力、Mamba 状态缓存等特性
+- 实现块驱逐和复用逻辑
+
+主要类：
+- SingleTypeKVCacheManager: 单一类型 KV 缓存管理器抽象基类
+- FullAttentionManager: 全注意力管理器
+- SlidingWindowManager: 滑动窗口管理器
+- ChunkedLocalAttentionManager: 分块局部注意力管理器
+- MambaManager: Mamba 状态管理器
+- CrossAttentionManager: 交叉注意力管理器
+- SinkFullAttentionManager: 带 sink token 的全注意力管理器
+"""
+
 import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -26,9 +44,24 @@ from vllm.v1.request import Request
 
 
 class SingleTypeKVCacheManager(ABC):
-    """
-    An abstract base class for a manager that handle the kv cache management
-    logic of one specific type of attention layer.
+    """单一类型 KV 缓存管理器抽象基类。
+
+    为特定类型的注意力层管理 KV 缓存的抽象基类。
+    不同的注意力类型（如全注意力、滑动窗口、Mamba 等）
+    需要不同的缓存管理策略，此类定义了统一的接口。
+
+    Attributes:
+        block_size: 块大小（token 数量）
+        dcp_world_size: 解码上下文并行世界大小
+        pcp_world_size: 预填充上下文并行世界大小
+        kv_cache_spec: KV 缓存规范
+        block_pool: 块池
+        enable_caching: 是否启用缓存
+        new_block_ids: 新分配的块 ID 列表
+        req_to_blocks: 请求 ID 到块的映射
+        num_cached_block: 每个请求的缓存块数量
+        kv_cache_group_id: KV 缓存组 ID
+        _null_block: 空块（用于填充）
     """
 
     def __init__(
@@ -40,12 +73,15 @@ class SingleTypeKVCacheManager(ABC):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> None:
-        """
-        Initializes the SingleTypeKVCacheManager.
+        """初始化单一类型 KV 缓存管理器。
+
         Args:
-            kv_cache_spec: The kv_cache_spec for this manager.
-            block_pool: The block pool.
-            kv_cache_group_id: The id of the kv cache group of this manager.
+            kv_cache_spec: 此管理器的 kv_cache_spec
+            block_pool: 块池
+            enable_caching: 是否启用缓存
+            kv_cache_group_id: 此管理器所属的 kv 缓存组 ID
+            dcp_world_size: 解码上下文并行世界大小
+            pcp_world_size: 预填充上下文并行世界大小
         """
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
@@ -57,15 +93,13 @@ class SingleTypeKVCacheManager(ABC):
         self.enable_caching = enable_caching
         self.new_block_ids: list[int] = []
 
-        # Mapping from request ID to blocks to track the blocks allocated
-        # for each request, so that we can free the blocks when the request
-        # is finished.
+        # 映射请求 ID 到块，用于跟踪每个请求分配的块，
+        # 以便在请求完成时释放块。
         self.req_to_blocks: defaultdict[str, list[KVCacheBlock]] = defaultdict(list)
 
-        # {req_id: The number of cached blocks for this given request}
-        # This is used to track the number of cached blocks for each request.
-        # This is only used to track the RUNNING requests, we do not track the
-        # data for preempted ones.
+        # {req_id: 该请求的缓存块数量}
+        # 这用于跟踪每个请求的缓存块数量。
+        # 这仅用于跟踪 RUNNING 请求，我们不为被抢占的请求跟踪数据。
         self.num_cached_block: dict[str, int] = {}
 
         self.kv_cache_group_id = kv_cache_group_id
@@ -73,6 +107,14 @@ class SingleTypeKVCacheManager(ABC):
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
+        """获取可驱逐的块数量。
+
+        Args:
+            blocks: 块列表
+
+        Returns:
+            ref_cnt 为 0 且不是 null_block 的块数量
+        """
         return sum(blk.ref_cnt == 0 and not blk.is_null for blk in blocks)
 
     def get_num_blocks_to_allocate(
@@ -83,57 +125,53 @@ class SingleTypeKVCacheManager(ABC):
         total_computed_tokens: int,
         num_tokens_main_model: int,
     ) -> int:
-        """
-        Get the number of blocks needed to be allocated for the request.
+        """获取需要为请求分配的块数量。
 
         Args:
-            request_id: The request ID.
-            num_tokens: The total number of tokens that need a slot (including
-                tokens that are already allocated).
-            new_computed_blocks: The new computed blocks just hitting the
-                prefix caching.
-            total_computed_tokens: Include both local and external computed
-                tokens.
-            num_tokens_main_model: The number of tokens for the main model (aka target
-                model in spec decode). w/o spec decode, it is num_tokens;
-                with spec decode, it is num_tokens - num_lookahead_tokens.
+            request_id: 请求 ID
+            num_tokens: 需要 slot 的 token 总数（包括已分配的 token）
+            new_computed_blocks: 刚命中前缀缓存的新已计算块
+            total_computed_tokens: 包括本地和外部已计算 token
+            num_tokens_main_model: 主模型（即 spec decode 中的 target model）
+                                 的 token 数量。不使用 spec decode 时等于
+                                 num_tokens；使用 spec decode 时等于
+                                 num_tokens - num_lookahead_tokens
 
         Returns:
-            The number of blocks to allocate.
+            需要分配的块数量
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
         num_req_blocks = len(self.req_to_blocks.get(request_id, ()))
 
         if request_id in self.num_cached_block:
-            # Fast-path: a running request won't have any new prefix-cache hits.
+            # 快速路径：运行中的请求不会有新的前缀缓存命中。
             assert len(new_computed_blocks) == 0
-            # NOTE: With speculative decoding, request's blocks may be allocated
-            # for draft tokens which are later rejected. In this case,
-            # num_required_blocks may be smaller than num_req_blocks.
+            # 注意：使用推测解码时，请求的块可能为 draft token 分配，
+            # 这些 token 后来可能被拒绝。在这种情况下，
+            # num_required_blocks 可能小于 num_req_blocks。
             return max(num_required_blocks - num_req_blocks, 0)
 
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
         num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
-        # Number of whole blocks that are skipped by the attention window.
-        # If nothing is skipped, this is 0.
+        # 被注意力窗口跳过的完整块数量。
+        # 如果没有跳过，这是 0。
         num_skipped_blocks = num_skipped_tokens // self.block_size
-        # We need blocks for the non-skipped suffix. If there are still
-        # local-computed blocks inside the window, they contribute to the
-        # required capacity; otherwise, skipped blocks dominate.
+        # 我们需要为非跳过后缀分配块。如果窗口内仍有本地计算块，
+        # 它们贡献所需容量；否则，跳过的块占主导地位。
         num_new_blocks = max(
             num_required_blocks - max(num_skipped_blocks, num_local_computed_blocks),
             0,
         )
 
-        # Among the `new_computed_blocks`, the first `num_skipped_blocks` worth
-        # of blocks are skipped; `num_req_blocks` of those may already be in
-        # `req_to_blocks`, so only skip the remainder from `new_computed_blocks`.
+        在 `new_computed_blocks` 中，前 `num_skipped_blocks` 个块被跳过；
+        `num_req_blocks` 个块可能已经在 `req_to_blocks` 中，
+        所以只从 `new_computed_blocks` 中跳过剩余部分。
         num_skipped_new_computed_blocks = max(0, num_skipped_blocks - num_req_blocks)
 
-        # If a computed block is an eviction candidate (in the free queue and
-        # ref_cnt == 0), it will be removed from the free queue when touched by
-        # the allocated request, so we must count it in the free-capacity check.
+        # 如果一个已计算块是驱逐候选（在空闲队列中且 ref_cnt == 0），
+        # 它将在被分配的请求触摸时从空闲队列中移除，
+        # 所以我们必须在空闲容量检查中计算它。
         num_evictable_blocks = self._get_num_evictable_blocks(
             new_computed_blocks[num_skipped_new_computed_blocks:]
         )
@@ -146,29 +184,28 @@ class SingleTypeKVCacheManager(ABC):
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
     ) -> None:
-        """
-        Add the new computed blocks to the request. This involves three steps:
-        1. Touch the computed blocks to make sure they won't be evicted.
-        1.5. (Optional) For sliding window, skip blocks are padded with null blocks.
-        2. Add the remaining computed blocks.
-        3. (Optional) For KV connectors, allocate new blocks for external computed
-            tokens (if any).
+        """将新计算的块添加到请求。
+
+        这涉及三个步骤：
+        1. 触摸已计算块以确保它们不会被驱逐
+        1.5（可选）对于滑动窗口，用 null_block 填充跳过的块
+        2. 添加剩余的计算块
+        3. （可选）对于 KV connectors，为外部计算的 token 分配新块（如果有）
 
         Args:
-            request_id: The request ID.
-            new_computed_blocks: The new computed blocks just hitting the
-                prefix cache.
-            num_local_computed_tokens: The number of local computed tokens.
-            num_external_computed_tokens: The number of external computed tokens.
+            request_id: 请求 ID
+            new_computed_blocks: 刚命中前缀缓存的新计算块
+            num_local_computed_tokens: 本地已计算 token 数量
+            num_external_computed_tokens: 外部已计算 token 数量
         """
 
         if request_id in self.num_cached_block:
-            # Fast-path: a running request won't have any new prefix-cache hits.
-            # It should not have any new computed blocks.
+            # 快速路径：运行中的请求不会有新的前缀缓存命中。
+            # 它不应该有任何新计算的块。
             assert len(new_computed_blocks) == 0
             return
 
-        # A new request.
+        # 新请求。
         req_blocks = self.req_to_blocks[request_id]
         assert len(req_blocks) == 0
         num_total_computed_tokens = (
@@ -177,34 +214,33 @@ class SingleTypeKVCacheManager(ABC):
         num_skipped_tokens = self.get_num_skipped_tokens(num_total_computed_tokens)
         num_skipped_blocks = num_skipped_tokens // self.block_size
         if num_skipped_blocks > 0:
-            # It is possible that all new computed blocks are skipped when
-            # num_skipped_blocks > len(new_computed_blocks).
+            # 当 num_skipped_blocks > len(new_computed_blocks) 时，
+            # 所有新计算块都可能被跳过。
             new_computed_blocks = new_computed_blocks[num_skipped_blocks:]
-            # Some external computed tokens may be skipped too.
+            # 一些外部计算的 token 也可能被跳过。
             num_external_computed_tokens = min(
                 num_total_computed_tokens - num_skipped_tokens,
                 num_external_computed_tokens,
             )
 
-        # Touch the computed blocks to make sure they won't be evicted.
+        # 触摸已计算块以确保它们不会被驱逐。
         if self.enable_caching:
             self.block_pool.touch(new_computed_blocks)
         else:
             assert not any(new_computed_blocks), (
-                "Computed blocks should be empty when prefix caching is disabled"
+                "当前缀缓存禁用时，已计算块应该为空"
             )
 
-        # Skip blocks are padded with null blocks.
+        # 用 null_block 填充跳过的块。
         req_blocks.extend([self._null_block] * num_skipped_blocks)
-        # Add the remaining computed blocks.
+        # 添加剩余的计算块。
         req_blocks.extend(new_computed_blocks)
-        # All cached hits (including skipped nulls) are already cached; mark
-        # them so cache_blocks() will not try to re-cache blocks that already
-        # have a block_hash set.
+        # 所有缓存命中（包括跳过的 null）都已缓存；标记它们，
+        # 这样 cache_blocks() 不会尝试重新缓存已经设置了 block_hash 的块。
         self.num_cached_block[request_id] = len(req_blocks)
 
         if num_external_computed_tokens > 0:
-            # Allocate new blocks for external computed tokens.
+            # 为外部计算的 token 分配新块。
             allocated_blocks = self.block_pool.get_new_blocks(
                 cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks)
             )
@@ -215,19 +251,18 @@ class SingleTypeKVCacheManager(ABC):
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
-        """
-        Allocate new blocks for the request to give it at least `num_tokens`
-        token slots.
+        """为请求分配新块以提供至少 `num_tokens` 个 token slot。
 
         Args:
-            request_id: The request ID.
-            num_tokens: The total number of tokens that need a slot (including
-                tokens that are already allocated).
-            num_tokens_main_model: The number of tokens for the main model (aka target
-                model in spec decode). w/o spec decode, it is num_tokens;
-                with spec decode, it is num_tokens - num_lookahead_tokens.
+            request_id: 请求 ID
+            num_tokens: 需要 slot 的 token 总数（包括已分配的 token）
+            num_tokens_main_model: 主模型（即 spec decode 中的 target model）
+                                 的 token 数量。不使用 spec decode 时等于
+                                 num_tokens；使用 spec decode 时等于
+                                 num_tokens - num_lookahead_tokens
+
         Returns:
-            The new allocated blocks.
+            新分配的块列表
         """
         req_blocks = self.req_to_blocks[request_id]
         num_required_blocks = cdiv(num_tokens, self.block_size)
@@ -242,19 +277,21 @@ class SingleTypeKVCacheManager(ABC):
             return new_blocks
 
     def take_new_block_ids(self) -> list[int]:
-        """Drain and return block IDs allocated since the last call."""
+        """取出并返回自上次调用以来分配的块 ID。
+
+        Returns:
+            新块 ID 列表
+        """
         ids = self.new_block_ids
         self.new_block_ids = []
         return ids
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
-        """
-        Cache the blocks for the request.
+        """为请求缓存块。
 
         Args:
-            request: The request.
-            num_tokens: The total number of tokens that need to be cached
-                (including tokens that are already cached).
+            request: 请求
+            num_tokens: 需要缓存的 token 总数（包括已缓存的 token）
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
@@ -274,17 +311,15 @@ class SingleTypeKVCacheManager(ABC):
         self.num_cached_block[request.request_id] = num_full_blocks
 
     def free(self, request_id: str) -> None:
-        """
-        Free the blocks for the request.
+        """释放请求的块。
 
         Args:
-            request_id: The request ID.
+            request_id: 请求 ID
         """
-        # Default to [] in case a request is freed (aborted) before alloc.
+        # 默认为 []，以防请求在分配前被释放（中止）。
         req_blocks = self.req_to_blocks.pop(request_id, [])
 
-        # Free blocks in reverse order so that the tail blocks are
-        # freed first.
+        # 按相反顺序释放块，以便尾部块先被释放。
         ordered_blocks = reversed(req_blocks)
 
         self.block_pool.free_blocks(ordered_blocks)
@@ -292,18 +327,14 @@ class SingleTypeKVCacheManager(ABC):
 
     @abstractmethod
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        """
-        Get the number of common prefix blocks for all requests with allocated
-        KV cache.
+        """获取所有分配了 KV 缓存的请求的公共前缀块数量。
 
         Args:
-            running_request_id: The request ID.
+            running_request_id: 请求 ID
 
         Returns:
-            The number of common prefix blocks for all requests with allocated
-            KV cache.
+            所有分配了 KV 缓存的请求的公共前缀块数量
         """
-
         raise NotImplementedError
 
     @classmethod
@@ -320,103 +351,101 @@ class SingleTypeKVCacheManager(ABC):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
-        """
-        Get the longest cache hit prefix of the blocks that is not longer than
-        `max_length`. The prefix should be a common prefix hit for all the
-        kv cache groups in `kv_cache_group_ids`. If no cache hit is found,
-        return an empty list.
-        If eagle is enabled, drop the last matched block to force recompute the
-        last block to get the required hidden states for eagle drafting head.
-        Need to be customized for each attention type.
+        """获取不超过 `max_length` 的最长缓存命中前缀块。
+
+        此前缀应该是 `kv_cache_group_ids` 中所有 kv 缓存组的公共前缀命中。
+        如果没有找到缓存命中，返回空列表。
+        如果启用了 eagle，删除最后一个匹配的块以强制重新计算最后一个块，
+        从而获得 eagle 预测头所需的隐藏状态。
+        需要为每种注意力类型定制实现。
 
         Args:
-            block_hashes: The block hashes of the request.
-            max_length: The maximum length of the cache hit prefix.
-            kv_cache_group_ids: The ids of the kv cache groups.
-            block_pool: The block pool.
-            kv_cache_spec: The kv cache spec.
-            use_eagle: Whether to use eagle.
-            alignment_tokens: The returned cache hit length (in tokens) should
-                be a multiple of this value (in tokens). By default, it should
-                be set to the block_size.
-            dcp_world_size: The world size of decode context parallelism.
-            pcp_world_size: The world size of prefill context parallelism.
+            block_hashes: 请求的块哈希
+            max_length: 缓存命中前缀的最大长度
+            kv_cache_group_ids: kv 缓存组 ID 列表
+            block_pool: 块池
+            kv_cache_spec: kv 缓存规范
+            use_eagle: 是否使用 eagle
+            alignment_tokens: 返回的缓存命中长度（以 token 为单位）应该是
+                           此值（以 token 为单位）的倍数。默认情况下，
+                           它应该设置为 block_size
+            dcp_world_size: 解码上下文并行的世界大小
+            pcp_world_size: 预填充上下文并行的世界大小
 
         Returns:
-            A list of cached blocks with skipped blocks replaced by null block
-            for each kv cache group in `kv_cache_group_ids`.
-            Return a list of length `len(kv_cache_group_ids)`, where the i-th
-            element is a list of cached blocks for the i-th kv cache group
-            in `kv_cache_group_ids`.
-            For example, sliding window manager should return a list like
-            ([NULL, NULL, KVCacheBlock(7), KVCacheBlock(8)]) for block size 4
-            and sliding window 8 and len(kv_cache_group_ids) = 1.
+            每个 kv 缓存组的已缓存块列表，跳过的块被替换为 null_block。
+            返回长度为 `len(kv_cache_group_ids)` 的列表，其中第 i 个元素
+            是 `kv_cache_group_ids` 中第 i 个 kv 缓存组的已缓存块列表。
+            例如，滑动窗口管理器应该返回一个列表，如
+            ([NULL, NULL, KVCacheBlock(7), KVCacheBlock(8)])，
+            块大小为 4，滑动窗口为 8，len(kv_cache_group_ids) = 1。
         """
-
         raise NotImplementedError
 
     def remove_skipped_blocks(
         self, request_id: str, total_computed_tokens: int
     ) -> None:
-        """
-        Remove and free the blocks that are no longer needed for attention computation.
-        The removed blocks should be replaced by null_block.
+        """移除不再需要注意力计算的块并释放它们。
+        被移除的块应该被 null_block 替换。
 
-        This function depends on `get_num_skipped_tokens`, which need to be implemented
-        differently for each attention type.
+        此函数依赖于 `get_num_skipped_tokens`，需要为每种注意力类型
+        分别实现。
 
         Args:
-            request_id: The request ID.
-            total_computed_tokens: The total number of computed tokens, including
-                local computed tokens and external computed tokens.
+            request_id: 请求 ID
+            total_computed_tokens: 已计算 token 总数，包括
+                                本地已计算 token 和外部已计算 token
         """
-        # Remove the blocks that will be skipped during attention computation.
+        # 移除在注意力计算期间将被跳过的块。
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
         if num_skipped_tokens <= 0:
-            # This indicates that ALL tokens are inside attention window.
-            # Thus we do not need to free any blocks outside attention window.
-            # A typical case is full attention that we never free any token
-            # before the request is finished.
+            # 这表示所有 token 都在注意力窗口内。
+            # 因此我们不需要释放注意力窗口外的任何块。
+            # 典型情况是全注意力，我们在请求完成前不释放任何 token。
             return
         blocks = self.req_to_blocks[request_id]
         num_skipped_blocks = num_skipped_tokens // self.block_size
-        # `num_skipped_tokens` may include tokens that haven't been allocated yet
-        # (e.g., when the attention window moves into the external computed tokens
-        # range), so we must cap to the number of blocks that currently exist for
-        # this request.
+        # `num_skipped_tokens` 可能包括尚未分配的 token（例如，当注意力窗口
+        # 移动到外部计算的 token 范围内时），所以我们必须限制为
+        # 此请求当前存在的块数量。
         num_skipped_blocks = min(num_skipped_blocks, len(blocks))
         removed_blocks: list[KVCacheBlock] = []
-        # Because the block starts from index 0, the num_skipped_block-th block
-        # corresponds to index num_skipped_blocks - 1.
+        # 因为块从索引 0 开始，第 num_skipped_block 个块对应索引
+        # num_skipped_blocks - 1。
         for i in range(num_skipped_blocks - 1, -1, -1):
             if blocks[i] == self._null_block:
-                # If the block is already a null block, the blocks before it
-                # should also have been set to null blocks by the previous calls
-                # to this function.
+                # 如果块已经是 null_block，它之前的块也应该已经被
+                # 之前的调用设置为 null_block。
                 break
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
         self.block_pool.free_blocks(removed_blocks)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
-        """
-        Get the number of tokens that will be skipped for attention computation.
+        """获取将被跳过注意力计算的 token 数量。
 
         Args:
-            num_computed_tokens: The number of tokens that have been computed.
+            num_computed_tokens: 已计算的 token 数量
 
         Returns:
-            The number of tokens that will be skipped for attention computation.
+            将被跳过注意力计算的 token 数量
         """
-        # The default behavior is to not skip any tokens.
+        # 默认行为是不跳过任何 token。
         return 0
 
     def new_step_starts(self) -> None:
-        # do nothing by default
+        """新 step 开始时的回调（默认不执行任何操作）。"""
+        # 默认不执行任何操作
         return None
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
+    """全注意力 KV 缓存管理器。
+
+    用于全注意力层和分块局部注意力层的缓存管理。
+    实现简单的前缀缓存查找逻辑。
+    """
+
     @classmethod
     def find_longest_cache_hit(
         cls,
@@ -430,11 +459,28 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
+        """查找最长缓存命中前缀。
+
+        对于全注意力，从左到右遍历块哈希，找到连续的缓存命中前缀。
+
+        Args:
+            block_hashes: 请求的块哈希
+            max_length: 缓存命中前缀的最大长度
+            kv_cache_group_ids: kv 缓存组 ID 列表
+            block_pool: 块池
+            kv_cache_spec: kv 缓存规范
+            use_eagle: 是否使用 eagle
+            alignment_tokens: 对齐 token 数量
+            dcp_world_size: 解码上下文并行的世界大小
+            pcp_world_size: 预填充上下文并行的世界大小
+
+        Returns:
+            每个 kv 缓存组的已缓存块列表
+        """
         assert isinstance(
             kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
         ), (
-            "FullAttentionManager can only be used for full attention "
-            "and chunked local attention groups"
+            "FullAttentionManager 只能用于全注意力和分块局部注意力组"
         )
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids))
@@ -444,9 +490,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             block_size *= dcp_world_size * pcp_world_size
         max_num_blocks = max_length // block_size
         for block_hash in itertools.islice(block_hashes, max_num_blocks):
-            # block_hashes is a chain of block hashes. If a block hash is not
-            # in the cached_block_hash_to_id, the following block hashes are
-            # not computed yet for sure.
+            # block_hashes 是一条块哈希链。如果一个块哈希不在
+            # cached_block_hash_to_id 中，后续的块哈希肯定还没有计算。
             if cached_block := block_pool.get_cached_block(
                 block_hash, kv_cache_group_ids
             ):
@@ -455,11 +500,11 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             else:
                 break
         if use_eagle and computed_blocks[0]:
-            # Need to drop the last matched block if eagle is enabled.
+            # 如果启用了 eagle，需要删除最后一个匹配的块。
             for computed in computed_blocks:
                 computed.pop()
         while (
-            block_size != alignment_tokens  # Faster for common case.
+            block_size != alignment_tokens  # 常见情况的优化
             and len(computed_blocks[0]) * block_size % alignment_tokens != 0
         ):
             for computed in computed_blocks:
@@ -467,6 +512,16 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         return computed_blocks
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+        """获取公共前缀块数量。
+
+        遍历请求的块，统计 ref_cnt 等于请求总数的连续块数量。
+
+        Args:
+            running_request_id: 运行中请求的 ID
+
+        Returns:
+            公共前缀块数量
+        """
         blocks = self.req_to_blocks[running_request_id]
         num_common_blocks = 0
         for block in blocks:
@@ -478,7 +533,22 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
+    """滑动窗口 KV 缓存管理器。
+
+    用于滑动窗口注意力层的缓存管理。
+    实现了特殊的缓存查找逻辑，从右向左搜索以找到最长的连续缓存命中。
+
+    Attributes:
+        sliding_window: 滑动窗口大小
+    """
+
     def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
+        """初始化滑动窗口管理器。
+
+        Args:
+            kv_cache_spec: 滑动窗口 kv 缓存规范
+            **kwargs: 传递给父类的其他参数
+        """
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
 
@@ -495,29 +565,47 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
-        assert isinstance(kv_cache_spec, SlidingWindowSpec), (
-            "SlidingWindowManager can only be used for sliding window groups"
-        )
-        assert dcp_world_size == 1, "DCP not support sliding window attn now."
-        assert pcp_world_size == 1, "PCP not support sliding window attn now."
+        """查找滑动窗口的最长缓存命中前缀。
 
-        # The number of contiguous blocks needed for prefix cache hit.
-        # -1 since the input token itself is also included in the window
+        从右向左搜索，找到最长的连续缓存命中。
+        滑动窗口需要连续的缓存命中才能有效。
+
+        Args:
+            block_hashes: 请求的块哈希
+            max_length: 缓存命中前缀的最大长度
+            kv_cache_group_ids: kv 缓存组 ID 列表
+            block_pool: 块池
+            kv_cache_spec: kv 缓存规范
+            use_eagle: 是否使用 eagle
+            alignment_tokens: 对齐 token 数量
+            dcp_world_size: 解码上下文并行的世界大小
+            pcp_world_size: 预填充上下文并行的世界大小
+
+        Returns:
+            每个 kv 缓存组的已缓存块列表，窗口外的块用 null_block 填充
+        """
+        assert isinstance(kv_cache_spec, SlidingWindowSpec), (
+            "SlidingWindowManager 只能用于滑动窗口组"
+        )
+        assert dcp_world_size == 1, "DCP 目前不支持滑动窗口注意力"
+        assert pcp_world_size == 1, "PCP 目前不支持滑动窗口注意力"
+
+        # 前缀缓存命中所需的连续块数量。
+        # -1 是因为输入 token 本身也包含在窗口内
         sliding_window_contiguous_blocks = cdiv(
             kv_cache_spec.sliding_window - 1, kv_cache_spec.block_size
         )
         if use_eagle:
-            # Need to drop the last matched block if eagle is enabled. For
-            # sliding window layer, we achieve this by increasing the number of
-            # contiguous blocks needed for prefix cache hit by one and dropping
-            # the last matched block.
+            # 如果启用了 eagle，需要删除最后一个匹配的块。
+            # 对于滑动窗口层，我们通过将前缀缓存命中所需的连续块数量
+            # 增加 1 并删除最后一个匹配的块来实现。
             sliding_window_contiguous_blocks += 1
 
-        # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # optimize the time complexity from O(max_num_blocks) to
+        # TODO: 当缓存未命中时减少 i 滑动 sliding_window_contiguous_blocks，
+        # 将时间复杂度从 O(max_num_blocks) 优化到
         # O(max_num_blocks / sliding_window_contiguous_blocks +
-        # sliding_window_contiguous_blocks),
-        # which is good for low cache hit rate scenarios.
+        # sliding_window_contiguous_blocks)，
+        # 这对低缓存命中率场景有益。
         max_num_blocks = max_length // kv_cache_spec.block_size
         computed_blocks = tuple(
             [block_pool.null_block] * max_num_blocks
@@ -526,27 +614,26 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         block_size = kv_cache_spec.block_size
         num_contiguous_blocks = 0
         match_found = False
-        # Search from right to left and early stop when a match is found.
+        # 从右向左搜索，找到匹配后提前停止。
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
                 block_hashes[i], kv_cache_group_ids
             ):
-                # Skip prefix matching check if the block is not aligned with
-                # `alignment_tokens`.
+                # 如果块与 `alignment_tokens` 不对齐，跳过前缀匹配检查。
                 if (
                     num_contiguous_blocks == 0
-                    and block_size != alignment_tokens  # Faster for common case.
+                    and block_size != alignment_tokens  # 常见情况的优化
                     and (i + 1) * block_size % alignment_tokens != 0
                 ):
                     continue
-                # Add the cached block to the computed blocks.
+                # 将已缓存块添加到已计算块中。
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed[i] = cached
                 num_contiguous_blocks += 1
                 if num_contiguous_blocks >= sliding_window_contiguous_blocks:
-                    # Trim the trailing blocks.
-                    # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
-                    # when sliding_window_contiguous_blocks=2.
+                    # 删除尾部块。
+                    # 例如，[NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
+                    # 当 sliding_window_contiguous_blocks=2 时。
                     for computed in computed_blocks:
                         del computed[i + num_contiguous_blocks :]
                     match_found = True
@@ -554,64 +641,82 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             else:
                 num_contiguous_blocks = 0
         if not match_found:
-            # The first `num_contiguous_blocks` is a cache hit even if
-            # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
+            # 即使 `num_contiguous_blocks < sliding_window_contiguous_blocks`，
+            # 前 `num_contiguous_blocks` 个也是缓存命中。
             for computed in computed_blocks:
                 del computed[num_contiguous_blocks:]
             while (
-                block_size != alignment_tokens  # Faster for common case.
+                block_size != alignment_tokens  # 常见情况的优化
                 and len(computed_blocks[0]) * block_size % alignment_tokens != 0
             ):
                 for computed in computed_blocks:
                     computed.pop()
         if use_eagle and computed_blocks[0]:
             assert kv_cache_spec.block_size == alignment_tokens, (
-                "aligned_length is not compatible with eagle now"
+                "aligned_length 目前与 eagle 不兼容"
             )
             for computed in computed_blocks:
                 computed.pop()
         return computed_blocks
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
-        """
-        Get the number of tokens that will be skipped for attention computation.
+        """获取将被跳过注意力计算的 token 数量。
 
-        For sliding window, this corresponds to the tokens that are prior to
-        the current sliding window.
+        对于滑动窗口，这对应于当前滑动窗口之前的 token。
 
-        Example:
+        示例：
         sliding_window=4, num_computed_tokens=7
 
         Tokens:   [ 0  1  2  3  4  5  6  7 ]
                   | ---- computed -----|
-                                         ^ next token to be computed
-                               |-----------| sliding window for next token
+                                         ^ 下一个要计算的 token
+                               |-----------| 下一个 token 的滑动窗口
                   |--skipped---|
 
-        The current window contains tokens 4~7. Tokens 0~3 will be skipped for
-        attention computation since they are outside the sliding window.
-        Thus, get_num_skipped_tokens(7) == 4.
+        当前窗口包含 token 4~7。Token 0~3 将被跳过注意力计算，
+        因为它们在滑动窗口外。因此，get_num_skipped_tokens(7) == 4。
 
         Args:
-            num_computed_tokens: The number of tokens that have been computed.
+            num_computed_tokens: 已计算的 token 数量
 
         Returns:
-            The number of tokens that will be skipped for attention computation.
+            将被跳过注意力计算的 token 数量
         """
         return max(0, num_computed_tokens - self.sliding_window + 1)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        """
-        NOTE(Chen): The prefix blocks are null blocks for sliding window layers.
-        So it's not correct to count ref_cnt like FullAttentionManager. Return
-        0 here for correctness. Need to support cascade attention + sliding
-        window in the future.
+        """获取公共前缀块数量。
+
+        注意 (Chen): 对于滑动窗口层，前缀块是 null_block。
+        所以像 FullAttentionManager 那样计算 ref_cnt 是不正确的。
+        这里返回 0 以保证正确性。需要在未来支持级联注意力 + 滑动窗口。
+
+        Args:
+            running_request_id: 运行中请求的 ID
+
+        Returns:
+            0（滑动窗口不支持公共前缀块）
         """
         return 0
 
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
+    """分块局部注意力 KV 缓存管理器。
+
+    用于分块局部注意力层的缓存管理。
+    只有当前分块内的 token 需要注意力计算，之前的分块用 null_block 标记。
+
+    Attributes:
+        attention_chunk_size: 注意力分块大小
+    """
+
     def __init__(self, kv_cache_spec: ChunkedLocalAttentionSpec, **kwargs) -> None:
+        """初始化分块局部注意力管理器。
+
+        Args:
+            kv_cache_spec: 分块局部注意力 kv 缓存规范
+            **kwargs: 传递给父类的其他参数
+        """
         super().__init__(kv_cache_spec, **kwargs)
         self.attention_chunk_size = kv_cache_spec.attention_chunk_size
 
@@ -628,53 +733,51 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
-        """
-        For chunked local attention, we need to find the longest cache hit
-        prefix of the blocks that is not longer than `max_length`. The prefix
-        should be a common prefix hit for all the kv cache groups in
-        `kv_cache_group_ids`. If no cache hit is found, return an empty list.
-        note we mark as computed if the whole block is outside of the local
-        window, and set the block as null. Examples:
+        """查找分块局部注意力的最长缓存命中前缀。
 
-        1. Attention chunk size of 8, block size of 4, max length of 15
-        for next token at 15th (zero-indexed), 8th - 14th tokens are in
-        the window(needs lookup), 0th - 7th are not in the window,
-        so they are already marked as computed. We check the complete
-        block3 (8th - 11th tokens), Assume block 3 is hit, we will return
-        [null, null, block 3], otherwise, we return [null, null]
+        对于分块局部注意力，我们需要找到不超过 `max_length` 的最长缓存命中前缀。
+        此前缀应该是 `kv_cache_group_ids` 中所有 kv 缓存组的公共前缀命中。
+        如果没有找到缓存命中，返回空列表。
+        注意：如果整个块在局部窗口外，我们将其标记为已计算，并将块设置为 null。
 
-        2. Attention chunk size of 8, block size of 4, max length of 16
-        for next token at 16th (zero-indexed), 0th - 15th tokens are not
-        in the window, so they are already marked as computed.
-        we return 4 blocks[null, null, null, null]
+        示例：
+
+        1. 注意力分块大小为 8，块大小为 4，最大长度为 15
+           对于第 15 个 token（从 0 开始索引），第 8-14 个 token 在窗口内（需要查找），
+           第 0-7 个 token 不在窗口内，所以它们已经被标记为已计算。
+           我们检查完整的 block3（第 8-11 个 token），假设 block 3 命中，
+           我们将返回 [null, null, block 3]，否则返回 [null, null]
+
+        2. 注意力分块大小为 8，块大小为 4，最大长度为 16
+           对于第 16 个 token（从 0 开始索引），第 0-15 个 token 不在窗口内，
+           所以它们已经被标记为已计算。
+           我们返回 4 个块 [null, null, null, null]
 
         Args:
-            block_hashes: The block hashes of the request.
-            max_length: The maximum length of the cache hit prefix.
-            kv_cache_group_ids: The ids of the kv cache groups.
-            block_pool: The block pool.
-            kv_cache_spec: The kv cache spec.
-            use_eagle: Whether to use eagle.
-            dcp_world_size: The world size of decode context parallelism.
-            pcp_world_size: The world size of prefill context parallelism.
-            alignment_tokens: The returned cache hit length (in tokens) should
-                be a multiple of this value (in tokens).
+            block_hashes: 请求的块哈希
+            max_length: 缓存命中前缀的最大长度
+            kv_cache_group_ids: kv 缓存组 ID 列表
+            block_pool: 块池
+            kv_cache_spec: kv 缓存规范
+            use_eagle: 是否使用 eagle
+            alignment_tokens: 返回的缓存命中长度（以 token 为单位）应该是
+                           此值（以 token 为单位）的倍数
+            dcp_world_size: 解码上下文并行的世界大小
+            pcp_world_size: 预填充上下文并行的世界大小
 
         Returns:
-            A list of cached blocks
+            已缓存块列表
         """
         assert isinstance(kv_cache_spec, ChunkedLocalAttentionSpec), (
-            "ChunkedLocalAttentionManager can only be used for "
-            "chunked local attention groups"
+            "ChunkedLocalAttentionManager 只能用于分块局部注意力组"
         )
         assert use_eagle is False, (
-            "Hybrid KV cache is not supported for " + "eagle + chunked local attention."
+            "混合 KV 缓存不支持 eagle + 分块局部注意力"
         )
-        assert dcp_world_size == 1, "DCP not support chunked local attn now."
-        assert pcp_world_size == 1, "PCP not support chunked local attn now."
+        assert dcp_world_size == 1, "DCP 目前不支持分块局部注意力"
+        assert pcp_world_size == 1, "PCP 目前不支持分块局部注意力"
         assert kv_cache_spec.block_size == alignment_tokens, (
-            "KV cache groups with different block sizes are not compatible with "
-            "chunked local attention now"
+            "具有不同块大小的 KV 缓存组目前与分块局部注意力不兼容"
         )
         max_num_blocks = max_length // kv_cache_spec.block_size
         if max_length > 0:
@@ -685,10 +788,10 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             )
         else:
             local_attention_start_idx = 0
-        # we marked blocks out of window as computed
-        # with null blocks, and blocks inside window based on cache lookup
-        # result [null] [null] ... [null] [hit block 1 (1st block contain
-        # last window)] [hit block 2] ... [hit block x]
+        # 我们将窗口外的块标记为已计算，使用 null_block，
+        # 并根据缓存查找结果标记窗口内的块
+        # [null] [null] ... [null] [hit block 1 (包含最后窗口的第一个块)]
+        # [hit block 2] ... [hit block x]
         local_attention_start_block_idx = (
             local_attention_start_idx // kv_cache_spec.block_size
         )
@@ -708,45 +811,42 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         return computed_blocks
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
-        """
-        Get the number of tokens that will be skipped for attention computation.
+        """获取将被跳过注意力计算的 token 数量。
 
-        For chunked local attention, this corresponds to the tokens that are on
-        the left side of the current chunk.
+        对于分块局部注意力，这对应于当前分块左侧的 token。
 
-        Example 1:
+        示例 1：
         chunk size = 8, num_computed_tokens = 13
         Tokens:  [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
                  | ----- computed ---------------|
-                                                  ^^ next token to be computed
-                                   |----------------| <-- attention window for
-                                                          next token
+                                                  ^^ 下一个要计算的 token
+                                   |----------------| <-- 下一个 token 的注意力窗口
                  |--- skipped -----|
-        Output: get_num_skipped_tokens(13) == 8
+        输出：get_num_skipped_tokens(13) == 8
 
-        Example 2:
+        示例 2：
         chunk size = 8, num_computed_tokens = 8
         Tokens:  [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
                  | --- computed ---|
-                                     ^ next token to be computed
-                                   |--| <-- attention window for next token
+                                     ^ 下一个要计算的 token
+                                   |--| <-- 下一个 token 的注意力窗口
                  | --- skipped ----|
-        Output: get_num_skipped_tokens(8) == 8
+        输出：get_num_skipped_tokens(8) == 8
 
-        Example 3:
+        示例 3：
         chunk size = 8, num_computed_tokens = 7
         Tokens:  [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
                  |---computed---|
-                                 ^ next token to be computed
-                 |-----------------| <-- attention window for next token
-                 no token should be skipped.
-        Output: get_num_skipped_tokens(7) == 0
+                                 ^ 下一个要计算的 token
+                 |-----------------| <-- 下一个 token 的注意力窗口
+                 没有 token 应该被跳过。
+        输出：get_num_skipped_tokens(7) == 0
 
         Args:
-            num_computed_tokens: The number of tokens that have been computed.
+            num_computed_tokens: 已计算的 token 数量
 
         Returns:
-            The number of tokens that will be skipped for attention computation.
+            将被跳过注意力计算的 token 数量
         """
         num_skipped_tokens = (
             num_computed_tokens // self.attention_chunk_size
@@ -754,25 +854,51 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         return num_skipped_tokens
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        """
-        cascade attention is not supported by chunked local attention.
+        """获取公共前缀块数量。
+
+        分块局部注意力不支持级联注意力。
+
+        Args:
+            running_request_id: 运行中请求的 ID
+
+        Returns:
+            0（分块局部注意力不支持公共前缀块）
         """
         return 0
 
 
 class MambaManager(SingleTypeKVCacheManager):
+    """Mamba KV 缓存管理器。
+
+    用于 Mamba 层（线性注意力/状态空间模型）的缓存管理。
+    实现了特殊的缓存逻辑，因为 Mamba 只需要保留最后一个计算 token 的状态。
+
+    Attributes:
+        cached_blocks_this_step: 当前 step 中缓存的块哈希集合
+        mamba_cache_mode: Mamba 缓存模式
+        num_speculative_blocks: 推测解码所需的额外块数量
+        last_state_block_idx: 每个请求的上一步分配的块索引（align 模式）
+        _allocated_block_reqs: 已分配块的请求集合（align 模式）
+    """
+
     def __init__(
         self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
     ) -> None:
+        """初始化 Mamba 管理器。
+
+        Args:
+            kv_cache_spec: Mamba kv 缓存规范
+            block_pool: 块池
+            **kwargs: 传递给父类的其他参数
+        """
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
         if self.mamba_cache_mode == "align":
-            # Mapping from request ID to the index of the block
-            # allocated in the previous step
+            # 映射请求 ID 到上一步分配的块索引
             self.last_state_block_idx: dict[str, int] = {}
-            # The set of the requests that have been allocated blocks
+            # 已分配块的请求集合
             self._allocated_block_reqs: set[str] = set()
 
     @classmethod
@@ -788,61 +914,86 @@ class MambaManager(SingleTypeKVCacheManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
+        """查找 Mamba 的最长缓存命中前缀。
+
+        从右向左搜索，找到最后一个匹配的块（Mamba 只需要最后一个状态）。
+
+        Args:
+            block_hashes: 请求的块哈希
+            max_length: 缓存命中前缀的最大长度
+            kv_cache_group_ids: kv 缓存组 ID 列表
+            block_pool: 块池
+            kv_cache_spec: kv 缓存规范
+            use_eagle: 是否使用 eagle
+            alignment_tokens: 对齐 token 数量
+            dcp_world_size: 解码上下文并行的世界大小
+            pcp_world_size: 预填充上下文并行的世界大小
+
+        Returns:
+            每个 kv 缓存组的已缓存块列表
+        """
         assert isinstance(kv_cache_spec, MambaSpec), (
-            "MambaManager can only be used for mamba groups"
+            "MambaManager 只能用于 Mamba 组"
         )
-        assert dcp_world_size == 1, "DCP not support mamba now."
-        assert pcp_world_size == 1, "PCP not support mamba now."
+        assert dcp_world_size == 1, "DCP 目前不支持 Mamba"
+        assert pcp_world_size == 1, "PCP 目前不支持 Mamba"
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids))
         )
 
         block_size = kv_cache_spec.block_size
         max_num_blocks = max_length // block_size
-        # Search from right to left and early stop when a match is found.
+        # 从右向左搜索，找到匹配后提前停止。
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
                 block_hashes[i], kv_cache_group_ids
             ):
-                # When enable Mamba prefix caching, `block_size` will be aligned
-                # across full attention layers and Mamba layers to ensure the
-                # prefix hit length aligned at block
+                # 当启用 Mamba 前缀缓存时，`block_size` 将在全注意力层和
+                # Mamba 层之间对齐，以确保前缀命中长度在块边界对齐
                 if (
-                    block_size != alignment_tokens  # Faster for common case.
+                    block_size != alignment_tokens  # 常见情况的优化
                     and (i + 1) * block_size % alignment_tokens != 0
                 ):
                     continue
                 for computed, cached in zip(computed_blocks, cached_block):
-                    # the hit length logic later assumes:
-                    #  hit_length = len(hit_blocks_other_attn[0])
-                    #               * self.other_block_size
-                    # so we insert dummy blocks at the beginning:
+                    # 命中长度逻辑后续假设：
+                    #   hit_length = len(hit_blocks_other_attn[0])
+                    #                * self.other_block_size
+                    # 所以我们在开头插入 dummy 块：
                     computed.extend([block_pool.null_block] * i)
                     computed.append(cached)
-                break  # we just need the last match - early stopping
+                break  # 我们只需要最后一个匹配 - 提前停止
 
         return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
+        """移除并释放不再需要的 Mamba 状态块。
+
+        注意 (tdoublep) 使用异步调度时，num_computed_tokens 可能包含
+        上一步的 draft token，这些 token 可能后来被拒绝。
+        这可能会让我们认为我们实际上比实际更靠后，
+        所以让我们假设所有 token 都被拒绝，以免释放我们实际需要的块。
+
+        Args:
+            request_id: 请求 ID
+            num_computed_tokens: 已计算 token 数量
+        """
         assert isinstance(self.kv_cache_spec, MambaSpec)
 
-        # NOTE (tdoublep) with async scheduling, the num_computed_tokens can contain
-        # draft tokens from the previous step that may or may not be rejected later.
-        # This can make us think we are further ahead in the sequence than we actually
-        # are, so let's assume that all tokens are rejected so we don't free blocks
-        # that we might actually need.
+        # 注意 (tdoublep) 使用异步调度时，num_computed_tokens 可能包含
+        # 上一步的 draft token，这些 token 可能后来被拒绝。
+        # 这可能会让我们认为我们实际上比实际更靠后，
+        # 所以让我们假设所有 token 都被拒绝，以免释放我们实际需要的块。
         num_computed_tokens = max(0, num_computed_tokens - self.num_speculative_blocks)
 
         super().remove_skipped_blocks(request_id, num_computed_tokens)
         if self.mamba_cache_mode == "align":
-            # `last_state_block_idx` refers to the block index allocated two steps ago.
-            # The block allocated in the previous step is used to copy Mamba states
-            # into the block allocated in the current step; the earlier block is
-            # no longer needed and should be freed here.
+            # `last_state_block_idx` 指的是两步前分配的块索引。
+            # 上一步分配的块用于将 Mamba 状态复制到当前步骤分配的块中；
+            # 更早的块不再需要，应该在这里释放。
             last_state_block_idx = self.last_state_block_idx.get(request_id)
-            # Blocks allocated during prefill may be non-contiguous. Use
-            # `last_state_block_idx` to free the appropriate block and replace it
-            # with a null block.
+            # 预填充期间分配的块可能是非连续的。使用
+            # `last_state_block_idx` 来释放适当的块并将其替换为 null_block。
             if (
                 last_state_block_idx is not None
                 and last_state_block_idx
@@ -854,8 +1005,15 @@ class MambaManager(SingleTypeKVCacheManager):
                     blocks[last_state_block_idx] = self._null_block
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        """
-        cascade attention is not supported by mamba
+        """获取公共前缀块数量。
+
+        Mamba 不支持级联注意力。
+
+        Args:
+            running_request_id: 运行中请求的 ID
+
+        Returns:
+            0（Mamba 不支持公共前缀块）
         """
         return 0
 
@@ -867,19 +1025,31 @@ class MambaManager(SingleTypeKVCacheManager):
         total_computed_tokens: int,
         num_tokens_main_model: int,
     ) -> int:
+        """获取需要为 Mamba 请求分配的块数量。
+
+        Args:
+            request_id: 请求 ID
+            num_tokens: 需要 slot 的 token 总数
+            new_computed_blocks: 新计算的块
+            total_computed_tokens: 总已计算 token 数量
+            num_tokens_main_model: 主模型的 token 数量
+
+        Returns:
+            需要分配的块数量
+        """
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if (
             len(new_computed_blocks) > 0
             and new_computed_blocks[-1].block_hash in self.cached_blocks_this_step
         ):
-            # Mamba can't rely on blocks generated by other requests in the current step
-            # To put it in the next step, we return num_gpu_blocks + 1 so
-            # that kv_cache_manager will think there is no enough blocks to allocate now
-            # and don't schedule it in the current step.
+            # Mamba 不能依赖当前 step 中其他请求生成的块
+            # 为了推迟到下一步，我们返回 num_gpu_blocks + 1，
+            # 这样 kv_cache_manager 会认为现在没有足够的块可分配，
+            # 而不会在当前 step 中调度它。
             return self.block_pool.num_gpu_blocks + 1
         if self.mamba_cache_mode != "align":
-            # Allocate extra `num_speculative_blocks` blocks for
-            # speculative decoding (MTP/EAGLE) with linear attention.
+            # 为线性注意力的推测解码（MTP/EAGLE）分配额外的
+            # `num_speculative_blocks` 个块。
             if self.num_speculative_blocks > 0:
                 num_tokens += (
                     self.kv_cache_spec.block_size * self.num_speculative_blocks
@@ -892,15 +1062,15 @@ class MambaManager(SingleTypeKVCacheManager):
                 num_tokens_main_model,
             )
         else:
-            # We don't allocate blocks for lookahead tokens in align mode, because if
-            # x * block_size tokens are scheduled, num_tokens is
-            # x * block_size + num_lookahead_tokens and breaks the alignment.
-            # We can ignore lookahead tokens because current draft models don't have
-            # mamba layers.
+            # 在 align 模式下，我们不为 lookahead token 分配块，因为如果
+            # x * block_size 个 token 被调度，num_tokens 是
+            # x * block_size + num_lookahead_tokens，这会破坏对齐。
+            # 我们可以忽略 lookahead token，因为当前的 draft 模型没有
+            # mamba 层。
             num_tokens = num_tokens_main_model
 
-            # NOTE(tdouble): this is an over-estimate of how many blocks we need because
-            # num_tokens can include draft tokens that will later be rejected.
+            # 注意 (tdouble): 这高估了我们需要的块数量，因为
+            # num_tokens 可能包含后来被拒绝的 draft token。
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
@@ -911,12 +1081,11 @@ class MambaManager(SingleTypeKVCacheManager):
             )
             if num_new_blocks > 0:
                 if request_id in self._allocated_block_reqs:
-                    # Old request. Needs at most 1 more blocks as we can reuse the
-                    # speculative blocks in previous step.
+                    # 旧请求。最多需要 1 个额外的块，因为我们可以重用
+                    # 上一步的推测块。
                     num_new_blocks = 1
                 else:
-                    # First prefill. Allocate 1 block for running state and the
-                    # speculative blocks.
+                    # 第一次预填充。分配 1 个块用于运行状态和推测块。
                     num_new_blocks = 1 + self.num_speculative_blocks
 
             num_evictable_computed_blocks = self._get_num_evictable_blocks(
@@ -927,25 +1096,35 @@ class MambaManager(SingleTypeKVCacheManager):
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
+        """为 Mamba 请求分配新块。
+
+        Args:
+            request_id: 请求 ID
+            num_tokens: 需要 slot 的 token 总数
+            num_tokens_main_model: 主模型的 token 数量
+
+        Returns:
+            新分配的块列表
+        """
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.mamba_cache_mode != "align":
-            # Allocate extra `num_speculative_blocks` blocks for
-            # speculative decoding (MTP/EAGLE) with linear attention.
+            # 为线性注意力的推测解码（MTP/EAGLE）分配额外的
+            # `num_speculative_blocks` 个块。
             if self.num_speculative_blocks > 0:
                 num_tokens += self.block_size * self.num_speculative_blocks
             return super().allocate_new_blocks(
                 request_id, num_tokens, num_tokens_main_model
             )
         else:
-            # We don't allocate blocks for lookahead tokens in align mode, because if
-            # x * block_size tokens are scheduled, num_tokens is
-            # x * block_size + num_lookahead_tokens and breaks the alignment.
-            # We can ignore lookahead tokens because current draft models don't have
-            # mamba layers.
+            # 在 align 模式下，我们不为 lookahead token 分配块，因为如果
+            # x * block_size 个 token 被调度，num_tokens 是
+            # x * block_size + num_lookahead_tokens，这会破坏对齐。
+            # 我们可以忽略 lookahead token，因为当前的 draft 模型没有
+            # mamba 层。
             num_tokens = num_tokens_main_model
             req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
-            # NOTE(tdouble): this is an over-estimate of how many blocks we need because
-            # num_tokens can include draft tokens that will later be rejected.
+            # 注意 (tdouble): 这高估了我们需要的块数量，因为
+            # num_tokens 可能包含后来被拒绝的 draft token。
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
@@ -953,27 +1132,26 @@ class MambaManager(SingleTypeKVCacheManager):
                 return []
             else:
                 assert num_required_blocks > len(req_blocks), (
-                    "num_required_blocks "
-                    f"{num_required_blocks} < len(req_blocks) {len(req_blocks)}"
+                    f"num_required_blocks {num_required_blocks} < "
+                    f"len(req_blocks) {len(req_blocks)}"
                 )
                 prev_block_len = len(req_blocks)
                 blocks_allocated = request_id in self._allocated_block_reqs
-                # Record the last state block
+                # 记录最后一个状态块
                 if blocks_allocated:
-                    # We always save the running state at the last
-                    # (1 + num_speculative_blocks) block
+                    # 我们总是将运行状态保存在最后一个
+                    # (1 + num_speculative_blocks) 块
                     self.last_state_block_idx[request_id] = (
                         prev_block_len - 1 - self.num_speculative_blocks
                     )
                 elif prev_block_len > 0:
-                    # When a new request hits the prefix cache, the last block
-                    # saves the hit state.
+                    # 当新请求命中前缀缓存时，最后一个块保存命中的状态。
                     self.last_state_block_idx[request_id] = prev_block_len - 1
 
                 num_skipped_blocks = (
                     num_required_blocks - self.num_speculative_blocks - 1
                 )
-                # null blocks
+                # null 块
                 if prev_block_len < num_skipped_blocks:
                     req_blocks.extend(
                         [
@@ -983,7 +1161,7 @@ class MambaManager(SingleTypeKVCacheManager):
                     )
 
                 if blocks_allocated:
-                    # reuse previous speculative blocks in this step
+                    # 在这一步重用之前的推测块
                     for block_idx in range(
                         prev_block_len - self.num_speculative_blocks, prev_block_len
                     ):
@@ -1003,20 +1181,39 @@ class MambaManager(SingleTypeKVCacheManager):
                 return req_blocks[prev_block_len:]
 
     def free(self, request_id: str) -> None:
+        """释放 Mamba 请求的块。
+
+        Args:
+            request_id: 请求 ID
+        """
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
         super().free(request_id)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
-        """
-        Get the number of tokens whose mamba state are not needed anymore. Mamba only
-        need to keep the state of the last computed token, so we return
-        num_computed_tokens - 1.
+        """获取将被跳过注意力计算的 token 数量。
+
+        Mamba 只需要保留最后一个计算 token 的状态，
+        所以我们返回 num_computed_tokens - 1。
+
+        Args:
+            num_computed_tokens: 已计算的 token 数量
+
+        Returns:
+            将被跳过注意力计算的 token 数量
         """
         return num_computed_tokens - 1
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
+        """为 Mamba 请求缓存块。
+
+        跟踪当前 step 中缓存的块哈希，以防止在同一 step 中重复使用。
+
+        Args:
+            request: 请求
+            num_tokens: 需要缓存的 token 总数
+        """
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
         super().cache_blocks(request, num_tokens)
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
@@ -1030,11 +1227,16 @@ class MambaManager(SingleTypeKVCacheManager):
                 self.cached_blocks_this_step.add(block.block_hash)
 
     def new_step_starts(self) -> None:
+        """新 step 开始时清除缓存块集合。"""
         self.cached_blocks_this_step.clear()
 
 
 class CrossAttentionManager(SingleTypeKVCacheManager):
-    """Manager for cross-attention KV cache in encoder-decoder models."""
+    """交叉注意力 KV 缓存管理器。
+
+    用于编码器 - 解码器模型中的交叉注意力 KV 缓存。
+    不实现前缀缓存，因为编码器状态是每个请求唯一的。
+    """
 
     def allocate_new_computed_blocks(
         self,
@@ -1043,18 +1245,49 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
     ) -> None:
-        # We do not cache blocks for cross-attention to be shared between
-        # requests, so  `new_computed_blocks` should always be empty.
+        """分配新计算的块。
+
+        我们不缓存交叉注意力块以在请求之间共享，
+        所以 `new_computed_blocks` 应该总是为空。
+
+        Args:
+            request_id: 请求 ID
+            new_computed_blocks: 新计算的块
+            num_local_computed_tokens: 本地已计算 token 数量
+            num_external_computed_tokens: 外部已计算 token 数量
+        """
+        # 我们不缓存交叉注意力块以在请求之间共享，
+        # 所以 `new_computed_blocks` 应该总是为空。
         assert len(new_computed_blocks) == 0
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
-        # We do not cache blocks for cross-attention to be shared between
-        # requests, so this method is not relevant.
-        raise ValueError("Should not be called as prefix caching is disabled.")
+        """缓存块（交叉注意力不支持）。
+
+        Args:
+            request: 请求
+            num_tokens: 需要缓存的 token 总数
+
+        Raises:
+            ValueError: 总是抛出，因为前缀缓存被禁用
+        """
+        # 我们不缓存交叉注意力块以在请求之间共享，
+        # 所以此方法不相关。
+        raise ValueError("不应调用，因为前缀缓存被禁用。")
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        # Cross-attention blocks contain request-specific encoder states
-        # and are not shared between different requests
+        """获取公共前缀块数量。
+
+        交叉注意力块包含请求特定的编码器状态，
+        不在不同请求之间共享。
+
+        Args:
+            running_request_id: 运行中请求的 ID
+
+        Returns:
+            0（交叉注意力不支持公共前缀块）
+        """
+        # 交叉注意力块包含请求特定的编码器状态，
+        # 不在不同请求之间共享
         return 0
 
     @classmethod
@@ -1070,19 +1303,49 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
+        """查找最长缓存命中前缀（交叉注意力不支持）。
+
+        交叉注意力不从前缀缓存中受益，因为：
+        1. 编码器状态是每个请求唯一的（不同的音频/图像输入）
+        2. 编码器状态每个请求只计算一次，不是增量计算
+        3. 不同多模态输入之间没有可重用的前缀
+
+        Args:
+            block_hashes: 请求的块哈希
+            max_length: 缓存命中前缀的最大长度
+            kv_cache_group_ids: kv 缓存组 ID 列表
+            block_pool: 块池
+            kv_cache_spec: kv 缓存规范
+            use_eagle: 是否使用 eagle
+            alignment_tokens: 对齐 token 数量
+            dcp_world_size: 解码上下文并行的世界大小
+            pcp_world_size: 预填充上下文并行的世界大小
+
+        Returns:
+            抛出 NotImplementedError
+        """
         assert isinstance(kv_cache_spec, CrossAttentionSpec), (
-            "CrossAttentionManager can only be used for cross-attention groups"
+            "CrossAttentionManager 只能用于交叉注意力组"
         )
-        # Cross-attention does not benefit from prefix caching since:
-        # 1. Encoder states are unique per request (different audio/image
-        #    inputs)
-        # 2. Encoder states are computed once per request, not incrementally
-        # 3. No reusable prefix exists between different multimodal inputs
-        # Return empty blocks to indicate no cache hits
-        raise NotImplementedError("CrossAttentionManager does not support caching")
+        # 交叉注意力不从前缀缓存中受益，因为：
+        # 1. 编码器状态是每个请求唯一的（不同的音频/图像输入）
+        # 2. 编码器状态每个请求只计算一次，不是增量计算
+        # 3. 不同多模态输入之间没有可重用的前缀
+        # 返回空块以表示没有缓存命中
+        raise NotImplementedError("CrossAttentionManager 不支持缓存")
 
 
 class SinkFullAttentionManager(FullAttentionManager):
+    """带 sink token 的全注意力 KV 缓存管理器。
+
+    用于具有 sink token 的全注意力层。
+    Sink token 是始终保留在缓存中的特殊 token，
+    用于处理长序列中的局部注意力。
+
+    Attributes:
+        sink_blocks: sink token 的专用块
+    """
+
     def __init__(
         self,
         kv_cache_spec: SinkFullAttentionSpec,
@@ -1092,6 +1355,16 @@ class SinkFullAttentionManager(FullAttentionManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ):
+        """初始化带 sink token 的全注意力管理器。
+
+        Args:
+            kv_cache_spec: sink 全注意力 kv 缓存规范
+            block_pool: 块池
+            enable_caching: 是否启用缓存
+            kv_cache_group_id: kv 缓存组 ID
+            dcp_world_size: 解码上下文并行的世界大小
+            pcp_world_size: 预填充上下文并行的世界大小
+        """
         super().__init__(
             kv_cache_spec,
             block_pool,
@@ -1106,6 +1379,7 @@ class SinkFullAttentionManager(FullAttentionManager):
         self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)
 
 
+# 规范到管理器的映射表
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
     MLAAttentionSpec: FullAttentionManager,
@@ -1120,6 +1394,15 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
 def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec, **kwargs
 ) -> SingleTypeKVCacheManager:
+    """根据 KV 缓存规范获取对应的管理器。
+
+    Args:
+        kv_cache_spec: KV 缓存规范
+        **kwargs: 传递给管理器的其他参数
+
+    Returns:
+        对应的 KV 缓存管理器实例
+    """
     manager_class = spec_manager_map[type(kv_cache_spec)]
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager

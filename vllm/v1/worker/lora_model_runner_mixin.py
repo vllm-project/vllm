@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Define LoRA functionality mixin for model runners.
+"""LoRA 模型运行器混入模块。
+
+本模块定义 LoRA 功能混入类，负责：
+- 加载 LoRA 模型
+- 设置活动的 LoRA 适配器
+- 管理 LoRA 缓存
+
+主要类：
+- LoRAModelRunnerMixin: LoRA 功能混入类
 """
 
 from contextlib import contextmanager
@@ -26,18 +33,36 @@ InputBatch: TypeAlias = TPUInputBatch | GPUInputBatch
 logger = init_logger(__name__)
 
 
-# Defined as a mixin for GPUModelRunner
+# 定义为 GPUModelRunner 的混入类
 class LoRAModelRunnerMixin:
+    """LoRA 功能混入类。
+
+    提供 LoRA 适配器的管理和执行功能。
+    """
+
     def load_lora_model(
         self,
         model: nn.Module,
         vllm_config: VllmConfig,
         device: torch.device,
     ) -> nn.Module:
-        if not supports_lora(model):
-            raise ValueError(f"{model.__class__.__name__} does not support LoRA yet.")
+        """加载支持 LoRA 的模型。
 
-        # Add LoRA Manager to the Model Runner
+        Args:
+            model: 要加载的模型
+            vllm_config: vLLM 配置
+            device: 设备类型
+
+        Returns:
+            加载了 LoRA 管理器的模型
+
+        Raises:
+            ValueError: 如果模型不支持 LoRA
+        """
+        if not supports_lora(model):
+            raise ValueError(f"{model.__class__.__name__} 尚不支持 LoRA。")
+
+        # 添加 LoRA 管理器到模型运行器
         self.lora_manager = LRUCacheWorkerLoRAManager(
             vllm_config,
             device,
@@ -52,12 +77,19 @@ class LoRAModelRunnerMixin:
         lora_requests: set[LoRARequest],
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
+        """设置活动的 LoRA 适配器。
+
+        Args:
+            prompt_lora_mapping: prompt LoRA 映射
+            token_lora_mapping: token LoRA 映射
+            lora_requests: LoRA 请求集合
+            mapping_type: LoRA 映射类型
+        """
         self._ensure_lora_enabled()
 
-        # Set is_prefill to True, so we always use the SGMV kernels on
-        # non-cuda platforms.
-        # On cuda platforms we use the same kernels for prefill and
-        # decode and this flag is generally ignored.
+        # 设置 is_prefill 为 True，因此我们总是在非 cuda 平台上使用 SGMV 内核
+        # 在 cuda 平台上，我们对 prefill 和 decode 使用相同的内核
+        # 这个标志通常被忽略
         lora_mapping = LoRAMapping(
             token_lora_mapping,
             prompt_lora_mapping,
@@ -67,8 +99,13 @@ class LoRAModelRunnerMixin:
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
     def _ensure_lora_enabled(self) -> None:
+        """确保 LoRA 已启用。
+
+        Raises:
+            RuntimeError: 如果 LoRA 未启用
+        """
         if not hasattr(self, "lora_manager"):
-            raise RuntimeError("LoRA is not enabled. Use --enable-lora to enable LoRA.")
+            raise RuntimeError("LoRA 未启用。请使用 --enable-lora 启用 LoRA。")
 
     def set_active_loras(
         self,
@@ -77,11 +114,19 @@ class LoRAModelRunnerMixin:
         num_sampled_tokens: np.ndarray | None = None,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
+        """设置活动的 LoRA 适配器。
+
+        Args:
+            input_batch: 输入批次
+            num_scheduled_tokens: 每个请求调度的 token 数量
+            num_sampled_tokens: 每个请求采样的 token 数量（可选）
+            mapping_type: LoRA 映射类型
+        """
         if num_sampled_tokens is None:
             num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
 
-        prompt_lora_mapping: tuple[int, ...]  # of size np.sum(num_sampled_tokens)
-        token_lora_mapping: tuple[int, ...]  # of size np.sum(num_scheduled_tokens)
+        prompt_lora_mapping: tuple[int, ...]  # 大小为 np.sum(num_sampled_tokens)
+        token_lora_mapping: tuple[int, ...]  # 大小为 np.sum(num_scheduled_tokens)
         lora_requests: set[LoRARequest]
         prompt_lora_mapping, token_lora_mapping, lora_requests = (
             input_batch.make_lora_inputs(num_scheduled_tokens, num_sampled_tokens)
@@ -94,17 +139,23 @@ class LoRAModelRunnerMixin:
     def maybe_setup_dummy_loras(
         self, lora_config: LoRAConfig | None, remove_lora: bool = True
     ):
+        """设置虚拟 LoRA 用于预热（如果有 LoRA 配置）。
+
+        Args:
+            lora_config: LoRA 配置
+            remove_lora: 是否在退出后移除 LoRA
+        """
         if lora_config is None:
             yield
         else:
-            # __enter__ code
-            assert self.lora_manager is not None, "LoRA is not enabled"
+            # __enter__ 代码
+            assert self.lora_manager is not None, "LoRA 未启用"
 
             num_loras = lora_config.max_loras
             lora_warmup_rank = (
                 lora_config.max_lora_rank if lora_config.max_lora_rank < 8 else 8
             )
-            # Make dummy lora requests
+            # 创建虚拟 lora 请求
             lora_requests: set[LoRARequest] = {
                 LoRARequest(
                     lora_name=f"warmup_{lora_id}",
@@ -115,14 +166,14 @@ class LoRAModelRunnerMixin:
             }
 
             with self.lora_manager.dummy_lora_cache():
-                # Add the dummy LoRAs here so _set_active_loras doesn't try to
-                # load from disk.
+                # 在这里添加虚拟 LoRA，这样_set_active_loras 就不会尝试从
+                # 磁盘加载
                 for lr in lora_requests:
                     self.lora_manager.add_dummy_lora(lr, rank=lora_warmup_rank)
 
                 yield
 
-            # __exit__ code
+            # __exit__ 代码
             if remove_lora:
                 self.lora_manager.remove_all_adapters()
 
@@ -135,60 +186,59 @@ class LoRAModelRunnerMixin:
         num_sampled_tokens: np.ndarray | None = None,
         num_active_loras: int = 0,
     ):
-        """
-        Context manager to select dummy LoRAs for capture/warmup.
+        """选择虚拟 LoRA 用于捕获/预热的上下文管理器。
 
         Args:
-            lora_config: LoRA configuration, or None if LoRA is disabled.
-            num_scheduled_tokens: Array of scheduled token counts per request.
-            num_sampled_tokens: Array of sampled token counts per request.
-            num_active_loras: Number of distinct active LoRAs to use.
-                - 0: No LoRA active (set up zero mappings).
-                - >0: Use exactly this many distinct LoRAs.
+            lora_config: LoRA 配置，或者 None 如果 LoRA 已禁用
+            num_scheduled_tokens: 每个请求的调度 token 数量数组
+            num_sampled_tokens: 每个请求的采样 token 数量数组
+            num_active_loras: 要使用的不同活动 LoRA 数量
+                - 0：没有 LoRA 活动（设置零映射）
+                - >0：使用正好这个数量的不同 LoRA
         """
         if num_sampled_tokens is None:
             num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
 
-        # Skip LoRA setup entirely only if no LoRA config
+        # 仅在没有任何 LoRA 配置时跳过 LoRA 设置
         if lora_config is None:
             yield
         else:
-            # __enter__ code
-            assert self.lora_manager is not None, "LoRA is not enabled"
+            # __enter__ 代码
+            assert self.lora_manager is not None, "LoRA 未启用"
 
             num_reqs = len(num_scheduled_tokens)
             max_loras = lora_config.max_loras
 
-            # Determine how many distinct LoRAs to use and whether to include
-            # no-LoRA tokens (-1 entries).
-            # When num_active_loras > max_loras (e.g., max_loras + 1), we need
-            # to include -1 entries to simulate batches with both LoRA and
-            # no-LoRA tokens. This ensures prepare_tensors computes the correct
-            # num_active_loras that matches the cudagraph capture key.
+            # 确定使用多少个不同的 LoRA 以及是否包含
+            # 无 LoRA token（-1 条目）
+            # 当 num_active_loras > max_loras 时（例如 max_loras + 1），我们需要
+            # 包含 -1 条目来模拟同时包含 LoRA 和无 LoRA token 的批次
+            # 这确保 prepare_tensors 计算正确的 num_active_loras
+            # 与 cudagraph 捕获键匹配
             if num_active_loras == 0:
-                # No LoRA active - use 0 mappings like the original code
+                # 没有 LoRA 活动 - 使用 0 映射，如原始代码
                 effective_num_loras = 0
                 include_no_lora = False
             elif num_active_loras > max_loras:
-                # num_active_loras > max_loras means we want max_loras adapters
-                # PLUS no-LoRA tokens (-1). This is the max_loras + 1 case.
+                # num_active_loras > max_loras 表示我们想要 max_loras 个适配器
+                # 加上无 LoRA token（-1）。这是 max_loras + 1 的情况
                 effective_num_loras = max_loras
                 include_no_lora = True
             else:
-                # Specific number of active LoRAs requested
+                # 请求特定数量的活动 LoRA
                 effective_num_loras = min(num_active_loras, max_loras)
                 include_no_lora = False
 
-            # Make prompt lora mapping
-            # Assign LoRA IDs cyclically to simulate a worst-case scenario.
-            # LoRA IDs are 1-indexed (1 to max_loras) as required by LoRARequest.
-            # convert_mapping() will convert these to 0-indexed slot indices.
+            # 创建 prompt lora 映射
+            # 循环分配 LoRA ID 以模拟最坏情况
+            # LoRA ID 是 1 索引的（1 到 max_loras），如 LoRARequest 所要求
+            # convert_mapping() 将这些转换为 0 索引的槽索引
             if effective_num_loras > 0:
                 if include_no_lora:
-                    # Include -1 (no-LoRA) entries by cycling through
+                    # 包含 -1（无 LoRA）条目，循环通过
                     # -1, 1, 2, ..., effective_num_loras
-                    # This ensures prepare_tensors sees both LoRA and no-LoRA
-                    # tokens, computing num_active_loras = effective_num_loras+1
+                    # 这确保 prepare_tensors 同时看到 LoRA 和无 LoRA token
+                    # 计算 num_active_loras = effective_num_loras+1
                     cycle_values = np.array(
                         list(range(1, effective_num_loras + 1)),
                         dtype=np.int32,
@@ -197,21 +247,21 @@ class LoRAModelRunnerMixin:
                         np.arange(num_reqs, dtype=np.int32) % len(cycle_values)
                     ]
                 else:
-                    # Use 1 to effective_num_loras (1-indexed lora IDs)
+                    # 使用 1 到 effective_num_loras（1 索引的 lora ID）
                     prompt_lora_mapping = (
                         np.arange(num_reqs, dtype=np.int32) % effective_num_loras
                     ) + 1
             else:
-                # No LoRA active - use 0 for all tokens (original behavior)
+                # 没有 LoRA 活动 - 对所有 token 使用 0（原始行为）
                 prompt_lora_mapping = np.zeros(num_reqs, dtype=np.int32)
 
-            # Make sample lora mapping
+            # 创建 sample lora 映射
             sample_lora_mapping = np.repeat(prompt_lora_mapping, num_sampled_tokens)
 
-            # Make token lora mapping
+            # 创建 token lora 映射
             token_lora_mapping = np.repeat(prompt_lora_mapping, num_scheduled_tokens)
 
-            # Make dummy lora requests (only for the active LoRAs)
+            # 创建虚拟 lora 请求（仅针对活动的 LoRA）
             lora_requests: set[LoRARequest] = {
                 LoRARequest(
                     lora_name=f"warmup_{lora_id}",
@@ -240,16 +290,15 @@ class LoRAModelRunnerMixin:
         num_active_loras: int = 0,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ):
-        """
-        Context manager for dummy runs with LoRA.
+        """使用 LoRA 进行虚拟运行的上下文管理器。
 
         Args:
-            lora_config: LoRA configuration.
-            num_scheduled_tokens: Array of scheduled token counts per request.
-            num_sampled_tokens: Array of sampled token counts per request.
-            remove_lora: Whether to remove LoRAs after the context exits.
-            num_active_loras: Number of distinct active LoRAs to use.
-                LoRA is activated when num_active_loras > 0.
+            lora_config: LoRA 配置
+            num_scheduled_tokens: 每个请求的调度 token 数量数组
+            num_sampled_tokens: 每个请求的采样 token 数量数组
+            remove_lora: 是否在上下文退出后移除 LoRA
+            num_active_loras: 要使用的不同活动 LoRA 数量
+                当 num_active_loras > 0 时激活 LoRA
         """
         with (
             self.maybe_setup_dummy_loras(lora_config, remove_lora),
@@ -264,22 +313,68 @@ class LoRAModelRunnerMixin:
             yield
 
     def maybe_remove_all_loras(self, lora_config: LoRAConfig | None):
+        """移除所有 LoRA（如果有 LoRA 配置）。
+
+        Args:
+            lora_config: LoRA 配置
+        """
         if lora_config is None:
             return
         self.lora_manager.remove_all_adapters()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
+        """添加 LoRA 适配器。
+
+        Args:
+            lora_request: LoRA 请求
+
+        Returns:
+            如果成功添加则返回 True
+
+        Raises:
+            RuntimeError: 如果 LoRA 未启用
+        """
         self._ensure_lora_enabled()
         return self.lora_manager.add_adapter(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
+        """移除 LoRA 适配器。
+
+        Args:
+            lora_id: LoRA ID
+
+        Returns:
+            如果成功移除则返回 True
+
+        Raises:
+            RuntimeError: 如果 LoRA 未启用
+        """
         self._ensure_lora_enabled()
         return self.lora_manager.remove_adapter(lora_id)
 
     def pin_lora(self, lora_id: int) -> bool:
+        """固定 LoRA 适配器（防止被驱逐）。
+
+        Args:
+            lora_id: LoRA ID
+
+        Returns:
+            如果成功固定则返回 True
+
+        Raises:
+            RuntimeError: 如果 LoRA 未启用
+        """
         self._ensure_lora_enabled()
         return self.lora_manager.pin_adapter(lora_id)
 
     def list_loras(self) -> set[int]:
+        """列出所有 LoRA ID。
+
+        Returns:
+            LoRA ID 集合
+
+        Raises:
+            RuntimeError: 如果 LoRA 未启用
+        """
         self._ensure_lora_enabled()
         return self.lora_manager.list_adapters()

@@ -1,7 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""引擎工具函数模块。
 
-import contextlib
+本模块实现了 vLLM V1 引擎的工具函数和辅助类，负责：
+- 引擎进程管理（启动、握手、关闭）
+- ZMQ 地址分配
+- 设备控制环境变量设置
+- Ray 放置组管理
+- 弹性 EP 扩缩容支持
+- 数据并行协调
+
+主要类：
+- CoreEngineState: 引擎核心状态枚举
+- CoreEngine: 引擎核心类（每个数据并行 rank 一个）
+- EngineZmqAddresses: 引擎 ZMQ 地址数据类
+- EngineHandshakeMetadata: 引擎握手元数据
+- CoreEngineProcManager: 引擎进程管理器
+- CoreEngineActorManager: 引擎 Ray 管理器
+- SignalCallback: 信号回调处理器
+"""
 import os
 import threading
 import weakref
@@ -36,15 +53,34 @@ STARTUP_POLL_PERIOD_MS = 10000
 
 
 class CoreEngineState(Enum):
+    """引擎核心状态枚举。
+
+    Attributes:
+        NEW: 新创建状态
+        CONNECTED: 已连接状态
+        READY: 就绪状态
+    """
     NEW = auto()
     CONNECTED = auto()
     READY = auto()
 
 
 class CoreEngine:
-    """One per data parallel rank, used to track state during handshaking."""
+    """引擎核心类，每个数据并行 rank 一个，用于跟踪握手过程中的状态。
+
+    Attributes:
+        local: 是否为本地引擎
+        identity: 引擎标识（2 字节）
+        state: 引擎状态
+    """
 
     def __init__(self, index: int = 0, local: bool = True):
+        """初始化引擎核心。
+
+        Args:
+            index: 引擎索引
+            local: 是否为本地引擎
+        """
         self.local = local
         self.identity = index.to_bytes(2, "little")
 
@@ -53,6 +89,15 @@ class CoreEngine:
 
 @dataclass
 class EngineZmqAddresses:
+    """引擎 ZMQ 地址数据类。
+
+    Attributes:
+        inputs: 前端客户端的 ZMQ 输入套接字地址列表（请求）
+        outputs: 前端客户端的 ZMQ 输出套接字地址列表（响应）
+        coordinator_input: DP 协调器的 ZMQ 输入地址（如果适用）
+        coordinator_output: DP 协调器的 ZMQ 输出地址（如果适用）
+        frontend_stats_publish_address: 前端连接到 DP 协调器的 ZMQ 套接字地址
+    """
     # ZMQ input socket addresses for each front-end client (requests)
     inputs: list[str]
     # ZMQ output socket addresses for each front-end client (responses)
@@ -69,9 +114,13 @@ class EngineZmqAddresses:
 
 @dataclass
 class EngineHandshakeMetadata:
-    """Metadata sent to each engine process during startup handshake,
-    including addresses of the front-end ZMQ queues that they should
-    connect to.
+    """引擎握手期间发送到每个引擎进程的元数据。
+
+    包含前端 ZMQ 队列的地址，引擎应连接到这些队列。
+
+    Attributes:
+        addresses: 引擎 ZMQ 地址
+        parallel_config: 并行配置字典
     """
 
     addresses: EngineZmqAddresses
@@ -79,9 +128,9 @@ class EngineHandshakeMetadata:
 
 
 class CoreEngineProcManager:
-    """
-    Utility class to handle creation, readiness, and shutdown
-    of background processes used by the AsyncLLM and LLMEngine.
+    """引擎进程管理器工具类。
+
+    负责处理 AsyncLLM 和 LLMEngine 使用的后台引擎进程的创建、就绪检查和关闭。
     """
 
     def __init__(
@@ -96,6 +145,19 @@ class CoreEngineProcManager:
         log_stats: bool,
         client_handshake_address: str | None = None,
     ):
+        """初始化引擎进程管理器。
+
+        Args:
+            local_engine_count: 本地引擎数量
+            start_index: 起始索引
+            local_start_index: 本地起始索引
+            vllm_config: 全局配置
+            local_client: 是否为本地客户端
+            handshake_address: 握手地址
+            executor_class: 执行器类
+            log_stats: 是否记录统计
+            client_handshake_address: 客户端握手地址
+        """
         context = get_mp_context()
         common_kwargs = {
             "vllm_config": vllm_config,
@@ -150,19 +212,32 @@ class CoreEngineProcManager:
                 self.shutdown()
 
     def shutdown(self, timeout: float | None = None) -> None:
-        """Shutdown engine core processes with configurable timeout."""
+        """关闭引擎核心进程。
+
+        Args:
+            timeout: 关闭超时时间（秒）
+        """
         if self._finalizer.detach() is not None:
             shutdown(self.processes, timeout=timeout)
 
     def join_first(self):
-        """Wait for any process to exit."""
+        """等待任意进程退出。"""
         connection.wait(proc.sentinel for proc in self.processes)
 
     def sentinels(self) -> list:
+        """返回所有进程的 sentinel 列表。
+
+        Returns:
+            sentinel 列表
+        """
         return [proc.sentinel for proc in self.processes]
 
     def finished_procs(self) -> dict[str, int]:
-        """Returns dict of proc name -> exit code for any finished procs."""
+        """返回已完成进程的字典。
+
+        Returns:
+            进程名到退出码的字典
+        """
         return {
             proc.name: proc.exitcode
             for proc in self.processes
@@ -171,9 +246,23 @@ class CoreEngineProcManager:
 
 
 class SignalCallback:
-    """Safely trigger a callback from signal handler context via a dedicated thread."""
+    """信号回调处理器。
+
+    通过专用线程在信号处理程序上下文中安全地触发回调。
+
+    Attributes:
+        _callback: 回调函数
+        _event: 触发事件
+        _stopped: 是否已停止
+        _thread: 后台线程
+    """
 
     def __init__(self, callback: Callable[[], None]):
+        """初始化信号回调。
+
+        Args:
+            callback: 回调函数
+        """
         self._callback = callback
         self._event = threading.Event()
         self._stopped = False
@@ -185,14 +274,17 @@ class SignalCallback:
         self._thread.start()
 
     def _run(self):
+        """运行回调。"""
         self._event.wait()
         if not self._stopped:
             self._callback()
 
     def trigger(self):
+        """触发回调。"""
         self._event.set()
 
     def stop(self):
+        """停止回调。"""
         self._stopped = True
         self._event.set()
 
@@ -201,9 +293,11 @@ class SignalCallback:
 def set_device_control_env_var(
     vllm_config: VllmConfig, local_dp_rank: int
 ) -> Iterator[None]:
-    """
-    Temporarily set CUDA_VISIBLE_DEVICES or equivalent
-    for engine subprocess.
+    """临时设置 CUDA_VISIBLE_DEVICES 或等效环境变量用于引擎子进程。
+
+    Args:
+        vllm_config: 全局配置
+        local_dp_rank: 本地数据并行 rank
     """
     world_size = vllm_config.parallel_config.world_size
     local_world_size = vllm_config.parallel_config.local_world_size
@@ -220,12 +314,22 @@ def get_device_indices(
     world_size: int,
     local_world_size: int | None = None,
 ):
-    """
-    Returns a comma-separated string of device indices for the specified
-    data parallel rank.
+    """返回指定数据并行 rank 的设备索引逗号分隔字符串。
 
-    For example, if world_size=2 and local_dp_rank=1, and there are 4 devices,
-    this will select devices 2 and 3 for local_dp_rank=1.
+    例如，如果 world_size=2 且 local_dp_rank=1，有 4 个设备，
+    这将为 local_dp_rank=1 选择设备 2 和 3。
+
+    Args:
+        device_control_env_var: 设备控制环境变量名
+        local_dp_rank: 本地数据并行 rank
+        world_size: 世界大小
+        local_world_size: 本地世界大小
+
+    Returns:
+        设备索引字符串
+
+    Raises:
+        Exception: 设置环境变量失败时抛出
     """
     if local_world_size is None:
         local_world_size = world_size
@@ -249,12 +353,11 @@ def get_device_indices(
 
 
 class CoreEngineActorManager:
-    """
-    Utility class to handle creation, readiness, and shutdown
-    of core engine Ray actors used by the AsyncLLM and LLMEngine.
+    """引擎 Ray 管理器工具类。
 
-    Different from CoreEngineProcManager, this class manages
-    core engines for both local and remote nodes.
+    负责处理 AsyncLLM 和 LLMEngine 使用的核心引擎 Ray actor 的创建、就绪检查和关闭。
+
+    与 CoreEngineProcManager 不同，此类管理本地和远程节点的核心引擎。
     """
 
     def __init__(
@@ -266,6 +369,16 @@ class CoreEngineActorManager:
         placement_groups: list["PlacementGroup"] | None = None,
         local_dp_ranks: list[int] | None = None,
     ):
+        """初始化引擎 Ray 管理器。
+
+        Args:
+            vllm_config: 全局配置
+            addresses: 引擎 ZMQ 地址
+            executor_class: 执行器类
+            log_stats: 是否记录统计
+            placement_groups: 放置组列表
+            local_dp_ranks: 本地数据并行 rank 列表
+        """
         import copy
 
         import ray
@@ -399,8 +512,16 @@ class CoreEngineActorManager:
     def create_dp_placement_groups(
         vllm_config: VllmConfig,
     ) -> tuple[list["PlacementGroup"], list[int]]:
-        """
-        Create placement groups for data parallel.
+        """创建数据并行的放置组。
+
+        Args:
+            vllm_config: 全局配置
+
+        Returns:
+            (放置组列表，本地数据并行 rank 列表) 元组
+
+        Raises:
+            ValueError: 资源不足或配置无效时抛出
         """
 
         import ray
@@ -583,8 +704,14 @@ class CoreEngineActorManager:
     def add_dp_placement_groups(
         old_vllm_config: VllmConfig, new_data_parallel_size: int
     ) -> tuple[list["PlacementGroup"], list[int]]:
-        """
-        Add placement groups for new data parallel size.
+        """为新的数据并行大小添加放置组。
+
+        Args:
+            old_vllm_config: 旧的全局配置
+            new_data_parallel_size: 新的数据并行大小
+
+        Returns:
+            (放置组列表，本地数据并行 rank 列表) 元组
         """
         import ray
         from ray._private.state import (
@@ -671,6 +798,15 @@ class CoreEngineActorManager:
     def scale_up_elastic_ep(
         self, cur_vllm_config: VllmConfig, new_data_parallel_size: int
     ) -> None:
+        """扩展弹性 EP 向上。
+
+        Args:
+            cur_vllm_config: 当前全局配置
+            new_data_parallel_size: 新的数据并行大小
+
+        Raises:
+            AssertionError: 新大小不大于当前大小时抛出
+        """
         import copy
 
         import ray
@@ -786,6 +922,15 @@ class CoreEngineActorManager:
     def scale_down_elastic_ep(
         self, cur_data_parallel_size: int, new_data_parallel_size: int
     ) -> None:
+        """缩小弹性 EP。
+
+        Args:
+            cur_data_parallel_size: 当前数据并行大小
+            new_data_parallel_size: 新的数据并行大小
+
+        Raises:
+            AssertionError: 当前大小不大于新大小时抛出
+        """
         import ray
 
         assert cur_data_parallel_size > new_data_parallel_size, (
@@ -803,9 +948,19 @@ class CoreEngineActorManager:
             ray.util.remove_placement_group(pg)
 
     def get_run_refs(self):
+        """获取运行引用列表。
+
+        Returns:
+            运行引用列表
+        """
         return self.run_refs
 
     def shutdown(self, timeout: float | None = None) -> None:
+        """关闭管理器。
+
+        Args:
+            timeout: 关闭超时时间
+        """
         import ray
 
         for actor in self.local_engine_actors + self.remote_engine_actors:
@@ -818,7 +973,15 @@ def get_engine_zmq_addresses(
     vllm_config: VllmConfig,
     num_api_servers: int = 1,
 ) -> EngineZmqAddresses:
-    """Allocate ZMQ addresses for engine-client communication."""
+    """分配引擎客户端通信的 ZMQ 地址。
+
+    Args:
+        vllm_config: 全局配置
+        num_api_servers: API 服务器数量
+
+    Returns:
+        引擎 ZMQ 地址
+    """
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
     local_start_index = parallel_config.data_parallel_rank_local
@@ -866,7 +1029,18 @@ def launch_core_engines(
         EngineZmqAddresses,
     ]
 ]:
-    """Launch engine and DP coordinator processes as needed."""
+    """启动引擎和 DP 协调器进程。
+
+    Args:
+        vllm_config: 全局配置
+        executor_class: 执行器类
+        log_stats: 是否记录统计
+        addresses: 引擎 ZMQ 地址
+        num_api_servers: API 服务器数量
+
+    Yields:
+        (引擎进程管理器或 Ray 管理器，DP 协调器，引擎 ZMQ 地址) 元组
+    """
 
     parallel_config = vllm_config.parallel_config
     dp_size = parallel_config.data_parallel_size
@@ -1004,6 +1178,21 @@ def wait_for_engine_startup(
     proc_manager: CoreEngineProcManager | None,
     coord_process: Process | None,
 ):
+    """等待引擎启动。
+
+    Args:
+        handshake_socket: 握手 ZMQ 套接字
+        addresses: 引擎 ZMQ 地址
+        core_engines: 引擎核心列表
+        parallel_config: 并行配置
+        coordinated_dp: 是否协调数据并行
+        cache_config: 缓存配置
+        proc_manager: 引擎进程管理器
+        coord_process: 协调器进程
+
+    Raises:
+        RuntimeError: 引擎初始化失败时抛出
+    """
     # Wait for engine core process(es) to send ready messages.
     local_count = parallel_config.data_parallel_size_local
     remote_count = len(core_engines) - local_count

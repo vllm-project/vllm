@@ -1,5 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""DeepSeek-V3.2 Indexer 后端模块。
+
+本模块实现了 DeepSeek-V3.2 索引器后端，负责：
+- 实现 DeepseekV32IndexerBackend 类
+- 实现 DeepseekV32IndexerMetadataBuilder 用于构建注意力元数据
+- 支持稀疏注意力的索引计算
+- 实现 kv_spans_from_batches 函数计算 KV 跨度
+- 使用 DeepGEMM 进行分页 MQA logits 计算（CUDA 设备）
+
+主要类和函数：
+- DeepseekV32IndexerBackend: 索引器后端类
+- DeepseekV32IndexerPrefillChunkMetadata: 预填充块元数据
+- DeepseekV32IndexerPrefillMetadata: 预填充元数据
+- DeepSeekV32IndexerDecodeMetadata: 解码元数据
+- DeepseekV32IndexerMetadata: 注意力元数据
+- kv_spans_from_batches: 从批次计算 KV 跨度
+- get_max_prefill_buffer_size: 获取最大预填充缓冲区大小
+"""
 from dataclasses import dataclass
 
 import torch

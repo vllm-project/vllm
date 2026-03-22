@@ -1,5 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""FlashMLA 后端模块。
+
+本模块实现了 DeepSeek 优化的 FlashMLA 后端（支持 Hopper 和 Blackwell 架构），负责：
+- 实现 FlashMLABackend 类（支持 compute capability 9.0 和 10.0）
+- 实现 FlashMLAMetadataBuilder 用于构建注意力元数据
+- 实现 FlashMLAImpl 用于执行 MLA 前向传播
+- 支持 FP8 KV 缓存（使用 flash_mla_with_kvcache_fp8）
+- 使用 FlashMLA 的 get_mla_metadata 进行调度元数据计算
+- 支持稠密和稀疏 MLA 模式
+
+主要类和函数：
+- FlashMLABackend: MLA 后端类
+- FlashMLADecodeMetadata: 解码阶段元数据
+- FlashMLAMetadata: 注意力元数据
+- FlashMLAMetadataBuilder: 元数据构建器
+- FlashMLAImpl: MLA 实现类
+"""
 
 from dataclasses import dataclass
 from typing import ClassVar

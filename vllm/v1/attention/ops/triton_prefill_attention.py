@@ -1,31 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Triton 预填充注意力操作模块。
 
-# Adapted from
-# https://github.com/sgl-project/sglang/blob/97cb762bb65ebf05025eb342de03c184660427a3/python/sglang/srt/layers/attention/triton_ops/prefill_attention.py
-# Changes:
-# - Add support for sliding window attention
+本模块实现了高效的预填充注意力计算，支持：
+- 分页注意力（Page Size = 1）
+- 因果注意力掩码
+- 滑动窗口注意力
+- 分组查询注意力（GQA/MQA）
 
-# Copyright 2023-2024 SGLang Team
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
+本模块改编自：
+- SGLang: https://github.com/sgl-project/sglang
+- LightLLM: https://github.com/ModelTC/lightllm
 """
-Memory-efficient attention for prefill.
-It supports page size = 1.
-"""
-
-# Adapted from
-# https://github.com/ModelTC/lightllm/blob/f2a54f0912293f683bf1d1695fd12c4098a5bf82/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py#L1
 import torch
 
 from vllm.platforms import current_platform
@@ -59,6 +45,35 @@ def _fwd_kernel(
     SLIDING_WINDOW_K: tl.constexpr,
     Lk: tl.constexpr,
 ):
+    """预填充注意力前向传播 Triton kernel。
+
+    实现高效的预填充注意力计算，支持因果掩码和滑动窗口注意力。
+
+    Args:
+        Q: Query 张量指针
+        K: Key 张量指针
+        V: Value 张量指针
+        sm_scale: Softmax 缩放因子
+        B_Start_Loc: 批次起始位置指针
+        B_Seqlen: 批次序列长度指针
+        Out: 输出张量指针
+        stride_qbs: Q 第 0 维步幅
+        stride_qh: Q 第 H 维步幅
+        stride_kbs: K 第 0 维步幅
+        stride_kh: K 第 H 维步幅
+        stride_vbs: V 第 0 维步幅
+        stride_vh: V 第 H 维步幅
+        stride_obs: 输出第 0 维步幅
+        stride_oh: 输出第 H 维步幅
+        kv_group_num: KV 组数量
+        BLOCK_M: M 维度块大小
+        BLOCK_DMODEL: D 模型块大小
+        BLOCK_N: N 维度块大小
+        IS_CAUSAL: 是否因果注意力
+        SLIDING_WINDOW_Q: Q 滑动窗口大小
+        SLIDING_WINDOW_K: K 滑动窗口大小
+        Lk: Key 头维度
+    """
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
     start_m = tl.program_id(2)
@@ -178,6 +193,14 @@ def _fwd_kernel(
 
 
 def get_block_size(dtype: torch.dtype) -> int:
+    """根据数据类型获取块大小。
+
+    Args:
+        dtype: 数据类型
+
+    Returns:
+        块大小
+    """
     if dtype == torch.float32:
         return 32
     elif current_platform.is_cuda_alike() and current_platform.has_device_capability(
@@ -201,11 +224,22 @@ def context_attention_fwd(
     sliding_window_q: int | None = None,
     sliding_window_k: int | None = None,
 ):
-    """
-    q, k, v: [b * s, head, head_dim]
-    b_start_loc: [b]
-    b_seq_len: [b]
-    out: [b * s, head, head_dim]
+    """上下文注意力前向传播封装函数。
+
+    处理预填充阶段的注意力计算，支持因果掩码和滑动窗口注意力。
+
+    Args:
+        q: Query 张量 [b * s, head, head_dim]
+        k: Key 张量 [b * s, head, head_dim]
+        v: Value 张量 [b * s, head, head_dim]
+        o: 输出张量 [b * s, head, head_dim]
+        b_start_loc: 批次起始位置 [b]
+        b_seq_len: 批次序列长度 [b]
+        max_input_len: 最大输入长度
+        is_causal: 是否因果注意力（默认 True）
+        softmax_scale: Softmax 缩放因子（可选）
+        sliding_window_q: Q 滑动窗口大小（可选）
+        sliding_window_k: K 滑动窗口大小（可选）
     """
     BLOCK = get_block_size(q.dtype)
 

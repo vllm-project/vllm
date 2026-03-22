@@ -1,6 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention layer with FlashAttention."""
+"""Flash Attention 后端模块。
+
+本模块实现了基于 FlashAttention 的注意力后端，负责：
+- 实现 FlashAttention 后端类
+- 支持 FlashAttention 的多种变体（varlen、scheduler metadata 等）
+- 处理 KV 缓存更新
+- 支持分布式上下文并行（DCP）
+- 支持混合模型和 Mamba SSM
+
+主要类：
+- FlashAttentionBackend: Flash Attention 后端类
+"""
 
 import copy
 from dataclasses import dataclass
@@ -62,6 +73,17 @@ logger = init_logger(__name__)
 
 
 class FlashAttentionBackend(AttentionBackend):
+    """Flash Attention 后端类。
+
+    基于 FlashAttention 实现的高效注意力后端。
+    支持 varlen 模式、scheduler metadata、FP8 KV 缓存等特性。
+
+    Class Attributes:
+        accept_output_buffer: 是否接受输出缓冲区
+        supported_dtypes: 支持的数据类型
+        supported_kv_cache_dtypes: 支持的 KV 缓存数据类型
+        forward_includes_kv_cache_update: 前向传播是否包含 KV 缓存更新
+    """
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -72,6 +94,14 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        """获取支持的内核块大小列表。
+
+        对于混合模型和 float32 Mamba SSM 缓存，返回 [16, 32, 64] 以避免 NaN 传播问题。
+        否则返回 MultipleOf(16)。
+
+        Returns:
+            支持的块大小列表
+        """
         vllm_config = get_current_vllm_config()
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
@@ -94,11 +124,23 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
+        """获取后端名称。
+
+        Returns:
+            后端名称 "FLASH_ATTN"
+        """
         return "FLASH_ATTN"
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """FlashAttention supports all attention types."""
+        """FlashAttention 支持所有注意力类型。
+
+        Args:
+            attn_type: 注意力类型
+
+        Returns:
+            是否支持
+        """
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,
@@ -108,15 +150,30 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_per_head_quant_scales(cls) -> bool:
+        """检查是否支持每头量化缩放因子。
+
+        Returns:
+            FlashAttention 版本 >= 3 时返回 True
+        """
         fa_version = get_flash_attn_version()
         return fa_version is not None and fa_version >= 3
 
     @staticmethod
     def get_impl_cls() -> type["FlashAttentionImpl"]:
+        """获取注意力实现类。
+
+        Returns:
+            FlashAttentionImpl 类
+        """
         return FlashAttentionImpl
 
     @staticmethod
     def get_builder_cls() -> type["FlashAttentionMetadataBuilder"]:
+        """获取元数据构建器类。
+
+        Returns:
+            FlashAttentionMetadataBuilder 类
+        """
         return FlashAttentionMetadataBuilder
 
     @staticmethod
@@ -127,6 +184,21 @@ class FlashAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
+        """获取 KV 缓存形状。
+
+        Args:
+            num_blocks: 块数量
+            block_size: 块大小
+            num_kv_heads: KV 头数量
+            head_size: 头大小
+            cache_dtype_str: 缓存数据类型
+
+        Returns:
+            KV 缓存形状元组
+
+        Raises:
+            ValueError: 如果块大小不是 16 的倍数
+        """
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
@@ -135,6 +207,17 @@ class FlashAttentionBackend(AttentionBackend):
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
+        """获取 KV 缓存步幅顺序。
+
+        Args:
+            include_num_layers_dimension: 是否包含层数维度
+
+        Returns:
+            步幅顺序元组
+
+        Raises:
+            ValueError: 如果缓存布局未知
+        """
         # `stride_order` indicates the permutation that gets
         # us from `get_kv_cache_shape` to the actual memory layout we want.
         cache_layout = get_kv_cache_layout()
@@ -154,6 +237,17 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_fp8_dtype_for_flashattn(kv_cache_dtype: str) -> torch.dtype:
+        """获取 FlashAttention 的 FP8 数据类型。
+
+        Args:
+            kv_cache_dtype: KV 缓存数据类型
+
+        Returns:
+            torch.float8_e4m3fn
+
+        Raises:
+            ValueError: 如果数据类型 unrecognized
+        """
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
             return torch.float8_e4m3fn
         else:
@@ -161,10 +255,26 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
+        """检查是否支持指定的头大小。
+
+        Args:
+            head_size: 头大小
+
+        Returns:
+            如果头大小是 8 的倍数且 <= 256 则返回 True
+        """
         return head_size % 8 == 0 and head_size <= 256
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+        """检查是否支持指定的 KV 缓存数据类型。
+
+        Args:
+            kv_cache_dtype: KV 缓存数据类型
+
+        Returns:
+            是否支持
+        """
         if kv_cache_dtype is None:
             return True
         if kv_cache_dtype.startswith("fp8"):
@@ -173,12 +283,25 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_sink(cls) -> bool:
+        """检查是否支持 sink。
+
+        Returns:
+            如果 FlashAttention varlen 可用且支持 sinks 则返回 True
+        """
         if not is_flash_attn_varlen_func_available():
             return False
         return flash_attn_supports_sinks()
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        """检查是否支持指定的计算能力。
+
+        Args:
+            capability: 设备计算能力
+
+        Returns:
+            如果计算能力 >= 8.0 则返回 True
+        """
         return capability >= DeviceCapability(8, 0)
 
     @classmethod
@@ -193,6 +316,21 @@ class FlashAttentionBackend(AttentionBackend):
         use_sparse: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        """检查是否支持指定的组合配置。
+
+        Args:
+            head_size: 头大小
+            dtype: 数据类型
+            kv_cache_dtype: KV 缓存数据类型
+            block_size: 块大小
+            use_mla: 是否使用 MLA
+            has_sink: 是否有 sink
+            use_sparse: 是否使用稀疏
+            device_capability: 设备计算能力
+
+        Returns:
+            如果不支持则返回错误消息，否则返回 None
+        """
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
         return None
@@ -200,6 +338,32 @@ class FlashAttentionBackend(AttentionBackend):
 
 @dataclass
 class FlashAttentionMetadata:
+    """Flash Attention 元数据类。
+
+    存储 Flash Attention 前向传播所需的元数据信息。
+
+    关于 context_len、query_len 和 seq_len 的定义：
+    |---------- N-1 iteration --------|
+    |---------------- N iteration ---------------------|
+    |- tokenA -|......................|-- newTokens ---|
+    |---------- context_len ----------|
+    |-------------------- seq_len ---------------------|
+    |                                  |-- query_len ---|
+
+    Attributes:
+        num_actual_tokens: 实际 token 数量（不包括 padding）
+        max_query_len: 最大 query 长度
+        query_start_loc: query 起始位置张量
+        max_seq_len: 最大序列长度
+        seq_lens: 序列长度张量
+        block_table: 块表张量
+        slot_mapping: slot 映射张量
+        use_cascade: 是否使用 cascade 注意力
+        common_prefix_len: 公共前缀长度
+        cu_prefix_query_lens: 前缀 query 长度累积和
+        prefix_kv_lens: 前缀 KV 长度
+        suffix_kv_lens: 后缀 KV 长度
+    """
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
@@ -208,37 +372,44 @@ class FlashAttentionMetadata:
     # |-------------------- seq_len ---------------------|
     #                                   |-- query_len ---|
 
-    num_actual_tokens: int  # Number of tokens excluding padding.
-    max_query_len: int
-    query_start_loc: torch.Tensor
-    max_seq_len: int
-    seq_lens: torch.Tensor
-    block_table: torch.Tensor
-    slot_mapping: torch.Tensor
+    num_actual_tokens: int  # 实际 token 数量（不包括 padding）
+    max_query_len: int  # 最大 query 长度
+    query_start_loc: torch.Tensor  # query 起始位置张量
+    max_seq_len: int  # 最大序列长度
+    seq_lens: torch.Tensor  # 序列长度张量
+    block_table: torch.Tensor  # 块表张量
+    slot_mapping: torch.Tensor  # slot 映射张量
 
-    # For cascade attention.
-    use_cascade: bool
-    common_prefix_len: int
-    cu_prefix_query_lens: torch.Tensor | None
-    prefix_kv_lens: torch.Tensor | None
-    suffix_kv_lens: torch.Tensor | None
+    # 用于 cascade 注意力
+    use_cascade: bool  # 是否使用 cascade 注意力
+    common_prefix_len: int  # 公共前缀长度
+    cu_prefix_query_lens: torch.Tensor | None  # 前缀 query 长度累积和
+    prefix_kv_lens: torch.Tensor | None  # 前缀 KV 长度
+    suffix_kv_lens: torch.Tensor | None  # 后缀 KV 长度
 
-    # For GQA DCP
-    max_dcp_context_kv_len: int | None = None
-    dcp_context_kv_lens: torch.Tensor | None = None
+    # 用于 GQA DCP
+    max_dcp_context_kv_len: int | None = None  # 最大 DCP 上下文 KV 长度
+    dcp_context_kv_lens: torch.Tensor | None = None  # DCP 上下文 KV 长度
 
-    # Optional aot scheduling
-    scheduler_metadata: torch.Tensor | None = None
-    prefix_scheduler_metadata: torch.Tensor | None = None
-    max_num_splits: int = 0
+    # 可选的 AOT 调度
+    scheduler_metadata: torch.Tensor | None = None  # 调度器元数据
+    prefix_scheduler_metadata: torch.Tensor | None = None  # 前缀调度器元数据
+    max_num_splits: int = 0  # 最大分割数
 
-    causal: bool = True
+    causal: bool = True  # 是否因果注意力
 
 
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
 ) -> set[tuple[int, int] | None]:
-    """Get the set of all sliding window configs used in the model."""
+    """获取模型中使用的所有滑动窗口配置集合。
+
+    Args:
+        vllm_config: vLLM 配置
+
+    Returns:
+        滑动窗口配置集合
+    """
     sliding_window_configs: set[tuple[int, int] | None] = set()
     layers = get_layers_from_vllm_config(vllm_config, Attention)
     for layer in layers.values():
@@ -248,6 +419,18 @@ def _get_sliding_window_configs(
 
 
 class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
+    """Flash Attention 元数据构建器类。
+
+    负责构建 Flash Attention 所需的元数据。
+
+    CUDA Graph 支持说明：
+    - FA3: 支持所有情况的完整 cudagraphs
+    - FA2: 对于 FA2，当 max_query_len=1 时捕获的图形不适用于混合 prefill-decode
+
+    Class Attributes:
+        _cudagraph_support: CUDA Graph 支持级别
+        supports_update_block_table: 是否支持更新块表
+    """
     # FA3:
     # Supports full cudagraphs for all cases.
     #
@@ -279,6 +462,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         vllm_config: "VllmConfig",
         kv_cache_spec: "AttentionSpec",
     ) -> AttentionCGSupport:
+        """获取 CUDA Graph 支持级别。
+
+        Args:
+            vllm_config: vLLM 配置
+            kv_cache_spec: KV 缓存规格
+
+        Returns:
+            CUDA Graph 支持级别
+        """
         return cls._cudagraph_support
 
     def __init__(
@@ -288,6 +480,14 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        """初始化 Flash Attention 元数据构建器。
+
+        Args:
+            kv_cache_spec: KV 缓存规格
+            layer_names: 层名列表
+            vllm_config: vLLM 配置
+            device: 计算设备
+        """
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
@@ -357,9 +557,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> FlashAttentionMetadata:
-        """
-        fast_build disables AOT scheduling, used when there will be few
-        iterations i.e. spec-decode
+        """构建 Flash Attention 元数据。
+
+        Args:
+            common_prefix_len: 公共前缀长度
+            common_attn_metadata: 通用注意力元数据
+            fast_build: 是否快速构建（禁用 AOT 调度，用于 spec-decode 等迭代次数少的场景）
+
+        Returns:
+            FlashAttentionMetadata 对象
         """
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -542,16 +748,38 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> FlashAttentionMetadata:
+        """更新块表。
+
+        Args:
+            metadata: 原元数据
+            blk_table: 新块表
+            slot_mapping: 新 slot 映射
+
+        Returns:
+            更新后的元数据
+        """
         new_metadata = copy.copy(metadata)
         new_metadata.block_table = blk_table
         new_metadata.slot_mapping = slot_mapping
         return new_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
+        """判断是否使用 cascade 注意力。
+
+        Returns:
+            是否使用 cascade 注意力
+        """
         return use_cascade_attention(*args, **kwargs)
 
 
 class FlashAttentionImpl(AttentionImpl):
+    """Flash Attention 实现类。
+
+    基于 FlashAttention 的注意力实现。
+
+    Class Attributes:
+        can_return_lse_for_decode: 是否可以在 decode 时返回 LSE
+    """
     can_return_lse_for_decode: bool = True
 
     def __init__(
@@ -568,6 +796,21 @@ class FlashAttentionImpl(AttentionImpl):
         kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
+        """初始化 Flash Attention 实现。
+
+        Args:
+            num_heads: 注意力头数量
+            head_size: 头大小
+            scale: 缩放因子
+            num_kv_heads: KV 头数量
+            alibi_slopes: ALiBi 斜率
+            sliding_window: 滑动窗口大小
+            kv_cache_dtype: KV 缓存数据类型
+            logits_soft_cap: logits 软上限
+            attn_type: 注意力类型
+            kv_sharing_target_layer_name: KV 共享目标层名
+            sinks: sink 张量
+        """
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -640,52 +883,55 @@ class FlashAttentionImpl(AttentionImpl):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Forward pass with FlashAttention.
+        """FlashAttention 前向传播。
 
         Args:
-            query: shape = [num_tokens, num_heads, head_size]
-            key: shape = [num_tokens, num_kv_heads, head_size]
-            value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
-            attn_metadata: Metadata for attention.
+            layer: 注意力层模块
+            query: 形状 = [num_tokens, num_heads, head_size]
+            key: 形状 = [num_tokens, num_kv_heads, head_size]
+            value: 形状 = [num_tokens, num_kv_heads, head_size]
+            kv_cache: 形状 = [2, num_blocks, block_size, num_kv_heads, head_size]
+            attn_metadata: 注意力元数据
+            output: 输出张量
+            output_scale: 输出缩放因子（未实现）
+            output_block_scale: 输出块缩放因子（未实现）
+
         Returns:
-            shape = [num_tokens, num_heads * head_size]
-        NOTE: FP8 quantization, flash-attn expect the size of
-              {q,k,v}_descale to be (num_sequences, num_kv_heads).
-              We use torch's .expand() to avoid duplicating values
+            形状 = [num_tokens, num_heads * head_size] 的输出张量
+
+        Note:
+            FP8 量化时，flash-attn 期望 {q,k,v}_descale 的大小为
+            (num_sequences, num_kv_heads)。我们使用 torch 的 .expand()
+            来避免复制值。
         """
-        assert output is not None, "Output tensor must be provided."
+        assert output is not None, "必须提供输出张量。"
         assert self.vllm_flash_attn_version is not None, (
-            "FlashAttention version not detected."
+            "未检测到 FlashAttention 版本。"
         )
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
-                "fused output quantization is not yet supported for FlashAttentionImpl"
+                "FlashAttentionImpl 尚未支持融合输出量化。"
             )
 
         if attn_metadata is None:
-            # Profiling run.
+            # 性能分析运行。
             return output.fill_(0)
 
         attn_type = self.attn_type
 
-        # IMPORTANT!
-        # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
-        # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
-        # in this method. For example, `view` and `slice` (or `[:n]`) operations
-        # are surprisingly slow even in the case they do not invoke any GPU ops.
-        # Minimize the PyTorch ops in this method as much as possible.
-        # Whenever making a change in this method, please benchmark the
-        # performance to make sure it does not introduce any overhead.
+        # 重要提示！
+        # NOTE(woosuk): 使用分段 CUDA 图时，此方法在 eager-mode PyTorch 中执行。
+        # 因此，我们需要小心此方法中的任何 CPU 开销。
+        # 例如，`view`和`slice`（或`[:n]`）操作即使在不调用任何 GPU 操作的情况下也慢得惊人。
+        # 尽可能减少此方法中的 PyTorch 操作。
+        # 在此方法中进行任何更改时，请基准测试性能以确保不会引入任何开销。
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        # Handle encoder attention differently - no KV cache needed
+        # 以不同方式处理编码器注意力 - 不需要 KV 缓存
         if attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
-            # For encoder attention,
-            # we use direct Q, K, V tensors without caching
+            # 对于编码器注意力，我们直接使用 Q、K、V 张量而不进行缓存
             return self._forward_encoder_attention(
                 query[:num_actual_tokens],
                 key[:num_actual_tokens],
@@ -695,11 +941,11 @@ class FlashAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # For decoder and cross-attention, use KV cache as before
+        # 对于解码器和交叉注意力，按原样使用 KV 缓存
         key_cache, value_cache = kv_cache.unbind(0)
 
         if self.kv_cache_dtype.startswith("fp8"):
-            # queries are quantized in the attention layer
+            # query 在注意力层中量化
             dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
                 self.kv_cache_dtype
             )
@@ -765,7 +1011,7 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
 
-        # Cascade attention (rare case).
+        # Cascade 注意力（罕见情况）。
         cascade_attention(
             output[:num_actual_tokens],
             query[:num_actual_tokens],
@@ -802,20 +1048,27 @@ class FlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
+        """执行 KV 缓存更新。
+
+        Args:
+            layer: 注意力层模块
+            key: Key 张量
+            value: Value 张量
+            kv_cache: KV 缓存
+            slot_mapping: slot 映射
+        """
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
-            # For encoder attention,
-            # we use direct Q, K, V tensors without caching
+            # 对于编码器注意力，我们直接使用 Q、K、V 张量而不进行缓存
             return
 
         key_cache, value_cache = kv_cache.unbind(0)
 
-        # Reshape the input keys and values and store them in the cache.
-        # Skip this if sharing KV cache with an earlier attention layer.
-        # NOTE(woosuk): Here, key and value are padded while slot_mapping is
-        # not padded. However, we don't need to do key[:num_actual_tokens]
-        # and value[:num_actual_tokens] because the reshape_and_cache_flash
-        # op uses the slot_mapping's shape to determine the number of
-        # actual tokens.
+        # 重塑输入键和值并将其存储在缓存中。
+        # 如果与早期注意力层共享 KV 缓存，则跳过此操作。
+        # NOTE(woosuk): 在这里，key 和 value 经过 padding，而 slot_mapping 没有。
+        # 但是，我们不需要执行 key[:num_actual_tokens] 和 value[:num_actual_tokens]，
+        # 因为 reshape_and_cache_flash 操作使用 slot_mapping 的形状来确定
+        # 实际 token 的数量。
         reshape_and_cache_flash(
             key,
             value,
@@ -840,8 +1093,25 @@ class FlashAttentionImpl(AttentionImpl):
         k_descale: torch.Tensor | None = None,
         v_descale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """使用 DCP（分布式上下文并行）执行前向传播。
+
+        Args:
+            query: Query 张量
+            key: Key 张量
+            value: Value 张量
+            key_cache: Key 缓存
+            value_cache: Value 缓存
+            output: 输出张量
+            attn_metadata: 注意力元数据
+            q_descale: Query 解缩放因子
+            k_descale: Key 解缩放因子
+            v_descale: Value 解缩放因子
+
+        Returns:
+            输出张量
+        """
         assert self.vllm_flash_attn_version is not None, (
-            "FlashAttention version not detected."
+            "未检测到 FlashAttention 版本。"
         )
 
         cu_seqlens_q = attn_metadata.query_start_loc
@@ -876,7 +1146,7 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale=v_descale,
             num_splits=attn_metadata.max_num_splits,
         )
-        # FA returns LSE in shape [ H, B ] but DCP combine wants [ B, H ]
+        # FA 返回的 LSE 形状为 [ H, B ]，但 DCP combine 需要 [ B, H ]
         context_attn_out_cor, context_lse_cor = self.dcp_combine(
             context_attn_out,
             context_lse.transpose(0, 1),
@@ -925,27 +1195,30 @@ class FlashAttentionImpl(AttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         layer: torch.nn.Module,
     ) -> torch.Tensor:
-        """Forward pass for encoder attention without KV cache.
+        """编码器注意力前向传播，不使用 KV 缓存。
 
         Args:
-            query: shape = [num_encoder_tokens, num_heads, head_size]
-            key: shape = [num_encoder_tokens, num_kv_heads, head_size]
-            value: shape = [num_encoder_tokens, num_kv_heads, head_size]
-            output: shape = [num_encoder_tokens, num_heads, head_size]
-            attn_metadata: Encoder attention metadata
-            layer: The attention layer
+            query: 形状 = [num_encoder_tokens, num_heads, head_size]
+            key: 形状 = [num_encoder_tokens, num_kv_heads, head_size]
+            value: 形状 = [num_encoder_tokens, num_kv_heads, head_size]
+            output: 形状 = [num_encoder_tokens, num_heads, head_size]
+            attn_metadata: 编码器注意力元数据
+            layer: 注意力层
+
+        Returns:
+            输出张量
         """
         assert self.vllm_flash_attn_version is not None, (
-            "FlashAttention version not detected."
+            "未检测到 FlashAttention 版本。"
         )
 
-        # For encoder attention, process FP8 quantization if needed
+        # 对于编码器注意力，如需则处理 FP8 量化
         if self.kv_cache_dtype.startswith("fp8"):
             raise NotImplementedError(
-                "quantization is not supported for encoder attention"
+                "编码器注意力不支持量化。"
             )
 
-        # Use encoder-specific metadata for sequence information
+        # 使用编码器特定的序列信息元数据
         cu_seqlens_q = attn_metadata.query_start_loc
         cu_seqlens_k = attn_metadata.query_start_loc
         max_seqlen_q = attn_metadata.max_query_len
@@ -956,7 +1229,7 @@ class FlashAttentionImpl(AttentionImpl):
             self.num_kv_heads,
         )
 
-        # Call flash attention directly on Q, K, V tensors
+        # 直接在 Q、K、V 张量上调用 flash attention
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
@@ -970,7 +1243,7 @@ class FlashAttentionImpl(AttentionImpl):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             softmax_scale=self.scale,
-            causal=False,  # Encoder attention is bidirectional
+            causal=False,  # 编码器注意力是双向的
             alibi_slopes=self.alibi_slopes,
             window_size=sliding_window_size,
             softcap=self.logits_soft_cap,
@@ -995,35 +1268,47 @@ def use_cascade_attention(
     num_sms: int,
     dcp_world_size: int,
 ) -> bool:
-    """Decide whether to use cascade attention.
+    """判断是否使用 cascade 注意力。
 
-    This function 1) checks whether cascade attention is supported with the
-    given configuration, and 2) heuristically decides whether using cascade
-    attention can improve performance.
+    此函数 1) 检查给定配置是否支持 cascade 注意力，
+    2) 启发式地决定是否使用 cascade 注意力可以提高性能。
+
+    Args:
+        common_prefix_len: 公共前缀长度
+        query_lens: query 长度数组
+        num_query_heads: query 头数量
+        num_kv_heads: KV 头数量
+        use_alibi: 是否使用 ALiBi
+        use_sliding_window: 是否使用滑动窗口
+        use_local_attention: 是否使用局部注意力
+        num_sms: SM 数量
+        dcp_world_size: DCP 世界大小
+
+    Returns:
+        是否使用 cascade 注意力
     """
-    # Too short common prefix. Probably not worth using cascade attention.
-    # We use an arbitrary threshold of 256 tokens. TODO: Tune this threshold.
-    # NOTE(woosuk): This is the common case. We should return False as soon as
-    # possible to avoid any unnecessary computation.
+    # 公共前缀太短。可能不值得使用 cascade 注意力。
+    # 我们使用任意阈值 256 个 token。TODO: 调整此阈值。
+    # NOTE(woosuk): 这是常见情况。我们应该尽快返回 False 以避免任何不必要的计算。
     if common_prefix_len < 256:
         return False
-    # Cascade attention is currently not supported with these variants.
+    # Cascade 注意力目前不支持这些变体。
     if use_alibi or use_sliding_window or use_local_attention:
         return False
-    # Too few queries. Probably not worth using cascade attention.
-    # We use an arbitrary threshold of 8 queries. TODO: Tune this threshold.
+    # query 太少。可能不值得使用 cascade 注意力。
+    # 我们使用任意阈值 8 个 query。TODO: 调整此阈值。
     num_reqs = len(query_lens)
     if num_reqs < 8:
         return False
-    # disable cascade attention for DCP
+    # 为 DCP 禁用 cascade 注意力
     if dcp_world_size > 1:
         return False
 
-    # Heuristics to decide whether using cascade attention is beneficial.
-    # 1. When FlashDecoding is not used for normal attention, cascade attention
-    #    is likely to be faster since it saves memory bandwidth.
+    # 启发式方法决定是否使用 cascade 注意力有益。
+    # 1) 当正常注意力不使用 FlashDecoding 时，cascade 注意力
+    #    可能更快，因为它节省内存带宽。
     num_queries_per_kv = num_query_heads // num_kv_heads
-    # The criteria for using FlashDecoding can be found in the following link:
+    # FlashDecoding 的标准可以在以下链接找到：
     # https://github.com/vllm-project/flash-attention/blob/96266b1111111f3d11aabefaf3bacbab6a89d03c/csrc/flash_attn/flash_api.cpp#L535
     use_flash_decoding = (
         num_queries_per_kv > 1
@@ -1032,18 +1317,17 @@ def use_cascade_attention(
         and np.all(query_lens == 1)
     )
     if not use_flash_decoding:
-        # Use cascade attention.
+        # 使用 cascade 注意力。
         return True
 
-    # 2. When FlashDecoding is used for normal attention, it is not clear
-    #    whether cascade attention is beneficial, because FlashDecoding can
-    #    launch more CTAs than cascade attention.
-    #    We use a simple performance model to compare the two methods.
-    #    NOTE(woosuk): The performance model is very rough and may not be
-    #    accurate.
+    # 2) 当正常注意力使用 FlashDecoding 时，目前尚不清楚
+    #    cascade 注意力是否有益，因为 FlashDecoding 可以
+    #    比 cascade 注意力启动更多 CTA。
+    #    我们使用简单的性能模型来比较这两种方法。
+    #    NOTE(woosuk): 性能模型非常粗略，可能不准确。
     num_tokens = num_reqs
-    # NOTE(woosuk): These are default tile sizes. flash-attn might use
-    # different tile sizes (e.g., 64 or 256) depending on the configuration.
+    # NOTE(woosuk): 这些是默认 tile 大小。flash-attn 可能使用
+    # 不同的 tile 大小（例如 64 或 256），具体取决于配置。
     q_tile_size = 128
     kv_tile_size = 128
     num_prefix_tiles = cdiv(common_prefix_len, kv_tile_size)
@@ -1058,7 +1342,7 @@ def use_cascade_attention(
     flash_decoding_ctas *= num_prefix_tiles
     flash_decoding_time = cdiv(flash_decoding_ctas, num_sms)
 
-    # Use cascade attention if it is faster than FlashDecoding.
+    # 如果 cascade 注意力比 FlashDecoding 快，则使用 cascade 注意力。
     return cascade_time < flash_decoding_time
 
 
@@ -1088,10 +1372,46 @@ def cascade_attention(
     v_descale: torch.Tensor | None = None,
     s_aux: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    assert alibi_slopes is None, "Cascade attention does not support ALiBi."
-    # TODO: Support sliding window.
+    """Cascade 注意力实现。
+
+    通过分别处理共享前缀和后缀来优化具有公共前缀的注意力计算。
+
+    Args:
+        output: 输出张量
+        query: Query 张量
+        key_cache: Key 缓存
+        value_cache: Value 缓存
+        cu_query_lens: query 长度累积和
+        max_query_len: 最大 query 长度
+        cu_prefix_query_lens: 前缀 query 长度累积和
+        prefix_kv_lens: 前缀 KV 长度
+        suffix_kv_lens: 后缀 KV 长度
+        max_kv_len: 最大 KV 长度
+        softmax_scale: softmax 缩放因子
+        alibi_slopes: ALiBi 斜率
+        sliding_window: 滑动窗口
+        logits_soft_cap: logits 软上限
+        block_table: 块表
+        common_prefix_len: 公共前缀长度
+        max_num_splits: 最大分割数
+        fa_version: FlashAttention 版本
+        prefix_scheduler_metadata: 前缀调度器元数据
+        suffix_scheduler_metadata: 后缀调度器元数据
+        q_descale: Query 解缩放因子
+        k_descale: Key 解缩放因子
+        v_descale: Value 解缩放因子
+        s_aux: 辅助 sink 张量
+
+    Returns:
+        输出张量
+
+    Raises:
+        AssertionError: 如果不支持 ALiBi 或滑动窗口
+    """
+    assert alibi_slopes is None, "Cascade 注意力不支持 ALiBi。"
+    # TODO: 支持滑动窗口。
     assert sliding_window == (-1, -1), (
-        "Cascade attention does not support sliding window."
+        "Cascade 注意力不支持滑动窗口。"
     )
 
     num_tokens = query.shape[0]
@@ -1101,7 +1421,7 @@ def cascade_attention(
     assert num_common_kv_blocks > 0
     descale_shape = (cu_prefix_query_lens.shape[0] - 1, key_cache.shape[-2])
 
-    # Process shared prefix.
+    # 处理共享前缀。
     prefix_output, prefix_lse = flash_attn_varlen_func(
         q=query,
         k=key_cache,
@@ -1121,15 +1441,15 @@ def cascade_attention(
         q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
         k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
-        # s_aux is incorporated into prefix_lse inside the GPU kernel,
-        # enabling its effect during the final attention merge.
+        # s_aux 在 GPU 内核中整合到 prefix_lse 中，
+        # 使其在最终注意力合并时生效。
         s_aux=s_aux,
         num_splits=1 if vllm_is_batch_invariant() else max_num_splits,
     )
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
 
-    # Process suffix per query.
+    # 处理每个 query 的后缀。
     suffix_output, suffix_lse = flash_attn_varlen_func(
         q=query,
         k=key_cache,
@@ -1152,5 +1472,5 @@ def cascade_attention(
         num_splits=1 if vllm_is_batch_invariant() else max_num_splits,
     )
 
-    # Merge prefix and suffix outputs, and store the result in output.
+    # 合并前缀和后缀输出，并将结果存储在 output 中。
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output, suffix_lse)

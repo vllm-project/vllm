@@ -1,6 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention layer with PagedAttention and Triton prefix prefill."""
+"""ROCM Attention 后端模块。
+
+本模块实现了基于 ROCm PagedAttention 和 Triton Prefix Prefill 的注意力后端，负责：
+- 实现 ROCm Attention 后端类
+- 支持编码器和解码器注意力
+- 支持级联注意力
+- 支持 FP8 量化和融合输出量化
+- 支持非标准块大小（通过 Triton kernel）
+
+主要类：
+- RocmAttentionBackend: ROCm Attention 后端类
+- RocmAttentionMetadata: ROCm Attention 元数据类
+- RocmAttentionMetadataBuilder: 元数据构建器
+- RocmAttentionImpl: 后端实现类
+"""
 
 from dataclasses import dataclass
 from typing import ClassVar
@@ -41,6 +55,26 @@ logger = init_logger(__name__)
 
 @dataclass
 class RocmAttentionMetadata:
+    """ROCM Attention 元数据类。
+
+    存储 ROCm Attention 前向传播所需的元数据信息。
+
+    Attributes:
+        num_actual_tokens: 实际 token 数（不包括 padding）
+        max_query_len: 最大 query 长度
+        query_start_loc: query 起始位置
+        max_seq_len: 最大序列长度
+        seq_lens: 序列长度
+        block_table: 块表
+        slot_mapping: 槽位映射
+        use_cascade: 是否使用级联注意力
+        common_prefix_len: 公共前缀长度
+        cu_prefix_query_lens: 前缀 query 累积长度
+        prefix_kv_lens: 前缀 KV 长度
+        suffix_kv_lens: 后缀 KV 长度
+        scheduler_metadata: 调度器元数据
+        prefix_scheduler_metadata: 前缀调度器元数据
+    """
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
@@ -50,26 +84,45 @@ class RocmAttentionMetadata:
     #                                   |-- query_len ---|
 
     num_actual_tokens: int  # Number of tokens excluding padding.
+    """实际 token 数（不包括 padding）。"""
     max_query_len: int
+    """最大 query 长度。"""
     query_start_loc: torch.Tensor
+    """query 起始位置张量。"""
     max_seq_len: int
+    """最大序列长度。"""
     seq_lens: torch.Tensor
+    """序列长度张量。"""
     block_table: torch.Tensor
+    """块表张量。"""
     slot_mapping: torch.Tensor
+    """槽位映射张量。"""
 
     # For cascade attention.
     use_cascade: bool
+    """是否使用级联注意力。"""
     common_prefix_len: int
+    """公共前缀长度。"""
     cu_prefix_query_lens: torch.Tensor | None
+    """前缀 query 累积长度张量。"""
     prefix_kv_lens: torch.Tensor | None
+    """前缀 KV 长度张量。"""
     suffix_kv_lens: torch.Tensor | None
+    """后缀 KV 长度张量。"""
 
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
+    """调度器元数据张量。"""
     prefix_scheduler_metadata: torch.Tensor | None = None
+    """前缀调度器元数据张量。"""
 
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
+    """ROCM Attention 元数据构建器类。
+
+    负责构建 ROCm Attention 运行所需的元数据对象。
+    支持 CUDA 图捕获和级联注意力。
+    """
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
     def __init__(
@@ -79,6 +132,14 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        """初始化 ROCm Attention 元数据构建器。
+
+        Args:
+            kv_cache_spec: KV 缓存规格
+            layer_names: 层名称列表
+            vllm_config: vLLM 配置
+            device: 设备类型
+        """
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         self.block_size = kv_cache_spec.block_size
@@ -93,6 +154,14 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> RocmAttentionMetadata:
+        """为 CUDA 图捕获构建元数据。
+
+        Args:
+            common_attn_metadata: 通用注意力元数据
+
+        Returns:
+            构建的 RocmAttentionMetadata 对象
+        """
         attn_metadata = self.build(0, common_attn_metadata)
         # When doing full graph capture, setting seq_lens to
         # max_model_len will cause graph capture to be extremely
@@ -113,6 +182,16 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> RocmAttentionMetadata:
+        """构建 ROCm Attention 元数据。
+
+        Args:
+            common_prefix_len: 公共前缀长度
+            common_attn_metadata: 通用注意力元数据
+            fast_build: 是否快速构建
+
+        Returns:
+            构建的 RocmAttentionMetadata 对象
+        """
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
@@ -158,6 +237,12 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
 
 
 class RocmAttentionBackend(AttentionBackend):
+    """ROCM Attention 后端类。
+
+    基于 ROCm PagedAttention 和 Triton Prefix Prefill 实现的注意力后端。
+    支持所有注意力类型（解码器、编码器、编码器 - 解码器）。
+    支持非标准块大小（如 64, 128, 544 等）通过 Triton kernel。
+    """
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
@@ -175,6 +260,17 @@ class RocmAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        """获取支持的内核块大小列表。
+
+        ROCM paged attention 原生 C++ kernel 仅支持块大小 16 和 32
+        （由于 AMD GPU 的共享内存 LDS 限制）。
+        但 vLLM 通过 Triton 路径允许支持任何 16 的倍数。
+        非标准模型（如 block_size=544 的 qwen3-next，或 784/1056 的 qwen3_5）
+        会通过 `do_kv_cache_update` 动态路由到优化的 Triton kernel。
+
+        Returns:
+            支持的块大小列表 [MultipleOf(16)]
+        """
         # ROCM paged attention native C++ kernel only supports block sizes 16 and 32
         # due to shared memory (LDS) constraints on AMD GPUs.
         # See csrc/rocm/attention.cu CALL_CUSTOM_LAUNCHER_BLK macro.
@@ -187,28 +283,63 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
+        """获取支持的头大小列表。
+
+        Returns:
+            支持的头大小列表 [32, 64, 80, 96, 128, 160, 192, 224, 256]
+        """
         return [32, 64, 80, 96, 128, 160, 192, 224, 256]
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
+        """检查是否支持 multimodal 前缀。
+
+        Returns:
+            True（支持）
+        """
         return True
 
     @classmethod
     def supports_sink(cls) -> bool:
+        """检查是否支持 sink token。
+
+        Returns:
+            True（支持）
+        """
         return True
 
     forward_includes_kv_cache_update: bool = False
 
     @staticmethod
     def get_name() -> str:
+        """获取后端名称。
+
+        Returns:
+            后端名称 "ROCM_ATTN"
+        """
         return "ROCM_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["RocmAttentionImpl"]:
+        """获取注意力实现类。
+
+        Returns:
+            RocmAttentionImpl 类
+        """
         return RocmAttentionImpl
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
+        """检查是否支持指定的注意力类型。
+
+        RocmAttention 支持所有注意力类型。
+
+        Args:
+            attn_type: 注意力类型
+
+        Returns:
+            是否支持
+        """
         """RocmAttention supports all attention types."""
         return attn_type in (
             AttentionType.DECODER,
@@ -225,21 +356,60 @@ class RocmAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
+        """获取 KV 缓存形状。
+
+        Args:
+            num_blocks: 块数量
+            block_size: 块大小
+            num_kv_heads: KV 头数量
+            head_size: 头大小
+            cache_dtype_str: 缓存数据类型
+
+        Returns:
+            KV 缓存形状元组
+
+        Raises:
+            ValueError: 如果块大小不是 16 的倍数
+        """
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
+        """检查是否使用级联注意力。
+
+        Returns:
+            False（不支持级联注意力）
+        """
         return False
 
     @staticmethod
     def get_builder_cls() -> type["RocmAttentionMetadataBuilder"]:
+        """获取元数据构建器类。
+
+        Returns:
+            RocmAttentionMetadataBuilder 类
+        """
         return RocmAttentionMetadataBuilder
 
 
 class RocmAttentionImpl(AttentionImpl):
+    """ROCM Attention 实现类。
+
+    基于 ROCm PagedAttention 和 Triton Prefix Prefill 实现的注意力后端。
+    支持编码器注意力（无 KV 缓存）和解码器注意力（使用 KV 缓存）。
+    支持 FP8 量化和融合输出量化。
+    """
     def fused_output_quant_supported(self, quant_key: QuantKey):
+        """检查是否支持融合输出量化。
+
+        Args:
+            quant_key: 量化密钥
+
+        Returns:
+            是否支持（仅支持 kFp8StaticTensorSym）
+        """
         return quant_key == kFp8StaticTensorSym
 
     def __init__(
@@ -256,6 +426,21 @@ class RocmAttentionImpl(AttentionImpl):
         kv_sharing_target_layer_name: int | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
+        """初始化 ROCm Attention 实现。
+
+        Args:
+            num_heads: 注意力头数量
+            head_size: 头大小
+            scale: 缩放因子
+            num_kv_heads: KV 头数量
+            alibi_slopes: ALIBI 斜率列表
+            sliding_window: 滑动窗口大小
+            kv_cache_dtype: KV 缓存数据类型
+            logits_soft_cap: Logits 软化上限
+            attn_type: 注意力类型
+            kv_sharing_target_layer_name: KV 共享目标层名称
+            sinks: sink token 张量
+        """
         self.attn_type = attn_type
         self.num_heads = num_heads
         self.head_size = head_size
@@ -296,15 +481,18 @@ class RocmAttentionImpl(AttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         layer: torch.nn.Module,
     ) -> torch.Tensor:
-        """Forward pass for encoder attention without KV cache.
+        """编码器注意力的前向传播（无需 KV 缓存）。
 
         Args:
-            query: shape = [num_encoder_tokens, num_heads, head_size]
-            key: shape = [num_encoder_tokens, num_kv_heads, head_size]
-            value: shape = [num_encoder_tokens, num_kv_heads, head_size]
-            output: shape = [num_encoder_tokens, num_heads, head_size]
-            attn_metadata: Encoder attention metadata
-            layer: The attention layer
+            query: 形状 = [num_encoder_tokens, num_heads, head_size]
+            key: 形状 = [num_encoder_tokens, num_kv_heads, head_size]
+            value: 形状 = [num_encoder_tokens, num_kv_heads, head_size]
+            output: 形状 = [num_encoder_tokens, num_heads, head_size]
+            attn_metadata: 编码器注意力元数据
+            layer: 注意力层
+
+        Returns:
+            输出张量
         """
         # For encoder attention, process FP8 quantization if needed
         if self.kv_cache_dtype.startswith("fp8"):
@@ -347,17 +535,21 @@ class RocmAttentionImpl(AttentionImpl):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Forward pass with FlashAttention.
+        """使用 FlashAttention 进行前向传播。
 
         Args:
-            query: shape = [num_tokens, num_heads, head_size]
-            key: shape = [num_tokens, num_kv_heads, head_size]
-            value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
-            attn_metadata: Metadata for attention.
+            layer: 注意力层
+            query: 形状 = [num_tokens, num_heads, head_size]
+            key: 形状 = [num_tokens, num_kv_heads, head_size]
+            value: 形状 = [num_tokens, num_kv_heads, head_size]
+            kv_cache: 形状 = [2, num_blocks, block_size, num_kv_heads, head_size]
+            attn_metadata: 注意力元数据
+            output: 输出张量
+            output_scale: 输出缩放因子
+            output_block_scale: 输出块缩放因子
+
         Returns:
-            shape = [num_tokens, num_heads * head_size]
+            形状 = [num_tokens, num_heads * head_size] 的输出张量
         """
         assert output is not None, "Output tensor must be provided."
 
@@ -444,6 +636,15 @@ class RocmAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ):
+        """执行 KV 缓存更新。
+
+        Args:
+            layer: 注意力层
+            key: Key 张量
+            value: Value 张量
+            kv_cache: KV 缓存张量
+            slot_mapping: 槽位映射
+        """
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
         key_cache, value_cache = PagedAttention.split_kv_cache(
@@ -482,6 +683,11 @@ class RocmAttentionImpl(AttentionImpl):
             )
 
     def fused_rope_kvcache_supported(self):
+        """检查是否支持融合 RoPE KV 缓存。
+
+        Returns:
+            是否支持（需要 rocm_aiter_ops 启用）
+        """
         return rocm_aiter_ops.is_enabled()
 
     def do_rope_and_kv_cache_update(
@@ -496,6 +702,19 @@ class RocmAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
+        """执行 RoPE 和 KV 缓存更新。
+
+        Args:
+            layer: 注意力层
+            query: Query 张量
+            key: Key 张量
+            value: Value 张量
+            positions: 位置
+            cos_sin_cache: RoPE cos/sin 缓存
+            is_neox: 是否 NeoX 格式
+            kv_cache: KV 缓存张量
+            layer_slot_mapping: 层槽位映射
+        """
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
         key_cache, value_cache = PagedAttention.split_kv_cache(

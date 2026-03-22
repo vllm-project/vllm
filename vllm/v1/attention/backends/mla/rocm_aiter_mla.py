@@ -1,5 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""ROCm Aiter MLA 后端模块。
+
+本模块实现了基于 ROCm Aiter 的 MLA 后端，负责：
+- 实现 AiterMLABackend 类（支持 ROCm 平台）
+- 实现 AiterMLAMetadataBuilder 用于构建注意力元数据
+- 实现 AiterMLAImpl 用于执行 MLA 前向传播
+- 支持 FP8 KV 缓存（fp8_e4m3, fp8_e5m2）
+- 使用 rocm_aiter_ops.mla_decode_fwd 执行解码
+- 支持头重复（head repeat）以适配 kernel 要求
+
+主要类和函数：
+- AiterMLABackend: MLA 后端类
+- AiterMLADecodeMetadata: 解码阶段元数据
+- AiterMLAMetadata: 注意力元数据
+- AiterMLAMetadataBuilder: 元数据构建器
+- AiterMLAImpl: MLA 实现类
+- _copy_page_indices_kernel: Triton kernel 用于复制页索引
+"""
 
 from dataclasses import dataclass
 from typing import ClassVar

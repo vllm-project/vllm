@@ -1,5 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Triton 统一注意力操作模块。
+
+本模块实现了统一的注意力计算 kernel，支持：
+- 2D 和 3D kernel 实现
+- 因果注意力掩码
+- 滑动窗口注意力
+- ALIBI 斜率（包括 sqrt 变体）
+- Softcap 限幅
+- Sink token
+- FP8 量化
+- Query-Query 注意力偏置
+- PrefixLM 多模态前缀范围
+- Gemma3 模型优化
+
+主要类和函数：
+- cdiv_fn: 向上取整除法
+- apply_softcap: Softcap 应用
+- find_seq_idx: 二分查找序列索引
+- kernel_unified_attention_2d: 2D 统一注意力 kernel
+- kernel_unified_attention_3d: 3D 统一注意力 kernel
+- reduce_segments: 段约减 kernel
+- unified_attention: 统一注意力封装函数
+"""
 
 # Authors:
 #  - Burkhard Ringlein <ngl@zurich.ibm.com>
@@ -21,11 +44,31 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 
 @triton.jit
 def cdiv_fn(x, y):
+    """向上取整除法。
+
+    Args:
+        x: 被除数
+        y: 除数
+
+    Returns:
+        向上取整的除法结果
+    """
     return (x + y - 1) // y
 
 
 @triton.jit
 def apply_softcap(S, x):
+    """应用 softcap 限幅。
+
+    使用双曲正切函数对注意力分数进行限幅。
+
+    Args:
+        S: 注意力分数
+        x: softcap 值
+
+    Returns:
+        限幅后的值
+    """
     Sdiv = S / x
     p1 = tl.exp(Sdiv)
     p2 = tl.exp(-Sdiv)
@@ -40,6 +83,20 @@ def find_seq_idx(
     BLOCK_Q: tl.constexpr,
     use_q_block_mode: tl.constexpr,
 ):
+    """二分查找序列索引。
+
+    在 query_start_len 数组中查找 target_idx 对应的序列索引。
+
+    Args:
+        query_start_len_ptr: query 起始长度指针
+        target_idx: 目标索引
+        num_seqs: 序列数量
+        BLOCK_Q: Q 块大小
+        use_q_block_mode: 是否使用 Q 块模式
+
+    Returns:
+        序列索引
+    """
     left: tl.int32 = 0
     right = num_seqs
     while left < right:
@@ -108,6 +165,63 @@ def kernel_unified_attention_2d(
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
+    """统一注意力 2D kernel。
+
+    实现统一的注意力计算，支持因果掩码、滑动窗口、ALIBI、softcap、
+    sink token、FP8 量化、query-query 偏置和多模态前缀范围。
+
+    Args:
+        output_ptr: 输出指针
+        query_ptr: Query 指针
+        key_cache_ptr: Key 缓存指针
+        value_cache_ptr: Value 缓存指针
+        sink_ptr: Sink 指针
+        block_tables_ptr: 块表指针
+        seq_lens_ptr: 序列长度指针
+        alibi_slopes_ptr: ALIBI 斜率指针
+        qq_bias_ptr: Query-Query 偏置指针
+        scale: 缩放因子
+        k_scale: K 缩放因子
+        v_scale: V 缩放因子
+        out_scale: 输出缩放因子
+        softcap: softcap 值
+        num_query_heads: Query 头数量
+        num_queries_per_kv: 每个 KV 头的 Query 头数
+        block_table_stride: 块表步幅
+        query_stride_0: Query 第 0 维步幅
+        query_stride_1: Query 第 1 维步幅
+        output_stride_0: 输出第 0 维步幅
+        output_stride_1: 输出第 1 维步幅
+        qq_bias_stride_0: QQ 偏置第 0 维步幅
+        BLOCK_SIZE: 块大小
+        TILE_SIZE: Tile 大小
+        HEAD_SIZE: 头维度
+        HEAD_SIZE_PADDED: 填充后的头维度
+        USE_ALIBI_SLOPES: 是否使用 ALIBI 斜率
+        USE_ALIBI_SQRT: 是否使用 ALIBI sqrt
+        USE_QQ_BIAS: 是否使用 QQ 偏置
+        USE_SOFTCAP: 是否使用 softcap
+        USE_SINKS: 是否使用 sinks
+        SLIDING_WINDOW: 滑动窗口大小
+        USE_MM_PREFIX: 是否使用多模态前缀
+        MAX_MM_RANGES: 最大多模态范围数
+        mm_prefix_range_ptr: 多模态前缀范围指针
+        stride_k_cache_0: K 缓存第 0 维步幅
+        stride_k_cache_1: K 缓存第 1 维步幅
+        stride_k_cache_2: K 缓存第 2 维步幅
+        stride_k_cache_3: K 缓存第 3 维步幅
+        stride_v_cache_0: V 缓存第 0 维步幅
+        stride_v_cache_1: V 缓存第 1 维步幅
+        stride_v_cache_2: V 缓存第 2 维步幅
+        stride_v_cache_3: V 缓存第 3 维步幅
+        query_start_len_ptr: Query 起始长度指针
+        BLOCK_Q: Q 块大小
+        num_seqs: 序列数量
+        BLOCK_M: M 块大小
+        USE_FP8: 是否使用 FP8
+        FP8_MIN: FP8 最小值
+        FP8_MAX: FP8 最大值
+    """
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
 
@@ -454,6 +568,60 @@ def kernel_unified_attention_3d(
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
 ):
+    """统一注意力 3D kernel。
+
+    实现分段注意力计算，将序列分成多个段分别计算，
+    然后通过 reduce_segments 合并结果。适用于解码场景。
+
+    Args:
+        segm_output_ptr: 分段输出指针
+        segm_max_ptr: 分段最大值指针
+        segm_expsum_ptr: 分段 expsum 指针
+        query_ptr: Query 指针
+        key_cache_ptr: Key 缓存指针
+        value_cache_ptr: Value 缓存指针
+        sink_ptr: Sink 指针
+        block_tables_ptr: 块表指针
+        seq_lens_ptr: 序列长度指针
+        alibi_slopes_ptr: ALIBI 斜率指针
+        qq_bias_ptr: Query-Query 偏置指针
+        scale: 缩放因子
+        k_scale: K 缩放因子
+        v_scale: V 缩放因子
+        softcap: softcap 值
+        num_query_heads: Query 头数量
+        num_queries_per_kv: 每个 KV 头的 Query 头数
+        block_table_stride: 块表步幅
+        query_stride_0: Query 第 0 维步幅
+        query_stride_1: Query 第 1 维步幅
+        qq_bias_stride_0: QQ 偏置第 0 维步幅
+        BLOCK_SIZE: 块大小
+        TILE_SIZE: Tile 大小
+        HEAD_SIZE: 头维度
+        HEAD_SIZE_PADDED: 填充后的头维度
+        USE_ALIBI_SLOPES: 是否使用 ALIBI 斜率
+        USE_ALIBI_SQRT: 是否使用 ALIBI sqrt
+        USE_QQ_BIAS: 是否使用 QQ 偏置
+        USE_SOFTCAP: 是否使用 softcap
+        USE_SINKS: 是否使用 sinks
+        SLIDING_WINDOW: 滑动窗口大小
+        stride_k_cache_0: K 缓存第 0 维步幅
+        stride_k_cache_1: K 缓存第 1 维步幅
+        stride_k_cache_2: K 缓存第 2 维步幅
+        stride_k_cache_3: K 缓存第 3 维步幅
+        stride_v_cache_0: V 缓存第 0 维步幅
+        stride_v_cache_1: V 缓存第 1 维步幅
+        stride_v_cache_2: V 缓存第 2 维步幅
+        stride_v_cache_3: V 缓存第 3 维步幅
+        query_start_len_ptr: Query 起始长度指针
+        BLOCK_Q: Q 块大小
+        num_seqs: 序列数量
+        BLOCK_M: M 块大小
+        NUM_SEGMENTS_PER_SEQ: 每序列段数
+        USE_MM_PREFIX: 是否使用多模态前缀
+        MAX_MM_RANGES: 最大多模态范围数
+        mm_prefix_range_ptr: 多模态前缀范围指针
+    """
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
     segm_idx = tl.program_id(2)
@@ -783,6 +951,33 @@ def reduce_segments(
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
+    """段约减 kernel。
+
+    合并 3D kernel 产生的分段注意力结果，计算最终的注意力输出。
+    使用在线注意力算法进行数值稳定的合并。
+
+    Args:
+        output_ptr: 输出指针
+        segm_output_ptr: 分段输出指针
+        segm_max_ptr: 分段最大值指针
+        segm_expsum_ptr: 分段 expsum 指针
+        seq_lens_ptr: 序列长度指针
+        num_seqs: 序列数量
+        num_query_heads: Query 头数量
+        out_scale_inv: 输出缩放因子的倒数
+        output_stride_0: 输出第 0 维步幅
+        output_stride_1: 输出第 1 维步幅
+        block_table_stride: 块表步幅
+        TILE_SIZE: Tile 大小
+        HEAD_SIZE: 头维度
+        HEAD_SIZE_PADDED: 填充后的头维度
+        query_start_len_ptr: Query 起始长度指针
+        BLOCK_Q: Q 块大小
+        NUM_SEGMENTS_PER_SEQ: 每序列段数
+        USE_FP8: 是否使用 FP8
+        FP8_MIN: FP8 最小值
+        FP8_MAX: FP8 最大值
+    """
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
 
@@ -850,11 +1045,18 @@ def reduce_segments(
 
 
 def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
-    """Detect Gemma3 models via unique (head_size, sliding_window) signature.
+    """通过独特的 (head_size, sliding_window) 特征检测 Gemma3 模型。
 
-    Gemma3 models are the only ones using sliding_window=1024 with
-    head_size 128 (27B) or 256 (1B, 4B, 12B). Other SWA models use
-    different window sizes (Mistral=4096, Phi-3=2047).
+    Gemma3 模型是唯一使用 sliding_window=1024 且 head_size 为
+    128 (27B) 或 256 (1B, 4B, 12B) 的模型。其他 SWA 模型使用
+    不同的窗口大小（Mistral=4096, Phi-3=2047）。
+
+    Args:
+        head_size: 头维度
+        sliding_window: 滑动窗口大小
+
+    Returns:
+        是否为 Gemma3 注意力
     """
     return sliding_window == 1024 and head_size in (128, 256)
 
@@ -865,17 +1067,26 @@ def _get_tile_size(
     element_size: int,
     is_prefill: bool,
 ) -> int:
-    """Select tile size with Gemma3-specific optimization.
+    """选择 Tile 大小，带有 Gemma3 特定优化。
 
-    For Gemma3, use 32 for both prefill and decode to better utilize
-    the larger head dimension (128/256). For other models, use
-    the default vLLM behavior.
+    对于 Gemma3 模型，预填充和解码都使用 32 的 Tile 大小，
+    以更好地利用较大的头维度（128/256）。对于其他模型，
+    使用默认的 vLLM 行为。
+
+    Args:
+        head_size: 头维度
+        sliding_window: 滑动窗口大小
+        element_size: 元素大小（字节）
+        is_prefill: 是否为预填充阶段
+
+    Returns:
+        Tile 大小
     """
     if _is_gemma3_attention(head_size, sliding_window):
-        # Gemma3: use 32 for decode (default is 16)
+        # Gemma3：解码使用 32（默认是 16）
         return 32
 
-    # Default behavior
+    # 默认行为
     if is_prefill:
         return 32
     return 16 if element_size >= 2 else 32
@@ -912,6 +1123,41 @@ def unified_attention(
     mm_prefix_range=None,
     use_alibi_sqrt=False,
 ):
+    """统一注意力封装函数。
+
+    根据序列长度和配置自动选择 2D 或 3D kernel 实现。
+    支持因果掩码、滑动窗口、ALIBI、softcap、sink token、
+    FP8 量化、query-query 偏置和多模态前缀范围。
+
+    Args:
+        q: Query 张量
+        k: Key 张量
+        v: Value 张量
+        out: 输出张量
+        cu_seqlens_q: Query 累积序列长度
+        max_seqlen_q: 最大 Query 序列长度
+        seqused_k: 使用的 K 序列长度
+        max_seqlen_k: 最大 K 序列长度
+        softmax_scale: Softmax 缩放因子
+        causal: 是否因果注意力
+        window_size: 窗口大小
+        block_table: 块表
+        softcap: softcap 值
+        q_descale: Q 反缩放因子
+        k_descale: K 反缩放因子
+        v_descale: V 反缩放因子
+        seq_threshold_3D: 3D kernel 序列阈值（可选）
+        num_par_softmax_segments: 并行 Softmax 段数（可选）
+        softmax_segm_output: Softmax 分段输出（可选）
+        softmax_segm_max: Softmax 分段最大值（可选）
+        softmax_segm_expsum: Softmax 分段 expsum（可选）
+        alibi_slopes: ALIBI 斜率（可选）
+        output_scale: 输出缩放因子（可选）
+        qq_bias: Query-Query 偏置（可选）
+        sinks: Sink token 张量（可选）
+        mm_prefix_range: 多模态前缀范围（可选）
+        use_alibi_sqrt: 是否使用 ALIBI sqrt
+    """
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
 

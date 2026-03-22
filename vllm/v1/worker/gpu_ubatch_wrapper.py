@@ -1,6 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""GPU 微批次包装器模块。
 
+本模块实现了微批次相关的包装器和元数据类，负责：
+- 管理微批次元数据（UbatchMetadata）
+- 管理 CUDA Graph 元数据（CUDAGraphMetaData）
+- 控制 SM（流式多处理器）分配
+- 包装微批次执行逻辑
+
+主要类：
+- UbatchMetadata: 微批次元数据
+- CUDAGraphMetaData: CUDA Graph 元数据
+- SMControlContextManager: SM 控制上下文管理器
+- UBatchWrapper: 微批次包装器
+"""
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -32,6 +45,18 @@ logger = init_logger(__name__)
 
 @dataclass
 class UbatchMetadata:
+    """微批次元数据类。
+
+    存储微批次执行所需的元数据信息。
+
+    Attributes:
+        context: 微批次上下文
+        input_ids: 输入 ID 张量
+        positions: 位置张量
+        inputs_embeds: 输入嵌入张量（可选）
+        intermediate_tensors: 中间张量（用于流水线并行）
+        num_tokens: token 数量
+    """
     context: UBatchContext
     input_ids: torch.Tensor
     positions: torch.Tensor
@@ -42,32 +67,46 @@ class UbatchMetadata:
 
 @dataclass
 class CUDAGraphMetaData:
+    """CUDA Graph 元数据类。
+
+    存储 CUDA Graph 执行所需的元数据信息。
+
+    Attributes:
+        cudagraph: CUDA Graph
+        ubatch_metadata: 微批次元数据
+        outputs: 输出（可选）
+    """
     cudagraph: torch.cuda.CUDAGraph
     ubatch_metadata: UbatchMetadata
     outputs: Any | None = None
 
 
 class SMControlContextManager:
+    """SM（流式多处理器）控制上下文管理器。
+
+    控制通信和计算的 SM 分配。进入上下文时，将通信和计算的 SM 数量
+    分别设置为 comm_sms 和 total_sms - comm_sms。退出时，恢复为使用
+    所有可用的 SM。
+
+    Attributes:
+        total_sms: 总 SM 数量
+        compute_sms: 计算用 SM 数量
+        comm_sms: 通信用 SM 数量
+        set_comm_sms: 设置通信 SM 数量的函数
+        set_compute_sms: 设置计算 SM 数量的函数
+    """
     def __init__(
         self,
         comm_sms: int,
         set_comm_sms: Callable[[int], None],
         set_compute_sms: Callable[[int], None],
     ):
-        """
-        Context manager for controlling SM (Streaming Multiprocessor)
-        allocation. Upon entering the context, it sets the number of SMs
-        allocated for communication and computation to comm_sms and
-        total_sms - comm_sms respectively. Upon exiting, it restores the
-        allocation to use all available SMs (i.e. total_sms).
+        """初始化 SM 控制上下文管理器。
 
         Args:
-            comm_sms (int): The number of SMs to allocate for communication.
-                (The remainder will be used for computation.)
-            set_comm_sms (Callable[[int], None]):
-                A function that sets the number of SMs for communication.
-            set_compute_sms (Callable[[int], None]):
-                A function that sets the number of SMs for computation.
+            comm_sms: 通信 SM 数量（剩余用于计算）
+            set_comm_sms: 设置通信 SM 数量的函数
+            set_compute_sms: 设置计算 SM 数量的函数
         """
 
         assert current_platform.is_cuda(), (
@@ -93,6 +132,22 @@ class SMControlContextManager:
 
 
 class UBatchWrapper:
+    """微批次包装器类。
+
+    包装可执行对象以支持微批次执行和 CUDA Graph 捕获。
+
+    Attributes:
+        runnable: 可执行对象
+        vllm_config: vLLM 配置
+        compilation_config: 编译配置
+        comm_stream: 通信 CUDA 流
+        ready_barrier: 就绪屏障
+        cudagraphs: CUDA Graph 元数据字典
+        cudagraph_wrapper: CUDA Graph 包装器
+        sm_control: SM 控制上下文管理器
+        device: 设备
+        is_debugging_mode: 是否为调试模式
+    """
     def __init__(
         self,
         runnable: Callable,
@@ -100,6 +155,14 @@ class UBatchWrapper:
         runtime_mode: CUDAGraphMode,
         device: torch.cuda.device,
     ):
+        """初始化微批次包装器。
+
+        Args:
+            runnable: 可执行对象
+            vllm_config: vLLM 配置
+            runtime_mode: CUDA Graph 模式
+            device: CUDA 设备
+        """
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
@@ -124,17 +187,31 @@ class UBatchWrapper:
 
     @property
     def graph_pool(self):
+        """获取图形池。
+
+        Returns:
+            图形池（如果有）
+        """
         if self.cudagraph_wrapper is not None:
             return self.cudagraph_wrapper.graph_pool
         return None
 
     def clear_graphs(self) -> None:
+        """清除所有图形。"""
         self.cudagraphs.clear()
         if self.cudagraph_wrapper is not None:
             self.cudagraph_wrapper.clear_graphs()
 
     @staticmethod
     def _create_sm_control_context(vllm_config: VllmConfig):
+        """创建 SM 控制上下文管理器。
+
+        Args:
+            vllm_config: vLLM 配置
+
+        Returns:
+            SM 控制上下文管理器
+        """
         comm_sms: int = envs.VLLM_DBO_COMM_SMS
 
         set_comm_sms = lambda sms: None
@@ -169,6 +246,14 @@ class UBatchWrapper:
         )
 
     def __getattr__(self, key: str):
+        """允许访问可执行对象的属性。
+
+        Args:
+            key: 属性名
+
+        Returns:
+            属性值
+        """
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
             return getattr(self.runnable, key)
@@ -180,30 +265,33 @@ class UBatchWrapper:
         raise AttributeError
 
     def unwrap(self) -> Callable:
+        """unwrap 返回原始可执行对象。
+
+        Returns:
+            原始可执行对象
+        """
         # in case we need to access the original runnable.
         return self.runnable
 
     def _capture_ubatches(self, ubatch_metadata, model) -> torch.Tensor:
-        """
-        Capture a cudagraph for a microbatched run.
+        """捕获微批次运行的 CUDA Graph。
 
-        The logic here is somewhat complicated because we need to make sure that
-        each of the ubatch threads initialize the cuda context before we start
-        the graph capture.
+        逻辑比较复杂，因为需要确保每个微批次线程在开始图形捕获之前
+        初始化其 CUDA 上下文。
 
-        The flow is as follows:
-        1. The main thread starts up each ubatch thread. Each thread will
-        initialize its cuda context (torch.cuda.current_blas_handle())
-        before going to sleep upon entering the ubatch_context.
+        流程如下：
+        1. 主线程启动每个微批次线程。每个线程在进入 ubatch_context 之前
+           初始化其 CUDA 上下文（torch.cuda.current_blas_handle()）。
+        2. 主线程开始图形捕获并唤醒第一个微批次线程。
+        3. 每个微批次线程运行模型到完成并将输出张量返回给主线程。
+        4. 主线程存储捕获的 CUDA Graph 及其元数据并返回。
 
-        2. The main thread starts the graph capture and wakes up the first
-        ubatch thread.
+        Args:
+            ubatch_metadata: 微批次元数据
+            model: 模型
 
-        3. Each ubatch thread runs the model to completion and returns the
-        completed output tensors back to the main thread.
-
-        4. The main thread stores the captured cudagraph along with its metadata
-        and returns
+        Returns:
+            输出张量
         """
 
         @torch.inference_mode()
@@ -277,6 +365,15 @@ class UBatchWrapper:
         return cudagraph_metadata.outputs
 
     def _run_ubatches(self, ubatch_metadata, model) -> torch.Tensor:
+        """运行微批次。
+
+        Args:
+            ubatch_metadata: 微批次元数据
+            model: 模型
+
+        Returns:
+            输出张量
+        """
         @torch.inference_mode()
         def _ubatch_thread(results, model, ubatch_metadata):
             with ubatch_metadata.context:
@@ -328,6 +425,24 @@ class UBatchWrapper:
         batch_descriptor,
         cudagraph_runtime_mode,
     ) -> list[UbatchMetadata]:
+        """生成微批次元数据列表。
+
+        Args:
+            ubatch_slices: 微批次切片列表
+            attn_metadata: 注意力元数据
+            slot_mapping: slot 映射
+            input_ids: 输入 ID
+            positions: 位置
+            inputs_embeds: 输入嵌入
+            intermediate_tensors: 中间张量
+            compute_stream: 计算流
+            dp_metadata: DP 元数据
+            batch_descriptor: 批次描述符
+            cudagraph_runtime_mode: CUDA Graph 运行时模式
+
+        Returns:
+            微批次元数据列表
+        """
         # Create one forward context per ubatch
         forward_contexts = []
         # slot_mapping can be None, an empty dict (from create_forward_context
@@ -389,6 +504,18 @@ class UBatchWrapper:
         inputs_embeds,
         intermediate_tensors,
     ):
+        """切片模型输入。
+
+        Args:
+            tokens_slice: token 切片
+            input_ids: 输入 ID
+            positions: 位置
+            inputs_embeds: 输入嵌入
+            intermediate_tensors: 中间张量
+
+        Returns:
+            切片后的 (input_ids, positions, inputs_embeds, intermediate_tensors)
+        """
         sliced_input_ids = input_ids[tokens_slice]
         # if we are using mrope. Mrope adds an additional dimension to the
         # positions tensor
@@ -409,6 +536,17 @@ class UBatchWrapper:
         )
 
     def __call__(self, *args, **kwargs):
+        """执行可执行对象。
+
+        如果启用了微批次，则使用微批次执行；否则直接运行可执行对象。
+
+        Args:
+            *args: 位置参数
+            **kwargs: 关键字参数
+
+        Returns:
+            执行结果
+        """
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
         ubatch_slices = forward_context.ubatch_slices
