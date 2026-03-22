@@ -254,7 +254,7 @@ class SpecDecodingProm:
             self.counter_spec_decode_num_accepted_tokens_per_pos[engine_idx]
         ):
             counter.inc(spec_decoding_stats.num_accepted_tokens_per_pos[pos])
-        
+
         # Update DSL metrics
         if spec_decoding_stats.dsl_total_proposals > 0:
             self.counter_dsl_total_proposals[engine_idx].inc(

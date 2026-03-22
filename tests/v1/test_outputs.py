@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest import TestCase
 
-from vllm.v1.outputs import LogprobsLists
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
 
 
 class TestLogprobsLists(TestCase):

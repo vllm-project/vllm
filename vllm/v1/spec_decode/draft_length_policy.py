@@ -10,11 +10,15 @@ proposer logic.
 Example usage (see SpecDecodeBaseProposer.__init__)::
 
     from vllm.v1.spec_decode.draft_length_policy import (
-        DraftLengthPolicy, ConfidenceThresholdPolicy, AlwaysContinuePolicy)
+        DraftLengthPolicy,
+        ConfidenceThresholdPolicy,
+        AlwaysContinuePolicy,
+    )
 
     threshold = speculative_config.draft_confidence_threshold
     policy: DraftLengthPolicy = (
-        ConfidenceThresholdPolicy(threshold) if threshold > 0
+        ConfidenceThresholdPolicy(threshold)
+        if threshold > 0
         else AlwaysContinuePolicy()
     )
 """
@@ -43,8 +47,7 @@ class DraftLengthPolicy(Protocol):
         ``False`` – stop drafting; the token at ``step`` is the last one.
     """
 
-    def should_continue(self, step: int, token_probs: torch.Tensor) -> bool:
-        ...
+    def should_continue(self, step: int, token_probs: torch.Tensor) -> bool: ...
 
 
 class ConfidenceThresholdPolicy:
