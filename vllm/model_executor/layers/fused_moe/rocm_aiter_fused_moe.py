@@ -10,11 +10,15 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    CK_MXFP4_MOE_DIM_ALIGNMENT,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -292,6 +296,8 @@ def rocm_aiter_fused_experts(
             doweight_stage1=apply_router_weight_on_input,
             num_local_tokens=num_local_tokens,
             output_dtype=output_dtype,
+            hidden_pad=quant_config.hidden_pad // 128 * 128,
+            intermediate_pad=quant_config.intermediate_pad // 64 * 64 * 2,
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
         )
@@ -348,6 +354,38 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
+
+    @staticmethod
+    def is_supported_config(
+        cls: type["AiterExperts"],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        supported, reason = mk.FusedMoEExpertsModular.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if not supported:
+            return supported, reason
+        # CK MXFP4 MoE kernels are only supported on gfx950 and require
+        # intermediate_size aligned to CK_MXFP4_MOE_DIM_ALIGNMENT (256).
+        if weight_key == kMxfp4Static:
+            from vllm.platforms.rocm import on_gfx950
+
+            if not on_gfx950():
+                return False, ("kernel does not support MXFP4 on non-gfx950 ROCm")
+            if (
+                moe_config.intermediate_size_per_partition % CK_MXFP4_MOE_DIM_ALIGNMENT
+                != 0
+            ):
+                return False, (
+                    f"kernel does not support "
+                    f"intermediate_size_per_partition="
+                    f"{moe_config.intermediate_size_per_partition} "
+                    f"(not a multiple of {CK_MXFP4_MOE_DIM_ALIGNMENT})"
+                )
+        return True, None
 
     def supports_expert_map(self):
         return True
