@@ -356,10 +356,14 @@ class W8A8BlockFp8LinearOp:
         act_quant_group_shape: GroupShape,
         cutlass_block_fp8_supported: bool = CUTLASS_BLOCK_FP8_SUPPORTED,
         use_aiter_and_is_supported: bool = False,
+        use_deep_gemm: bool | None = None,
     ):
         self.weight_group_shape = weight_group_shape
         self.act_quant_group_shape = act_quant_group_shape
-        self.is_deep_gemm_supported = is_deep_gemm_supported()
+        if use_deep_gemm is not None:
+            self.is_deep_gemm_supported = use_deep_gemm
+        else:
+            self.is_deep_gemm_supported = is_deep_gemm_supported()
         self.is_hopper = current_platform.is_device_capability(90)
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
         self.is_flashinfer_supported = is_flashinfer_fp8_blockscale_gemm_supported()
