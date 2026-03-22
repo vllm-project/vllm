@@ -95,15 +95,20 @@ def _gumbel_sample_kernel(
             mask=mask,
         )
 
+    logits = logits.to(tl.float64)
     if temp != 0.0:
         # Calculate the seed for gumbel noise.
         seed = tl.load(seeds_ptr + req_state_idx)
         pos = tl.load(pos_ptr + token_idx)
         gumbel_seed = tl.randint(seed, pos)
 
-        # Generate gumbel noise in FP32.
-        u = tl.rand(gumbel_seed, block)
-        u = tl.maximum(u, 1e-7)
+        # tl.rand returns fp32, so build a true fp64 uniform from 64 random
+        # bits before applying the double-log transform.
+        lo, hi, _, _ = tl.randint4x(gumbel_seed, block)
+        lo = lo.to(tl.uint32, bitcast=True).to(tl.uint64)
+        hi = hi.to(tl.uint32, bitcast=True).to(tl.uint64)
+        u = tl.uint_to_uniform_float((hi << 32) | lo)
+        u = tl.maximum(u, 2.2250738585072014e-308)  # float64 tiny
         gumbel_noise = -tl.log(-tl.log(u))
 
         # Apply gumbel noise.
@@ -128,7 +133,7 @@ def gumbel_sample(
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
-    local_max = logits.new_empty(num_tokens, num_blocks, dtype=torch.float32)
+    local_max = logits.new_empty(num_tokens, num_blocks, dtype=torch.float64)
     _gumbel_sample_kernel[(num_tokens, num_blocks)](
         local_argmax,
         local_argmax.stride(0),

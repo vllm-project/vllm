@@ -211,12 +211,18 @@ def _probabilistic_rejection_kernel(
             else:
                 target_prob = tl.load(
                     target_probs_ptr + logit_idx * target_probs_stride + draft_sampled
-                )
+                ).to(tl.float64)
                 draft_prob = tl.load(
                     draft_probs_ptr + logit_idx * draft_probs_stride + draft_sampled
-                )
+                ).to(tl.float64)
                 pos = tl.load(pos_ptr + logit_idx)
-                u = tl.sum(tl.rand(seed, pos + tl.arange(0, 1)))
+
+                lo, hi, _, _ = tl.randint4x(seed, pos + tl.arange(0, 1))
+                lo = lo.to(tl.uint32, bitcast=True).to(tl.uint64)
+                hi = hi.to(tl.uint32, bitcast=True).to(tl.uint64)
+                u = tl.uint_to_uniform_float((hi << 32) | lo)
+                u = tl.sum(u)
+
                 accepted &= target_prob > u * draft_prob
             tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
             rejected_step += accepted
