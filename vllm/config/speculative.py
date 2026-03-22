@@ -280,7 +280,7 @@ class SpeculativeConfig:
             )
 
         if (
-            hf_config.model_type.startswith("nemotron_h")
+            hf_config.model_type in {"nemotron_h", "nemotron_h_puzzle"}
             and hasattr(hf_config, "num_nextn_predict_layers")
             and hf_config.num_nextn_predict_layers > 0
         ):
