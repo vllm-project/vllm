@@ -587,7 +587,6 @@ class RMSNormNvfp4QuantPattern:
         config = get_current_vllm_config()
         self.model_dtype = config.model_config.dtype if config.model_config else None
         self.device = config.device_config.device if config.device_config else None
-        self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
 
     def get_inputs(self) -> list[torch.Tensor]:
         input = torch.empty(5, 16, dtype=self.model_dtype, device=self.device)
@@ -608,7 +607,7 @@ class RMSNormNvfp4QuantPattern:
             weight: torch.Tensor,
             input_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            rms_out = self.rmsnorm_matcher(input, weight)
+            rms_out = vllm.ir.ops.rms_norm(input, weight, self.epsilon)
             at = auto_functionalized(
                 STATIC_FP4_QUANT_OP,
                 output=quant_result,
