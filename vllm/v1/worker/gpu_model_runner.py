@@ -415,9 +415,9 @@ class GPUModelRunner(
             cache_config.cache_dtype, self.model_config
         )
 
-        # Resolve the bitmask backend once at init time.
-        self._bitmask_backend = current_platform.get_bitmask_backend(
-            vllm_config.structured_outputs_config.bitmask_backend
+        # Resolve the structured output backend once at init time.
+        self._structured_output_backend = current_platform.get_structured_output_backend(
+            vllm_config.structured_outputs_config.structured_output_backend
         )
 
         self.is_pooling_model = model_config.runner_type == "pooling"
@@ -3940,7 +3940,7 @@ class GPUModelRunner(
         if grammar_output is not None:
             apply_grammar_bitmask(
                 scheduler_output, grammar_output, self.input_batch, logits,
-                bitmask_backend=self._bitmask_backend,
+                structured_output_backend=self._structured_output_backend,
             )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):

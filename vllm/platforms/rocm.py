@@ -555,20 +555,20 @@ class RocmPlatform(Platform):
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
-    def get_supported_bitmask_backends(cls) -> list[str]:
+    def get_supported_structured_output_backends(cls) -> list[str]:
         return ["auto", "cpu", "cuda", "torch_compile", "torch_native"]
 
     @classmethod
-    def get_bitmask_backend(cls, backend: str = "auto") -> str:
+    def get_structured_output_backend(cls, backend: str = "auto") -> str:
         if backend != "auto":
-            supported = cls.get_supported_bitmask_backends()
+            supported = cls.get_supported_structured_output_backends()
             if backend not in supported:
                 raise ValueError(
-                    f"Bitmask backend '{backend}' is not supported on ROCm. "
+                    f"Structured output backend '{backend}' is not supported on ROCm. "
                     f"Supported: {supported}"
                 )
             logger.info_once(
-                "Using user-specified bitmask backend: %s", backend
+                "Using user-specified structured output backend: %s", backend
             )
             return backend
         return "auto"

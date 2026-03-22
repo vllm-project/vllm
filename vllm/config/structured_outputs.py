@@ -13,7 +13,7 @@ StructuredOutputsBackend = Literal[
     "auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"
 ]
 
-BitmaskBackend = Literal[
+StructuredOutputBackend = Literal[
     "auto", "cpu", "cuda", "triton", "torch_compile", "torch_native"
 ]
 
@@ -27,8 +27,8 @@ class StructuredOutputsConfig:
     regex, etc) by default. With "auto", we will make opinionated choices
     based on request contents and what the backend libraries currently support,
     so the behavior is subject to change in each release."""
-    bitmask_backend: BitmaskBackend = "auto"
-    """Select the backend for applying the structured output token bitmask
+    structured_output_backend: StructuredOutputBackend = "auto"
+    """Select the structured output backend for applying the token bitmask
     via xgrammar's apply_token_bitmask_inplace. Options: "auto", "cpu",
     "cuda", "triton", "torch_compile", "torch_native". Default "auto" lets
     the platform decide the best backend."""

@@ -117,20 +117,20 @@ class XPUPlatform(Platform):
         return AttentionBackendEnum.FLASH_ATTN
 
     @classmethod
-    def get_supported_bitmask_backends(cls) -> list[str]:
+    def get_supported_structured_output_backends(cls) -> list[str]:
         return ["auto", "triton", "cpu"]
 
     @classmethod
-    def get_bitmask_backend(cls, backend: str = "auto") -> str:
+    def get_structured_output_backend(cls, backend: str = "auto") -> str:
         if backend != "auto":
-            supported = cls.get_supported_bitmask_backends()
+            supported = cls.get_supported_structured_output_backends()
             if backend not in supported:
                 raise ValueError(
-                    f"Bitmask backend '{backend}' is not supported on XPU. "
+                    f"Structured output backend '{backend}' is not supported on XPU. "
                     f"Supported: {supported}"
                 )
             logger.info_once(
-                "Using user-specified bitmask backend: %s", backend
+                "Using user-specified structured output backend: %s", backend
             )
             return backend
         # XPU platform uses "cpu" backend
