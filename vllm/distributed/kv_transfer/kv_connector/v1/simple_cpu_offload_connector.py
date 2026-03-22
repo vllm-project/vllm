@@ -72,8 +72,8 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         logger.info(
-            "CPUOffloadConnector: Initializing with role=%s, cpu_capacity=%.2f GB, "
-            "mode=%s",
+            "SimpleCPUOffloadConnector: Initializing with role=%s, "
+            "cpu_capacity=%.2f GB, mode=%s",
             role.name,
             cpu_capacity_bytes / (1024**3),
             "lazy" if lazy_offload else "eager",
@@ -96,33 +96,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
     # --- Worker-side methods ---
 
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        # When prefix caching is disabled, the connector is inactive.
-        if self.worker_handler is None and self.scheduler_manager is None:
-            return False
-        if self._kv_cache_config is None:
-            return False
-        from vllm.v1.kv_cache_interface import MambaSpec
-
-        if any(
-            isinstance(group.kv_cache_spec, MambaSpec)
-            for group in self._kv_cache_config.kv_cache_groups
-        ):
-            return False
-        return len(self._kv_cache_config.kv_cache_groups) == 1
-
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self.worker_handler is not None:
             self.worker_handler.register_kv_caches(kv_caches)
-
-    def register_cross_layers_kv_cache(
-        self,
-        kv_cache: torch.Tensor,
-        attn_backend: "type[Any]",
-    ) -> None:
-        if self.worker_handler is not None:
-            self.worker_handler.register_kv_caches({"ALL_LAYERS": kv_cache})
 
     def bind_connector_metadata(
         self,
@@ -142,13 +118,8 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         if self.worker_handler is not None:
             self.worker_handler.handle_preemptions(preempted_req_ids)
 
-    def start_load_kv(
-        self,
-        forward_context: "ForwardContext",
-        **kwargs: Any,
-    ) -> None:
-        if self.worker_handler is not None:
-            self.worker_handler.start_load_kv()
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
+        pass  # Launch loads ops in get_finished() after launching model execution
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass  # Always load asynchronously and deferred to get_finished()
