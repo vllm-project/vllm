@@ -4786,7 +4786,14 @@ class GPUModelRunner(
 
             # Set up target LogprobsTensors object.
             logprobs_tensors = in_progress_dict.get(req_id)
-            if not logprobs_tensors:
+            start_idx = request.num_computed_tokens
+            if logprobs_tensors is not None and start_idx == 0:
+                # Request was preempted and resumed. Clear the stale logprobs
+                # data from before preemption to avoid livelock with IsHybrid
+                # models where mamba state cache is lost on preemption.
+                logprobs_tensors = None
+                del in_progress_dict[req_id]
+            if logprobs_tensors is None:
                 # Create empty logprobs CPU tensors for the entire prompt.
                 # If chunked, we'll copy in slice by slice.
                 logprobs_tensors = LogprobsTensors.empty_cpu(
@@ -4795,7 +4802,6 @@ class GPUModelRunner(
                 in_progress_dict[req_id] = logprobs_tensors
 
             # Determine number of logits to retrieve.
-            start_idx = request.num_computed_tokens
             start_tok = start_idx + 1
             num_remaining_tokens = num_prompt_tokens - start_tok
             if num_tokens <= num_remaining_tokens:
