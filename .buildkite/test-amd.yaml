@@ -39,8 +39,7 @@
 #####################################################################################################################################
 #                                                                                                                                   #
 # IMPORTANT:                                                                                                                        #
-#   * Currently AMD CI has MI300 agents, MI325 agents, and MI355 agents. Of those, AMD is using mostly MI325 and MI355. AMD team    #
-#     is actively working on enabling more MI300 machines. All upcoming feature improvements are tracked in:                        #
+#   * Currently AMD CI has MI250 agents, MI325 agents, and MI355 agents. All upcoming feature improvements are tracked in:          #
 #         https://github.com/vllm-project/vllm/issues/34994                                                                         #
 #                                                                                                                                   #
 #-----------------------------------------------------------------------------------------------------------------------------------#
@@ -49,13 +48,15 @@
 #   * [Pytorch Nightly Dependency Override Check]: if this test fails, it means the nightly torch version is not compatible with    #
 #                                                  some of the dependencies. Please check the error message and add the package to  #
 #                                                  whitelist in `/vllm/tools/pre_commit/generate_nightly_torch_test.py`.            #
-#   * [Entrypoints Integration Test (LLM)]:                                                                                         #
+#   * [Entrypoints Integration (LLM)]:                                                                                              #
 #     - {`pytest -v -s entrypoints/llm/test_generate.py`}: It needs a clean process                                                 #
 #     - {`pytest -v -s entrypoints/offline_mode`}: Needs to avoid interference with other tests                                     #
-#   * [V1 Test e2e + engine]: The test uses 4 GPUs, but we schedule it on 8-GPU machines for stability. See discussion here:        #
-#                             https://github.com/vllm-project/vllm/pull/31040                                                       #
-#   * [V1 others]:                                                                                                                  #
-#     - Split the tests to avoid interference                                                                                       #
+#   * [Engine / Engine (1 GPU) / e2e Scheduling / e2e Core / V1 e2e / Spec Decode / V1 Sample + Logits / V1 Core + KV + Metrics]:   #
+#     - Previously a single "V1 Test e2e + engine" step, now split across multiple groups.                                          #
+#     - V1 e2e (2/4 GPUs) uses 4 GPUs but is scheduled on 8-GPU machines for stability. See:                                        #
+#       https://github.com/vllm-project/vllm/pull/31040                                                                             #
+#   * [V1 Sample + Logits / V1 Core + KV + Metrics / V1 others (CPU)]:                                                              #
+#     - Previously a single "V1 others" step, now split to avoid interference.                                                      #
 #     - Integration test for streaming correctness (requires special branch for __harness__ lib).                                   #
 #   * [V1 others (CPU)]: Split the tests to avoid interference                                                                      #
 #   * [PyTorch Compilation Unit Tests]: Run unit tests defined directly under `compile/`, not including subdirectories, which       #
@@ -83,9 +84,9 @@
 #                                          run plamo2 model in vLLM.                                                                #
 #   * [Language Models Test (Extended Generation)]: Install fast path packages for testing against transformers (mamba, conv1d)     #
 #                                                   and to run plamo2 model in vLLM.                                                #
-#   * [Multi-Modal Models (Standard)]:                                                                                              #
+#   * [Multi-Modal Models (Standard) 1-4]:                                                                                          #
 #     - Do NOT remove `VLLM_WORKER_MULTIPROC_METHOD=spawn` setting as ROCm requires this for certain models to function.            #
-#   * [Transformers Nightly Models Test]: Whisper needs `VLLM_WORKER_MULTIPROC_METHOD=spawn` to avoid deadlock.                     #
+#   * [Transformers Nightly Models]: Whisper needs `VLLM_WORKER_MULTIPROC_METHOD=spawn` to avoid deadlock.                          #
 #   * [Plugin Tests (2 GPUs)]:                                                                                                      #
 #     - {`pytest -v -s entrypoints/openai/test_oot_registration.py`}: It needs a clean process                                      #
 #     - {`pytest -v -s models/test_oot_registration.py`}: It needs a clean process                                                  #
@@ -94,11 +95,11 @@
 #     - There is some Tensor Parallelism related processing logic in LoRA that requires multi-GPU testing for validation.           #
 #     - {`pytest -v -s -x lora/test_gptoss_tp.py`}: Disabled for now because MXFP4 backend on non-cuda platform doesn't support     #
 #                                                   LoRA yet.                                                                       #
-#   * [Distributed Tests (GPU_TAG)]: Don't test llama model here, it seems hf implementation is buggy. See:                         #
-#                                    https://github.com/vllm-project/vllm/pull/5689                                                 #
-#   * [Distributed Tests (GPU_TAG)]: Some old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293 in          #
-#                                    favor of new tests in fusions_e2e. We avoid replicating the new jobs in                        #
-#                                    this file as it's deprecated.                                                                  #
+#   * [Distributed Tests (NxGPUs)(HW-TAG)]: Don't test llama model here, it seems hf implementation is buggy. See:                  #
+#                                           https://github.com/vllm-project/vllm/pull/5689                                          #
+#   * [Distributed Tests (NxGPUs)(HW-TAG)]: Some old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293     #
+#                                           in favor of new tests in fusions_e2e. We avoid replicating the new jobs in              #
+#                                           this file as it's deprecated.                                                           #
 #                                                                                                                                   #
 #####################################################################################################################################
 
@@ -223,7 +224,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
-  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/serve/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
 
 
 - label: Entrypoints Integration (LLM) # TBD
@@ -254,11 +255,11 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/rpc
-  - tests/entrypoints/instrumentator
+  - tests/entrypoints/serve/instrumentator
   - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/instrumentator
+  - pytest -v -s entrypoints/serve/instrumentator
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 
@@ -481,19 +482,6 @@ steps:
   - tests/v1/e2e
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
-
-
-- label: Entrypoints V1 # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/v1
-  commands:
-  - pytest -v -s v1/entrypoints
 
 
 - label: V1 Sample + Logits # TBD
@@ -1173,14 +1161,14 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/v1/distributed
-  - tests/v1/entrypoints/openai/test_multi_api_servers.py
+  - tests/entrypoints/openai/test_multi_api_servers.py
   - vllm/platforms/rocm.py
   commands:
   - export TORCH_NCCL_BLOCKING_WAIT=1
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
-  - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
+  - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
 
 
 - label: Distributed Compile + RPC Tests (2 GPUs) # TBD
@@ -1402,7 +1390,7 @@ steps:
 - label: Distributed Tests (2 GPUs)(H100-MI250) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_2
+  agent_pool: mi325_2
   num_gpus: 2
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
@@ -1412,7 +1400,6 @@ steps:
   - vllm/v1/attention/backends/
   - vllm/v1/attention/selector.py
   - tests/distributed/test_context_parallel.py
-  - tests/v1/distributed/test_dbo.py
   - examples/offline_inference/data_parallel.py
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
@@ -1420,7 +1407,6 @@ steps:
   - export TORCH_NCCL_BLOCKING_WAIT=1
   - pytest -v -s tests/distributed/test_context_parallel.py
   - VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
-  - pytest -v -s tests/v1/distributed/test_dbo.py
 
 
 #####################################################################################################################################
@@ -1477,11 +1463,11 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/rpc
-  - tests/entrypoints/instrumentator
+  - tests/entrypoints/serve/instrumentator
   - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/instrumentator
+  - pytest -v -s entrypoints/serve/instrumentator
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 
@@ -1511,8 +1497,6 @@ steps:
   - vllm/distributed/
   - tests/distributed/test_torchrun_example.py
   - tests/distributed/test_torchrun_example_moe.py
-  - examples/offline_inference/rlhf.py
-  - examples/offline_inference/rlhf_colocate.py
   - examples/rl/
   - tests/examples/offline_inference/data_parallel.py
   - vllm/platforms/rocm.py
@@ -1762,25 +1746,13 @@ steps:
   timeout_in_minutes: 106
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/v1/e2e
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
-
-
-- label: Entrypoints V1 # 25.7m
-  timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/v1
-  commands:
-  - pytest -v -s v1/entrypoints
 
 
 - label: V1 Spec Decode # TBD
@@ -2395,14 +2367,14 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/v1/distributed
-  - tests/v1/entrypoints/openai/test_multi_api_servers.py
+  - tests/entrypoints/openai/test_multi_api_servers.py
   - vllm/platforms/rocm.py
   commands:
   - export TORCH_NCCL_BLOCKING_WAIT=1
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
-  - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
+  - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
 
 
 - label: Distributed Compile + RPC Tests (2 GPUs) # 56.1m
@@ -2580,6 +2552,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
   num_gpus: 4
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -2596,21 +2569,16 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_2
   num_gpus: 2
-  optional: true
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
   - vllm/distributed/
   - vllm/v1/distributed/
   - vllm/model_executor/layers/fused_moe/
-  - tests/distributed/test_context_parallel.py
   - tests/v1/distributed/test_dbo.py
-  - examples/offline_inference/data_parallel.py
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
   - export TORCH_NCCL_BLOCKING_WAIT=1
-  - pytest -v -s tests/distributed/test_context_parallel.py
-  - VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
   - pytest -v -s tests/v1/distributed/test_dbo.py
 
 
@@ -2669,7 +2637,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
 
 - label: LM Eval Large Models (H200-MI325) # TBD
@@ -2700,6 +2668,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
   num_gpus: 4
+  optional: true
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - csrc/
@@ -2720,6 +2689,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
   num_gpus: 4
+  optional: true
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - csrc/
@@ -2785,6 +2755,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
   num_gpus: 4
+  optional: true
   working_dir: "/vllm-workspace"
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -2827,6 +2798,7 @@ steps:
   timeout_in_minutes: 11
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
+  optional: true
   working_dir: "/vllm-workspace"
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -2848,6 +2820,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
   num_gpus: 4
+  optional: true
   working_dir: "/vllm-workspace"
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -2990,11 +2963,11 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/rpc
-  - tests/entrypoints/instrumentator
+  - tests/entrypoints/serve/instrumentator
   - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/instrumentator
+  - pytest -v -s entrypoints/serve/instrumentator
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 
@@ -3599,7 +3572,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
 
 - label: LM Eval Large Models (4 GPUs)(FP8) # TBD

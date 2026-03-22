@@ -758,11 +758,10 @@ class Glm4vVisionTransformer(nn.Module):
             grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
         ).cumsum(dim=0, dtype=torch.int32)
         cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
-        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
-
         # pre-compute max_seqlen for attn mask to reduce cuMemcpy operations
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
         x = self.embeddings(
             x, seqlens, grid_thw, image_type_ids[:, 0], image_type_ids[:, 1]
         )
