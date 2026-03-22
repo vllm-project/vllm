@@ -1686,12 +1686,6 @@ class SpecDecodeBaseProposer:
                     self.kv_cache_gid = gid
 
         # Build AttentionGroups per KV cache group containing draft layers.
-        # Mamba draft layers need a config with speculative_config=None so
-        # the metadata builder uses num_spec_tokens=0 (matching the draft
-        # model's actual conv-state width).
-        draft_mamba_vllm_config = replace(
-            self.vllm_config, speculative_config=None
-        ) if self._mamba_kv_cache_gids else None
         attention_groups: dict[str, AttentionGroup] = {}
         draft_gids = {self.kv_cache_gid} | set(self._mamba_kv_cache_gids)
         for gid in sorted(draft_gids):
@@ -1724,14 +1718,8 @@ class SpecDecodeBaseProposer:
                         kv_cache_spec=layer_kv_cache_spec,
                         kv_cache_group_id=gid,
                     )
-                    # Use draft-specific config (no spec decode) for
-                    # mamba groups so num_spec_tokens=0.
-                    is_mamba_group = gid in self._mamba_kv_cache_gids
-                    builder_config = (draft_mamba_vllm_config
-                                      if is_mamba_group
-                                      else self.vllm_config)
                     attn_group.create_metadata_builders(
-                        builder_config,
+                        self.vllm_config,
                         self.device,
                         kernel_block_size=kernel_block_size,
                     )

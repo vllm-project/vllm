@@ -193,23 +193,14 @@ class MambaMixer(MambaBase, PluggableLayer):
         self.cache_config = cache_config
         self.prefix = prefix
 
-        # num_spec widens the conv-state to hold speculative token states.
-        # It must be 0 for draft models: the draft model itself does not
-        # perform speculative decoding, so its mamba layers use the default
-        # (non-speculative) state shape.  We detect draft-model context by
-        # checking whether the current model_config is the draft_model_config
-        # inside speculative_config (they are the same object when the model
-        # is loaded via create_vllm_config_for_draft_model).
+        # num_spec widens the conv-state for speculative token slots.
+        # Draft mamba models inherit the target's speculative_config but
+        # must not inflate their own state — set to 0 for draft models.
         vllm_config: VllmConfig = get_current_vllm_config()
         spec_cfg = vllm_config.speculative_config
-        is_draft_model = (
-            spec_cfg is not None
-            and vllm_config.model_config is spec_cfg.draft_model_config
-        )
-        self.num_spec = (
-            0 if is_draft_model
-            else vllm_config.num_speculative_tokens
-        )
+        is_draft = (spec_cfg is not None
+                    and vllm_config.model_config is spec_cfg.draft_model_config)
+        self.num_spec = 0 if is_draft else vllm_config.num_speculative_tokens
 
     def _ssm_transform(
         self, x: torch.Tensor
