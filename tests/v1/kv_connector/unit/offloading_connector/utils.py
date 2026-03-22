@@ -702,6 +702,9 @@ def test_offloading_spec_exposes_hybrid_planner_from_config():
     assert isinstance(spec.hybrid_planner, HybridOffloadPlanner)
     assert spec.hybrid_planner.fixed_chunk_size == 16384
     assert spec.hybrid_offload_enabled is True
+    assert spec.group_hash_block_size == (16384, 16384, 16384, 1056)
+    assert spec.offloaded_block_size == 16384
+
 def test_offloading_spec_reports_partial_group_requirement():
     assert spec.requires_partial_group_offload is True
 def test_scheduler_rejects_partial_group_hybrid_transfers():

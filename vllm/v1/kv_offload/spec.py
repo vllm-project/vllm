@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils.hashing import get_hash_fn_by_name
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.planner import HybridOffloadPlanner
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
@@ -88,6 +90,9 @@ class OffloadingSpec(ABC):
         # block size used by vLLM for hashing request tokens for the sake
         # of enabling prefix caching
         self.hash_block_size = vllm_config.cache_config.block_size
+        self.hash_function = get_hash_fn_by_name(
+            vllm_config.cache_config.prefix_caching_hash_algo
+        )
         # gpu block size per group
         self.gpu_block_size: tuple[int, ...] = tuple(
             kv_cache_group.kv_cache_spec.block_size
@@ -95,13 +100,26 @@ class OffloadingSpec(ABC):
         )
         self.hybrid_planner: HybridOffloadPlanner | None = None
         self.hybrid_offload_enabled: bool = False
+        self.group_hash_block_size: tuple[int, ...] = tuple(
+            self.hash_block_size for _ in self.gpu_block_size
+        )
 
         print(
             f"VLLM OffloadingSpec hash_block_size={self.hash_block_size} gpu_block_size={self.gpu_block_size}",
             flush=True,
         )
-        for block_size in self.gpu_block_size:
-            assert block_size % self.hash_block_size == 0
+        hybrid_chunk_size = self.extra_config.get("hybrid_chunk_size")
+        if hybrid_chunk_size is not None:
+            self.hybrid_planner = HybridOffloadPlanner(
+                hash_block_size=self.hash_block_size,
+                gpu_block_sizes=self.gpu_block_size,
+                fixed_chunk_size=int(hybrid_chunk_size),
+            )
+            self.hybrid_offload_enabled = True
+            self.group_hash_block_size = self.hybrid_planner.offload_unit_sizes
+        else:
+            for block_size in self.gpu_block_size:
+                assert block_size % self.hash_block_size == 0
 
         self.offloaded_block_size: int = lcm(*self.gpu_block_size)
         self.block_size_factors: tuple[int, ...] = tuple(
@@ -125,14 +143,14 @@ class OffloadingSpec(ABC):
                 for block_size in self.gpu_block_size
             )
 
-        hybrid_chunk_size = self.extra_config.get("hybrid_chunk_size")
-        if hybrid_chunk_size is not None:
-            self.hybrid_planner = HybridOffloadPlanner(
-                hash_block_size=self.hash_block_size,
-                gpu_block_sizes=self.gpu_block_size,
-                fixed_chunk_size=int(hybrid_chunk_size),
+        if self.hybrid_offload_enabled:
+            self.offloaded_block_size = int(hybrid_chunk_size)
+            self.block_size_factors = tuple(
+                self.offloaded_block_size // block_size
+                if self.offloaded_block_size % block_size == 0
+                else 0
+                for block_size in self.gpu_block_size
             )
-            self.hybrid_offload_enabled = True
 
     @property
     def requires_partial_group_offload(self) -> bool:

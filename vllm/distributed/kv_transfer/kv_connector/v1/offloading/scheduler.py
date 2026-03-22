@@ -17,6 +17,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashListWithBlockSize
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_offload.abstract import OffloadingManager
+from vllm.v1.kv_offload.hashing import HybridChunkBlockHashList
 from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import TransferSpec
@@ -33,13 +34,17 @@ class OffloadingConnectorScheduler:
         self.hybrid_offload_enabled = spec.hybrid_offload_enabled
         self.requires_partial_group_offload = spec.requires_partial_group_offload
         self.gpu_block_sizes = tuple(spec.gpu_block_size)
+        self.group_hash_block_sizes = tuple(spec.group_hash_block_size)
+        self.hash_function = spec.hash_function
         self.num_kv_groups = len(self.gpu_block_sizes)
         self.hash_block_size = spec.hash_block_size
         self.offloaded_block_size = spec.offloaded_block_size
-        assert self.offloaded_block_size % self.hash_block_size == 0
-        self.hash_block_size_factor = (
-            self.offloaded_block_size // self.hash_block_size
-        )
+        self.hash_block_size_factor: int | None = None
+        if not self.hybrid_offload_enabled:
+            assert self.offloaded_block_size % self.hash_block_size == 0
+            self.hash_block_size_factor = (
+                self.offloaded_block_size // self.hash_block_size
+            )
         self.block_size_factors = tuple(spec.block_size_factors)
         self.manager: OffloadingManager = spec.get_manager()
 
@@ -99,12 +104,28 @@ class OffloadingConnectorScheduler:
         start_idx: int = 0,
         end_idx: int | None = None,
     ) -> Iterable[BlockHash]:
+        if self.hybrid_offload_enabled:
+            offloaded_hashes = HybridChunkBlockHashList(
+                req,
+                self.group_hash_block_sizes,
+                self.offloaded_block_size,
+                self.hash_function,
+            )
+            return islice(offloaded_hashes, start_idx, end_idx)
+
         offloaded_hashes = BlockHashListWithBlockSize(
             req.block_hashes,
             self.hash_block_size,
             self.offloaded_block_size,
         )
         return islice(offloaded_hashes, start_idx, end_idx)
+
+    def _get_num_offloaded_blocks(self, request: Request) -> int:
+        if self.hybrid_offload_enabled:
+            return request.num_tokens // self.offloaded_block_size
+
+        assert self.hash_block_size_factor is not None
+        return len(request.block_hashes) // self.hash_block_size_factor
 
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
@@ -130,7 +151,7 @@ class OffloadingConnectorScheduler:
         """
         num_blocks = request.num_tokens // self.offloaded_block_size
 
-        assert len(request.block_hashes) // self.hash_block_size_factor == num_blocks
+        assert self._get_num_offloaded_blocks(request) == num_blocks
         block_hashes = self._get_block_hashes(request)
 
         self.manager.touch(block_hashes)
@@ -211,7 +232,7 @@ class OffloadingConnectorScheduler:
         start_block_idx = num_computed_tokens // self.offloaded_block_size
         num_blocks = full_block_tokens // self.offloaded_block_size
 
-        assert len(request.block_hashes) // self.hash_block_size_factor >= num_blocks
+        assert self._get_num_offloaded_blocks(request) >= num_blocks
         block_hashes = self._get_block_hashes(
             request, start_idx=start_block_idx, end_idx=num_blocks
         )
