@@ -8,7 +8,6 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.nn import Parameter
 from transformers import PretrainedConfig
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -50,6 +49,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,
     moe_awq_to_marlin_zero_points,
     verify_marlin_supported,
+    verify_marlin_supports_shape,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -57,7 +57,6 @@ from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMPa
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
-from vllm.utils.import_utils import import_pynvml
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -150,35 +149,6 @@ def _convert_awq_to_standard_format(
     setattr(layer, w_zp_name, new_zp_param)
 
 
-def _parse_cuda_version(version: str | None) -> tuple[int, int] | None:
-    if not version:
-        return None
-    try:
-        major_s, minor_s, *_ = version.split(".")
-        return int(major_s), int(minor_s)
-    except (ValueError, AttributeError):
-        return None
-
-
-def _get_driver_cuda_version() -> tuple[int, int] | None:
-    try:
-        pynvml = import_pynvml()
-        pynvml.nvmlInit()
-        try:
-            version_raw = pynvml.nvmlSystemGetCudaDriverVersion_v2()
-        except Exception:
-            version_raw = pynvml.nvmlSystemGetCudaDriverVersion()
-        finally:
-            pynvml.nvmlShutdown()
-
-        # NVML encodes as e.g. 12080 => 12.8
-        major = version_raw // 1000
-        minor = (version_raw % 1000) // 10
-        return major, minor
-    except Exception:
-        return None
-
-
 class AWQMarlinConfig(QuantizationConfig):
     """Config class for AWQ Marlin"""
 
@@ -269,29 +239,8 @@ class AWQMarlinConfig(QuantizationConfig):
             user_quant is None or user_quant == "marlin" or user_quant == "awq_marlin"
         )
 
-        driver_cuda = _get_driver_cuda_version()
-        torch_cuda = _parse_cuda_version(getattr(torch.version, "cuda", None))
-        if (
-            can_convert
-            and user_quant is None
-            and not envs.VLLM_ENABLE_CUDA_COMPATIBILITY
-            and driver_cuda is not None
-            and torch_cuda is not None
-            and driver_cuda < torch_cuda
-        ):
-            logger.warning(
-                "Detected torch CUDA %s but driver CUDA %s with "
-                "VLLM_ENABLE_CUDA_COMPATIBILITY=0; skipping awq_marlin auto-selection "
-                "to avoid potential PTX toolchain incompatibility. Falling back "
-                "to awq. "
-                "Set VLLM_ENABLE_CUDA_COMPATIBILITY=1 (with compat libs) or use "
-                "a CUDA-matching runtime to re-enable awq_marlin auto-selection.",
-                getattr(torch.version, "cuda", None),
-                ".".join(map(str, driver_cuda)),
-            )
-            return None
-
         if can_convert and is_valid_user_quant:
+            warn_marlin_cuda_driver_mismatch()
             msg = (
                 "The model is convertible to {} during runtime."
                 " Using {} kernel.".format(cls.get_name(), cls.get_name())

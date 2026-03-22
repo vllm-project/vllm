@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import functools
 import numpy
 import torch
 
@@ -21,6 +22,78 @@ from vllm.utils.platform_utils import num_compute_units
 from .quant_utils import pack_cols, unpack_cols
 
 logger = init_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# CUDA driver / toolkit version helpers shared by all Marlin-based configs
+# ---------------------------------------------------------------------------
+
+def _parse_cuda_version(version: str | None) -> tuple[int, int] | None:
+    if not version:
+        return None
+    try:
+        major_s, minor_s, *_ = version.split(".")
+        return int(major_s), int(minor_s)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _get_driver_cuda_version() -> tuple[int, int] | None:
+    try:
+        from vllm.utils.import_utils import import_pynvml
+
+        pynvml = import_pynvml()
+        pynvml.nvmlInit()
+        try:
+            version_raw = pynvml.nvmlSystemGetCudaDriverVersion_v2()
+        except Exception:
+            version_raw = pynvml.nvmlSystemGetCudaDriverVersion()
+        finally:
+            pynvml.nvmlShutdown()
+
+        # NVML encodes as e.g. 12080 => (12, 8)
+        major = version_raw // 1000
+        minor = (version_raw % 1000) // 10
+        return major, minor
+    except Exception:
+        return None
+
+
+@functools.lru_cache(maxsize=1)
+def warn_marlin_cuda_driver_mismatch() -> None:
+    """Emit a one-time warning when the CUDA driver is older than the PyTorch
+    CUDA toolkit and CUDA forward compatibility is disabled.
+
+    A driver/toolkit mismatch can cause ``cudaErrorUnsupportedPtxVersion``
+    when any Marlin kernel is loaded, because PTX compiled for a newer toolkit
+    cannot be JIT-assembled by an older driver.  This function is called by
+    every Marlin-based quantization config so the check is centralised and the
+    warning appears exactly once regardless of which config triggers it.
+    """
+    driver_cuda = _get_driver_cuda_version()
+    torch_cuda = _parse_cuda_version(getattr(torch.version, "cuda", None))
+    if (
+        driver_cuda is not None
+        and torch_cuda is not None
+        and driver_cuda < torch_cuda
+        and not envs.VLLM_ENABLE_CUDA_COMPATIBILITY
+    ):
+        torch_cuda_str = getattr(torch.version, "cuda", None)
+        driver_cuda_str = ".".join(map(str, driver_cuda))
+        logger.warning(
+            "Detected torch CUDA %s but CUDA driver %s with "
+            "VLLM_ENABLE_CUDA_COMPATIBILITY=0. Marlin kernels may fail with "
+            "cudaErrorUnsupportedPtxVersion at load time. "
+            "To fix: restart with VLLM_ENABLE_CUDA_COMPATIBILITY=1 (requires "
+            "CUDA forward-compat libs at /usr/local/cuda-%s/compat or "
+            "VLLM_CUDA_COMPATIBILITY_PATH), or update your NVIDIA driver to "
+            "one that supports CUDA >= %s.",
+            torch_cuda_str,
+            driver_cuda_str,
+            torch_cuda_str,
+            torch_cuda_str,
+        )
+
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
