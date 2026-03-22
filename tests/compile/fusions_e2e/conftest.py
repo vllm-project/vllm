@@ -84,10 +84,7 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
 
         # TODO: remove this after finishing migration from envs to model kwargs
         if model_name == "openai/gpt-oss-20b":
-            from .common import is_blackwell
-
-            if is_blackwell():
-                monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
+            monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
 
         # Disable, compile cache to make sure custom passes run.
         # Otherwise, we can't verify fusion happened through the logs.

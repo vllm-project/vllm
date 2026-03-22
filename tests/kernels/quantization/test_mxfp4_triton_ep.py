@@ -17,6 +17,89 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.mxfp4 import (
+    Mxfp4Backend,
+    Mxfp4MoEMethod,
+)
+
+
+def _make_mock_moe_config(ep_size: int = 1) -> MagicMock:
+    """Create a mock FusedMoEConfig with the given EP size."""
+    parallel_config = MagicMock()
+    parallel_config.ep_size = ep_size
+
+    moe_config = MagicMock()
+    moe_config.ep_size = ep_size
+    moe_config.is_lora_enabled = False
+    moe_config.moe_parallel_config = parallel_config
+    return moe_config
+
+
+class TestMxfp4TritonIsMonolithic:
+    """Verify that is_monolithic is always True for the TRITON backend,
+    regardless of EP size, since triton_kernel_moe_forward now handles
+    expert_map remapping internally."""
+
+    @pytest.mark.parametrize(
+        "backend,ep_size,expected_monolithic",
+        [
+            # TRITON is always monolithic (handles EP via expert_map remapping)
+            (Mxfp4Backend.TRITON, 1, True),
+            (Mxfp4Backend.TRITON, 2, True),
+            (Mxfp4Backend.TRITON, 4, True),
+            # SM100 backends are always monolithic
+            (Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM, 1, True),
+            (Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM, 2, True),
+            (Mxfp4Backend.SM100_FI_MXFP4_BF16, 1, True),
+            (Mxfp4Backend.SM100_FI_MXFP4_BF16, 2, True),
+            # MARLIN is never monolithic
+            (Mxfp4Backend.MARLIN, 1, False),
+            (Mxfp4Backend.MARLIN, 2, False),
+        ],
+        ids=[
+            "triton-no-ep",
+            "triton-ep2",
+            "triton-ep4",
+            "sm100-trtllm-no-ep",
+            "sm100-trtllm-ep2",
+            "sm100-bf16-no-ep",
+            "sm100-bf16-ep2",
+            "marlin-no-ep",
+            "marlin-ep2",
+        ],
+    )
+    @patch(
+        "vllm.model_executor.layers.quantization.mxfp4.get_mxfp4_backend",
+    )
+    @patch(
+        "vllm.model_executor.layers.quantization.mxfp4.get_current_vllm_config",
+    )
+    def test_is_monolithic(
+        self,
+        mock_get_config,
+        mock_get_backend,
+        backend,
+        ep_size,
+        expected_monolithic,
+    ):
+        """is_monolithic should be True for TRITON regardless of EP size."""
+        mock_get_backend.return_value = backend
+
+        mock_compilation_config = MagicMock()
+        mock_compilation_config.max_cudagraph_capture_size = 1024
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.compilation_config = mock_compilation_config
+        mock_get_config.return_value = mock_vllm_config
+
+        moe_config = _make_mock_moe_config(ep_size=ep_size)
+        method = Mxfp4MoEMethod(moe_config)
+
+        assert method.is_monolithic == expected_monolithic, (
+            f"Expected is_monolithic={expected_monolithic} for "
+            f"backend={backend.name}, ep_size={ep_size}, "
+            f"but got {method.is_monolithic}."
+        )
+
 
 class TestTritonMoeForwardExpertMap:
     """Test that triton_kernel_moe_forward applies expert_map remapping
