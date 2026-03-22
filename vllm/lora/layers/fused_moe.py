@@ -338,6 +338,14 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         fused_experts = m_fused_moe_fn.impl.fused_experts
 
+        # Disable inplace mode when LoRA is active. The LoRA decorators
+        # read hidden_states from moe_state_dict while the kernel writes
+        # to output. If inplace=True these alias, causing the LoRA path
+        # to read partially-overwritten hidden_states and produce corrupt
+        # output.
+        if hasattr(m_fused_moe_fn.impl, "inplace"):
+            m_fused_moe_fn.impl.inplace = False
+
         m_fused_moe_fn.apply = fwd_decorator(self.base_layer, m_fused_moe_fn.apply)
         fused_experts.activation = act_decorator(
             self.base_layer, fused_experts.activation

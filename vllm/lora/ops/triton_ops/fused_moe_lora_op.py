@@ -354,7 +354,7 @@ def _fused_moe_lora_kernel(
         cur_k_offset = k * (BLOCK_SIZE_K * SPLIT_K)
         k_remaining = K - cur_k_offset
         # pre-fetch lora weight
-        if b_desc is not None:
+        if USE_TMA and b_desc is not None:
             b = (
                 b_desc.load([lora_id, expert_id, offs_bn, offs_bk + cur_k_offset])
                 .reshape(BLOCK_SIZE_N, BLOCK_SIZE_K)
@@ -369,7 +369,7 @@ def _fused_moe_lora_kernel(
                 b = tl.load(b_ptrs, mask=b_mask, other=0.0)
             b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
 
-        if a_desc is not None:
+        if USE_TMA and a_desc is not None:
             a = a_desc.load([offs_am, offs_ak + cur_k_offset])
         else:
             a = tl.load(
@@ -379,7 +379,11 @@ def _fused_moe_lora_kernel(
             )
             a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
 
-        accumulator += tl.dot(a, b)
+        # Cast operands to matching dtype for tl.dot. On ROCm, Triton's
+        # compiler may infer different types for a and b when merging
+        # if/else branches (TMA desc path returns fp32, tl.load returns
+        # the pointer's element type).
+        accumulator += tl.dot(a.to(tl.bfloat16), b.to(tl.bfloat16))
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
