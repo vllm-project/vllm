@@ -1309,7 +1309,8 @@ class Scheduler(SchedulerInterface):
             # load. Identify affected requests and adjust their computed token
             # count to trigger recomputation of the invalid blocks.
             failed_kv_load_req_ids = self._handle_invalid_blocks(
-                kv_connector_output.invalid_block_ids
+                kv_connector_output.invalid_block_ids,
+                finished_recving=set(kv_connector_output.finished_recving or ()),
             )
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
@@ -2216,7 +2217,9 @@ class Scheduler(SchedulerInterface):
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
 
-    def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
+    def _handle_invalid_blocks(
+        self, invalid_block_ids: set[int], finished_recving: set[str] | None = None
+    ) -> set[str]:
         """
         Handle requests affected by invalid KV cache blocks.
 
@@ -2226,44 +2229,43 @@ class Scheduler(SchedulerInterface):
         should_fail = not self.recompute_kv_load_failures
 
         # handle async KV loads (not cached yet, evict_blocks=False)
-        async_load_reqs = (
-            req
-            for req in self.skipped_waiting
-            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-        )
-        async_failed_req_ids, num_failed_tokens, _ = (
-            self._update_requests_with_invalid_blocks(
-                async_load_reqs, invalid_block_ids, evict_blocks=False
-            )
-        )
-
-        # Handle cases when other request's num computed tokens need to be modified
-        # The logic could be more clean if handle in cache_blocks but don't want
-        # to modify that part heavily
+        # Snapshot pre-truncation credits before _update_requests_with_invalid_blocks
+        # modifies them.
         async_load_reqs_list = [
             req
             for req in self.skipped_waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         ]
+
+        # Snapshot credits before truncation
+        pre_truncation_tokens: dict[str, int] = {
+            req.request_id: req.num_computed_tokens for req in async_load_reqs_list
+        }
+
+        async_failed_req_ids, num_failed_tokens, _ = (
+            self._update_requests_with_invalid_blocks(
+                iter(async_load_reqs_list), invalid_block_ids, evict_blocks=False
+            )
+        )
+
         if async_failed_req_ids:
-            # Find the minimum credit across all directly failed requests —
-            # this is the earliest token position we know is invalid.
-            min_valid_tokens = min(
-                req.num_computed_tokens
-                for req in async_load_reqs_list
-                if req.request_id in async_failed_req_ids
+            # The failed token boundary: the highest pre-truncation credit
+            # among directly failed requests. Any sibling at or above this
+            # boundary was promised the same tokens and may have unwritten blocks.
+            max_failed_pre_truncation = max(
+                pre_truncation_tokens[req_id] for req_id in async_failed_req_ids
             )
             for req in async_load_reqs_list:
                 if req.request_id in async_failed_req_ids:
                     continue
-                # This request was not directly affected, but if it has credit
-                # beyond the known-invalid range, it must also be reset.
-                if req.num_computed_tokens > min_valid_tokens:
-                    num_failed_tokens += req.num_computed_tokens - min_valid_tokens
-                    req.num_external_computed_tokens -= (
-                        req.num_computed_tokens - min_valid_tokens
-                    )
-                    req.num_computed_tokens = min_valid_tokens
+                # If this request already successfully finished receiving
+                # in THIS SAME step, its blocks are valid — do not reset it.
+                if finished_recving and req.request_id in finished_recving:
+                    continue
+                if pre_truncation_tokens[req.request_id] >= max_failed_pre_truncation:
+                    num_failed_tokens += req.num_computed_tokens
+                    req.num_external_computed_tokens -= req.num_computed_tokens
+                    req.num_computed_tokens = 0
                     async_failed_req_ids.add(req.request_id)
 
         total_failed_requests = len(async_failed_req_ids)
