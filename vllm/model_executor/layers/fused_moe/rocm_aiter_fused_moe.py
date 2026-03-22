@@ -357,7 +357,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def is_supported_config(
-        cls: type["AiterExperts"],
+        cls: type[mk.FusedMoEExperts],
         moe_config: FusedMoEConfig,
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
