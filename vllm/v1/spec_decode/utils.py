@@ -275,13 +275,21 @@ def create_vllm_config_for_draft_model(
     # Copy cache_config so the draft model's verify_and_update_config
     # (triggered by VllmConfig.__post_init__) does not overwrite the
     # target model's mamba_page_size_padded / block_size.
-    new_cache_config = replace(old.cache_config)
+    # Reset mamba_block_size to None so the draft config's __post_init__
+    # doesn't trip the "mamba_block_size requires prefix caching" check.
+    new_cache_config = replace(old.cache_config, mamba_block_size=None)
+    # Clear speculative_config so the draft model does not inherit the
+    # target's spec-decode settings.  This is critical for hybrid models
+    # (Jamba/Mamba) where num_speculative_tokens controls the conv-state
+    # width: the draft model itself does not perform speculative decoding,
+    # so its mamba layers must use the default (non-speculative) state shape.
     new: VllmConfig = replace(
         old,
         quant_config=None,
         parallel_config=new_parallel_config,
         model_config=old_spec_config.draft_model_config,
         cache_config=new_cache_config,
+        speculative_config=None,
     )
     return new
 

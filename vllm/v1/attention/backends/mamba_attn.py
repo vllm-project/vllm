@@ -91,10 +91,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
-        # Enable speculative decoding support
+        # Draft mamba models inherit the target's speculative_config but
+        # must not size their buffers for speculative tokens.
         self.speculative_config = vllm_config.speculative_config
         self.compilation_config = vllm_config.compilation_config
-        self.num_spec_tokens: int = vllm_config.num_speculative_tokens
+        spec_cfg = vllm_config.speculative_config
+        is_draft = (spec_cfg is not None
+                    and vllm_config.model_config is spec_cfg.draft_model_config)
+        self.num_spec_tokens: int = (
+            0 if is_draft else vllm_config.num_speculative_tokens)
         self.use_spec_decode = self.num_spec_tokens > 0
 
         assert isinstance(kv_cache_spec, MambaSpec)
@@ -388,11 +393,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.reorder_batch_threshold if num_accepted_tokens is not None else 1
         )
 
+        # is_prefilling may be None during draft-model speculation;
+        # in that case fall back to treating short extends as decodes
+        # (safe default — avoids the is_prefilling assertion).
+        has_prefilling_info = common_attn_metadata.is_prefilling is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=decode_threshold,
-                treat_short_extends_as_decodes=False,
+                treat_short_extends_as_decodes=not has_prefilling_info,
             )
         )
 
