@@ -896,11 +896,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             )
 
         # 1.2: Process the remaining part
+        query_non_spec, key_non_spec, value_non_spec = None, None, None
         if attn_metadata.num_prefills > 0:
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
-            mixed_qkv_non_spec = causal_conv1d_fn(
+            query_non_spec_2d, key_non_spec_2d, value_non_spec_2d = causal_conv1d_fn(
                 mixed_qkv_non_spec_T,
                 conv_weights,
                 self.conv1d.bias,
@@ -910,7 +911,30 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 cache_indices=non_spec_state_indices_tensor,
                 query_start_loc=non_spec_query_start_loc,
                 metadata=attn_metadata,
-            ).transpose(0, 1)
+                split_output_sizes=(
+                    self.key_dim // self.tp_size,
+                    self.key_dim // self.tp_size,
+                    self.value_dim // self.tp_size,
+                ),
+            )
+            query_non_spec = query_non_spec_2d.view(
+                1,
+                -1,
+                self.num_k_heads // self.tp_size,
+                self.head_k_dim,
+            )
+            key_non_spec = key_non_spec_2d.view(
+                1,
+                -1,
+                self.num_k_heads // self.tp_size,
+                self.head_k_dim,
+            )
+            value_non_spec = value_non_spec_2d.view(
+                1,
+                -1,
+                self.num_v_heads // self.tp_size,
+                self.head_v_dim,
+            )
         elif attn_metadata.num_decodes > 0:
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
@@ -927,9 +951,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             mixed_qkv_non_spec = None
 
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
-        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
-            mixed_qkv_non_spec
-        )
+        if query_non_spec is None:
+            query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
+                mixed_qkv_non_spec
+            )
 
         if attn_metadata.num_prefills > 0:
             g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
