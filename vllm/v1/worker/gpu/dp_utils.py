@@ -27,6 +27,7 @@ def sync_cudagraph_and_dp_padding(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
+    num_active_loras: int = 0,
 ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
     """
     Coordinates the batch descriptor and DP padding across all ranks.
@@ -59,6 +60,7 @@ def sync_cudagraph_and_dp_padding(
             cg_mode=CUDAGraphMode.NONE,
             num_tokens=num_tokens,
             num_reqs=num_reqs,
+            num_active_loras=desired_batch_desc.num_active_loras,
         ), num_tokens_across_dp
 
     synced_num_tokens = int(num_tokens_across_dp.max().item())
@@ -70,9 +72,13 @@ def sync_cudagraph_and_dp_padding(
         synced_uniform_token_count = None
 
     # Dispatch for the final synced values, use num_reqs instead of synced_num_reqs
-    # so we don't perform request padding for PIECEWISE graphs
+    # so we don't perform request padding for PIECEWISE graphs.
+    # num_active_loras is per-rank and doesn't need cross-rank agreement.
     synced_desc = cudagraph_manager.dispatch(
-        num_reqs, synced_num_tokens, synced_uniform_token_count
+        num_reqs,
+        synced_num_tokens,
+        synced_uniform_token_count,
+        num_active_loras=num_active_loras,
     )
 
     # Update num_tokens_across_dp to reflect padded size.

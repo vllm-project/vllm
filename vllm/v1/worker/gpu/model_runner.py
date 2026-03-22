@@ -78,7 +78,12 @@ from vllm.v1.worker.gpu.kv_connector import (
     KVConnector,
     get_kv_connector,
 )
-from vllm.v1.worker.gpu.lora_utils import LoraState
+from vllm.v1.worker.gpu.lora_utils import (
+    LoraState,
+    create_lora_capture_hook,
+    get_lora_capture_cases,
+    get_num_active_loras_for_dispatch,
+)
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
@@ -232,11 +237,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # CUDA graphs.
         self.decode_query_len = self.num_speculative_steps + 1
+        self.lora_capture_cases = get_lora_capture_cases(
+            self.lora_config, self.compilation_config
+        )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
             self.device,
             self.compilation_config.cudagraph_mode,
             decode_query_len=self.decode_query_len,
+            lora_capture_cases=self.lora_capture_cases,
         )
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
@@ -404,14 +413,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dtype=self.model_config.dtype,
                 device=self.device,
             )
-
-        # Execute the model.
-        self.execute_model(
-            dummy_scheduler_output,
-            intermediate_tensors=intermediate_tensors,
-            dummy_run=True,
-            skip_attn_for_dummy_run=skip_attn,
-        )
+        with self.maybe_dummy_run_with_lora(
+            self.lora_config,
+            num_scheduled_tokens=np.array(num_tokens_per_request, dtype=np.int32),
+            num_sampled_tokens=None,
+            remove_lora=True,
+            num_active_loras=self.lora_config.max_loras
+            if self.lora_config is not None
+            else 0,
+        ):
+            # Execute the model.
+            self.execute_model(
+                dummy_scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=True,
+                skip_attn_for_dummy_run=skip_attn,
+            )
         self.kv_connector.set_disabled(False)
 
         # Non-last PP ranks don't produce output for sampling.
@@ -551,6 +568,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.kv_cache_config,
                 has_lora=self.lora_config is not None,
                 use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
+                lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
             )
             if self.speculator is not None:
                 self.speculator.capture_model()
@@ -915,8 +933,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
 
+        req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+        num_active_loras = get_num_active_loras_for_dispatch(
+            self.lora_config, self.lora_state, req_ids, dummy_run
+        )
+
         batch_desc = self.cudagraph_manager.dispatch(
-            num_reqs, num_toks, uniform_tok_count
+            num_reqs,
+            num_toks,
+            uniform_tok_count,
+            num_active_loras=num_active_loras,
         )
         num_tokens_across_dp = None
 
@@ -942,6 +968,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 uniform_tok_count,
                 self.dp_size,
                 self.dp_rank,
+                num_active_loras=num_active_loras,
             )
 
         if batch_desc.num_tokens == 0:
@@ -975,7 +1002,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 block_tables = None
                 slot_mappings = None
-            # FIXME(woosuk): Fix warmup for LoRA.
 
         attn_metadata = None
         slot_mappings_by_layer = None
@@ -1038,6 +1064,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             batch_descriptor = BatchDescriptor(
                 num_tokens=input_batch.num_tokens_after_padding,
                 has_lora=self.lora_config is not None,
+                num_active_loras=batch_desc.num_active_loras,
             )
 
             with set_forward_context(
