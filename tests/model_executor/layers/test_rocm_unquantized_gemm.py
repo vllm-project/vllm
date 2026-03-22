@@ -26,7 +26,7 @@ def test_rocm_unquantized_gemm_gfx1x_wvsplitk_path(monkeypatch):
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
-    monkeypatch.setattr(utils, "get_cu_count", lambda: 120)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
 
     wvsplitk_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
     monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
@@ -50,7 +50,7 @@ def test_rocm_unquantized_gemm_gfx1x_n_gt_4_falls_back(monkeypatch):
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: False)
-    monkeypatch.setattr(utils, "get_cu_count", lambda: 120)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
 
     wvsplitk_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
     monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
@@ -74,7 +74,7 @@ def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx1x", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx9", lambda: False)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
-    monkeypatch.setattr(utils, "get_cu_count", lambda: 120)
+    monkeypatch.setattr(utils, "num_compute_units", lambda: 120)
 
     wvsplitkrc_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
     monkeypatch.setattr(utils.ops, "wvSplitKrc", wvsplitkrc_mock)
