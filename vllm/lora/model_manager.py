@@ -720,23 +720,19 @@ class LoRAModelManager:
             if self._is_3d_moe_model:
                 num_experts = module.w13_lora_a_stacked[0].shape[1]
 
-                # Clone before reshaping so that adapters loaded with
-                # the same underlying safetensor storage (e.g. lora_id
-                # 1 and 2 backed by the same file) don't alias and
-                # corrupt each other's weights during permute/reshape.
                 # (num_experts,rank,input_size)
-                gate_up_proj_lora.lora_a = gate_up_proj_lora.lora_a.clone().reshape(
+                gate_up_proj_lora.lora_a = gate_up_proj_lora.lora_a.reshape(
                     num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
                 )
-                down_proj_lora.lora_a = down_proj_lora.lora_a.clone().reshape(
+                down_proj_lora.lora_a = down_proj_lora.lora_a.reshape(
                     num_experts, -1, down_proj_lora.lora_a.shape[-1]
                 )
 
                 # (output_size,rank,num_experts)
-                gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.clone().reshape(
+                gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.reshape(
                     gate_up_proj_lora.lora_b.shape[0], -1, num_experts
                 )
-                down_proj_lora.lora_b = down_proj_lora.lora_b.clone().reshape(
+                down_proj_lora.lora_b = down_proj_lora.lora_b.reshape(
                     down_proj_lora.lora_b.shape[0], -1, num_experts
                 )
 
