@@ -19,10 +19,11 @@ class PoolingRunner:
     def __init__(self, model: nn.Module):
         self.model = cast(VllmModelForPooling, model)
 
-    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
-        if not is_pooling_model(self.model):
+    @staticmethod
+    def get_supported_tasks(model: nn.Module) -> list[PoolingTask]:
+        if not is_pooling_model(model):
             return []
-        assert "embed" in self.model.pooler.get_supported_tasks()
+        assert "embed" in model.pooler.get_supported_tasks()
         return ["embed"]
 
     def pool(

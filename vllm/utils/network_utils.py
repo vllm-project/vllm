@@ -247,7 +247,7 @@ def split_zmq_path(path: str) -> tuple[str, str, str]:
 
     scheme = parsed.scheme
     host = parsed.hostname or ""
-    port = str(parsed.port or "")
+    port = "" if parsed.port is None else str(parsed.port)
     if host.startswith("[") and host.endswith("]"):
         host = host[1:-1]  # Remove brackets for IPv6 address
 
@@ -288,6 +288,7 @@ def make_zmq_socket(
     bind: bool | None = None,
     identity: bytes | None = None,
     linger: int | None = None,
+    router_handover: bool = False,
 ) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
@@ -313,6 +314,10 @@ def make_zmq_socket(
     if socket_type in (zmq.PUSH, zmq.DEALER, zmq.ROUTER):
         socket.setsockopt(zmq.SNDHWM, 0)
         socket.setsockopt(zmq.SNDBUF, buf_size)
+
+    if socket_type == zmq.ROUTER and router_handover:
+        # Let a new connection take over an identity left behind by a dead one.
+        socket.setsockopt(zmq.ROUTER_HANDOVER, 1)
 
     if identity is not None:
         socket.setsockopt(zmq.IDENTITY, identity)
@@ -344,12 +349,20 @@ def zmq_socket_ctx(
     bind: bool | None = None,
     linger: int = 0,
     identity: bytes | None = None,
+    router_handover: bool = False,
 ) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
     ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
-        yield make_zmq_socket(ctx, path, socket_type, bind=bind, identity=identity)
+        yield make_zmq_socket(
+            ctx,
+            path,
+            socket_type,
+            bind=bind,
+            identity=identity,
+            router_handover=router_handover,
+        )
     except KeyboardInterrupt:
         logger.debug("Got Keyboard Interrupt.")
 

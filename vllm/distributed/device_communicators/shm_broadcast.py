@@ -274,6 +274,7 @@ class ShmRingBuffer:
             self.shared_memory = shared_memory.SharedMemory(
                 create=True, size=self.total_bytes_of_buffer
             )
+            assert self.shared_memory.buf is not None, "Buffer was not created"
             # initialize the metadata section to 0
             with self.shared_memory.buf[self.metadata_offset :] as metadata_buffer:
                 torch.frombuffer(metadata_buffer, dtype=torch.uint8).fill_(0)
@@ -325,6 +326,7 @@ class ShmRingBuffer:
     def get_data(self, current_idx: int):
         start = self.data_offset + current_idx * self.max_chunk_bytes
         end = start + self.max_chunk_bytes
+        assert self.shared_memory.buf is not None, "Buffer has been closed"
         with self.shared_memory.buf[start:end] as buf:
             yield buf
 
@@ -332,6 +334,7 @@ class ShmRingBuffer:
     def get_metadata(self, current_idx: int):
         start = self.metadata_offset + current_idx * self.metadata_size
         end = start + self.metadata_size
+        assert self.shared_memory.buf is not None, "Buffer has been closed"
         with self.shared_memory.buf[start:end] as buf:
             yield buf
 
