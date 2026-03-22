@@ -152,5 +152,5 @@ async def test_basic_audio_foscolo(foscolo, rocm_aiter_fa_attention, model_name)
             model_name,
             foscolo,
             language="it",
-            expected_text="ove il mio corpo fanciulletto",
+            expected_text="ove il mio corpo fanciulletto giacque",
         )

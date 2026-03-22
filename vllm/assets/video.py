@@ -10,9 +10,14 @@ import numpy.typing as npt
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
-from vllm.multimodal.media.audio import load_audio_pyav
+from vllm.utils.import_utils import PlaceholderModule
 
 from .base import get_cache_dir
+
+try:
+    import librosa
+except ImportError:
+    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
 
 @lru_cache
@@ -141,4 +146,4 @@ class VideoAsset:
 
         See also: examples/offline_inference/qwen2_5_omni/only_thinker.py
         """
-        return load_audio_pyav(self.video_path, sr=sampling_rate)[0]
+        return librosa.load(self.video_path, sr=sampling_rate)[0]

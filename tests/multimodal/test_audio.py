@@ -14,7 +14,7 @@ from vllm.multimodal.audio import (
     AudioSpec,
     ChannelReduction,
     normalize_audio,
-    resample_audio_pyav,
+    resample_audio_librosa,
     resample_audio_scipy,
     split_audio,
 )
@@ -25,14 +25,14 @@ def dummy_audio():
     return np.array([0.0, 0.1, 0.2, 0.3, 0.4], dtype=float)
 
 
-def test_resample_audio_pyav(dummy_audio):
-    out_down = resample_audio_pyav(dummy_audio, orig_sr=4, target_sr=2)
-    out_up = resample_audio_pyav(dummy_audio, orig_sr=2, target_sr=4)
-    out_same = resample_audio_pyav(dummy_audio, orig_sr=4, target_sr=4)
-
-    assert len(out_down) == 3
-    assert len(out_up) == 10
-    assert np.all(out_same == dummy_audio)
+def test_resample_audio_librosa(dummy_audio):
+    with patch("vllm.multimodal.audio.librosa.resample") as mock_resample:
+        mock_resample.return_value = dummy_audio * 2
+        out = resample_audio_librosa(dummy_audio, orig_sr=44100, target_sr=22050)
+        mock_resample.assert_called_once_with(
+            dummy_audio, orig_sr=44100, target_sr=22050
+        )
+        assert np.all(out == dummy_audio * 2)
 
 
 def test_resample_audio_scipy(dummy_audio):
@@ -56,9 +56,9 @@ def test_resample_audio_scipy_non_integer_ratio(dummy_audio):
     assert np.isfinite(out).all()
 
 
-def test_audio_resampler_pyav_calls_resample(dummy_audio):
-    resampler = AudioResampler(target_sr=22050, method="pyav")
-    with patch("vllm.multimodal.audio.resample_audio_pyav") as mock_resample:
+def test_audio_resampler_librosa_calls_resample(dummy_audio):
+    resampler = AudioResampler(target_sr=22050, method="librosa")
+    with patch("vllm.multimodal.audio.resample_audio_librosa") as mock_resample:
         mock_resample.return_value = dummy_audio
         out = resampler.resample(dummy_audio, orig_sr=44100)
         mock_resample.assert_called_once_with(
@@ -423,13 +423,13 @@ class TestAudioPipelineE2E:
         # Verify channel averaging: mean of [0.5, -0.5] = 0.0
         np.testing.assert_array_almost_equal(audio_output, np.zeros(16000), decimal=5)
 
-    def test_pyav_mono_passthrough_e2e(self):
-        """Full pipeline: pyav mono format → preserved as mono."""
+    def test_librosa_mono_passthrough_e2e(self):
+        """Full pipeline: librosa mono format → preserved as mono."""
         from vllm.multimodal.parse import MultiModalDataParser
 
-        # Simulate pyav output: already mono (time,) format
-        mono_pyav = np.random.randn(16000).astype(np.float32)
-        assert mono_pyav.shape == (16000,)
+        # Simulate librosa output: already mono (time,) format
+        mono_librosa = np.random.randn(16000).astype(np.float32)
+        assert mono_librosa.shape == (16000,)
 
         # Create parser with mono normalization
         parser = MultiModalDataParser(
@@ -438,7 +438,7 @@ class TestAudioPipelineE2E:
         )
 
         # Process audio through the parser
-        result = parser._parse_audio_data((mono_pyav, 16000))
+        result = parser._parse_audio_data((mono_librosa, 16000))
         audio_output = result.get(0)
 
         # Verify output is still mono 1D
@@ -446,7 +446,7 @@ class TestAudioPipelineE2E:
         assert audio_output.shape == (16000,)
 
         # Verify audio content is preserved
-        np.testing.assert_array_almost_equal(audio_output, mono_pyav)
+        np.testing.assert_array_almost_equal(audio_output, mono_librosa)
 
     def test_multichannel_5_1_surround_to_mono_e2e(self):
         """Full pipeline: 5.1 surround (6 channels) → mono output."""

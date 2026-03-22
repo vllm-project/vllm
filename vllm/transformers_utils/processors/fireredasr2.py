@@ -188,7 +188,7 @@ class FireRedASR2FeatureExtractor(SequenceFeatureExtractor):
         for speech in raw_speech:
             """
             We must multiply by 32768 here because FireRedASR2 loads audio data
-            using kaldiio.load_mat, while vLLM loads audio data using pyav.
+            using kaldiio.load_mat, while vLLM loads audio data using librosa.
             """
             speech = speech * 32768
             fbank = self.fbank(sampling_rate, speech)
