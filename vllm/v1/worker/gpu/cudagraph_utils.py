@@ -276,9 +276,11 @@ class ModelCudaGraphManager(CudaGraphManager):
         decode_query_len: int,
     ):
         super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
+        # Used for FULL CUDA graphs. PW CUDA graphs do not use these.
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
+        self.intermediate_tensors: IntermediateTensors | None = None
 
     def capture(
         self,
@@ -345,25 +347,43 @@ class ModelCudaGraphManager(CudaGraphManager):
                     }
                     model_output = model(**model_inputs)
 
-                    if not self.is_last_pp_rank:
-                        # The output is IntermediateTensors, not hidden states.
-                        # FIXME(woosuk): Support FULL CUDA graph.
+                    if cg_mode == CUDAGraphMode.PIECEWISE:
+                        # PW CUDA graph internally handles the model outputs.
+                        # No need to keep track of the hidden states.
                         return None
 
-                    if self.use_aux_hidden_state_outputs:
-                        hidden_states, aux_hidden_states = model_output
+                    if self.is_last_pp_rank:
+                        # Last PP rank (common case).
+                        if self.use_aux_hidden_state_outputs:
+                            hidden_states, aux_hidden_states = model_output
+                        else:
+                            hidden_states = model_output
+                            aux_hidden_states = []
+                        if self.hidden_states is None:
+                            self.hidden_states = torch.empty_like(hidden_states)
+                        self.hidden_states[:num_tokens] = hidden_states
+                        if (
+                            self.use_aux_hidden_state_outputs
+                            and not self.aux_hidden_states
+                        ):
+                            self.aux_hidden_states = [
+                                torch.empty_like(x) for x in aux_hidden_states
+                            ]
+                        for i, aux in enumerate(aux_hidden_states):
+                            self.aux_hidden_states[i][:num_tokens] = aux
                     else:
-                        hidden_states = model_output
-                        aux_hidden_states = []
-                    if self.hidden_states is None:
-                        self.hidden_states = torch.empty_like(hidden_states)
-                    if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
-                        self.aux_hidden_states = [
-                            torch.empty_like(x) for x in aux_hidden_states
-                        ]
-                    self.hidden_states[:num_tokens] = hidden_states
-                    for i, aux in enumerate(aux_hidden_states):
-                        self.aux_hidden_states[i][:num_tokens] = aux
+                        # Non-last PP rank.
+                        intermediate_tensors = model_output
+                        assert isinstance(intermediate_tensors, IntermediateTensors)
+                        if self.intermediate_tensors is None:
+                            self.intermediate_tensors = IntermediateTensors(
+                                {
+                                    k: torch.empty_like(v)
+                                    for k, v in intermediate_tensors.tensors.items()
+                                }
+                            )
+                        for k, v in intermediate_tensors.tensors.items():
+                            self.intermediate_tensors[k][:num_tokens] = v
 
             return forward_fn
 
@@ -371,9 +391,13 @@ class ModelCudaGraphManager(CudaGraphManager):
 
     def run_fullgraph(
         self, desc: BatchExecutionDescriptor
-    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
         """Replay a captured FULL cudagraph and return hidden states."""
         super().run_fullgraph(desc)
+        if not self.is_last_pp_rank:
+            assert self.intermediate_tensors is not None
+            return self.intermediate_tensors[: desc.num_tokens]
+
         assert self.hidden_states is not None
         hidden_states = self.hidden_states[: desc.num_tokens]
         if not self.use_aux_hidden_state_outputs:
