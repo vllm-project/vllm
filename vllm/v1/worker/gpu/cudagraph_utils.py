@@ -276,6 +276,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         decode_query_len: int,
     ):
         super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
+        # Used for FULL CUDA graphs. PW CUDA graphs do not use these.
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
@@ -345,9 +346,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                     }
                     model_output = model(**model_inputs)
 
-                    if not self.is_last_pp_rank:
-                        # The output is IntermediateTensors, not hidden states.
-                        # FIXME(woosuk): Support FULL CUDA graph.
+                    if cg_mode == CUDAGraphMode.PIECEWISE:
+                        # PW CUDA graph internally handles the model outputs.
+                        # No need to keep track of the hidden states.
                         return None
 
                     if self.use_aux_hidden_state_outputs:
