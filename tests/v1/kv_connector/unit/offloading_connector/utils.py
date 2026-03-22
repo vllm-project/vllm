@@ -522,8 +522,13 @@ def generate_store_output(block_hashes: Iterable[BlockHash]):
     )
 
 
-def create_hybrid_vllm_config(hybrid_chunk_size: int | None = None) -> VllmConfig:
-    vllm_config = create_vllm_config(block_size=16, max_num_batched_tokens=1000)
+def create_hybrid_vllm_config(
+    hybrid_chunk_size: int | None = None,
+    block_size: int = 16,
+) -> VllmConfig:
+    vllm_config = create_vllm_config(
+        block_size=block_size, max_num_batched_tokens=1000
+    )
     extra_config = {
         "spec_name": "MockOffloadingSpec",
         "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",
@@ -753,6 +758,15 @@ def test_scheduler_rejects_partial_group_hybrid_transfers():
     with pytest.raises(NotImplementedError, match="partial-group GPU transfer"):
         scheduler._ensure_transfer_supported()
 
+
+def test_offloading_spec_allows_engine_hash_size_1056_with_hybrid_chunk():
+    spec = MockOffloadingSpec(
+        create_hybrid_vllm_config(hybrid_chunk_size=16384, block_size=1056),
+        create_hybrid_kv_cache_config(),
+    )
+    assert spec.hash_block_size == 1056
+    assert spec.group_hash_block_size == (16384, 16384, 16384, 1056)
+    assert spec.offloaded_block_size == 16384
 def test_scheduler_hybrid_hits_return_common_prefix_tokens():
     init_none_hash(sha256)
     request = Request(

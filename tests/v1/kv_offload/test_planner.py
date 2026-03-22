@@ -17,12 +17,12 @@ def test_fixed_chunk_marks_large_groups_as_partial():
     assert planner.group_hash_factors == (1024, 1024, 1024, 66)
 
 
-def test_fixed_chunk_rejects_non_hash_aligned_size():
-    with pytest.raises(ValueError, match="must be divisible by hash_block_size"):
+def test_fixed_chunk_rejects_non_positive_size():
+    with pytest.raises(ValueError, match="must be positive"):
         HybridOffloadPlanner(
             hash_block_size=16,
             gpu_block_sizes=(65536, 1056),
-            fixed_chunk_size=10001,
+            fixed_chunk_size=0,
         )
 
 
@@ -59,6 +59,18 @@ def test_planner_reports_partial_group_requirement():
     )
 
     assert planner.requires_partial_group_offload_any is True
+
+
+def test_planner_allows_engine_hash_size_to_differ_from_hybrid_chunk():
+    planner = HybridOffloadPlanner(
+        hash_block_size=1056,
+        gpu_block_sizes=(65536, 65536, 65536, 1056),
+        fixed_chunk_size=16384,
+    )
+
+    assert planner.offload_unit_sizes == (16384, 16384, 16384, 1056)
+    assert planner.group_hash_factors == (None, None, None, 1)
+    assert planner.chunk_prefix_tokens(1) == 15840
 
 
 def test_chunk_prefix_tokens_uses_common_covered_prefix():

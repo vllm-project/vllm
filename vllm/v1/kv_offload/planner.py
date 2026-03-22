@@ -22,16 +22,10 @@ class HybridOffloadPlanner:
             raise ValueError("hash_block_size must be positive")
         if self.fixed_chunk_size <= 0:
             raise ValueError("fixed_chunk_size must be positive")
-        if self.fixed_chunk_size % self.hash_block_size != 0:
-            raise ValueError(
-                "fixed_chunk_size must be divisible by hash_block_size"
-            )
         if not self.gpu_block_sizes:
             raise ValueError("gpu_block_sizes must be non-empty")
         if any(block_size <= 0 for block_size in self.gpu_block_sizes):
             raise ValueError("gpu_block_sizes must be positive")
-        if any(block_size % self.hash_block_size != 0 for block_size in self.gpu_block_sizes):
-            raise ValueError("All gpu_block_sizes must be divisible by hash_block_size")
 
     @property
     def offload_unit_sizes(self) -> tuple[int, ...]:
@@ -59,9 +53,14 @@ class HybridOffloadPlanner:
         return any(self.requires_partial_group_offload)
 
     @property
-    def group_hash_factors(self) -> tuple[int, ...]:
+    def group_hash_factors(self) -> tuple[int | None, ...]:
         return tuple(
-            unit_size // self.hash_block_size for unit_size in self.offload_unit_sizes
+            (
+                unit_size // self.hash_block_size
+                if unit_size % self.hash_block_size == 0
+                else None
+            )
+            for unit_size in self.offload_unit_sizes
         )
 
     def group_covered_tokens_for_chunk_count(
