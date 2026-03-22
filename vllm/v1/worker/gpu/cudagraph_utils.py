@@ -308,11 +308,18 @@ class ModelCudaGraphManager(CudaGraphManager):
                 if self.dp_size > 1
                 else None
             )
+
+            model_inputs = {
+                "input_ids": input_buffers.input_ids[:num_tokens],
+                "positions": input_buffers.positions[:num_tokens],
+                **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
+            }
             if not self.is_first_pp_rank:
+                # Update for non-first PP ranks.
+                model_inputs["input_ids"] = None
+                model_inputs["inputs_embeds"] = None
                 assert intermediate_tensors is not None
-                intermediate_tensors_sliced = intermediate_tensors[:num_tokens]
-            else:
-                intermediate_tensors_sliced = None
+                model_inputs["intermediate_tensors"] = intermediate_tensors[:num_tokens]
 
             attn_metadata, slot_mappings = prepare_inputs_to_capture(
                 num_reqs,
@@ -339,51 +346,42 @@ class ModelCudaGraphManager(CudaGraphManager):
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
                 ):
-                    model_inputs = {
-                        "input_ids": input_buffers.input_ids[:num_tokens],
-                        "positions": input_buffers.positions[:num_tokens],
-                        "intermediate_tensors": intermediate_tensors_sliced,
-                        **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
-                    }
                     model_output = model(**model_inputs)
 
-                    if cg_mode == CUDAGraphMode.PIECEWISE:
-                        # PW CUDA graph internally handles the model outputs.
-                        # No need to keep track of the hidden states.
-                        return None
+                if cg_mode == CUDAGraphMode.PIECEWISE:
+                    # PW CUDA graph internally handles the model outputs.
+                    # No need to keep track of the hidden states.
+                    return None
 
-                    if self.is_last_pp_rank:
-                        # Last PP rank (common case).
-                        if self.use_aux_hidden_state_outputs:
-                            hidden_states, aux_hidden_states = model_output
-                        else:
-                            hidden_states = model_output
-                            aux_hidden_states = []
-                        if self.hidden_states is None:
-                            self.hidden_states = torch.empty_like(hidden_states)
-                        self.hidden_states[:num_tokens] = hidden_states
-                        if (
-                            self.use_aux_hidden_state_outputs
-                            and not self.aux_hidden_states
-                        ):
-                            self.aux_hidden_states = [
-                                torch.empty_like(x) for x in aux_hidden_states
-                            ]
-                        for i, aux in enumerate(aux_hidden_states):
-                            self.aux_hidden_states[i][:num_tokens] = aux
+                if self.is_last_pp_rank:
+                    # Last PP rank (common case).
+                    if self.use_aux_hidden_state_outputs:
+                        hidden_states, aux_hidden_states = model_output
                     else:
-                        # Non-last PP rank.
-                        intermediate_tensors = model_output
-                        assert isinstance(intermediate_tensors, IntermediateTensors)
-                        if self.intermediate_tensors is None:
-                            self.intermediate_tensors = IntermediateTensors(
-                                {
-                                    k: torch.empty_like(v)
-                                    for k, v in intermediate_tensors.tensors.items()
-                                }
-                            )
-                        for k, v in intermediate_tensors.tensors.items():
-                            self.intermediate_tensors[k][:num_tokens] = v
+                        hidden_states = model_output
+                        aux_hidden_states = []
+                    if self.hidden_states is None:
+                        self.hidden_states = torch.empty_like(hidden_states)
+                    self.hidden_states[:num_tokens] = hidden_states
+                    if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
+                        self.aux_hidden_states = [
+                            torch.empty_like(x) for x in aux_hidden_states
+                        ]
+                    for i, aux in enumerate(aux_hidden_states):
+                        self.aux_hidden_states[i][:num_tokens] = aux
+                else:
+                    # Non-last PP rank.
+                    intermediate_tensors = model_output
+                    assert isinstance(intermediate_tensors, IntermediateTensors)
+                    if self.intermediate_tensors is None:
+                        self.intermediate_tensors = IntermediateTensors(
+                            {
+                                k: torch.empty_like(v)
+                                for k, v in intermediate_tensors.tensors.items()
+                            }
+                        )
+                    for k, v in intermediate_tensors.tensors.items():
+                        self.intermediate_tensors[k][:num_tokens] = v
 
             return forward_fn
 
