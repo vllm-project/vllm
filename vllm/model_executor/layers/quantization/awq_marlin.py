@@ -240,7 +240,6 @@ class AWQMarlinConfig(QuantizationConfig):
         )
 
         if can_convert and is_valid_user_quant:
-            warn_marlin_cuda_driver_mismatch()
             msg = (
                 "The model is convertible to {} during runtime."
                 " Using {} kernel.".format(cls.get_name(), cls.get_name())

@@ -48,7 +48,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,
     marlin_repeat_scales_on_all_ranks,
     verify_marlin_supported,
-    warn_marlin_cuda_driver_mismatch,
 )
 from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
@@ -224,7 +223,6 @@ class GPTQMarlinConfig(QuantizationConfig):
         )
 
         if can_convert and is_valid_user_quant:
-            warn_marlin_cuda_driver_mismatch()
             msg = (
                 "The model is convertible to {} during runtime."
                 " Using {} kernel.".format(cls.get_name(), cls.get_name())

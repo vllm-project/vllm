@@ -36,50 +36,126 @@ def _get_torch_cuda_version():
         return None
 
 
+def _get_driver_cuda_version_early():
+    """Return (major, minor) of the CUDA version supported by the installed
+    NVIDIA driver, or None if it cannot be determined.
+
+    Uses vllm's bundled pynvml directly so that torch does not need to be
+    imported yet (NVML is a separate shared library from the CUDA runtime).
+    """
+    try:
+        import vllm.third_party.pynvml as pynvml
+
+        pynvml.nvmlInit()
+        try:
+            version_raw = pynvml.nvmlSystemGetCudaDriverVersion_v2()
+        except Exception:
+            version_raw = pynvml.nvmlSystemGetCudaDriverVersion()
+        finally:
+            pynvml.nvmlShutdown()
+        return version_raw // 1000, (version_raw % 1000) // 10
+    except Exception:
+        return None
+
+
+def _parse_cuda_version_str(version):
+    """Parse a CUDA version string like '12.8' into (12, 8), or return None."""
+    if not version:
+        return None
+    try:
+        major_s, minor_s, *_ = version.split(".")
+        return int(major_s), int(minor_s)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _find_cuda_compat_path(torch_cuda_version):
+    """Search standard locations for the CUDA forward-compat library directory.
+
+    Returns the first existing path found, or an empty string if none exists.
+    Search order: explicit env var → Conda prefix → default CUDA install.
+    """
+    path = os.environ.get("VLLM_CUDA_COMPATIBILITY_PATH", "")
+    if path and os.path.isdir(path):
+        return path
+    conda_prefix = os.environ.get("CONDA_PREFIX", "")
+    if conda_prefix:
+        p = os.path.join(conda_prefix, "cuda-compat")
+        if os.path.isdir(p):
+            return p
+    if torch_cuda_version:
+        p = f"/usr/local/cuda-{torch_cuda_version}/compat"
+        if os.path.isdir(p):
+            return p
+    return ""
+
+
+def _prepend_ld_library_path(compat_path):
+    """Prepend *compat_path* to LD_LIBRARY_PATH (idempotent)."""
+    norm_path = os.path.normpath(compat_path)
+    existing = os.environ.get("LD_LIBRARY_PATH", "")
+    ld_paths = existing.split(os.pathsep) if existing else []
+    if ld_paths and ld_paths[0] and os.path.normpath(ld_paths[0]) == norm_path:
+        return  # Already at the front
+    new_paths = [norm_path] + [
+        p for p in ld_paths if not p or os.path.normpath(p) != norm_path
+    ]
+    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(new_paths)
+
+
 def _maybe_set_cuda_compatibility_path():
-    """Set LD_LIBRARY_PATH for CUDA forward compatibility if enabled.
+    """Set LD_LIBRARY_PATH for CUDA forward compatibility.
 
     Must run before 'import torch' since torch loads CUDA shared libraries
     at import time and the dynamic linker only consults LD_LIBRARY_PATH when
     a library is first loaded.
 
-    CUDA forward compatibility is only supported on select professional and
-    datacenter NVIDIA GPUs. Consumer GPUs (GeForce, RTX) do not support it
-    and will get Error 803 if compat libs are loaded.
+    Two modes:
+    1. Explicit (VLLM_ENABLE_CUDA_COMPATIBILITY=1): user opted in; find compat
+       libs and prepend them unconditionally (existing behaviour).
+    2. Auto-detect: if the CUDA driver version is older than the PyTorch CUDA
+       toolkit version, compat libs are required for PTX-heavy kernels (e.g.
+       Marlin) to load successfully. When such a mismatch is detected and
+       compat libs are found, they are prepended automatically so the user
+       does not need to restart.  A notice is printed to stderr because the
+       vllm logger is not yet available at this point.
+
+    Note: CUDA forward compatibility is only supported on select professional
+    and datacenter NVIDIA GPUs.  Consumer GPUs (GeForce, RTX) do not support
+    it and will receive Error 803 if compat libs are loaded.  In practice,
+    compat libs are rarely installed on consumer-GPU machines, so auto-detect
+    will not trigger for them.
     """
-    enable = os.environ.get("VLLM_ENABLE_CUDA_COMPATIBILITY", "0").strip().lower() in (
-        "1",
-        "true",
-    )
-    if not enable:
+    torch_cuda_version = _get_torch_cuda_version()
+    explicitly_enabled = os.environ.get(
+        "VLLM_ENABLE_CUDA_COMPATIBILITY", "0"
+    ).strip().lower() in ("1", "true")
+
+    if explicitly_enabled:
+        compat_path = _find_cuda_compat_path(torch_cuda_version)
+        if compat_path:
+            _prepend_ld_library_path(compat_path)
         return
 
-    cuda_compat_path = os.environ.get("VLLM_CUDA_COMPATIBILITY_PATH", "")
-    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
-        conda_prefix = os.environ.get("CONDA_PREFIX", "")
-        conda_compat = os.path.join(conda_prefix, "cuda-compat")
-        if conda_prefix and os.path.isdir(conda_compat):
-            cuda_compat_path = conda_compat
-    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
-        torch_cuda_version = _get_torch_cuda_version()
-        if torch_cuda_version:
-            default_path = f"/usr/local/cuda-{torch_cuda_version}/compat"
-            if os.path.isdir(default_path):
-                cuda_compat_path = default_path
-    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
-        return
+    # Auto-detect: check for driver/toolkit version mismatch.
+    driver_ver = _get_driver_cuda_version_early()
+    toolkit_ver = _parse_cuda_version_str(torch_cuda_version)
+    if driver_ver is None or toolkit_ver is None or driver_ver >= toolkit_ver:
+        return  # No mismatch — nothing to do.
 
-    norm_path = os.path.normpath(cuda_compat_path)
-    existing = os.environ.get("LD_LIBRARY_PATH", "")
-    ld_paths = existing.split(os.pathsep) if existing else []
-
-    if ld_paths and ld_paths[0] and os.path.normpath(ld_paths[0]) == norm_path:
-        return  # Already at the front
-
-    new_paths = [norm_path] + [
-        p for p in ld_paths if not p or os.path.normpath(p) != norm_path
-    ]
-    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(new_paths)
+    compat_path = _find_cuda_compat_path(torch_cuda_version)
+    if compat_path:
+        _prepend_ld_library_path(compat_path)
+        import sys
+        print(
+            f"[vllm] CUDA driver {driver_ver[0]}.{driver_ver[1]} is older than "
+            f"the PyTorch CUDA toolkit {torch_cuda_version}. "
+            f"Auto-enabled CUDA forward compatibility using libs at {compat_path}. "
+            f"Set VLLM_ENABLE_CUDA_COMPATIBILITY=1 to make this explicit.",
+            file=sys.stderr,
+        )
+    # If no compat libs are found the mismatch warning in marlin_utils will
+    # fire at kernel-selection time once the vllm logger is available.
 
 
 _maybe_set_cuda_compatibility_path()

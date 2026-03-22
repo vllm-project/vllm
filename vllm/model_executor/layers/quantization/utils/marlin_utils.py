@@ -231,6 +231,12 @@ def verify_marlin_supported(
     if not cond:
         assert err_msg is not None
         raise ValueError(err_msg)
+    # Warn once if the CUDA driver/toolkit mismatch was not resolved at
+    # startup (e.g. no compat libs available).  Centralised here so every
+    # Marlin-based config (awq_marlin, gptq_marlin, compressed_tensors, fp8,
+    # moe_wna16, modelopt, …) gets the check without per-config boilerplate.
+    if current_platform.is_cuda():
+        warn_marlin_cuda_driver_mismatch()
 
 
 def verify_marlin_supports_shape(
