@@ -134,7 +134,7 @@ def warmup_kernels(
         }
         if num_spec_steps > 0:
             decode_output.scheduled_spec_decode_tokens = {
-                rid: [1] * num_spec_steps for rid in req_ids
+                rid: [0] * num_spec_steps for rid in req_ids
             }
         decode_output.total_num_scheduled_tokens = sum(
             decode_output.num_scheduled_tokens.values()
