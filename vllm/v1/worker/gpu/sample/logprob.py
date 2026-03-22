@@ -4,7 +4,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.outputs import LogprobsTensors, TrackedLogprobsTensors
+from vllm.v1.outputs import LogprobsTensors
 
 
 @triton.jit
@@ -123,60 +123,4 @@ def compute_topk_logprobs(
         logprobs=logprobs,
         selected_token_ranks=token_ranks,
         cu_num_generated_tokens=cu_num_logits,
-    )
-
-
-def compute_prompt_logprobs(
-    prompt_token_ids: torch.Tensor,
-    prompt_hidden_states: torch.Tensor,
-    logits_fn: Callable[[torch.Tensor], torch.Tensor],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # Since materializing the full prompt logits can take too much memory,
-    # we compute it in chunks.
-    CHUNK_SIZE = 1024
-    logprobs = []
-    ranks = []
-    prompt_token_ids = prompt_token_ids.to(torch.int64)
-    for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
-        end_idx = start_idx + CHUNK_SIZE
-        # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
-        prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
-        prompt_logprobs = compute_topk_logprobs(
-            prompt_logits,
-            0,  # num_logprobs
-            prompt_token_ids[start_idx:end_idx],
-        )
-        logprobs.append(prompt_logprobs.logprobs)
-        ranks.append(prompt_logprobs.selected_token_ranks)
-
-    logprobs = torch.cat(logprobs, dim=0) if len(logprobs) > 1 else logprobs[0]
-    ranks = torch.cat(ranks, dim=0) if len(ranks) > 1 else ranks[0]
-    return logprobs, ranks
-
-
-def compute_tracked_logprobs(
-    logits: torch.Tensor,
-    track_token_ids: torch.Tensor,
-) -> TrackedLogprobsTensors:
-    """Compute logprobs for specific tracked token IDs.
-
-    This is an efficient way to get logprobs for a small set of tokens
-    (e.g., class labels) without retrieving the full vocabulary logprobs.
-
-    Args:
-        logits: [batch_size, vocab_size] tensor of logits
-        track_token_ids: [num_tracked_tokens] tensor of token IDs to track
-
-    Returns:
-        TrackedLogprobsTensors containing:
-            - logprobs: [batch_size, num_tracked_tokens] tensor
-            - token_ids: [num_tracked_tokens] tensor (same as input)
-    """
-    # Compute log softmax to get logprobs
-    logprobs = logits.log_softmax(dim=-1, dtype=torch.float32)
-    # Index into the specific token columns we care about
-    tracked_logprobs = logprobs[:, track_token_ids]
-    return TrackedLogprobsTensors(
-        logprobs=tracked_logprobs,
-        token_ids=track_token_ids,
     )

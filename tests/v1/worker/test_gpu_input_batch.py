@@ -491,6 +491,8 @@ def test_pooling_prompt_lens_not_aliased(device: str):
         f"Expected {prompt_lens_snapshot}, got {metadata.prompt_lens}"
     )
 
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_merged_track_token_ids_empty(device: str):
     """
     Test that merged_track_token_ids returns None
