@@ -154,6 +154,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         )
         self.hidden_size = hidden_size = self.moe.hidden_dim
 
+        # Expose padded dimensions on the layer for LoRA and Marlin code
+        # that reads layer.hidden_size / layer.intermediate_size_per_partition.
+        layer.params_dtype = params_dtype
+        layer.num_experts = num_experts
+        layer.hidden_size = hidden_size
+        layer.intermediate_size_per_partition = (
+            intermediate_size_per_partition_after_pad
+        )
+
         # CK (gfx950) padding info for rocm_aiter_ops.fused_moe()
         self.hidden_pad = extra_weight_attrs.get("hidden_pad", 0)
         self.intermediate_pad = (
