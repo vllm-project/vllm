@@ -31,9 +31,9 @@ class Int8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
 @dataclass
 class FP8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
     weight_quant_key: QuantKey
-    weight_shape: tuple[int, int]
     activation_quant_key: QuantKey
-    out_dtype: torch.dtype | None
+    out_dtype: torch.dtype | None = None
+    weight_shape: tuple[int, int] | None = None
 
 
 _FP8ParamsT = tuple[

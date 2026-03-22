@@ -145,7 +145,8 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             c.activation_quant_key.scale.group_shape.is_per_token()
             and c.weight_quant_key.scale.group_shape.is_per_channel()
         )
-
+        if c.weight_shape is None:
+            return False, "weight_shape is required for Aiter kernels"
         N, K = c.weight_shape
         fp8_dtype = current_platform.fp8_dtype()
 
@@ -220,6 +221,8 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             c.activation_quant_key.scale.group_shape.is_per_token()
             and c.weight_quant_key.scale.group_shape.is_per_channel()
         )
+        if c.weight_shape is None:
+            return False, "weight_shape is required for Aiter kernels"
         N, K = c.weight_shape
         fp8_dtype = current_platform.fp8_dtype()
 
