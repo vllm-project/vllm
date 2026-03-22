@@ -112,6 +112,15 @@ class SpecDecodeBaseProposer:
         self.dsl_last_reported_generated = 0
         self.dsl_last_reported_requested = 0
 
+        # Actual number of draft tokens produced in the last propose() call.
+        # Equals num_speculative_tokens when DSL did not exit early; less when
+        # it did.  Used by take_draft_token_ids() (sync scheduling only) to
+        # trim the CPU list so the scheduler schedules only the actually-
+        # drafted slots, saving verification compute on the skipped positions.
+        # The GPU tensor itself remains padded to num_speculative_tokens to
+        # keep the fixed stride expected by _prepare_input_ids.
+        self._last_draft_token_count: int = self.num_speculative_tokens
+
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
@@ -832,11 +841,19 @@ class SpecDecodeBaseProposer:
                     )
                     break
 
-        # [batch_size, num_speculative_tokens]
+        # [batch_size, num_actual_draft_tokens (≤ num_speculative_tokens)]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
 
-        # Pad to full num_speculative_tokens width if DSL early exit produced
-        # fewer tokens — downstream (GDN attention, scheduler) expects fixed shape.
+        # Record the actual (un-padded) count for the scheduler.  This is read
+        # by take_draft_token_ids() in sync-scheduling mode so that the
+        # scheduler commits to only the drafted slots.
+        self._last_draft_token_count = len(draft_token_ids_list)
+
+        # Pad the GPU tensor back to num_speculative_tokens.  This is required
+        # because _prepare_input_ids in the model runner uses a fixed stride of
+        # num_speculative_tokens when indexing into the flattened draft-token
+        # tensor.  The padded zeros are never read by the scheduler (the CPU
+        # list is trimmed first) and are never accepted by the verifier.
         if draft_token_ids.shape[1] < self.num_speculative_tokens:
             pad_width = self.num_speculative_tokens - draft_token_ids.shape[1]
             draft_token_ids = torch.nn.functional.pad(

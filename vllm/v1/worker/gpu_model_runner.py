@@ -4159,6 +4159,20 @@ class GPUModelRunner(
         if not self.num_spec_tokens or not self._draft_token_req_ids:
             return None
         draft_token_ids, req_ids = self._get_draft_token_ids_cpu()
+
+        # When DSL (confidence-threshold early exit) caused the proposer to
+        # generate fewer tokens than num_spec_tokens, trim the per-request
+        # CPU lists to the actual count.  This tells the scheduler to commit
+        # to only the actually-drafted slots, saving verification compute for
+        # the skipped positions.  The GPU tensor is kept padded (see
+        # eagle.py) so that _prepare_input_ids can still use its fixed-stride
+        # indexing; only the CPU list returned to the scheduler is shortened.
+        actual_k = getattr(
+            self.drafter, "_last_draft_token_count", self.num_spec_tokens
+        )
+        if actual_k < self.num_spec_tokens:
+            draft_token_ids = [row[:actual_k] for row in draft_token_ids]
+
         return DraftTokenIds(req_ids, draft_token_ids)
 
     def _copy_draft_token_ids_to_cpu(
