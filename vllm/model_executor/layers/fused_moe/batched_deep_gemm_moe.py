@@ -117,7 +117,10 @@ def _silu_mul_fp8_quant_deep_gemm(
         gate = gate * (1.0 / (1.0 + tl.exp(-gate)))
         y = gate * up
 
-        y_s = tl.maximum(tl.max(tl.abs(y)), eps) / fp8_max
+        # Use multiply-by-reciprocal to match PyTorch's tensor/scalar
+        # division precision (Triton GPU fast-division for constexpr
+        # divisors can introduce 1-ULP error).
+        y_s = tl.maximum(tl.max(tl.abs(y)), eps) * (1.0 / fp8_max)
         if ceil_ue8m0:
             y_s = tl.exp2(tl.ceil(tl.log2(y_s)))
 
@@ -210,11 +213,30 @@ def persistent_masked_m_silu_mul_quant(
         device_id=y.device.index
     ).to_int()
 
-    if cuda_arch >= 80:
+    if cuda_arch >= 80 and current_platform.is_cuda():
         torch.ops._C.persistent_masked_m_silu_mul_quant(
             y, tokens_per_expert, y_q, y_s, ceil_ue8m0
         )
     else:
+        # Triton fallback for ROCm -- the C++ kernel is guarded by
+        # #ifndef USE_ROCM in activation_kernels.cu.
+        # https://github.com/ROCm/aiter/issues/2420
+        # For UE8M0 (int32 packed scales), compute with float32 scales
+        # first, then pack afterwards.
+        is_packed_ue8m0 = quant_scale_fmt == DeepGemmQuantScaleFMT.UE8M0
+        if is_packed_ue8m0:
+            f32_shape, f32_strides, _ = scales_shape_stride_dtype(
+                E, T, G, DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
+            )
+            y_s_f32 = torch.empty_strided(
+                f32_shape,
+                f32_strides,
+                dtype=torch.float32,
+                device=y.device,
+            )
+        else:
+            y_s_f32 = y_s
+
         stride_cnt_e = tokens_per_expert.stride()[0]
 
         # Static grid over experts and H-groups.
@@ -228,14 +250,12 @@ def persistent_masked_m_silu_mul_quant(
         fp8_max = f_info.max
         fp8_min = f_info.min
         eps: float = 1e-10
-        assert y_s.dtype == torch.float32, (
-            "_silu_mul_fp8_quant_deep_gemm does"
-            "not support {y_s.dtype} scales. Only torch.float32 supported."
-        )
+
+        f32_strides = y_s_f32.stride()
         _silu_mul_fp8_quant_deep_gemm[grid](
             y,
             y_q,
-            y_s,
+            y_s_f32,
             tokens_per_expert,
             H,
             group_size,
@@ -245,9 +265,9 @@ def persistent_masked_m_silu_mul_quant(
             stride_yq_e,
             stride_yq_t,
             stride_yq_h,
-            ys_strides[0],
-            ys_strides[1],
-            ys_strides[2],
+            f32_strides[0],
+            f32_strides[1],
+            f32_strides[2],
             stride_cnt_e,
             eps,
             fp8_min,
@@ -257,6 +277,23 @@ def persistent_masked_m_silu_mul_quant(
             NUM_STAGES=4,
             num_warps=1,
         )
+
+        if is_packed_ue8m0:
+            # Pack float32 scales into int32 UE8M0 format:
+            # extract exponent bits (bits 30:23) from float32.
+            E_dim, T_dim, G_dim = y_s_f32.shape
+            y_s_cont = y_s_f32.contiguous()
+            i32_pad = round_up(G_dim, 4) - G_dim
+            y_s_u8 = (y_s_cont.view(torch.int32) >> 23).to(torch.uint8)
+            if i32_pad > 0:
+                y_s_u8 = torch.nn.functional.pad(y_s_u8, (0, i32_pad))
+            # y_s has shape (E, T, G//4) with stride (T*G//4, 1, T)
+            packed = y_s_u8.view(torch.int32)
+            # Copy with matching strides
+            for e_idx in range(E_dim):
+                nt = tokens_per_expert[e_idx].item()
+                if nt > 0:
+                    y_s[e_idx, :nt].copy_(packed[e_idx, :nt])
 
     return y_q, y_s
 
