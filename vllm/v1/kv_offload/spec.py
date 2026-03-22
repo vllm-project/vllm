@@ -3,12 +3,14 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
+from math import lcm
 from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
+from vllm.v1.kv_offload.planner import HybridOffloadPlanner
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 if TYPE_CHECKING:
@@ -91,26 +93,54 @@ class OffloadingSpec(ABC):
             kv_cache_group.kv_cache_spec.block_size
             for kv_cache_group in kv_cache_config.kv_cache_groups
         )
+        self.hybrid_planner: HybridOffloadPlanner | None = None
+        self.hybrid_offload_enabled: bool = False
 
+        print(
+            f"VLLM OffloadingSpec hash_block_size={self.hash_block_size} gpu_block_size={self.gpu_block_size}",
+            flush=True,
+        )
         for block_size in self.gpu_block_size:
             assert block_size % self.hash_block_size == 0
 
-        # offloaded_block_size / gpu_block_size
-        self.block_size_factor: int = 1
+        self.offloaded_block_size: int = lcm(*self.gpu_block_size)
+        self.block_size_factors: tuple[int, ...] = tuple(
+            self.offloaded_block_size // block_size
+            for block_size in self.gpu_block_size
+        )
 
         offloaded_block_size = self.extra_config.get("block_size")
         if offloaded_block_size is not None:
             offloaded_block_size_int = int(offloaded_block_size)
-            gpu_block_sizes = set(self.gpu_block_size)
-            assert len(gpu_block_sizes) == 1, (
+            assert all(
+                offloaded_block_size_int % gpu_block_size == 0
+                for gpu_block_size in self.gpu_block_size
+            ), (
                 "If 'block_size' is specified in kv_connector_extra_config, "
-                "there must be at least one KV cache group, "
-                "and all groups must have the same block size."
+                "it must be divisible by every KV cache group block size."
             )
-            gpu_block_size = gpu_block_sizes.pop()
+            self.offloaded_block_size = offloaded_block_size_int
+            self.block_size_factors = tuple(
+                self.offloaded_block_size // block_size
+                for block_size in self.gpu_block_size
+            )
 
-            assert offloaded_block_size_int % gpu_block_size == 0
-            self.block_size_factor = offloaded_block_size_int // gpu_block_size
+        hybrid_chunk_size = self.extra_config.get("hybrid_chunk_size")
+        if hybrid_chunk_size is not None:
+            self.hybrid_planner = HybridOffloadPlanner(
+                hash_block_size=self.hash_block_size,
+                gpu_block_sizes=self.gpu_block_size,
+                fixed_chunk_size=int(hybrid_chunk_size),
+            )
+            self.hybrid_offload_enabled = True
+
+    @property
+    def requires_partial_group_offload(self) -> bool:
+        return (
+            self.hybrid_planner.requires_partial_group_offload_any
+            if self.hybrid_planner is not None
+            else False
+        )
 
     @abstractmethod
     def get_manager(self) -> OffloadingManager:

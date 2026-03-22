@@ -14,7 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 )
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashListWithBlockSize
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_offload.abstract import OffloadingManager
 from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
@@ -30,15 +30,22 @@ class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
     def __init__(self, spec: OffloadingSpec):
-        assert len(spec.gpu_block_size) == 1
-        self.gpu_block_size = spec.gpu_block_size[0]
-        self.offloaded_block_size = self.gpu_block_size * spec.block_size_factor
-        self.block_size_factor = spec.block_size_factor
+        self.hybrid_offload_enabled = spec.hybrid_offload_enabled
+        self.requires_partial_group_offload = spec.requires_partial_group_offload
+        self.gpu_block_sizes = tuple(spec.gpu_block_size)
+        self.num_kv_groups = len(self.gpu_block_sizes)
+        self.hash_block_size = spec.hash_block_size
+        self.offloaded_block_size = spec.offloaded_block_size
+        assert self.offloaded_block_size % self.hash_block_size == 0
+        self.hash_block_size_factor = (
+            self.offloaded_block_size // self.hash_block_size
+        )
+        self.block_size_factors = tuple(spec.block_size_factors)
         self.manager: OffloadingManager = spec.get_manager()
 
         self._requests: dict[ReqId, Request] = {}
         # list of GPU block IDs per request
-        self._request_block_ids: dict[ReqId, list[int]] = {}
+        self._request_block_ids: dict[ReqId, tuple[list[int], ...]] = {}
         # requests to load for the current scheduler step
         self._reqs_to_load: dict[ReqId, TransferSpec] = {}
         # request blocks are stored in order
@@ -54,18 +61,50 @@ class OffloadingConnectorScheduler:
         self._reqs_being_stored = defaultdict[ReqId, set[BlockHash]](set)
         self._reqs_being_loaded = defaultdict[ReqId, set[BlockHash]](set)
 
+    def _ensure_transfer_supported(self) -> None:
+        if self.hybrid_offload_enabled and self.requires_partial_group_offload:
+            raise NotImplementedError(
+                "hybrid_chunk_size currently requires partial-group GPU transfer "
+                "support in the worker/backend; scheduler-side planning exists "
+                "but transfer emission is not implemented yet"
+            )
+
+    def _empty_block_groups(self) -> tuple[list[int], ...]:
+        return tuple([] for _ in range(self.num_kv_groups))
+
+    @staticmethod
+    def _flatten_block_groups(
+        block_groups: tuple[list[int], ...] | list[list[int]],
+    ) -> tuple[list[int], tuple[int, ...]]:
+        flat_block_ids: list[int] = []
+        group_sizes: list[int] = []
+        for group_block_ids in block_groups:
+            group_sizes.append(len(group_block_ids))
+            flat_block_ids.extend(group_block_ids)
+        return flat_block_ids, tuple(group_sizes)
+
+    def _append_block_groups(
+        self,
+        req_id: ReqId,
+        new_block_id_groups: tuple[list[int], ...],
+    ) -> None:
+        existing = self._request_block_ids[req_id]
+        assert len(existing) == len(new_block_id_groups) == self.num_kv_groups
+        for group_index, group_block_ids in enumerate(new_block_id_groups):
+            existing[group_index].extend(group_block_ids)
+
     def _get_block_hashes(
         self,
         req: Request,
         start_idx: int = 0,
         end_idx: int | None = None,
     ) -> Iterable[BlockHash]:
-        return islice(
+        offloaded_hashes = BlockHashListWithBlockSize(
             req.block_hashes,
-            self.block_size_factor * start_idx + self.block_size_factor - 1,
-            self.block_size_factor * end_idx if end_idx else None,
-            self.block_size_factor,
+            self.hash_block_size,
+            self.offloaded_block_size,
         )
+        return islice(offloaded_hashes, start_idx, end_idx)
 
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
@@ -91,7 +130,7 @@ class OffloadingConnectorScheduler:
         """
         num_blocks = request.num_tokens // self.offloaded_block_size
 
-        assert len(request.block_hashes) // self.block_size_factor == num_blocks
+        assert len(request.block_hashes) // self.hash_block_size_factor == num_blocks
         block_hashes = self._get_block_hashes(request)
 
         self.manager.touch(block_hashes)
@@ -144,39 +183,69 @@ class OffloadingConnectorScheduler:
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
+        self._ensure_transfer_supported()
         self._requests[request.request_id] = request
-        # the block ids are updated in _get_reqs_to_store
-        self._request_block_ids[request.request_id] = []
+        self._request_block_ids[request.request_id] = self._empty_block_groups()
 
         if num_external_tokens == 0:
             return
 
         block_groups = blocks.get_block_ids()
-        block_ids = block_groups[0]
+        computed_tokens_per_group: list[int] = []
+        for group_index, group_blocks in enumerate(blocks.blocks):
+            num_computed_gpu_blocks = sum(
+                block.block_hash is not None for block in group_blocks if not block.is_null
+            )
+            computed_tokens_per_group.append(
+                num_computed_gpu_blocks * self.gpu_block_sizes[group_index]
+            )
 
-        num_computed_gpu_blocks = sum(
-            block.block_hash is not None for block in blocks.blocks[0]
-        )
-        num_computed_tokens = num_computed_gpu_blocks * self.gpu_block_size
+        num_computed_tokens = min(computed_tokens_per_group, default=0)
+        assert all(
+            group_tokens == num_computed_tokens
+            for group_tokens in computed_tokens_per_group
+        ), "All KV groups must agree on the already-computed prefix length."
         full_block_tokens = num_computed_tokens + num_external_tokens
         assert full_block_tokens % self.offloaded_block_size == 0
-
-        num_pending_gpu_blocks = len(block_ids) - num_computed_gpu_blocks
-        assert num_external_tokens == num_pending_gpu_blocks * self.gpu_block_size
 
         start_block_idx = num_computed_tokens // self.offloaded_block_size
         num_blocks = full_block_tokens // self.offloaded_block_size
 
-        assert len(request.block_hashes) // self.block_size_factor >= num_blocks
+        assert len(request.block_hashes) // self.hash_block_size_factor >= num_blocks
         block_hashes = self._get_block_hashes(
             request, start_idx=start_block_idx, end_idx=num_blocks
         )
 
         src_spec = self.manager.prepare_load(block_hashes)
+
+        pending_block_groups: list[list[int]] = []
+        block_indices: list[int] = []
+        pending_tokens_per_group: int | None = None
+        for group_index, (group_block_ids, group_blocks) in enumerate(
+            zip(block_groups, blocks.blocks)
+        ):
+            num_computed_gpu_blocks = sum(
+                block.block_hash is not None
+                for block in group_blocks
+                if not block.is_null
+            )
+            block_indices.append(num_computed_gpu_blocks)
+            pending_group_block_ids = group_block_ids[num_computed_gpu_blocks:]
+            pending_block_groups.append(pending_group_block_ids)
+            pending_tokens = len(pending_group_block_ids) * self.gpu_block_sizes[group_index]
+            if pending_tokens_per_group is None:
+                pending_tokens_per_group = pending_tokens
+            else:
+                assert pending_tokens == pending_tokens_per_group
+
+        assert pending_tokens_per_group == num_external_tokens
+        flat_pending_block_ids, group_sizes = self._flatten_block_groups(
+            pending_block_groups
+        )
         dst_spec = GPULoadStoreSpec(
-            block_ids[num_computed_gpu_blocks:],
-            group_sizes=(num_pending_gpu_blocks,),
-            block_indices=(num_computed_gpu_blocks,),
+            flat_pending_block_ids,
+            group_sizes=group_sizes,
+            block_indices=tuple(block_indices),
         )
 
         block_hashes = self._get_block_hashes(
@@ -192,17 +261,17 @@ class OffloadingConnectorScheduler:
             self._blocks_being_loaded.update(req_blocks_being_loaded)
 
     def _get_reqs_to_store(self, scheduler_output: SchedulerOutput):
+        self._ensure_transfer_supported()
         reqs_to_store: dict[ReqId, TransferSpec] = {}
         # iterate over both new and cached requests
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             if preempted:
-                self._request_block_ids[req_id] = []
+                self._request_block_ids[req_id] = self._empty_block_groups()
 
             if new_block_id_groups:
-                new_block_ids = new_block_id_groups[0]
-                self._request_block_ids[req_id] += new_block_ids
+                self._append_block_groups(req_id, new_block_id_groups)
 
-            block_ids = self._request_block_ids[req_id]
+            block_groups = self._request_block_ids[req_id]
 
             req = self._requests[req_id]
             new_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -216,11 +285,17 @@ class OffloadingConnectorScheduler:
             if num_new_blocks <= 0:
                 continue
 
-            num_gpu_blocks = num_blocks * self.block_size_factor
-            assert len(req.block_hashes) >= num_gpu_blocks
+            expected_group_gpu_blocks = [
+                num_blocks * self.block_size_factors[group_index]
+                for group_index in range(self.num_kv_groups)
+            ]
+            assert all(
+                len(group_block_ids) >= expected_group_gpu_blocks[group_index]
+                for group_index, group_block_ids in enumerate(block_groups)
+            )
 
-            new_block_hashes = self._get_block_hashes(
-                req, start_idx=start_block_idx, end_idx=num_blocks
+            new_block_hashes = list(
+                self._get_block_hashes(req, start_idx=start_block_idx, end_idx=num_blocks)
             )
             store_output = self.manager.prepare_store(new_block_hashes)
             if store_output is None:
@@ -238,21 +313,21 @@ class OffloadingConnectorScheduler:
             block_hashes = self._get_block_hashes(req, end_idx=num_blocks)
             self.manager.touch(block_hashes)
 
-            new_block_hashes = self._get_block_hashes(
-                req, start_idx=start_block_idx, end_idx=num_blocks
-            )
             dst_spec = store_output.store_spec
-            src_block_ids: list[int] = []
-            for idx, blk_hash in enumerate(new_block_hashes):
-                if blk_hash not in block_hashes_to_store:
-                    continue
-                offloaded_block_idx = start_block_idx + idx
-                gpu_block_idx = offloaded_block_idx * self.block_size_factor
-                for i in range(self.block_size_factor):
-                    src_block_ids.append(block_ids[gpu_block_idx + i])
-            src_spec = GPULoadStoreSpec(
-                src_block_ids, group_sizes=(len(src_block_ids),)
-            )
+            src_block_groups: list[list[int]] = []
+            for group_index, group_block_ids in enumerate(block_groups):
+                group_factor = self.block_size_factors[group_index]
+                src_group_block_ids: list[int] = []
+                for idx, blk_hash in enumerate(new_block_hashes):
+                    if blk_hash not in block_hashes_to_store:
+                        continue
+                    offloaded_block_idx = start_block_idx + idx
+                    gpu_block_idx = offloaded_block_idx * group_factor
+                    for i in range(group_factor):
+                        src_group_block_ids.append(group_block_ids[gpu_block_idx + i])
+                src_block_groups.append(src_group_block_ids)
+            flat_src_block_ids, group_sizes = self._flatten_block_groups(src_block_groups)
+            src_spec = GPULoadStoreSpec(flat_src_block_ids, group_sizes=group_sizes)
 
             reqs_to_store[req_id] = (src_spec, dst_spec)
             self._reqs_being_stored[req_id] |= block_hashes_to_store
@@ -309,7 +384,7 @@ class OffloadingConnectorScheduler:
     def request_finished(
         self,
         request: Request,
-        block_ids: list[int],
+        block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called when a request has finished, before its blocks are freed.

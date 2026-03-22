@@ -37,6 +37,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
 )
 from vllm.v1.kv_offload.abstract import (
     LoadStoreSpec,
@@ -44,12 +45,14 @@ from vllm.v1.kv_offload.abstract import (
     PrepareStoreOutput,
 )
 from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
+from vllm.v1.kv_offload.planner import HybridOffloadPlanner
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferResult,
     TransferSpec,
 )
+from vllm.v1.worker.utils import prepare_kernel_block_sizes
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -231,7 +234,7 @@ class RequestRunner:
         assert isinstance(manager, MagicMock)
         self.manager: MagicMock = manager
 
-        assert connector_scheduler.gpu_block_size == gpu_block_size
+        assert connector_scheduler.gpu_block_sizes == (gpu_block_size,)
         assert connector_scheduler.offloaded_block_size == offloaded_block_size
 
         # extract OffloadingSpec of worker_connector
@@ -517,3 +520,273 @@ def generate_store_output(block_hashes: Iterable[BlockHash]):
         store_spec=MockLoadStoreSpec(block_hashes),
         block_hashes_evicted=[],
     )
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_offloading_connector(request_runner, async_scheduling: bool):
+    offloaded_block_size = 12
+    gpu_block_size = 4
+    num_gpu_blocks = 100
+    block_size_factor = offloaded_block_size // gpu_block_size
+    runner = request_runner(
+        offloaded_block_size=offloaded_block_size,
+        gpu_block_size=gpu_block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
+    )
+    # 3 blocks, store just the middle block (skip first and last)
+    # blocks = [0, 1, 2], [3, 4, 5], [6, 7, 8]
+    runner.new_request(token_ids=[0] * offloaded_block_size * 3)
+    runner.manager.prepare_store.side_effect = (
+        lambda block_hashes: generate_store_output(list(block_hashes)[1:2])
+    runner.run(decoded_tokens=[0])
+    # add block missing 1 token -> no offload
+    runner.run(
+        decoded_tokens=[0] * (offloaded_block_size - 1),
+        expected_stored_gpu_block_indexes=(3, 4, 5),
+    runner.manager.prepare_store.assert_not_called()
+    # +1 token -> single block, fail prepare_store
+    runner.manager.prepare_store.side_effect = lambda block_hashes: None
+    runner.manager.prepare_store.assert_called()
+    # 1 more block (+ token for async scheduling)
+    # now set block_hashes_to_store = []
+        lambda block_hashes: generate_store_output([])
+    runner.run(decoded_tokens=[0] * (offloaded_block_size + 1))
+    # 1 more block (+ token for kicking off offloading)
+    # now check touch was called with all 6 blocks
+        lambda block_hashes: generate_store_output(block_hashes)
+        decoded_tokens=[0] * (offloaded_block_size + 1),
+        expected_stored_gpu_block_indexes=(15, 16, 17),
+    runner.manager.touch.assert_called()
+    block_hashes1 = list(runner.manager.touch.call_args.args[0])
+    assert len(block_hashes1) == 6
+    # terminate request
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+    # create a new request differing only on the last token
+    runner.new_request(token_ids=[0] * (offloaded_block_size * 6 - 1) + [1])
+    block_hashes2 = list(runner.manager.touch.call_args.args[0])
+    assert len(block_hashes2) == 6
+    # verify hashes are the same, except for the last block
+    assert block_hashes1[:5] == block_hashes2[:5]
+    assert block_hashes1[5] != block_hashes2[5]
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored_gpu_block_indexes=tuple(range(6 * block_size_factor)),
+    # full_block_tokens - num_computed_tokens < offloaded_block_size
+    runner.new_request(
+        token_ids=[0] * gpu_block_size + [1] * (offloaded_block_size - gpu_block_size)
+    runner.manager.lookup.assert_not_called()
+    # single block lookup with no hits
+    runner.new_request(token_ids=[1] * offloaded_block_size)
+    runner.manager.lookup.assert_called()
+    assert len(list(runner.manager.lookup.call_args.args[0])) == 1
+    # single block lookup with a hit
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.lookup.return_value = 1
+        decoded_tokens=[EOS_TOKEN_ID], expected_loaded_gpu_block_indexes=(0, 1, 2)
+    # single block lookup with a hit in a middle block
+        token_ids=[0] * offloaded_block_size * 2 + [1] * offloaded_block_size
+        decoded_tokens=[EOS_TOKEN_ID], expected_loaded_gpu_block_indexes=(3, 4, 5)
+    # test take_events
+    def to_hashes(int_hashes: list[int]) -> list[BlockHash]:
+        return [BlockHash(str(i).encode()) for i in int_hashes]
+    def take_events() -> Iterable[OffloadingEvent]:
+        yield OffloadingEvent(
+            block_hashes=to_hashes([1, 2, 3]), block_size=16, medium="A", removed=False
+        )
+            block_hashes=to_hashes([4, 5, 6]), block_size=32, medium="B", removed=True
+    runner.manager.take_events.side_effect = take_events
+    events = list(runner.scheduler_connector.take_events())
+    assert len(events) == 2
+    event = events[0]
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == to_hashes([1, 2, 3])
+    assert event.block_size == 16
+    assert event.medium == "A"
+    assert event.token_ids == []
+    assert event.parent_block_hash is None
+    assert event.lora_id is None
+    assert event.lora_name is None
+    event = events[1]
+    assert isinstance(event, BlockRemoved)
+    assert event.block_hashes == to_hashes([4, 5, 6])
+    assert event.medium == "B"
+def test_request_preemption(request_runner, async_scheduling: bool):
+    free_block_queue = runner.scheduler.kv_cache_manager.block_pool.free_block_queue
+    num_free_blocks_empty = free_block_queue.num_free_blocks
+    # 2 blocks, store all, without flushing
+    # blocks = [0, 1, 2], [3, 4, 5]
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
+        decoded_tokens=[0],
+        complete_transfers=False,
+    # decode 2 more blocks - 1 gpu block, storing [6, 7, 8] (no flush)
+        decoded_tokens=[0] * (2 * offloaded_block_size - gpu_block_size),
+    # simulate KV cache running out of space
+    free_block_queue.num_free_blocks = 0
+    # request should be preempted now
+        decoded_tokens=[],
+        expected_flushed_gpu_block_indexes=(0, 1, 2, 3, 4, 5, 6, 7, 8),
+        expected_stored_gpu_block_indexes=(0, 1, 2, 3, 4, 5, 6, 7, 8),
+    # restore KV cache space and reset GPU prefix cache
+    free_block_queue.num_free_blocks = num_free_blocks_empty
+    # request should now return from preemption
+    # re-load [0, ..., 8] from the CPU and store [9, 10, 11]
+    runner.manager.lookup.return_value = 3
+        decoded_tokens=[0] * gpu_block_size,
+        expected_loaded_gpu_block_indexes=(0, 1, 2, 3, 4, 5, 6, 7, 8),
+        expected_stored_gpu_block_indexes=(9, 10, 11),
+def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling: bool):
+    # store 1 blocks
+        expected_stored_gpu_block_indexes=(0, 1, 2),
+    # start a request to load the first block, but don't complete
+    # request triggered a load
+    transfer_jobs = list(runner.offloading_spec.handler.transfer_specs)
+    assert transfer_jobs
+    # start a new request to load the same first block
+    # request did not trigger a load
+    assert transfer_jobs == list(runner.offloading_spec.handler.transfer_specs)
+    # complete transfers
+        expected_loaded_gpu_block_indexes=(0, 1, 2),
+    # second request will use the GPU prefix cache
+def test_abort_loading_requests(request_runner, async_scheduling: bool):
+    # abort request
+    req_id = str(runner.req_id)
+    runner.scheduler.finish_requests((req_id,), RequestStatus.FINISHED_ABORTED)
+    # verify request is not deleted
+    assert req_id in runner.scheduler.requests
+    # complete loading request
+    # assert request is deleted
+    assert req_id not in runner.scheduler.requests
+def test_offloading_spec_hybrid_groups_collapse_to_lcm():
+    vllm_config = create_vllm_config(block_size=16, max_num_batched_tokens=1000)
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "spec_name": "MockOffloadingSpec",
+            "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",
+        },
+    kv_cache_config = KVCacheConfig(
+        num_blocks=128,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["mamba-0"],
+                MambaSpec(
+                    block_size=65536,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                ),
+            ),
+                ["mamba-1"],
+                ["mamba-2"],
+                ["attn"],
+                FullAttentionSpec(
+                    block_size=1056,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+        ],
+    spec = MockOffloadingSpec(vllm_config, kv_cache_config)
+    assert spec.hash_block_size == 16
+    assert spec.gpu_block_size == (65536, 65536, 65536, 1056)
+    assert spec.offloaded_block_size == 2162688
+    assert spec.block_size_factors == (33, 33, 33, 2048)
+def test_prepare_kernel_block_sizes_does_not_split_mamba_blocks():
+                ["mamba"],
+    kernel_block_sizes = prepare_kernel_block_sizes(
+        kv_cache_config,
+        attn_groups=[[], []],
+    assert kernel_block_sizes == [65536, 1056]
+def test_offloading_spec_exposes_hybrid_planner_from_config():
+            "hybrid_chunk_size": 16384,
+    assert isinstance(spec.hybrid_planner, HybridOffloadPlanner)
+    assert spec.hybrid_planner.fixed_chunk_size == 16384
+    assert spec.hybrid_offload_enabled is True
+def test_offloading_spec_reports_partial_group_requirement():
+    assert spec.requires_partial_group_offload is True
+def test_scheduler_rejects_partial_group_hybrid_transfers():
+    connector = OffloadingConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    scheduler = connector.connector_scheduler
+    assert scheduler is not None
+    with pytest.raises(NotImplementedError, match="partial-group GPU transfer"):
+        scheduler._ensure_transfer_supported()
+class TestOffloadingConnectorStats:
+    """Tests for OffloadingConnector stats reconstruction and operations."""
+    def test_build_kv_connector_stats_with_none(self):
+        """Test that build_kv_connector_stats returns empty stats when given None."""
+        stats = OffloadingConnector.build_kv_connector_stats(data=None)
+        assert stats is not None
+        assert isinstance(stats, OffloadingConnectorStats)
+        assert len(stats.data) == 0
+        assert stats.is_empty()
+    def test_build_kv_connector_stats_with_empty_dict(self):
+        """Test that build_kv_connector_stats returns empty stats with empty dict."""
+        stats = OffloadingConnector.build_kv_connector_stats(data={})
+    def test_build_kv_connector_stats_reconstructs_offload_stats(self):
+        """Test that OffloadingConnector stats are properly reconstructed with
+        correct data."""
+        serialized_data = {
+            "CPU_to_GPU": [
+                {"op_size": 16, "op_time": 1.0},
+                {"op_size": 8, "op_time": 0.5},
+            ],
+            "GPU_to_CPU": [
+                {"op_size": 1, "op_time": 0.1},
+                {"op_size": 2, "op_time": 0.2},
+        }
+        stats = OffloadingConnector.build_kv_connector_stats(data=serialized_data)
+        offload_connector_stats = stats
+        assert isinstance(offload_connector_stats, OffloadingConnectorStats)
+        assert offload_connector_stats.data["CPU_to_GPU"] == [
+            {"op_size": 16, "op_time": 1.0},
+            {"op_size": 8, "op_time": 0.5},
+        ]
+        assert offload_connector_stats.data["GPU_to_CPU"] == [
+            {"op_size": 1, "op_time": 0.1},
+            {"op_size": 2, "op_time": 0.2},
+    def test_aggregate_same_connector(self):
+        """Test aggregating stats from the same connector type."""
+        stats1 = OffloadingConnectorStats(
+            data={
+                "CPU_to_GPU": [
+                    {"op_size": 16, "op_time": 1.0},
+                    {"op_size": 8, "op_time": 0.5},
+                ],
+                "GPU_to_CPU": [
+                    {"op_size": 1, "op_time": 0.1},
+                    {"op_size": 2, "op_time": 0.2},
+            }
+        stats2 = OffloadingConnectorStats(
+                    {"op_size": 3, "op_time": 0.2},
+                    {"op_size": 7, "op_time": 0.9},
+                "GPU_to_CPU": [{"op_size": 16, "op_time": 2}],
+        result = stats1.aggregate(stats2)
+        assert result is stats1  # Should return self
+        offload_connector_stats = result
+            {"op_size": 3, "op_time": 0.2},
+            {"op_size": 7, "op_time": 0.9},
+            {"op_size": 16, "op_time": 2},
+    def test_reduce(self):
+        """Test that reduce() correctly reduces all nested connector stats."""
+        stats = OffloadingConnectorStats(
+                    {"op_size": 16, "op_time": 2},
+        reduced = stats.reduce()
+        assert isinstance(reduced, dict)
+        # Check that the stats were reduced (should have aggregated values)
+        assert "CPU_to_GPU_total_bytes" in reduced
+        assert "CPU_to_GPU_total_time" in reduced
+        assert "GPU_to_CPU_total_bytes" in reduced
+        assert "GPU_to_CPU_total_time" in reduced
+        assert reduced["CPU_to_GPU_total_bytes"] == 34
+        assert reduced["CPU_to_GPU_total_time"] == 2.6
+        assert reduced["GPU_to_CPU_total_time"] == 2.3
+        assert reduced["GPU_to_CPU_total_bytes"] == 19
+    def test_reset(self):
+        """Test that reset() resets all nested connector stats."""
+        offload_connector_stats = OffloadingConnectorStats(
+        assert not offload_connector_stats.is_empty()
+        offload_connector_stats.reset()
+        # After reset, stats should be empty
+        assert offload_connector_stats.is_empty()
+        assert len(offload_connector_stats.data) == 0

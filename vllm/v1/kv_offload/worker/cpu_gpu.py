@@ -34,6 +34,8 @@ def expand_block_ids(
     block_size_factor: int,
     output: np.ndarray,
     skip_count: int = 0,
+    block_offsets: np.ndarray | None = None,
+    block_counts: np.ndarray | None = None,
 ):
     """
     Convert a list of block IDs to a list of matching block ids,
@@ -49,6 +51,26 @@ def expand_block_ids(
     and 3 maps to [12, 13, 14, 15]
     """
     assert skip_count < block_size_factor
+    if block_offsets is not None or block_counts is not None:
+        assert block_offsets is not None and block_counts is not None
+        assert len(block_offsets) == len(block_ids)
+        assert len(block_counts) == len(block_ids)
+
+        output_idx = 0
+        for block_id, block_offset, block_count in zip(
+            block_ids, block_offsets, block_counts
+        ):
+            assert block_offset >= 0
+            assert block_count >= 0
+            assert block_offset + block_count <= block_size_factor
+            base_block_id = block_id * block_size_factor
+            output_end_idx = output_idx + block_count
+            output[output_idx:output_end_idx] = (
+                base_block_id + np.arange(block_offset, block_offset + block_count)
+            )
+            output_idx = output_end_idx
+        assert output_idx == len(output)
+        return
 
     first_range = np.arange(skip_count, block_size_factor)
     full_range = np.arange(0, block_size_factor)
