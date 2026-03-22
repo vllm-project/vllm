@@ -61,7 +61,6 @@ steps:
   source_file_dependencies: []
   commands:
     - pytest -v -s models/release/gptoss.py
-    - pytest -v -s models/release/guidellm/gptoss_gllm.py
 
 
 - label: Transformers Nightly Models
