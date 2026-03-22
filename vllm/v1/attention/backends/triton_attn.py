@@ -619,6 +619,7 @@ class TritonAttentionImpl(AttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        attn_metadata: object | None = None,
     ):
         key_cache, value_cache = kv_cache.unbind(1)
         flash_layout = True
