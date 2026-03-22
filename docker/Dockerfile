@@ -805,26 +805,59 @@ ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
+    --mount=type=bind,source=tools/resolve_kv_connector_requirements.py,target=/tmp/resolve_kv_connector_requirements.py,ro \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
     CUDA_HOME=/usr/local/cuda; \
     # lmcache requires explicit specifying CUDA_HOME
-    BUILD_PKGS="libcusparse-dev-${CUDA_VERSION_DASH} \
+    BUILD_PKGS="git \
+                libcusparse-dev-${CUDA_VERSION_DASH} \
                 libcublas-dev-${CUDA_VERSION_DASH} \
                 libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
         if [ "$CUDA_MAJOR" -ge 13 ]; then \
-            uv pip install --system nixl-cu13; \
-        fi; \
-        uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
-            # if the above fails, install from source
             apt-get update -y && \
             apt-get install -y --no-install-recommends ${BUILD_PKGS} && \
-            uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
+            python3 /tmp/resolve_kv_connector_requirements.py \
+                --input /tmp/kv_connectors.txt \
+                --output /tmp/kv_connectors_cuda13_runtime.txt \
+                --cuda-major "${CUDA_MAJOR}" \
+                --skip-package lmcache && \
+            uv pip install --system cupy-cuda13x && \
+            uv pip install --system \
+                -r /tmp/kv_connectors_cuda13_runtime.txt \
+                --no-build || \
+            uv pip install --system \
+                -r /tmp/kv_connectors_cuda13_runtime.txt \
+                --no-build-isolation && \
+            LM_TORCH_CUDA_ARCH_LIST="$(printf '%s\n' "${TORCH_CUDA_ARCH_LIST}" | \
+                awk 'BEGIN { first = 1 } \
+                    { for (i = 1; i <= NF; ++i) \
+                        if ($i != "7.0" && $i != "7.0+PTX") { \
+                            if (!first) { printf " " } \
+                            printf "%s", $i; \
+                            first = 0; \
+                        } } \
+                    END { print "" }')" && \
+            TORCH_CUDA_ARCH_LIST="${LM_TORCH_CUDA_ARCH_LIST}" \
+                uv pip install --system \
+                --no-binary lmcache \
+                --no-build-isolation \
+                --no-deps \
+                "lmcache>=0.3.9" && \
             apt-get purge -y ${BUILD_PKGS} && \
-            # clean up -dev packages, keep runtime libraries
-            rm -rf /var/lib/apt/lists/* \
-        ); \
+            rm -rf /var/lib/apt/lists/*; \
+        else \
+            uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
+                # if the above fails, install from source
+                apt-get update -y && \
+                apt-get install -y --no-install-recommends ${BUILD_PKGS} && \
+                uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
+                apt-get purge -y ${BUILD_PKGS} && \
+                # clean up -dev packages, keep runtime libraries
+                rm -rf /var/lib/apt/lists/* \
+            ); \
+        fi; \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
