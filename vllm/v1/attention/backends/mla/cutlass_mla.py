@@ -27,6 +27,10 @@ from vllm.v1.attention.backend import (
 
 logger = init_logger(__name__)
 
+# Shared across all CutlassMLAImpl instances (all layers) to avoid
+# 61× per-layer allocation (~15 GiB → ~256 MiB for DeepSeek-R1).
+g_cutlass_decode_out: torch.Tensor | None = None
+
 
 class CutlassMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # enable full CUDA Graph support for decode-only capture
@@ -162,10 +166,6 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # Share workspace buffer across all executions
         self._workspace = g_sm100_workspace
 
-        # Pre-allocated output buffer, lazily sized on first call.
-        # Zero-init once to prevent NaN in padding slots (seq_lens=0)
-        # from contaminating downstream per-tensor reductions.
-        self._decode_out: torch.Tensor | None = None
 
     def _sm100_cutlass_mla_decode(
         self,
@@ -223,15 +223,17 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             if is_quantized_kv_cache(self.kv_cache_dtype)
             else q_nope.dtype
         )
-        # Reuse pre-allocated zero-init output buffer to avoid a memset
-        # kernel on every CUDA graph replay.
+        # Reuse a single zero-init output buffer shared across all layers
+        # to prevent NaN in padding slots. Shared buffer reduces memory
+        # from ~15 GiB (per-layer) to ~256 MiB for DeepSeek-R1.
+        global g_cutlass_decode_out
         if (
-            self._decode_out is None
-            or self._decode_out.shape[0] < B_q
-            or self._decode_out.dtype != dtype
+            g_cutlass_decode_out is None
+            or g_cutlass_decode_out.shape[0] < B_q
+            or g_cutlass_decode_out.dtype != dtype
         ):
-            self._decode_out = q_nope.new_zeros((B_q, MAX_HEADS, D_latent), dtype=dtype)
-        out = self._decode_out[:B_q]
+            g_cutlass_decode_out = q_nope.new_zeros((B_q, MAX_HEADS, D_latent), dtype=dtype)
+        out = g_cutlass_decode_out[:B_q]
         lse = (
             torch.empty((B_q, MAX_HEADS), dtype=torch.float32, device=q_nope.device)
             if self.need_to_return_lse_for_decode
