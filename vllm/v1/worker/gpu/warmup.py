@@ -111,7 +111,7 @@ def warmup_kernels(
 
         worker_sample_tokens(grammar_output)
 
-        # Step 2: Decode all requests.
+        # Step 2: Decode all requests with 1 + num_spec_steps tokens each.
         spec_config = model_runner.speculative_config
         if spec_config is not None:
             num_spec_steps = spec_config.num_speculative_tokens
