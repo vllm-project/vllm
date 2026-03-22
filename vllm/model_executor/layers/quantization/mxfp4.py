@@ -154,6 +154,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         )
         self.hidden_size = hidden_size = self.moe.hidden_dim
 
+        # Expose padded dimensions on the layer for LoRA and Marlin code
+        # that reads layer.hidden_size / layer.intermediate_size_per_partition.
+        layer.params_dtype = params_dtype
+        layer.num_experts = num_experts
+        layer.hidden_size = hidden_size
+        layer.intermediate_size_per_partition = (
+            intermediate_size_per_partition_after_pad
+        )
+
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
             torch.zeros(
