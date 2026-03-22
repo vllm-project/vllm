@@ -104,10 +104,6 @@ class OffloadingSpec(ABC):
             self.hash_block_size for _ in self.gpu_block_size
         )
 
-        print(
-            f"VLLM OffloadingSpec hash_block_size={self.hash_block_size} gpu_block_size={self.gpu_block_size}",
-            flush=True,
-        )
         hybrid_chunk_size = self.extra_config.get("hybrid_chunk_size")
         if hybrid_chunk_size is not None:
             self.hybrid_planner = HybridOffloadPlanner(

@@ -59,3 +59,30 @@ def test_planner_reports_partial_group_requirement():
     )
 
     assert planner.requires_partial_group_offload_any is True
+
+
+def test_chunk_prefix_tokens_uses_common_covered_prefix():
+    planner = HybridOffloadPlanner(
+        hash_block_size=16,
+        gpu_block_sizes=(65536, 65536, 65536, 1056),
+        fixed_chunk_size=16384,
+    )
+
+    assert planner.chunk_prefix_tokens(0) == 0
+    assert planner.chunk_prefix_tokens(1) == 15840
+    assert planner.chunk_prefix_tokens(2) == 32736
+    assert planner.chunk_prefix_tokens(4) == 65472
+
+
+def test_chunk_count_for_tokens_inverts_common_prefix_boundaries():
+    planner = HybridOffloadPlanner(
+        hash_block_size=16,
+        gpu_block_sizes=(65536, 65536, 65536, 1056),
+        fixed_chunk_size=16384,
+    )
+
+    assert planner.chunk_count_for_tokens(0) == 0
+    assert planner.chunk_count_for_tokens(15839) == 0
+    assert planner.chunk_count_for_tokens(15840) == 1
+    assert planner.chunk_count_for_tokens(32735) == 1
+    assert planner.chunk_count_for_tokens(32736) == 2

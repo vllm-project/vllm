@@ -64,14 +64,45 @@ class HybridOffloadPlanner:
             unit_size // self.hash_block_size for unit_size in self.offload_unit_sizes
         )
 
+    def group_covered_tokens_for_chunk_count(
+        self, chunk_count: int
+    ) -> tuple[int, ...]:
+        if chunk_count < 0:
+            raise ValueError("chunk_count must be non-negative")
+        logical_tokens = chunk_count * self.fixed_chunk_size
+        return tuple(
+            (logical_tokens // unit_size) * unit_size
+            for unit_size in self.offload_unit_sizes
+        )
+
+    def chunk_prefix_tokens(self, chunk_count: int) -> int:
+        return self.loadable_prefix_tokens(
+            self.group_covered_tokens_for_chunk_count(chunk_count)
+        )
+
+    def chunk_count_for_tokens(self, tokens: int) -> int:
+        if tokens < 0:
+            raise ValueError("tokens must be non-negative")
+
+        low = 0
+        high = tokens // self.fixed_chunk_size + 1
+        while low < high:
+            mid = (low + high + 1) // 2
+            if self.chunk_prefix_tokens(mid) <= tokens:
+                low = mid
+            else:
+                high = mid - 1
+        return low
+
     def storeable_prefix_tokens(self, request_tokens: int) -> int:
         if request_tokens <= 0:
             return 0
-        per_group_covered_tokens = tuple(
-            (request_tokens // unit_size) * unit_size
-            for unit_size in self.offload_unit_sizes
+        return self.loadable_prefix_tokens(
+            tuple(
+                (request_tokens // unit_size) * unit_size
+                for unit_size in self.offload_unit_sizes
+            )
         )
-        return self.loadable_prefix_tokens(per_group_covered_tokens)
 
     def loadable_prefix_tokens(self, group_covered_tokens: tuple[int, ...]) -> int:
         if len(group_covered_tokens) != len(self.gpu_block_sizes):

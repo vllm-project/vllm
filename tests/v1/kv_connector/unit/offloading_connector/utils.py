@@ -521,6 +521,44 @@ def generate_store_output(block_hashes: Iterable[BlockHash]):
         block_hashes_evicted=[],
     )
 
+
+def create_hybrid_vllm_config(hybrid_chunk_size: int | None = None) -> VllmConfig:
+    vllm_config = create_vllm_config(block_size=16, max_num_batched_tokens=1000)
+    extra_config = {
+        "spec_name": "MockOffloadingSpec",
+        "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",
+    }
+    if hybrid_chunk_size is not None:
+        extra_config["hybrid_chunk_size"] = hybrid_chunk_size
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+    )
+    return vllm_config
+def create_hybrid_kv_cache_config(num_mamba_groups: int = 3) -> KVCacheConfig:
+    kv_cache_groups: list[KVCacheGroupSpec] = [
+        KVCacheGroupSpec(
+            [f"mamba-{group_idx}"],
+            MambaSpec(
+                block_size=65536,
+                shapes=((1, 1),),
+                dtypes=(torch.float32,),
+            ),
+        )
+        for group_idx in range(num_mamba_groups)
+    ]
+    kv_cache_groups.append(
+            ["attn"],
+            FullAttentionSpec(
+                block_size=1056,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+    return KVCacheConfig(
+        num_blocks=128,
+        kv_cache_tensors=[],
+        kv_cache_groups=kv_cache_groups,
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_offloading_connector(request_runner, async_scheduling: bool):
     offloaded_block_size = 12
@@ -714,6 +752,29 @@ def test_scheduler_rejects_partial_group_hybrid_transfers():
     assert scheduler is not None
     with pytest.raises(NotImplementedError, match="partial-group GPU transfer"):
         scheduler._ensure_transfer_supported()
+
+def test_scheduler_hybrid_hits_return_common_prefix_tokens():
+    init_none_hash(sha256)
+    request = Request(
+        request_id="hybrid-request",
+        prompt_token_ids=list(range(65536)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(16, sha256),
+    )
+    connector = OffloadingConnector(
+        create_hybrid_vllm_config(hybrid_chunk_size=16384),
+        KVConnectorRole.SCHEDULER,
+        create_hybrid_kv_cache_config(num_mamba_groups=1),
+    scheduler = connector.connector_scheduler
+    assert scheduler is not None
+    scheduler.manager.lookup.return_value = 1
+    num_hit_tokens, is_async = scheduler.get_num_new_matched_tokens(
+        request, num_computed_tokens=0
+    assert (num_hit_tokens, is_async) == (15840, True)
+def test_scheduler_hybrid_uses_chunk_boundaries_for_existing_tokens():
+        request, num_computed_tokens=15840
+    assert (num_hit_tokens, is_async) == (16896, True)
 class TestOffloadingConnectorStats:
     """Tests for OffloadingConnector stats reconstruction and operations."""
     def test_build_kv_connector_stats_with_none(self):

@@ -19,6 +19,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_offload.abstract import OffloadingManager
 from vllm.v1.kv_offload.hashing import HybridChunkBlockHashList
 from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
+from vllm.v1.kv_offload.planner import HybridOffloadPlanner
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import TransferSpec
 from vllm.v1.outputs import KVConnectorOutput
@@ -32,6 +33,7 @@ class OffloadingConnectorScheduler:
 
     def __init__(self, spec: OffloadingSpec):
         self.hybrid_offload_enabled = spec.hybrid_offload_enabled
+        self.hybrid_planner: HybridOffloadPlanner | None = spec.hybrid_planner
         self.requires_partial_group_offload = spec.requires_partial_group_offload
         self.gpu_block_sizes = tuple(spec.gpu_block_size)
         self.group_hash_block_sizes = tuple(spec.group_hash_block_size)
@@ -73,6 +75,23 @@ class OffloadingConnectorScheduler:
                 "support in the worker/backend; scheduler-side planning exists "
                 "but transfer emission is not implemented yet"
             )
+
+    def _chunk_prefix_tokens(self, chunk_count: int) -> int:
+        if not self.hybrid_offload_enabled:
+            return chunk_count * self.offloaded_block_size
+        return self._get_hybrid_planner().chunk_prefix_tokens(chunk_count)
+
+    def _chunk_count_for_tokens(self, tokens: int) -> int:
+        if not self.hybrid_offload_enabled:
+            return tokens // self.offloaded_block_size
+        planner = self._get_hybrid_planner()
+        return planner.chunk_count_for_tokens(tokens)
+
+    def _get_hybrid_planner(self):
+        planner = self.hybrid_planner
+        if planner is None:
+            raise RuntimeError("Hybrid offload planner is not configured")
+        return planner
 
     def _empty_block_groups(self) -> tuple[list[int], ...]:
         return tuple([] for _ in range(self.num_kv_groups))
@@ -149,19 +168,21 @@ class OffloadingConnectorScheduler:
                 - `True` if tokens will be loaded asynchronously
                   (between scheduler steps).
         """
-        num_blocks = request.num_tokens // self.offloaded_block_size
-
-        assert self._get_num_offloaded_blocks(request) == num_blocks
+        num_blocks = self._get_num_offloaded_blocks(request)
         block_hashes = self._get_block_hashes(request)
 
         self.manager.touch(block_hashes)
 
-        full_block_tokens = self.offloaded_block_size * num_blocks
-        if full_block_tokens - num_computed_tokens < self.offloaded_block_size:
-            # we can load less than a block, skip
-            return 0, False
-
-        start_block_idx = num_computed_tokens // self.offloaded_block_size
+        full_block_tokens = self._chunk_prefix_tokens(num_blocks)
+        if self.hybrid_offload_enabled:
+            if full_block_tokens <= num_computed_tokens:
+                return 0, False
+            start_block_idx = self._chunk_count_for_tokens(num_computed_tokens)
+        else:
+            if full_block_tokens - num_computed_tokens < self.offloaded_block_size:
+                # we can load less than a block, skip
+                return 0, False
+            start_block_idx = num_computed_tokens // self.offloaded_block_size
         hits = self.manager.lookup(
             self._get_block_hashes(request, start_idx=start_block_idx)
         )
@@ -172,7 +193,7 @@ class OffloadingConnectorScheduler:
             return 0, False
 
         num_hit_tokens = (
-            self.offloaded_block_size * (start_block_idx + hits) - num_computed_tokens
+            self._chunk_prefix_tokens(start_block_idx + hits) - num_computed_tokens
         )
         logger.debug(
             "Request %s hit %s offloaded tokens after %s GPU hit tokens",
@@ -180,7 +201,10 @@ class OffloadingConnectorScheduler:
             num_hit_tokens,
             num_computed_tokens,
         )
-        if num_hit_tokens < self.offloaded_block_size:
+        min_hit_tokens = (
+            self.hash_block_size if self.hybrid_offload_enabled else self.offloaded_block_size
+        )
+        if num_hit_tokens < min_hit_tokens:
             return 0, False
 
         if self._blocks_being_loaded:
