@@ -118,7 +118,7 @@ def post_reset(host, port):
         req = urllib.request.Request(url, data=b'', method='POST')
         urllib.request.urlopen(req, timeout=3.0)
         return True
-    except:
+    except Exception:
         return False
 
 
@@ -129,7 +129,7 @@ def post_enable(host, port, enable=True):
         req = urllib.request.Request(url, data=b'', method='POST')
         urllib.request.urlopen(req, timeout=3.0)
         return True
-    except:
+    except Exception:
         return False
 
 
@@ -500,7 +500,7 @@ class Dashboard:
         try:
             stdscr.addstr(h-1, 0, prompt.ljust(w-1), curses.color_pair(9))
             stdscr.refresh()
-        except:
+        except Exception:
             pass
 
         # Read number input
@@ -646,18 +646,18 @@ class Dashboard:
                f"{self.interval:.1f}s | {age} | ?=help ")
         try:
             stdscr.addstr(0, 0, hdr[:w-1], curses.color_pair(9) | curses.A_BOLD)
-        except:
+        except Exception:
             pass
 
         if stats.error and not self.demo:
             msg = f" Cannot reach {self.host}:{self.port} -- {stats.error}"
             try: stdscr.addstr(2, 2, msg[:w-3], curses.color_pair(5))
-            except: pass
+            except Exception: pass
             return
 
         if not stats.experts:
             try: stdscr.addstr(2, 2, " Waiting for data...", curses.color_pair(7))
-            except: pass
+            except Exception: pass
             return
 
         # Column layout — 1 char per expert, auto-fit to terminal width
@@ -702,7 +702,7 @@ class Dashboard:
             stdscr.addstr(row, 0,
                           (hdr_prefix2 + "|" + ones_hdr)[:w-1],
                           curses.color_pair(7))
-        except:
+        except Exception:
             pass
 
         # Layer rows
@@ -722,14 +722,14 @@ class Dashboard:
             line_prefix = f"  L{layer:04d} "
             try:
                 stdscr.addstr(row, 0, line_prefix, curses.color_pair(7))
-            except:
+            except Exception:
                 pass
 
             col = len(line_prefix)
 
             if num_shared:
                 try: stdscr.addstr(row, col, "|", curses.color_pair(7))
-                except: pass
+                except Exception: pass
                 col += 1
                 for e in range(num_shared):
                     v = stats.experts.get((layer, e), ExpertData())
@@ -738,7 +738,7 @@ class Dashboard:
                     col += 1  # 1 char per expert
 
             try: stdscr.addstr(row, col, "|", curses.color_pair(7))
-            except: pass
+            except Exception: pass
             col += 1
 
             for e in block_experts:
@@ -787,7 +787,7 @@ class Dashboard:
                 f"  |  total:{len(stats.experts)}"
             )
             stdscr.addstr(summary_row, 0, summary[:w-1], curses.color_pair(7))
-        except:
+        except Exception:
             pass
 
         # Legend
@@ -803,7 +803,7 @@ class Dashboard:
             for pair, label in [(1,"low"),(2,"\u00b7"),(3,"mid"),(4,"\u00b7"),(5,"high")]:
                 stdscr.addstr(legend_row, lc, "\u25a0", curses.color_pair(pair))
                 lc += 1
-        except:
+        except Exception:
             pass
 
         # Status bar
@@ -814,7 +814,7 @@ class Dashboard:
         try:
             stdscr.addstr(h-1, 0, status[:w-1].ljust(w-1),
                           curses.color_pair(9))
-        except:
+        except Exception:
             pass
 
         # Pruning bar (visual: how much could be pruned)
@@ -846,7 +846,7 @@ class Dashboard:
                 prune_label = f" prunable: [{bar}] {pct*100:.0f}%{prune_info}"
                 stdscr.addstr(prune_row, 0, prune_label[:w-1],
                               curses.color_pair(5) if pct > 0.3 else curses.color_pair(3))
-        except:
+        except Exception:
             pass
 
     def _draw_expert(self, stdscr, row, col, layer, expert, v,
@@ -872,7 +872,7 @@ class Dashboard:
 
         try:
             stdscr.addstr(row, col, ch, attr)
-        except:
+        except Exception:
             pass
 
     def _draw_help(self, stdscr, h, w):
@@ -910,7 +910,7 @@ class Dashboard:
                 if i == 0:
                     attr |= curses.A_BOLD
                 stdscr.addstr(i, 0, line[:w-1], attr)
-            except:
+            except Exception:
                 pass
 
 

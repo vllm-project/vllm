@@ -575,6 +575,7 @@ def _start_riy_server(port: int = 8019):
 
 
 _riy_server_started = False
+_riy_server_lock = threading.Lock()
 
 
 def ensure_riy_server(port: int = 8019):
@@ -582,6 +583,10 @@ def ensure_riy_server(port: int = 8019):
     global _riy_server_started
     if _riy_server_started:
         return
-    _riy_server_started = True
-    t = threading.Thread(target=_start_riy_server, args=(port,), daemon=True)
-    t.start()
+    with _riy_server_lock:
+        if _riy_server_started:
+            return
+        _riy_server_started = True
+        t = threading.Thread(
+            target=_start_riy_server, args=(port,), daemon=True)
+        t.start()
