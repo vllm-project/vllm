@@ -111,7 +111,12 @@ def warmup_kernels(
 
         worker_sample_tokens(grammar_output)
 
-        # Step 2: Decode all requests with 1 token each.
+        # Step 2: Decode all requests.
+        spec_config = model_runner.speculative_config
+        if spec_config is not None:
+            num_spec_steps = spec_config.num_speculative_tokens
+        else:
+            num_spec_steps = 0
         cached_req_data = CachedRequestData.make_empty()
         cached_req_data.req_ids = list(req_ids)
         cached_req_data.num_computed_tokens = [prompt_len] * num_reqs
@@ -124,8 +129,16 @@ def warmup_kernels(
 
         decode_output = SchedulerOutput.make_empty()
         decode_output.scheduled_cached_reqs = cached_req_data
-        decode_output.num_scheduled_tokens = {rid: 1 for rid in req_ids}
-        decode_output.total_num_scheduled_tokens = num_reqs
+        decode_output.num_scheduled_tokens = {
+            rid: 1 + num_spec_steps for rid in req_ids
+        }
+        if num_spec_steps > 0:
+            decode_output.scheduled_spec_decode_tokens = {
+                rid: [1] * num_spec_steps for rid in req_ids
+            }
+        decode_output.total_num_scheduled_tokens = sum(
+            decode_output.num_scheduled_tokens.values()
+        )
         decode_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
         worker_execute_model(decode_output)
