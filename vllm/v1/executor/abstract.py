@@ -1,20 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Executor 抽象基类模块。
-
-本模块定义了 vLLM V1 执行器的抽象基类，负责：
-- 定义执行器接口和通用功能
-- 管理 worker 的生命周期
-- 执行模型推理和采样
-- 支持分布式执行
-
-主要类：
-- Executor: 执行器抽象基类
-
-执行器是 vLLM 的核心组件，负责在一个或多个设备上执行模型。
-它可以是单设备执行器，也可以是支持多设备分布式执行的执行器。
-"""
-
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -49,51 +34,21 @@ FailureCallback = Callable[[], None]
 
 
 class Executor(ABC):
-    """vLLM 执行器的抽象基类。
+    """Abstract base class for vLLM executors."
 
-    执行器负责在一个设备上执行模型，
-    或者作为分布式执行器在多个设备上执行模型。
-
-    主要功能：
-    - 初始化和配置 worker
-    - 执行模型推理（execute_model）
-    - 执行采样（sample_tokens）
-    - 管理 LoRA 适配器
-    - 支持睡眠/唤醒功能
-    - 健康检查
-
-    Attributes:
-        uses_ray: 是否使用 Ray 进行编排
-        supports_pp: 是否支持流水线并行（Pipeline Parallelism）
-        vllm_config: vLLM 配置
-        is_sleeping: 是否处于睡眠状态
-        sleeping_tags: 睡眠标签集合
-        kv_output_aggregator: KV 输出聚合器
+    An executor is responsible for executing the model on one device,
+    or it can be a distributed executor that can execute the model on multiple devices.
     """
 
-    uses_ray: bool = False  # 执行器是否使用 Ray 进行编排
-    supports_pp: bool = False  # 执行器是否支持流水线并行
+    uses_ray: bool = False  # whether the executor uses Ray for orchestration.
+    supports_pp: bool = False  # whether the executor supports PP
 
     @staticmethod
     def get_class(vllm_config: VllmConfig) -> type["Executor"]:
-        """根据配置获取执行器类。
-
-        根据 distributed_executor_backend 配置选择对应的执行器类。
-
-        Args:
-            vllm_config: vLLM 配置
-
-        Returns:
-            执行器类
-
-        Raises:
-            TypeError: 如果 distributed_executor_backend 不是 Executor 的子类
-            ValueError: 如果 distributed_executor_backend 未知
-        """
         executor_class: type[Executor]
         parallel_config = vllm_config.parallel_config
         distributed_executor_backend = parallel_config.distributed_executor_backend
-        # distributed_executor_backend 必须在 VllmConfig.__post_init__ 中设置
+        # distributed_executor_backend must be set in VllmConfig.__post_init__
         if isinstance(distributed_executor_backend, type):
             if not issubclass(distributed_executor_backend, Executor):
                 raise TypeError(
@@ -114,7 +69,8 @@ class Executor(ABC):
 
             executor_class = UniProcExecutor
         elif distributed_executor_backend == "external_launcher":
-            # TODO: 使 v1 调度确定性以支持外部启动器
+            # TODO: make v1 scheduling deterministic
+            # to support external launcher
             executor_class = ExecutorWithExternalLauncher
         elif isinstance(distributed_executor_backend, str):
             executor_class = resolve_obj_by_qualname(distributed_executor_backend)
@@ -134,11 +90,6 @@ class Executor(ABC):
         self,
         vllm_config: VllmConfig,
     ) -> None:
-        """初始化执行器。
-
-        Args:
-            vllm_config: vLLM 配置
-        """
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -156,51 +107,35 @@ class Executor(ABC):
 
     @abstractmethod
     def _init_executor(self) -> None:
-        """初始化执行器。子类必须实现此方法。"""
         raise NotImplementedError
 
     def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-        """从配置初始化 KV 缓存并开始模型执行循环。
-
-        初始化底层 worker 的 KV 缓存并开始模型执行循环。
-
-        Args:
-            kv_cache_configs: KV 缓存配置列表
+        """
+        Initialize the KV caches and begin the model execution loop of the
+        underlying workers.
         """
         self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
         compilation_times: list[float] = self.collective_rpc("compile_or_warm_up_model")
-        # 将编译时间从 worker 传播回主进程
-        # 当 TP>1 时，编译在 worker 进程中进行，因此主进程配置不会被更新
-        # 使用 worker 中的最大值，因为它们是并行编译的
+        # Propagate compilation time from workers back to the main process.
+        # With TP>1, compilation happens in worker processes, so the main
+        # process config is never updated. Use max across workers since they
+        # compile in parallel.
         if compilation_times:
             self.vllm_config.compilation_config.compilation_time = max(
                 compilation_times
             )
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027
-        """注册失败回调函数。
-
-        当执行器进入永久失败状态时调用此函数。
-
-        Args:
-            callback: 失败回调函数
+        """
+        Register a function to be called if the executor enters a permanent
+        failed state.
         """
         pass
 
     def determine_available_memory(self) -> list[int]:  # in bytes
-        """确定可用内存（字节）。
-
-        Returns:
-            可用内存列表（字节）
-        """
         return self.collective_rpc("determine_available_memory")
 
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
-        """获取 KV 缓存规格。
-
-        Returns:
-            KV 缓存规格列表
-        """
         return self.collective_rpc("get_kv_cache_spec")
 
     @overload
@@ -213,21 +148,28 @@ class Executor(ABC):
         non_block: Literal[False] = False,
     ) -> list[_R]:
         """
-        在所有 worker 上执行 RPC 调用。
+        Execute an RPC call on all workers.
 
         Args:
-            method: 要执行的 worker 方法名称或可序列化并发送到所有 worker 的 callable
-                如果是 callable，应接受额外的 `self` 参数，以及 `args` 和 `kwargs` 中传入的参数
-            timeout: 最大等待时间（秒），超时抛出 TimeoutError，None 表示无限等待
-            args: 传递给 worker 方法的位置参数
-            kwargs: 传递给 worker 方法的关键字参数
-            non_block: 如果为 True，返回 Future 列表而不是等待结果
+            method: Name of the worker method to execute, or a callable that
+                is serialized and sent to all workers to execute.
+
+                If the method is a callable, it should accept an additional
+                `self` argument, in addition to the arguments passed in `args`
+                and `kwargs`. The `self` argument will be the worker object.
+            timeout: Maximum time in seconds to wait for execution. Raises a
+                [`TimeoutError`][] on timeout. `None` means wait indefinitely.
+            args: Positional arguments to pass to the worker method.
+            kwargs: Keyword arguments to pass to the worker method.
+            non_block: If `True`, returns a list of Futures instead of waiting
+                for the results.
 
         Returns:
-            包含每个 worker 结果的列表
+            A list containing the results from each worker.
 
         Note:
-            建议使用此 API 仅传递控制消息，并设置数据平面通信来传递数据。
+            It is recommended to use this API to only pass control messages,
+            and set up data-plane communication to pass data.
         """
         pass
 
@@ -246,17 +188,11 @@ class Executor(ABC):
     def collective_rpc(
         self, method, timeout=None, args=(), kwargs=None, non_block: bool = False
     ):
-        """在所有 worker 上执行 RPC 调用。子类必须实现此方法。"""
         raise NotImplementedError
 
     def get_kv_connector_handshake_metadata(
         self,
     ) -> list[dict[int, KVConnectorHandshakeMetadata]]:
-        """获取 KV 连接器握手元数据。
-
-        Returns:
-            KV 连接器握手元数据列表
-        """
         return self.collective_rpc("get_kv_connector_handshake_metadata")
 
     @overload
@@ -274,15 +210,6 @@ class Executor(ABC):
     def execute_model(
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
-        """执行模型推理。
-
-        Args:
-            scheduler_output: 调度器输出
-            non_block: 如果为 True，返回 Future 而不是等待结果
-
-        Returns:
-            模型 runner 输出或 None
-        """
         output = self.collective_rpc(  # type: ignore[call-overload]
             "execute_model", args=(scheduler_output,), non_block=non_block
         )
@@ -303,49 +230,23 @@ class Executor(ABC):
     def sample_tokens(
         self, grammar_output: GrammarOutput | None, non_block: bool = False
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
-        """执行 token 采样。
-
-        Args:
-            grammar_output: 语法输出（用于结构化输出）
-            non_block: 如果为 True，返回 Future 而不是等待结果
-
-        Returns:
-            模型 runner 输出
-        """
         output = self.collective_rpc(  # type: ignore[call-overload]
             "sample_tokens", args=(grammar_output,), non_block=non_block
         )
         return output[0]
 
     def execute_dummy_batch(self) -> None:
-        """执行虚拟批次（用于预热和测试）。"""
         self.collective_rpc("execute_dummy_batch")
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        """获取草稿 token ID（用于推测解码）。
-
-        Returns:
-            草稿 token ID 或 None
-        """
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
 
     @property
     def max_concurrent_batches(self) -> int:
-        """最大并发批次数量。
-
-        Returns:
-            最大并发批次数量
-        """
         return 1
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        """启动或停止性能分析。
-
-        Args:
-            is_start: True 启动分析，False 停止分析
-            profile_prefix: 分析文件前缀
-        """
         self.collective_rpc("profile", args=(is_start, profile_prefix))
 
     def save_sharded_state(
@@ -354,13 +255,6 @@ class Executor(ABC):
         pattern: str | None = None,
         max_size: int | None = None,
     ) -> None:
-        """保存分片状态。
-
-        Args:
-            path: 保存路径
-            pattern: 文件名模式（可选）
-            max_size: 每个分片的最大大小（可选）
-        """
         self.collective_rpc(
             "save_sharded_state",
             kwargs=dict(path=path, pattern=pattern, max_size=max_size),
@@ -368,95 +262,53 @@ class Executor(ABC):
 
     @abstractmethod
     def check_health(self) -> None:
-        """检查执行器是否健康。如果不健康，应抛出异常。"""
+        """Checks if the executor is healthy. If not, it should raise an
+        exception."""
         raise NotImplementedError
 
     def shutdown(self) -> None:
-        """关闭执行器。"""
+        """Shutdown the executor."""
         self.collective_rpc("shutdown")
 
     def init_kv_output_aggregator(self, connector: "KVConnectorBase") -> None:
-        """初始化 KVOutputAggregator。
-
-        Args:
-            connector: KV 连接器
-        """
+        """Init KVOutputAggregator"""
         self.kv_output_aggregator = KVOutputAggregator.from_connector(
             connector, self.parallel_config.world_size
         )
 
-    @cached_property  # 避免不必要的 RPC 调用
+    @cached_property  # Avoid unnecessary RPC calls
     def supported_tasks(self) -> tuple[SupportedTask, ...]:
-        """获取支持的任务类型。
-
-        Returns:
-            支持的任务元组
-        """
         output: list[tuple[SupportedTask, ...]]
         output = self.collective_rpc("get_supported_tasks")
         return output[0]
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        """添加 LoRA 适配器。
-
-        Args:
-            lora_request: LoRA 请求
-
-        Returns:
-            是否成功添加
-        """
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
         return all(self.collective_rpc("add_lora", args=(lora_request,)))
 
     def remove_lora(self, lora_id: int) -> bool:
-        """移除 LoRA 适配器。
-
-        Args:
-            lora_id: LoRA ID
-
-        Returns:
-            是否成功移除
-        """
         assert lora_id > 0, "lora_id must be greater than 0."
         return all(self.collective_rpc("remove_lora", args=(lora_id,)))
 
     def pin_lora(self, lora_id: int) -> bool:
-        """固定 LoRA 适配器（防止被驱逐）。
-
-        Args:
-            lora_id: LoRA ID
-
-        Returns:
-            是否成功固定
-        """
         assert lora_id > 0, "lora_id must be greater than 0."
         return all(self.collective_rpc("pin_lora", args=(lora_id,)))
 
     def list_loras(self) -> set[int]:
-        """列出所有 LoRA ID。
-
-        Returns:
-            LoRA ID 集合
-        """
         sets: list[set[int]] = self.collective_rpc("list_loras")
         for s in sets:
             assert s == sets[0], "All workers should have the same LORAs."
         return sets[0]
 
     def reset_mm_cache(self) -> None:
-        """重置每个 worker 中的多模态缓存。"""
+        """Reset the multi-modal cache in each worker."""
         self.collective_rpc("reset_mm_cache")
 
     def reset_encoder_cache(self) -> None:
-        """重置每个 worker 中的编码器缓存以清除缓存的编码器输出。"""
+        """Reset the encoder cache in each worker to clear cached encoder outputs."""
         self.collective_rpc("reset_encoder_cache")
 
     def sleep(self, level: int = 1):
-        """使执行器进入睡眠状态（释放资源）。
-
-        Args:
-            level: 睡眠级别
-        """
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")
             return
@@ -470,11 +322,6 @@ class Executor(ABC):
         )
 
     def wake_up(self, tags: list[str] | None = None):
-        """唤醒执行器（恢复资源）。
-
-        Args:
-            tags: 要唤醒的标签列表，None 表示唤醒所有
-        """
         if not self.is_sleeping:
             logger.warning("Executor is not sleeping.")
             return
@@ -504,20 +351,12 @@ class Executor(ABC):
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
-        """重新初始化分布式配置。
-
-        Args:
-            reconfig_request: 重新配置请求
-        """
         raise NotImplementedError
 
     @classmethod
     def supports_async_scheduling(cls) -> bool:
         """
-        是否支持异步调度。
-
-        Returns:
-            是否支持异步调度
+        Whether the executor supports async scheduling.
         """
         return False
 
@@ -529,6 +368,6 @@ from vllm.v1.executor.uniproc_executor import (  # noqa: E402
     UniProcExecutor as _UniProcExecutor,
 )
 
-# 向后兼容
+# For backwards compatibility.
 UniProcExecutor = _UniProcExecutor
 ExecutorWithExternalLauncher = _ExecutorWithExternalLauncher

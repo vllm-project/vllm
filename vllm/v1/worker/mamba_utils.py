@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Mamba 状态复制工具函数模块。
-
-本模块提供 Mamba 状态复制相关的辅助函数，负责：
-- 使用 Triton 内核批量复制 Mamba 状态
-- 收集 Mamba 复制元数据
-- 预处理和后处理 Mamba 状态
-
-主要函数：
-- batch_memcpy_kernel: Triton 批量复制内核
-- batch_memcpy: 批量复制函数
-- get_mamba_groups: 获取 Mamba 组
-- collect_mamba_copy_meta: 收集 Mamba 复制元数据
-- do_mamba_copy_block: 执行 Mamba 复制
-- preprocess_mamba: Mamba 预处理
-- postprocess_mamba: Mamba 后处理
-"""
 import dataclasses
 import itertools
 from collections.abc import Callable
@@ -38,14 +22,6 @@ from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 
 @triton.jit
 def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
-    """Triton 内核：批量复制内存块。
-
-    Args:
-        src_ptrs: 源指针数组
-        dst_ptrs: 目标指针数组
-        sizes: 大小数组
-        BLOCK_SIZE: 块大小（编译时常量）
-    """
     pid = tl.program_id(0)
 
     src_ptr = tl.load(src_ptrs + pid)
@@ -63,14 +39,7 @@ def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
         tl.store(curr_dst_ptr, data, mask=mask)
 
 
-def batch_memcpy(src_ptrs, dst_ptrs, sizes) -> None:
-    """批量复制内存块。
-
-    Args:
-        src_ptrs: 源指针数组
-        dst_ptrs: 目标指针数组
-        sizes: 大小数组
-    """
+def batch_memcpy(src_ptrs, dst_ptrs, sizes):
     batch = src_ptrs.shape[0]
     assert dst_ptrs.shape[0] == batch
     assert sizes.shape[0] == batch
@@ -81,17 +50,6 @@ def batch_memcpy(src_ptrs, dst_ptrs, sizes) -> None:
 
 
 def get_mamba_groups(kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSpec]:
-    """获取 Mamba 组 ID 和规格。
-
-    Args:
-        kv_cache_config: KV 缓存配置
-
-    Returns:
-        (Mamba 组 ID 列表，Mamba 规格) 元组
-
-    Raises:
-        AssertionError: 如果模型中没有 Mamba 层或规格不一致
-    """
     mamba_group_ids: list[int] = []
     mamba_specs: list[MambaSpec] = []
     for i in range(len(kv_cache_config.kv_cache_groups)):
@@ -99,21 +57,13 @@ def get_mamba_groups(kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSp
         if isinstance(kv_cache_spec, MambaSpec):
             mamba_group_ids.append(i)
             mamba_specs.append(kv_cache_spec)
-    assert len(mamba_group_ids) > 0, "模型中没有 Mamba 层"
+    assert len(mamba_group_ids) > 0, "no mamba layers in the model"
     assert all(mamba_specs[0] == spec for spec in mamba_specs)
     return mamba_group_ids, mamba_specs[0]
 
 
 @dataclasses.dataclass
 class MambaCopyBuffers:
-    """Mamba 复制缓冲区。
-
-    Attributes:
-        src_ptrs: 源指针缓冲区
-        dst_ptrs: 目标指针缓冲区
-        sizes: 大小缓冲区
-        offset: 当前偏移量
-    """
     src_ptrs: CpuGpuBuffer
     dst_ptrs: CpuGpuBuffer
     sizes: CpuGpuBuffer
@@ -127,18 +77,6 @@ class MambaCopyBuffers:
         copy_funcs: tuple[MambaStateCopyFunc, ...],
         make_buffer: Callable[..., CpuGpuBuffer],
     ) -> "MambaCopyBuffers":
-        """创建 Mamba 复制缓冲区。
-
-        Args:
-            max_num_reqs: 最大请求数量
-            kv_cache_config: KV 缓存配置
-            copy_funcs: 复制函数元组
-            make_buffer: 缓冲区创建函数
-
-        Returns:
-            MambaCopyBuffers 实例
-        """
-        """
         mamba_group_ids, _ = get_mamba_groups(kv_cache_config)
         entries_per_req = sum(
             len(kv_cache_config.kv_cache_groups[gid].layer_names)
@@ -163,19 +101,6 @@ def collect_mamba_copy_meta(
     req_state: CachedRequestState,
     forward_context: dict[str, Any],
 ) -> None:
-    """收集 Mamba 复制元数据。
-
-    Args:
-        copy_bufs: 复制缓冲区
-        kv_cache_config: KV 缓存配置
-        mamba_state_copy_funcs: Mamba 状态复制函数元组
-        mamba_group_ids: Mamba 组 ID 列表
-        src_block_idx: 源块索引
-        dest_block_idx: 目标块索引
-        accept_token_bias: 接受 token 偏移
-        req_state: 缓存的请求状态
-        forward_context: 前向上下文
-    """
     if src_block_idx == dest_block_idx and accept_token_bias == 0:
         return
 
@@ -204,12 +129,7 @@ def collect_mamba_copy_meta(
     copy_bufs.offset = offset
 
 
-def do_mamba_copy_block(copy_bufs: MambaCopyBuffers) -> None:
-    """执行 Mamba 复制块。
-
-    Args:
-        copy_bufs: 复制缓冲区
-    """
+def do_mamba_copy_block(copy_bufs: MambaCopyBuffers):
     n = copy_bufs.offset
     if n == 0:
         return
@@ -230,22 +150,10 @@ def preprocess_mamba(
     forward_context: dict[str, Any],
     mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
     copy_bufs: MambaCopyBuffers,
-) -> None:
-    """Mamba 预处理。
-
-    将上一步的 Mamba 状态复制到最后
-    (1 + num_speculative_blocks) 块。
-
-    Args:
-        scheduler_output: 调度器输出
-        kv_cache_config: KV 缓存配置
-        cache_config: 缓存配置
-        mamba_state_idx: Mamba 状态索引字典
-        input_batch: 输入批次
-        requests: 缓存的请求状态字典
-        forward_context: 前向上下文
-        mamba_state_copy_funcs: Mamba 状态复制函数元组
-        copy_bufs: 复制缓冲区
+):
+    """
+    Copy the mamba state of previous step to the last
+    (1 + num_speculative_blocks) block.
     """
     mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
     num_speculative_blocks = mamba_spec.num_speculative_blocks
@@ -316,20 +224,9 @@ def postprocess_mamba(
     mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
     copy_bufs: MambaCopyBuffers,
 ):
-    """Mamba 后处理。
-
-    如果一个块在这一步中从部分块转换为完整块，则将状态
-    从运行状态块复制到新的完整块。
-
-    Args:
-        scheduler_output: 调度器输出
-        kv_cache_config: KV 缓存配置
-        input_batch: 输入批次
-        requests: 缓存的请求状态字典
-        mamba_state_idx: Mamba 状态索引字典
-        forward_context: 前向上下文
-        mamba_state_copy_funcs: Mamba 状态复制函数元组
-        copy_bufs: 复制缓冲区
+    """
+    If a blocks is converted from partial block to full block in this step, copy the
+    state from the block for running state to the new full block.
     """
     num_scheduled_tokens_dict = scheduler_output.num_scheduled_tokens
     scheduled_spec_decode_tokens_dict = scheduler_output.scheduled_spec_decode_tokens

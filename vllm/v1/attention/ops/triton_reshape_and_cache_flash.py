@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton 重塑和缓存 Flash 注意力操作模块。
-
-本模块实现了使用 Triton kernel 将 Key 和 Value 重塑并写入 KV 缓存的操作，负责：
-- 将 [num_tokens, num_heads, head_size] 的 K/V 张量写入分页缓存
-- 支持 FP8 KV 缓存量化
-- 支持头主序（head-major）布局
-- 支持不同 K/V 头维度（diffkv）
-
-主要函数：
-- reshape_and_cache_kernel_flash: 主 kernel
-- triton_reshape_and_cache_flash: 封装函数
-- reshape_and_cache_kernel_flash_diffkv: 支持不同 K/V 维度的 kernel
-- triton_reshape_and_cache_flash_diffkv: 封装函数
-"""
 
 import torch
 
@@ -48,33 +34,6 @@ def reshape_and_cache_kernel_flash(
     # tune parameters
     TILE_SIZE: tl.constexpr,
 ):
-    """重塑和缓存 Flash 注意力 kernel。
-
-    将 Key 和 Value 张量重塑并写入分页 KV 缓存，支持 FP8 量化。
-
-    Args:
-        key_ptr: Key 张量指针
-        value_ptr: Value 张量指针
-        key_cache_ptr: Key 缓存指针
-        value_cache_ptr: Value 缓存指针
-        slot_mapping_ptr: 槽位映射指针
-        k_scale: K 缩放因子
-        v_scale: V 缩放因子
-        key_stride: Key 步幅
-        value_stride: Value 步幅
-        block_stride: 块步幅
-        head_stride: 头步幅
-        dim_stride_k: K 维度步幅
-        dim_stride_v: V 维度步幅
-        page_stride: 页步幅
-        num_heads: 头数量
-        head_size: 头维度
-        block_size: 块大小
-        x: K 缓存分块参数
-        USE_HEAD_MAJOR_LAYOUT: 是否使用头主序布局
-        FP8_KV_CACHE: 是否 FP8 KV 缓存
-        TILE_SIZE: Tile 大小
-    """
     token_idx = tl.program_id(axis=0)
     slot_idx = tl.load(slot_mapping_ptr + token_idx).to(tl.int64)
     if slot_idx < 0:
@@ -164,20 +123,6 @@ def triton_reshape_and_cache_flash(
     k_scale: torch.Tensor,  # float32
     v_scale: torch.Tensor,  # float32
 ):
-    """重塑和缓存 Flash 注意力封装函数。
-
-    将 Key 和 Value 张量写入分页 KV 缓存，支持 FP8 量化。
-
-    Args:
-        key: Key 张量 [num_tokens, num_heads, head_size]
-        value: Value 张量 [num_tokens, num_heads, head_size]
-        key_cache: Key 缓存
-        value_cache: Value 缓存
-        slot_mapping: 槽位映射 [num_tokens]
-        kv_cache_dtype: KV 缓存数据类型
-        k_scale: K 缩放因子
-        v_scale: V 缩放因子
-    """
     num_heads = key.shape[1]
     head_size = key.shape[2]
 
@@ -301,28 +246,6 @@ def reshape_and_cache_kernel_flash_diffkv(
     # tune parameters
     TILE_SIZE: tl.constexpr,
 ):
-    """重塑和缓存 Flash 注意力 kernel（支持不同 K/V 维度）。
-
-    将 Key 和 Value 张量写入分页 KV 缓存，支持 K 和 V 头维度不同的场景。
-
-    Args:
-        key_ptr: Key 张量指针
-        value_ptr: Value 张量指针
-        kv_cache_ptr: KV 缓存指针
-        slot_mapping_ptr: 槽位映射指针
-        k_scale: K 缩放因子
-        v_scale: V 缩放因子
-        key_stride: Key 步幅
-        value_stride: Value 步幅
-        block_stride: 块步幅
-        page_stride: 页步幅
-        num_heads: 头数量
-        head_size_k: K 头维度
-        head_size_v: V 头维度
-        block_size: 块大小
-        FP8_KV_CACHE: 是否 FP8 KV 缓存
-        TILE_SIZE: Tile 大小
-    """
     token_idx = tl.program_id(axis=0)
     slot_idx = tl.load(slot_mapping_ptr + token_idx).to(tl.int64)
     if slot_idx < 0:
@@ -390,19 +313,6 @@ def triton_reshape_and_cache_flash_diffkv(
     k_scale: torch.Tensor,  # float32
     v_scale: torch.Tensor,  # float32
 ):
-    """重塑和缓存 Flash 注意力封装函数（支持不同 K/V 维度）。
-
-    将 Key 和 Value 张量写入分页 KV 缓存，支持 K 和 V 头维度不同的场景。
-
-    Args:
-        key: Key 张量 [num_tokens, num_heads, head_size]
-        value: Value 张量 [num_tokens, num_heads, head_size_v]
-        kv_cache: KV 缓存
-        slot_mapping: 槽位映射 [num_tokens]
-        kv_cache_dtype: KV 缓存数据类型
-        k_scale: K 缩放因子
-        v_scale: V 缩放因子
-    """
     num_heads = key.shape[1]
     head_size_k = key.shape[2]
     head_size_v = value.shape[2]

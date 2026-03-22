@@ -1,24 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""推测解码工具函数模块。
-
-本模块提供了 EAGLE 推测解码所需的工具函数和 Triton kernel，负责：
-- 槽映射计算和更新
-- 输入准备和扩展
-- Token 索引计算
-- 注意力元数据管理
-- 草稿模型配置创建
-
-主要函数：
-- eagle_step_update_slot_mapping_and_metadata: 更新 EAGLE 步骤的槽映射和元数据
-- eagle_prepare_inputs_padded_kernel: 准备填充模式的输入
-- eagle_prepare_next_token_padded_kernel: 准备下一个 token
-- compute_new_slot_mapping: 计算新的槽映射
-- create_vllm_config_for_draft_model: 创建草稿模型的 vllm 配置
-- extend_all_queries_by_N: 扩展所有查询长度
-- copy_and_expand_eagle_inputs_kernel: 复制和扩展 EAGLE 输入
-"""
-
 import torch
 
 from vllm.config import VllmConfig, replace
@@ -32,42 +13,29 @@ PADDING_SLOT_ID = -1
 
 @triton.jit
 def eagle_step_slot_mapping_metadata_kernel(
-    positions_ptr,  # [batch_size] - 当前位置（M-RoPE 的 1D 视图）
+    positions_ptr,  # [batch_size] - current positions (1D view for M-RoPE)
     block_table_ptr,  # [batch_size, n_blocks_per_req]
-    block_table_stride,  # block_table 第一维的步长
-    seq_lens_ptr,  # [batch_size] - 读写
-    out_clamped_positions_ptr,  # [batch_size] (输出)
-    out_slot_mapping_ptr,  # [input_batch_size] (输出)
+    block_table_stride,  # stride for block_table dim 1
+    seq_lens_ptr,  # [batch_size] - read and write
+    out_clamped_positions_ptr,  # [batch_size] (output)
+    out_slot_mapping_ptr,  # [input_batch_size] (output)
     block_size: tl.constexpr,
     max_model_len: tl.constexpr,
     n_blocks_per_req: tl.constexpr,
     PAD_ID: tl.constexpr,
     batch_size,
 ):
-    """EAGLE 自回归步骤的融合 kernel。
+    """
+    Fused kernel for EAGLE autoregressive step: updates positions, slot mapping,
+    and sequence lengths in a single kernel to reduce launch overhead.
 
-    在单个 kernel 中更新位置、槽映射和序列长度，以减少启动开销。
+    Launched with input_batch_size threads. Threads with req_idx >= batch_size
+    are cudagraph padding slots and only write PADDING_SLOT_ID.
 
-    使用 input_batch_size 个线程启动。req_idx >= batch_size 的线程是
-    CUDA 图填充槽位，只写入 PADDING_SLOT_ID。
-
-    每个真实线程处理批次中的一个请求。计算：
-    - new_position = position + 1，如果超过 max_model_len 则钳制
-    - 从块表查找计算 slot_mapping
-    - seq_lens += 1，如果超过最大值则为 1
-
-    Args:
-        positions_ptr: 当前位置指针
-        block_table_ptr: 块表指针
-        block_table_stride: 块表步长
-        seq_lens_ptr: 序列长度指针
-        out_clamped_positions_ptr: 输出钳制位置指针
-        out_slot_mapping_ptr: 输出槽映射指针
-        block_size: KV 缓存块大小
-        max_model_len: 最大模型长度
-        n_blocks_per_req: 每个请求的块数
-        PAD_ID: 填充槽位 ID
-        batch_size: 批次大小
+    Each real thread handles one request in the batch. Computes:
+    - new_position = position + 1, clamped if exceeds max_model_len
+    - slot_mapping from block table lookup
+    - seq_lens += 1, or 1 if position exceeds max
     """
     req_idx = tl.program_id(0)
 
@@ -75,16 +43,16 @@ def eagle_step_slot_mapping_metadata_kernel(
         tl.store(out_slot_mapping_ptr + req_idx, PAD_ID)
         return
 
-    # 加载当前位置并递增
+    # Load current position and increment
     position = tl.load(positions_ptr + req_idx)
     new_position = position + 1
 
-    # 检查边界并计算钳制位置
+    # Check bounds and compute clamped position
     exceeds_max = new_position >= max_model_len
     clamped_position = tl.where(exceeds_max, 0, new_position)
 
-    # 块表查找：block_number = position // block_size
-    # 钳制 block_number 避免越界
+    # Block table lookup: block_number = position // block_size
+    # Clamp block_number to avoid OOB when position is at max
     block_number = clamped_position // block_size
     block_number = tl.minimum(block_number, n_blocks_per_req - 1)
 
@@ -92,12 +60,12 @@ def eagle_step_slot_mapping_metadata_kernel(
     slot_id = block_id * block_size + (clamped_position % block_size)
     slot_id = tl.where(exceeds_max, PAD_ID, slot_id)
 
-    # 更新 seq_lens：通常 +1，如果超过则为 1
+    # Update seq_lens: +1 normally, or 1 if exceeded
     seq_len = tl.load(seq_lens_ptr + req_idx)
     new_seq_len = tl.where(exceeds_max, 1, seq_len + 1)
     new_seq_len = tl.minimum(new_seq_len, max_model_len)
 
-    # 存储输出
+    # Store outputs
     tl.store(out_clamped_positions_ptr + req_idx, clamped_position)
     tl.store(out_slot_mapping_ptr + req_idx, slot_id)
     tl.store(seq_lens_ptr + req_idx, new_seq_len)
@@ -113,23 +81,23 @@ def eagle_step_update_slot_mapping_and_metadata(
     out_slot_mapping: torch.Tensor,
     input_batch_size: int | None = None,
 ) -> None:
-    """为 EAGLE 自回归步骤融合更新槽映射和元数据。
+    """
+    Fused update of slot mapping and metadata for one EAGLE autoregressive step.
+    Updates seq_lens in place. Writes to out_clamped_positions and out_slot_mapping.
 
-    原地更新 seq_lens，写入 out_clamped_positions 和 out_slot_mapping。
-
-    当 input_batch_size > batch_size 时，超出 batch_size 的线程写入
-    PADDING_SLOT_ID 到 out_slot_mapping 用于 CUDA 图填充。
+    When input_batch_size > batch_size, threads beyond batch_size write
+    PADDING_SLOT_ID to out_slot_mapping for cudagraph padding.
 
     Args:
-        positions_1d: [batch_size] 当前位置（对 M-RoPE 使用 positions[0]）
-        block_table_tensor: [batch_size, n_blocks_per_req] 块表张量
-        seq_lens: [batch_size] 原地更新
-        block_size: KV 缓存块大小
-        max_model_len: 最大模型长度用于钳制
-        out_clamped_positions: [batch_size] 钳制位置输出缓冲区
-        out_slot_mapping: [input_batch_size] 槽映射输出缓冲区
-        input_batch_size: 包含 CUDA 图填充的总批次大小；
-            默认为 batch_size（无填充）
+        positions_1d: [batch_size] current positions (use positions[0] for M-RoPE)
+        block_table_tensor: [batch_size, n_blocks_per_req]
+        seq_lens: [batch_size] updated in place
+        block_size: KV cache block size
+        max_model_len: max model length for clamping
+        out_clamped_positions: [batch_size] output buffer for clamped positions
+        out_slot_mapping: [input_batch_size] output buffer for slot mapping
+        input_batch_size: total batch size including cudagraph padding;
+            defaults to batch_size (no padding)
     """
     batch_size = positions_1d.shape[0]
     if input_batch_size is None:
@@ -156,30 +124,22 @@ def eagle_prepare_inputs_padded_kernel(
     cu_num_draft_tokens_ptr,  # [num_reqs]
     valid_sampled_tokens_count_ptr,  # [num_reqs]
     query_start_loc_gpu_ptr,  # [num_reqs + 1]
-    token_indices_to_sample_ptr,  # [num_reqs] (输出)
-    num_rejected_tokens_gpu_ptr,  # [num_reqs] (输出)
+    token_indices_to_sample_ptr,  # [num_reqs] (output)
+    num_rejected_tokens_gpu_ptr,  # [num_reqs] (output)
     num_reqs,  # tl.int32
 ):
-    """EAGLE prepare_input_padded 的融合 kernel。
-
-    此 kernel 为每个请求计算要采样的 token 索引，
-    考虑草稿 token 数量和有效采样 token 数量
-    （比接受 token 数量多一个）。
-
-    Args:
-        cu_num_draft_tokens_ptr: 累积草稿 token 数量指针
-        valid_sampled_tokens_count_ptr: 有效采样 token 数量指针
-        query_start_loc_gpu_ptr: 查询起始位置指针
-        token_indices_to_sample_ptr: 要采样的 token 索引输出指针
-        num_rejected_tokens_gpu_ptr: 被拒绝 token 数量输出指针
-        num_reqs: 请求数量
+    """
+    Fused kernel for Eagle prepare_input_padded. This kernel computes the
+    token index to sample for each request, taking into account the number
+    of draft tokens and the number of valid sampled tokens (which is one more than
+    the number of accepted tokens).
     """
     req_idx = tl.program_id(axis=0)
     if req_idx >= num_reqs:
         return
 
-    # 从 cu_num_draft_tokens 计算 num_draft_tokens，
-    # 这是包含性累积和（第一项是第一个值，不是零）
+    # Calculate num_draft_tokens from cu_num_draft_tokens, which is an inclusive
+    # cumulative sum (first entry is the first value, not zero).
     cu_draft_curr = tl.load(cu_num_draft_tokens_ptr + req_idx)
 
     num_draft_tokens = 0
@@ -193,8 +153,8 @@ def eagle_prepare_inputs_padded_kernel(
     num_rejected_tokens = num_draft_tokens + 1 - valid_count
     num_rejected_tokens = tl.where(num_draft_tokens > 0, num_rejected_tokens, 0)
 
-    # query_start_loc[req_idx + 1] 是下一个请求的起始位置，
-    # 即当前请求最后一个 token 之后的位置
+    # query_start_loc[req_idx + 1] is the start position of the next request,
+    # which is one past the last token of this request.
     q_last_tok_idx = tl.load(query_start_loc_gpu_ptr + req_idx + 1) - 1
 
     index_to_sample = q_last_tok_idx - num_rejected_tokens
@@ -207,38 +167,26 @@ def eagle_prepare_next_token_padded_kernel(
     sampled_token_ids_ptr,  # [num_reqs, num_sampled_tokens_per_req]
     discard_request_mask_ptr,  # [num_reqs]
     backup_next_token_ids_ptr,  # [num_reqs]
-    next_token_ids_ptr,  # [num_reqs] (输出)
-    valid_sampled_tokens_count_ptr,  # [num_reqs] (输出)
+    next_token_ids_ptr,  # [num_reqs] (output)
+    valid_sampled_tokens_count_ptr,  # [num_reqs] (output)
     vocab_size,  # tl.int32
     num_sampled_tokens_per_req,  # tl.int32 (num_spec_tokens + 1)
     num_reqs,  # tl.int32
-    stride_sampled_token_ids,  # tl.int32 (第一维的步长)
-    BLOCK_SIZE_TOKENS: tl.constexpr,  # 2 的幂 >= num_sampled_tokens_per_req
+    stride_sampled_token_ids,  # tl.int32 (stride for dim 0)
+    BLOCK_SIZE_TOKENS: tl.constexpr,  # Power-of-2 >= num_sampled_tokens_per_req
 ):
-    """EAGLE prepare_next_token_ids_padded 的融合 kernel。
-
-    此 kernel 计算每个请求的有效（1 + 接受）token 数量，
-    以及推测解码期间要采样的对应"下一个"token ID。
-    这是来自采样 token 的"最后一个接受的 token"，
-    或者如果没有接受 token 或请求被标记为丢弃则使用备份 token。
-
-    Args:
-        sampled_token_ids_ptr: 采样 token ID 指针
-        discard_request_mask_ptr: 丢弃请求掩码指针
-        backup_next_token_ids_ptr: 备份下一个 token ID 指针
-        next_token_ids_ptr: 下一个 token ID 输出指针
-        valid_sampled_tokens_count_ptr: 有效采样 token 数量输出指针
-        vocab_size: 词表大小
-        num_sampled_tokens_per_req: 每个请求的采样 token 数量
-        num_reqs: 请求数量
-        stride_sampled_token_ids: 采样 token ID 的步长
-        BLOCK_SIZE_TOKENS: token 维度的块大小（2 的幂）
+    """
+    Fused kernel for Eagle prepare_next_token_ids_padded. This kernel computes the
+    number of valid (1 + accepted) tokens for each request, and the corresponding
+    "next" token id to sample from during speculative decoding. This is the
+    "last accepted token" from the sampled tokens, or the backup token if no
+    tokens were accepted or if the request is marked as discarded.
     """
     req_idx = tl.program_id(axis=0)
     if req_idx >= num_reqs:
         return
 
-    # 检查此请求是否被丢弃
+    # Check if this request is discarded.
     is_discarded = tl.load(discard_request_mask_ptr + req_idx)
 
     if is_discarded:
@@ -247,29 +195,30 @@ def eagle_prepare_next_token_padded_kernel(
         tl.store(next_token_ids_ptr + req_idx, backup_token)
         tl.store(valid_sampled_tokens_count_ptr + req_idx, valid_count)
     else:
-        # 计算采样 token 中的有效 token 数量
+        # Count the number of valid tokens among the sampled tokens.
         token_offs = tl.arange(0, BLOCK_SIZE_TOKENS)
         token_mask = token_offs < num_sampled_tokens_per_req
 
         row_ptr = sampled_token_ids_ptr + req_idx * stride_sampled_token_ids
         token_ids = tl.load(row_ptr + token_offs, mask=token_mask, other=-1)
 
-        # 被拒绝的 token 是 -1，有效 token 在 [0, vocab_size) 范围内
+        # Rejected tokens are -1, valid tokens are in [0, vocab_size)
         is_valid_mask = (token_ids != -1) & (token_ids < vocab_size) & token_mask
         valid_count = tl.sum(is_valid_mask)
 
         if valid_count > 0:
-            # 保证有定义，因为 valid_count > 0 意味着 is_valid_mask 非空
+            # Guaranteed to be well-defined since
+            # valid_count > 0 implies is_valid_mask is not empty
             last_valid_index = tl.max(tl.where(is_valid_mask, token_offs, -1))
 
-            # 选择该索引处的 token，使用求和技巧
-            # 因为我们不想再次加载来访问 token_ids[last_valid_index]
+            # Select the token at that index, using a sum trick since
+            # we don't want to load again to access token_ids[last_valid_index].
             last_valid_token = tl.sum(
                 tl.where(token_offs == last_valid_index, token_ids, 0)
             )
             tl.store(next_token_ids_ptr + req_idx, last_valid_token)
         else:
-            # 没有有效 token，使用备份 token
+            # No valid tokens found, use backup token
             backup_token = tl.load(backup_next_token_ids_ptr + req_idx)
             tl.store(next_token_ids_ptr + req_idx, backup_token)
 
@@ -284,21 +233,6 @@ def compute_new_slot_mapping(
     num_new_tokens: int,
     max_model_len: int,
 ):
-    """计算新的槽映射。
-
-    基于新位置和拒绝掩码计算槽映射。
-
-    Args:
-        cad: 通用注意力元数据
-        new_positions: 新位置张量
-        is_rejected_token_mask: 被拒绝 token 掩码
-        block_size: KV 缓存块大小
-        num_new_tokens: 新 token 数量
-        max_model_len: 最大模型长度
-
-    Returns:
-        新的槽映射张量
-    """
     batch_size, n_blocks_per_req = cad.block_table_tensor.shape
     req_indices = torch.arange(batch_size, device=cad.query_start_loc.device)
     req_indices = torch.repeat_interleave(
@@ -306,7 +240,8 @@ def compute_new_slot_mapping(
         cad.naive_query_lens() + num_new_tokens,
         output_size=len(new_positions),
     )
-    # 钳制位置以防止索引 block_table_tensor 时越界
+    # Clamp the positions to prevent an out-of-bounds error when indexing
+    # into block_table_tensor.
     clamped_positions = torch.clamp(new_positions, max=max_model_len - 1)
     block_table_indices = (
         req_indices * n_blocks_per_req + clamped_positions // block_size
@@ -314,10 +249,10 @@ def compute_new_slot_mapping(
     block_nums = cad.block_table_tensor.view(-1)[block_table_indices]
     block_offsets = clamped_positions % block_size
     new_slot_mapping = block_nums * block_size + block_offsets
-    # 屏蔽超出最大模型长度的位置 ID
+    # Mask out the position ids that exceed the max model length.
     exceeds_max_model_len = new_positions >= max_model_len
     new_slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
-    # 屏蔽被拒绝的 token 以防止保存到 KV 缓存
+    # Mask out rejected tokens to prevent saves to the KV cache.
     new_slot_mapping.masked_fill_(is_rejected_token_mask, PADDING_SLOT_ID)
     return new_slot_mapping
 
@@ -325,18 +260,11 @@ def compute_new_slot_mapping(
 def create_vllm_config_for_draft_model(
     target_model_vllm_config: VllmConfig,
 ) -> VllmConfig:
-    """为草稿模型创建 vllm 配置。
-
-    vllm_config 是为目标模型配置的，例如其 quant_config 和 parallel_config。
-    但草稿模型可能使用不同的量化方式和不同的 tensor_parallel_size。
-    此函数创建一个为草稿模型配置的新 vllm_config。
-    vllm_config 在通过 get_model() 加载草稿模型时有用。
-
-    Args:
-        target_model_vllm_config: 目标模型的 vllm 配置
-
-    Returns:
-        为草稿模型配置的 vllm 配置
+    """The vllm_config is configured for the target model, e.g.
+    its quant_config and parallel_config. But the draft model is potentially
+    quantized differently, and has potentially different tensor_parallel_size.
+    This function creates a new vllm_config configured for the drafter.
+    The vllm_config is useful when loading the draft model with get_model().
     """
     old = target_model_vllm_config
     assert old.speculative_config is not None, "speculative_config is not set"
@@ -359,24 +287,15 @@ def extend_all_queries_by_N(
     arange: torch.Tensor,
     new_slot_mapping: torch.Tensor,
 ) -> CommonAttentionMetadata:
-    """创建所有查询长度增加 N 的新 CommonAttentionMetadata。
-
-    所有序列长度也增加 N。
-    这在并行推测解码中很有用，我们将每个序列扩展 N 个 token
-    并在一次传递中预测所有 token。
-    槽映射在外部计算，因为它需要更多信息。
-
-    Args:
-        common_attn_metadata: 通用注意力元数据
-        N: 要增加的长度
-        arange: 范围张量
-        new_slot_mapping: 新的槽映射
-
-    Returns:
-        扩展后的通用注意力元数据
+    """
+    Creates a new CommonAttentionMetadata with all query lengths increased by N.
+    Also all seq lens are increased by N.
+    This is useful e.g. in speculative decoding with parallel drafting, where we
+    extend each sequence by N tokens and predict all tokens in one pass.
+    The slot mapping is computed externally, as it requires more information.
     """
     cad = common_attn_metadata
-    # query start loc 必须增加 [+0, +N, +2N, ..., +batch_size * N]
+    # query start loc must be increased by [+0, +N, +2N, ..., +batch_size * N]
     new_query_start_loc = cad.query_start_loc + N * arange[: len(cad.query_start_loc)]
     new_query_start_loc_cpu = cad.query_start_loc_cpu + N * torch.arange(
         len(cad.query_start_loc_cpu), dtype=torch.int32
@@ -385,9 +304,9 @@ def extend_all_queries_by_N(
         query_start_loc=new_query_start_loc,
         query_start_loc_cpu=new_query_start_loc_cpu,
         seq_lens=cad.seq_lens + N,
-        # 每个请求增加 N 个 token -> 增加 batch_size * N 个 token
+        # each request is extended by N tokens -> batch_size * N tokens are added
         num_actual_tokens=cad.num_actual_tokens + cad.batch_size() * N,
-        # 所有查询长度增加 N，所以最大查询长度增加 N
+        # All query lens increase by N, so max query len increases by N
         max_query_len=cad.max_query_len + N,
         max_seq_len=cad.max_seq_len + N,
         slot_mapping=new_slot_mapping,
@@ -395,74 +314,48 @@ def extend_all_queries_by_N(
     return new_cad
 
 
-# 统一的复制/扩展 kernel
+# Unified copy/expand kernel
 @triton.jit
 def copy_and_expand_eagle_inputs_kernel(
-    # 来自目标模型的（填充）输入
+    # (Padded) Inputs from the target model
     target_token_ids_ptr,  # [total_tokens_in_batch]
     target_positions_ptr,  # [total_tokens_in_batch]
     next_token_ids_ptr,  # [num_reqs]
-    # 写入草稿缓冲区的输出
-    out_input_ids_ptr,  # [total_draft_tokens_in_batch] (输出)
-    out_positions_ptr,  # [total_draft_tokens_in_batch] (输出)
-    out_is_rejected_token_mask_ptr,  # [total_draft_tokens_in_batch] (输出)
-    out_is_masked_token_mask_ptr,  # [total_draft_tokens_in_batch] (输出)
-    out_new_token_indices_ptr,  # [num_padding_slots_per_request * num_reqs] (输出)
+    # Outputs to the drafting buffers
+    out_input_ids_ptr,  # [total_draft_tokens_in_batch] (output)
+    out_positions_ptr,  # [total_draft_tokens_in_batch] (output)
+    out_is_rejected_token_mask_ptr,  # [total_draft_tokens_in_batch] (output)
+    out_is_masked_token_mask_ptr,  # [total_draft_tokens_in_batch] (output)
+    out_new_token_indices_ptr,  # [num_padding_slots_per_request * num_reqs] (output)
     out_hidden_state_mapping_ptr,  # [total_tokens_in_batch]
-    # 输入元数据
-    query_start_loc_ptr,  # [num_reqs + 1], 最后一个值是总输入 token 数量
+    # Input metadata
+    query_start_loc_ptr,  # [num_reqs + 1], last value is the total num input tokens
     query_end_loc_ptr,  # [num_reqs]
     padding_token_id,  # tl.int32
     parallel_drafting_token_id,  # tl.int32
-    # 尺寸信息
+    # Sizing info
     total_input_tokens,  # tl.int32
     num_padding_slots_per_request,  # tl.int32
     shift_input_ids,  # tl.bool
-    BLOCK_SIZE_TOKENS: tl.constexpr,  # 沿 token 维度的块大小用于处理预填充
+    BLOCK_SIZE_TOKENS: tl.constexpr,  # Blocks along token dim to handle prefills
 ):
-    """复制和扩展输入从目标模型到草稿缓冲区。
-
-    用于 EAGLE 推测解码。此 kernel 处理填充槽位和并行推测 token（如果启用）。
-
-    输出布局：
-    - [0, num_valid_tokens): 从输入复制的有效 token
-    - [num_valid_tokens]: 来自 next_token_ids 的 bonus token
-    - (num_valid_tokens, num_valid_tokens + num_padding_slots_per_request):
-        并行推测槽位
-    - [num_valid_tokens + num_padding_slots_per_request, total_output_tokens):
-        被拒绝的槽位
-
-    Args:
-        target_token_ids_ptr: 目标 token ID 指针
-        target_positions_ptr: 目标位置指针
-        next_token_ids_ptr: 下一个 token ID 指针
-        out_input_ids_ptr: 输出 input IDs 指针
-        out_positions_ptr: 输出位置指针
-        out_is_rejected_token_mask_ptr: 输出被拒绝 token 掩码指针
-        out_is_masked_token_mask_ptr: 输出被屏蔽 token 掩码指针
-        out_new_token_indices_ptr: 输出新 token 索引指针
-        out_hidden_state_mapping_ptr: 输出隐藏状态映射指针
-        query_start_loc_ptr: 查询起始位置指针
-        query_end_loc_ptr: 查询结束位置指针
-        padding_token_id: 填充 token ID
-        parallel_drafting_token_id: 并行推测 token ID
-        total_input_tokens: 总输入 token 数量
-        num_padding_slots_per_request: 每个请求的填充槽位数量
-        shift_input_ids: 是否移位 input IDs
-        BLOCK_SIZE_TOKENS: token 维度的块大小（ constexpr）
+    """
+    Copy and expand inputs from the target model to the drafting buffers for Eagle
+    speculative decoding. This kernel handles padding slots and parallel drafting
+    tokens, if enabled.
     """
     request_idx = tl.program_id(axis=0)
     token_batch_idx = tl.program_id(axis=1)
 
-    # 加载查询位置
+    # Load query locations
     query_start_loc = tl.load(query_start_loc_ptr + request_idx)
     next_query_start_loc = tl.load(query_start_loc_ptr + request_idx + 1)
     query_end_loc = tl.load(query_end_loc_ptr + request_idx)
 
-    # 计算要复制的有效 token 数量和输入偏移
-    # shift_input_ids=True 时，我们跳过第一个 token
-    # 每个请求获得 (input_len + num_padding_slots_per_request) 个输出槽位
-    # 但有移位时，每个请求失去一个 token
+    # Calculate number of valid tokens to copy and input offset
+    # With shift_input_ids=True, we skip the first token
+    # Output layout: each request gets (input_len + num_padding_slots_per_request) slots
+    # But with shift, we lose one token per request
     if shift_input_ids:
         num_valid_tokens = query_end_loc - query_start_loc
         input_offset = 1
@@ -474,18 +367,24 @@ def copy_and_expand_eagle_inputs_kernel(
         input_offset = 0
         output_start = query_start_loc + request_idx * num_padding_slots_per_request
 
-    # 来自之前推测的被拒绝 token 数量
+    # Number of rejected tokens from previous speculation
     num_rejected = next_query_start_loc - query_end_loc - 1
 
-    # 此请求的总输出 token 数量
+    # Total output tokens for this request
     total_output_tokens = (
         num_valid_tokens + num_padding_slots_per_request + num_rejected
     )
 
-    # 在此块中处理 token
+    # Process tokens in this block
     j = token_batch_idx * BLOCK_SIZE_TOKENS + tl.arange(0, BLOCK_SIZE_TOKENS)
 
-    # 计算不同输出区域的掩码：
+    # Compute masks for different output regions:
+    # [0, num_valid_tokens): valid tokens copied from input
+    # [num_valid_tokens]: bonus token from next_token_ids
+    # (num_valid_tokens, num_valid_tokens + num_padding_slots_per_request):
+    #     parallel drafting slots
+    # [num_valid_tokens + num_padding_slots_per_request, total_output_tokens):
+    #     rejected slots
     in_bounds = j < total_output_tokens
     is_valid_region = j < num_valid_tokens
     is_bonus_region = j == num_valid_tokens
@@ -494,67 +393,67 @@ def copy_and_expand_eagle_inputs_kernel(
     )
     is_rejected_region = j >= num_valid_tokens + num_padding_slots_per_request
 
-    # 计算输出索引
+    # Compute output indices
     out_idx = output_start + j
 
-    # 对于有效 token，计算输入索引
+    # For valid tokens, compute input index
     in_idx = query_start_loc + input_offset + j
-    # 钳制避免越界访问（掩码加载仍需要有效地址）
+    # Clamp to avoid out-of-bounds access (masked loads still need valid addresses)
     in_idx_clamped = tl.minimum(in_idx, total_input_tokens - 1)
 
-    # 加载输入 token（掩码到有效区域）
+    # Load input tokens (masked to valid region)
     token_ids = tl.load(
         target_token_ids_ptr + in_idx_clamped, mask=is_valid_region & in_bounds, other=0
     )
 
-    # 加载此请求的起始位置（序列中的第一个位置）
+    # Load the starting position for this request (first position in the sequence)
     start_pos = tl.load(target_positions_ptr + query_start_loc)
 
-    # 加载此请求的 bonus token
+    # Load bonus token for this request
     bonus_token = tl.load(next_token_ids_ptr + request_idx)
 
-    # 基于区域构建最终的 token_ids
+    # Build final token_ids based on region
     token_ids = tl.where(is_bonus_region, bonus_token, token_ids)
     token_ids = tl.where(
         is_parallel_draft_region, parallel_drafting_token_id, token_ids
     )
     token_ids = tl.where(is_rejected_region, padding_token_id, token_ids)
 
-    # 构建最终位置：
-    # 位置不移位 - 从第一个输入位置开始递增
-    # 输出位置 j 获得 start_pos + j
-    # （例如，输入位置 [5,6,7] -> 输出 [5,6,7,8,9,...]）
+    # Build final positions:
+    # Positions are NOT shifted - they start from the first input position and increment
+    # Output position j gets start_pos + j
+    # (e.g., input positions [5,6,7] -> output [5,6,7,8,9,...])
     positions = start_pos + j
-    # 被拒绝的位置是无关紧要的，设置为 0
+    # Rejected positions are don't-care, set to 0
     positions = tl.where(is_rejected_region, 0, positions)
 
-    # 计算输出掩码
+    # Compute output masks
     is_rejected_out = is_rejected_region & in_bounds
     is_masked_out = is_parallel_draft_region & in_bounds
 
-    # 计算新 token 的索引（bonus + 并行推测）用于采样
-    # 新 token 在位置
+    # Compute indices of new tokens (bonus + parallel drafting) for sampling
+    # New tokens are at positions
     #     [num_valid_tokens, num_valid_tokens + num_padding_slots_per_request)
     is_new_token_region = (j >= num_valid_tokens) & (
         j < num_valid_tokens + num_padding_slots_per_request
     )
     new_token_local_idx = (
         j - num_valid_tokens
-    )  # bonus 为 0，并行推测为 1, 2, ...
+    )  # 0 for bonus, 1, 2, ... for parallel drafting
     new_token_out_idx = (
         request_idx * num_padding_slots_per_request + new_token_local_idx
     )
 
-    # 计算隐藏状态映射（源索引 -> 目标索引）
-    # 这将每个输入位置映射到其对应的输出位置
-    # 隐藏状态不移位，所以我们映射所有输入 token（包括被拒绝的）
+    # Compute hidden state mapping (source index -> destination index)
+    # This maps each input position to its corresponding output position
+    # Hidden states don't get shifted, so we map all input tokens (including rejected)
     if shift_input_ids:
         num_input_tokens_this_request = next_query_start_loc - query_start_loc
         is_input_region = j < num_input_tokens_this_request
         src_idx = query_start_loc + j
         tl.store(out_hidden_state_mapping_ptr + src_idx, out_idx, mask=is_input_region)
 
-    # 存储输出
+    # Store outputs
     tl.store(out_input_ids_ptr + out_idx, token_ids, mask=in_bounds)
     tl.store(out_positions_ptr + out_idx, positions, mask=in_bounds)
     tl.store(out_is_rejected_token_mask_ptr + out_idx, is_rejected_out, mask=in_bounds)

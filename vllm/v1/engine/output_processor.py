@@ -1,23 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""输出处理器模块。
 
-本模块实现了 vLLM V1 引擎的输出处理功能，负责：
-- 将 EngineCoreOutput 转换为 RequestOutput
-- 增量反词元化
-- Logprobs 处理
-- 流式输出支持
-- 请求状态管理
-- 统计数据收集
-- 分布式追踪支持
-
-主要类：
-- RequestOutputCollector: 请求输出收集器
-- OutputProcessorOutput: 输出处理器输出数据类
-- StreamingUpdate: 流式输入更新数据类
-- RequestState: 请求状态类
-- OutputProcessor: 输出处理器
-"""
+import asyncio
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -59,41 +43,32 @@ EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
 
 
 class RequestOutputCollector:
-    """请求输出收集器。
+    """
+    Collects streamed RequestOutputs per individual request,
+    for hand-off to the consuming asyncio generate task.
 
-    为每个请求收集流式 RequestOutput，并传递给消费的 asyncio generate 任务。
-
-    当流式传输 deltas 时，如果生产者领先于消费者，RequestOutputs 会被合并。
-
-    Attributes:
-        aggregate: 是否聚合输出（DELTA 模式）
-        request_id: 请求 ID
-        output: 输出或异常
-        ready: 就绪事件
-        _input_stream_task: 输入流任务
+    When streaming deltas, RequestOutputs are merged if the
+    producer gets ahead of the consumer.
     """
 
     def __init__(self, output_kind: RequestOutputKind, request_id: str):
-        """初始化请求输出收集器。
+        self.aggregate = output_kind == RequestOutputKind.DELTA
+        self.request_id = request_id
+        self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
+        self.ready = asyncio.Event()
 
-        Args:
-            output_kind: 输出类型
-            request_id: 请求 ID
-        """
+        self._input_stream_task: asyncio.Task | None = None
 
     def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
-        """非阻塞 put 操作。
-
-        Args:
-            output: 请求输出或异常
-        """
+        """Non-blocking put operation."""
         if self.output is None or isinstance(output, Exception):
             self.output = output
             self.ready.set()
         elif isinstance(self.output, RequestOutput) and isinstance(
             output, RequestOutput
         ):
-            # 这确保具有不同请求索引的请求输出（如果 n > 1）不会相互覆盖
+            # This ensures that request outputs with different request indexes
+            # (if n > 1) do not override each other.
             self.output.add(output, aggregate=self.aggregate)
         elif isinstance(self.output, PoolingRequestOutput) and isinstance(
             output, PoolingRequestOutput
@@ -101,14 +76,7 @@ class RequestOutputCollector:
             self.output = output
 
     async def get(self) -> RequestOutput | PoolingRequestOutput:
-        """Get 操作阻塞直到 put 事件。
-
-        Returns:
-            请求输出或池化请求输出
-
-        Raises:
-            Exception: 如果存储的是异常则抛出
-        """
+        """Get operation blocks on put event."""
         while (output := self.output) is None:
             await self.ready.wait()
         self.output = None
@@ -118,14 +86,7 @@ class RequestOutputCollector:
         return output
 
     def get_nowait(self) -> RequestOutput | PoolingRequestOutput | None:
-        """非阻塞 get 操作。
-
-        Returns:
-            请求输出或池化请求输出，如果没有则为 None
-
-        Raises:
-            Exception: 如果存储的是异常则抛出
-        """
+        """Non-blocking get operation."""
         output = self.output
         if output is not None:
             self.output = None
@@ -135,13 +96,11 @@ class RequestOutputCollector:
         return output
 
     def close(self):
-        """关闭收集器，取消输入流任务。"""
         if self._input_stream_task is not None:
             self._input_stream_task.cancel()
         self._input_stream_task = None
 
     def __del__(self):
-        """析构函数，取消输入流任务。"""
         if (task := self._input_stream_task) is not None:
             task.get_loop().call_soon_threadsafe(task.cancel)
             self._input_stream_task = None
@@ -149,27 +108,16 @@ class RequestOutputCollector:
 
 @dataclass
 class OutputProcessorOutput:
-    """输出处理器输出数据类。
-
-    Attributes:
-        request_outputs: 请求输出列表
-        reqs_to_abort: 需要中止的请求 ID 列表
-    """
     request_outputs: list[RequestOutput | PoolingRequestOutput]
     reqs_to_abort: list[str]
 
 
 @dataclass
 class StreamingUpdate:
-    """输出处理器的流式输入更新数据。
+    """Streaming input update data for output processor.
 
-    包含当当前子请求完成时要应用于请求状态的增量提示数据。
-
-    Attributes:
-        prompt: 提示词文本
-        prompt_token_ids: 提示词 token IDs
-        arrival_time: 到达时间
-        final: 是否为最终更新
+    Contains the incremental prompt data to be applied to a request state
+    when the current sub-request completes.
     """
 
     prompt: str | None
@@ -179,16 +127,6 @@ class StreamingUpdate:
 
 
 class RequestState:
-    """请求状态类。
-
-    存储和管理单个请求的处理状态，包括：
-    - 请求标识和元数据
-    - 提示词和 token IDs
-    - 反词元化和 logprobs 处理器
-    - 流式输出状态
-    - 统计数据
-    """
-
     def __init__(
         self,
         request_id: str,
@@ -212,30 +150,6 @@ class RequestState:
         temperature: float | None = None,
         stream_input: bool = False,
     ):
-        """初始化请求状态。
-
-        Args:
-            request_id: 内部请求 ID
-            external_req_id: 外部请求 ID
-            parent_req: 父请求（用于并行采样）
-            request_index: 请求索引
-            lora_request: LoRA 请求
-            output_kind: 输出类型
-            prompt: 提示词文本
-            prompt_token_ids: 提示词 token IDs
-            prompt_embeds: 提示词嵌入
-            logprobs_processor: Logprobs 处理器
-            detokenizer: 反词元化器
-            max_tokens_param: 最大 token 数参数
-            arrival_time: 到达时间
-            queue: 请求输出收集器
-            log_stats: 是否记录统计
-            stream_interval: 流式间隔
-            top_p: Top-p 采样参数
-            n: 并行采样数
-            temperature: 温度参数
-            stream_input: 是否支持流式输入
-        """
         self.request_id = request_id
         self.external_req_id = external_req_id
         self.parent_req = parent_req
@@ -263,7 +177,7 @@ class RequestState:
 
         # Stream Interval
         self.stream_interval = stream_interval
-        self.sent_tokens_offset = 0  # 已发送 token 的偏移量
+        self.sent_tokens_offset = 0  # Offset of sent tokens
 
         # Streaming input queue
         self.streaming_input = stream_input
@@ -272,11 +186,6 @@ class RequestState:
         )
 
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
-        """应用流式更新到请求状态。
-
-        Args:
-            update: 流式更新数据
-        """
         # Apply the update to the request state.
         self.streaming_input = not update.final
         # TODO also include relevant output tokens in new prompt here
@@ -307,21 +216,6 @@ class RequestState:
         log_stats: bool,
         stream_interval: int,
     ) -> "RequestState":
-        """从新请求创建请求状态。
-
-        Args:
-            tokenizer: 分词器
-            request: 引擎核心请求
-            prompt: 提示词文本
-            parent_req: 父请求
-            request_index: 请求索引
-            queue: 请求输出收集器
-            log_stats: 是否记录统计
-            stream_interval: 流式间隔
-
-        Returns:
-            RequestState 实例
-        """
         if sampling_params := request.sampling_params:
             if not sampling_params.detokenize:
                 tokenizer = None
@@ -381,19 +275,6 @@ class RequestState:
         kv_transfer_params: dict[str, Any] | None = None,
         routed_experts: np.ndarray | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
-        """创建请求输出。
-
-        Args:
-            new_token_ids: 新的 token IDs
-            pooling_output: 池化输出张量
-            finish_reason: 完成原因
-            stop_reason: 停止原因
-            kv_transfer_params: KV 传输参数
-            routed_experts: 路由专家信息
-
-        Returns:
-            请求输出或池化请求输出，如果不需要输出则返回 None
-        """
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
 
@@ -456,17 +337,6 @@ class RequestState:
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
     ) -> RequestOutput | PoolingRequestOutput:
-        """创建新的请求输出。
-
-        Args:
-            external_req_id: 外部请求 ID
-            outputs: 完成输出或池化输出列表
-            finished: 是否已完成
-            kv_transfer_params: KV 传输参数
-
-        Returns:
-            请求输出或池化请求输出
-        """
         # If prompt embeds were used, put placeholder prompt token ids
         prompt_token_ids = self.prompt_token_ids
         if prompt_token_ids is None and self.prompt_embeds is not None:
@@ -510,17 +380,6 @@ class RequestState:
         stop_reason: int | str | None,
         routed_experts: np.ndarray | None = None,
     ) -> CompletionOutput:
-        """创建新的完成输出。
-
-        Args:
-            token_ids: token IDs 列表
-            finish_reason: 完成原因
-            stop_reason: 停止原因
-            routed_experts: 路由专家信息
-
-        Returns:
-            完成输出
-        """
         assert self.detokenizer is not None
         assert self.logprobs_processor is not None
         finished = finish_reason is not None
@@ -548,28 +407,11 @@ class RequestState:
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
-        """创建新的池化输出。
-
-        Args:
-            pooling_output: 池化输出张量
-
-        Returns:
-            池化输出
-        """
         return PoolingOutput(data=pooling_output)
 
 
 class OutputProcessor:
-    """输出处理器。
-
-    负责将 EngineCoreOutputs 处理为 RequestOutputs，包括：
-    - 请求状态管理
-    - 增量反词元化
-    - Logprobs 处理
-    - 流式输出支持
-    - 统计数据收集
-    - 分布式追踪
-    """
+    """Process EngineCoreOutputs into RequestOutputs."""
 
     def __init__(
         self,
@@ -579,14 +421,6 @@ class OutputProcessor:
         stream_interval: int = 1,
         tracing_enabled: bool = False,
     ):
-        """初始化输出处理器。
-
-        Args:
-            tokenizer: 分词器
-            log_stats: 是否记录统计
-            stream_interval: 流式间隔
-            tracing_enabled: 是否启用追踪
-        """
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.stream_interval = stream_interval
@@ -597,49 +431,32 @@ class OutputProcessor:
         self.tracing_enabled = tracing_enabled
 
     def get_num_unfinished_requests(self):
-        """获取未完成请求数量。
-
-        Returns:
-            未完成请求数
-        """
         return len(self.request_states)
 
     def has_unfinished_requests(self) -> bool:
-        """检查是否有未完成请求。
-
-        Returns:
-            是否有未完成请求
-        """
         return len(self.request_states) > 0
 
     def propagate_error(self, e: Exception):
-        """将所有错误传播给所有 generate() 任务。
+        """Propagate error to all generate() tasks."""
 
-        Args:
-            e: 异常
-        """
         for _, state in self.request_states.items():
             assert state.queue is not None
             state.queue.put(e)
 
     def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
-        """中止请求列表。
+        """Abort a list of requests.
 
-        request_ids 可以是外部请求 ID（传递给 InputProcessor.process_inputs() 的 ID）
-        或内部请求 ID（创建 EngineCoreRequest 时随机生成的 ID）。
+        The request_ids may be either external request IDs (those passed to
+        InputProcessor.process_inputs()) or internal request IDs (those randomly
+        generated when creating the EngineCoreRequest).
 
-        如果提供外部请求 ID，并且该外部请求 ID 用于多个请求，
-        则与该外部请求 ID 关联的所有请求都将被中止。
+        If an external request ID is provided, and that external request ID
+        was used for multiple requests, all requests associated with that external
+        request ID are aborted.
 
-        在并行采样情况下，请求 ID 可用于标识父请求，
-        此时关联的子请求也将被中止。
-
-        Args:
-            request_ids: 请求 ID 列表
-            internal: 是否为内部 ID
-
-        Returns:
-            被中止的请求 ID 列表
+        In the case of parallel sampling, a request ID may be used to identify
+        a parent request, in which case the associated child requests are aborted
+        also.
         """
         internal_req_ids = []
         for request_id in request_ids:
@@ -696,15 +513,6 @@ class OutputProcessor:
         request_index: int = 0,
         queue: RequestOutputCollector | None = None,
     ) -> None:
-        """添加请求到处理器。
-
-        Args:
-            request: 引擎核心请求
-            prompt: 提示词文本
-            parent_req: 父请求
-            request_index: 请求索引
-            queue: 请求输出收集器
-        """
         request_id = request.request_id
         req_state = self.request_states.get(request_id)
         if req_state is not None:
@@ -731,13 +539,7 @@ class OutputProcessor:
     def _update_streaming_request_state(
         self, req_state: RequestState, request: EngineCoreRequest, prompt: str | None
     ) -> None:
-        """将流式更新入队而不是立即应用。
-
-        Args:
-            req_state: 请求状态
-            request: 引擎核心请求
-            prompt: 提示词文本
-        """
+        """Queue a streaming update instead of immediately applying it."""
         if not request.resumable:
             # Final request - just mark completion, don't add its dummy tokens.
             if req_state.input_chunk_queue is None:
@@ -773,27 +575,26 @@ class OutputProcessor:
         engine_core_timestamp: float | None = None,
         iteration_stats: IterationStats | None = None,
     ) -> OutputProcessorOutput:
-        """处理 EngineCoreOutputs。
+        """
+        Process the EngineCoreOutputs:
+        1) Compute stats for logging
+        2) Detokenize
+        3) Create and handle RequestOutput objects:
+            * If there is a queue (for usage with AsyncLLM),
+              put the RequestOutput objects into the queue for
+              handling by the per-request generate() tasks.
 
-        负责：
-        1. 计算统计数据用于日志记录
-        2. 反词元化
-        3. 创建和处理 RequestOutput 对象：
-           - 如果有队列（用于 AsyncLLM），将 RequestOutput 放入队列
-             供每个请求的 generate() 任务处理
-           - 如果没有队列（用于 LLMEngine），返回 RequestOutput 列表
+            * If there is no queue (for usage with LLMEngine),
+              return a list of RequestOutput objects.
 
-        注意：
-        vLLM V1 最小化对整个批次的 Python 循环次数以确保系统开销最小化。
-        这是唯一应该循环 EngineCoreOutputs 的函数。
+        NOTE FOR DEVELOPERS
 
-        Args:
-            engine_core_outputs: EngineCoreOutput 列表
-            engine_core_timestamp: EngineCore 时间戳
-            iteration_stats: 迭代统计
+        vLLM V1 minimizes the number of python loops over the full
+        batch to ensure system overheads are minimized. This is the
+        only function that should loop over EngineCoreOutputs.
 
-        Returns:
-            OutputProcessorOutput 包含处理后的输出
+        If you need to touch every element of the batch, do it from
+        within the loop below.
         """
 
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
@@ -881,11 +682,6 @@ class OutputProcessor:
         )
 
     def _finish_request(self, req_state: RequestState) -> None:
-        """完成请求并清理状态。
-
-        Args:
-            req_state: 请求状态
-        """
         req_id = req_state.request_id
         self.request_states.pop(req_id)
 
@@ -900,11 +696,6 @@ class OutputProcessor:
             self.parent_requests.pop(parent_req.request_id, None)
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
-        """更新调度器统计信息。
-
-        Args:
-            scheduler_stats: 调度器统计
-        """
         self.lora_states.update_scheduler_stats(scheduler_stats)
 
     def do_tracing(
@@ -913,13 +704,6 @@ class OutputProcessor:
         req_state: RequestState,
         iteration_stats: IterationStats | None,
     ) -> None:
-        """执行分布式追踪。
-
-        Args:
-            engine_core_output: 引擎核心输出
-            req_state: 请求状态
-            iteration_stats: 迭代统计
-        """
         assert req_state.stats is not None
         assert iteration_stats is not None
 
@@ -983,14 +767,6 @@ class OutputProcessor:
         engine_core_timestamp: float | None,
         iteration_stats: IterationStats | None,
     ):
-        """从输出更新统计信息。
-
-        Args:
-            req_state: 请求状态
-            engine_core_output: 引擎核心输出
-            engine_core_timestamp: EngineCore 时间戳
-            iteration_stats: 迭代统计
-        """
         if iteration_stats is None:
             return
 
@@ -1012,13 +788,6 @@ class OutputProcessor:
         finish_reason: FinishReason | None,
         iteration_stats: IterationStats | None,
     ):
-        """从完成的请求更新统计信息。
-
-        Args:
-            req_state: 请求状态
-            finish_reason: 完成原因
-            iteration_stats: 迭代统计
-        """
         if iteration_stats is None:
             return
 

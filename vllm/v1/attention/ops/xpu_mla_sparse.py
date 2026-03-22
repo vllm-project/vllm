@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""XPU 稀疏 MLA 操作模块。
-
-本模块实现了 XPU 平台上的稀疏多头潜在注意力（MLA）操作，负责：
-- 实现 BF16 稀疏 MLA Triton kernel
-- 支持稀疏索引注意力计算
-- 支持分组查询注意力（GQA）
-- 支持 RoPE 位置编码
-
-主要函数：
-- _bf16_mla_sparse_kernel: BF16 稀疏 MLA Triton kernel
-- triton_bf16_mla_sparse_interface: 封装函数
-"""
 
 import torch
 
@@ -54,45 +42,6 @@ def _bf16_mla_sparse_kernel(
     BLOCK_DPE: tl.constexpr,  # block size for positional embedding
     LOGE2: tl.constexpr,
 ):
-    """BF16 稀疏 MLA Triton kernel。
-
-    实现稀疏多头潜在注意力的前向传播计算，支持 RoPE 位置编码。
-
-    Args:
-        q_buffer: Query 缓冲区指针
-        k_buffer: Key 缓冲区指针
-        v_buffer: Value 缓冲区指针
-        indices_ptr: 稀疏索引指针
-        out_ptr: 输出指针
-        softmax_lse_ptr: Softmax LSE 指针
-        max_logits_ptr: 最大 logits 指针
-        seq_q: Query 序列长度
-        seq_kv: KV 序列长度
-        h_q: Query 头数量
-        dim_qk: QK 维度
-        dim_v: V 维度
-        stride_q_token: Q token 步幅
-        stride_q_head: Q 头步幅
-        stride_k_token: K token 步幅
-        stride_k_head: K 头步幅
-        stride_v_token: V token 步幅
-        stride_v_head: V 头步幅
-        stride_out_token: 输出 token 步幅
-        stride_out_head: 输出头步幅
-        stride_lse: LSE 步幅
-        stride_indices_token: 索引 token 步幅
-        stride_indices_head: 索引头步幅
-        sm_scale: Softmax 缩放因子
-        kv_group_num: KV 组数量
-        index_topk: 顶部 K 索引数
-        BLOCK_H: 头块大小
-        BLOCK_M: token 块大小
-        BLOCK_N: 索引块大小
-        BLOCK_DV: V 维度块大小
-        BLOCK_DMODEL: 模型维度块大小
-        BLOCK_DPE: 位置编码维度块大小
-        LOGE2: log(e)/log(2) 常数
-    """
     cur_q = tl.program_id(0)
     cur_head_id = tl.program_id(1)
     cur_kv_head_id = cur_head_id // tl.cdiv(kv_group_num, BLOCK_H)
@@ -232,22 +181,10 @@ def triton_bf16_mla_sparse_interface(
     sm_scale: float,
     d_v: int = 512,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """BF16 稀疏 MLA 接口函数。
-
-    实现稀疏多头潜在注意力的封装接口，用于 DeepSeek V3.2 等模型。
-
-    Args:
-        q: Query 张量 [num_tokens, num_heads_q, dim_qk]
-        kv: KV 张量 [num_tokens, num_heads_kv, dim_qk]
-        indices: 稀疏索引 [num_tokens, num_heads_kv, topk]
-        sm_scale: Softmax 缩放因子
-        d_v: V 维度（默认 512）
-
-    Returns:
-        (输出张量，最大 logits, LSE) 元组
-        - out: [num_tokens, num_heads_q, d_v]
-        - max_logits: [num_tokens, num_heads_q]
-        - lse: logsumexp, [num_tokens, num_heads_q]
+    """
+    out : [num_tokens, num_heads_q, d_v]
+    max_logits : [num_tokens, num_heads_q]
+    lse : logsumexp, [num_tokens, num_heads_q]
     """
     num_tokens, num_heads_q, dim_qk = q.shape
     _, num_heads_kv, _ = kv.shape

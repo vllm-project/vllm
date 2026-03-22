@@ -1,28 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlashInfer 后端模块。
-
-本模块实现了基于 FlashInfer 库的注意力后端，负责：
-- 实现 FlashInfer 后端类
-- 支持 TRT-LLM 注意力 kernel
-- 支持 FP8 KV 缓存
-- 支持 Cascade 注意力
-- 支持分布式上下文并行（DCP）
-- 支持 CUDA 图
-
-主要类：
-- FlashInferBackend: FlashInfer 后端类
-- FlashInferMetadata: FlashInfer 元数据类
-- FlashInferMetadataBuilder: 元数据构建器
-- FlashInferImpl: 后端实现类
-
-辅助类：
-- FIPrefill: FlashInfer 原生预填充元数据
-- FIDecode: FlashInfer 原生解码元数据
-- TRTLLMPrefill: TRT-LLM 预填充元数据
-- TRTLLMDecode: TRT-LLM 解码元数据
-- BatchDCPPrefillWrapper: DCP 预填充包装器
-"""
+"""Attention layer with FlashInfer."""
 
 from dataclasses import dataclass
 from functools import partial
@@ -102,11 +80,6 @@ trtllm_gen_workspace_buffer = None
 
 
 def _get_trtllm_gen_workspace_buffer():
-    """获取 TRT-LLM 生成工作空间缓冲区。
-
-    Returns:
-        工作空间缓冲区张量
-    """
     global trtllm_gen_workspace_buffer
     if trtllm_gen_workspace_buffer is None:
         trtllm_gen_workspace_buffer = torch.zeros(
@@ -131,25 +104,6 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     HEAD_STRIDE: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
 ):
-    """Triton kernel 用于 FP8 KV 缓存的反量化。
-
-    为 TRT-LLM 预填充注意力创建模拟 KV 缓存，将 FP8 KV 缓存反量化为 BF16/FP16。
-
-    Args:
-        kv_cache_ptr: FP8 KV 缓存指针
-        block_tables_prefill_ptr: 预填充块表指针
-        block_table_stride: 块表步幅
-        mock_kv_cache_ptr: 输出模拟 KV 缓存指针
-        k_scale_ptr: K 缩放因子
-        v_scale_ptr: V 缩放因子
-        src_stride_page: 源页面步幅
-        src_stride_kv: 源 KV 步幅
-        src_stride_head: 源头步幅
-        DST_K_CACHE_STRIDE: 目标 K 缓存步幅
-        DST_KV_CACHE_STRIDE: 目标 KV 缓存步幅
-        HEAD_STRIDE: 头步幅
-        NUM_KV_HEADS: KV 头数量
-    """
     batch_idx = tl.program_id(0).to(tl.int64)
     mock_block_table_idx = tl.program_id(1).to(tl.int64)
     orig_page_num = tl.load(
@@ -168,16 +122,16 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     for h in range(NUM_KV_HEADS):
         h_off = tl.cast(h, tl.int64)
 
-        # 从源读取 K（支持非连续页面/kv/头步幅）
+        # Read K from source (supports non-contiguous page/kv/head strides)
         src_k = orig_page_num * src_stride_page + h_off * src_stride_head + head_offsets
         fp8_k = tl.load(kv_cache_ptr + src_k)
         dequant_k = (fp8_k.to(tl.float32) * k_scale_val).to(dequant_dtype)
 
-        # 将 K 写入连续模拟缓存
+        # Write K to contiguous mock cache
         dst_k = mock_page_idx * DST_KV_CACHE_STRIDE + h * HEAD_STRIDE + head_offsets
         tl.store(mock_kv_cache_ptr + dst_k, dequant_k)
 
-        # 从源读取 V（通过 src_stride_kv 偏移 V 半部分）
+        # Read V from source (offset by src_stride_kv for the V half)
         src_v = (
             orig_page_num * src_stride_page
             + src_stride_kv
@@ -187,7 +141,7 @@ def _trtllm_prefill_attn_kvfp8_dequant(
         fp8_v = tl.load(kv_cache_ptr + src_v)
         dequant_v = (fp8_v.to(tl.float32) * v_scale_val).to(dequant_dtype)
 
-        # 将 V 写入连续模拟缓存
+        # Write V to contiguous mock cache
         dst_v = (
             mock_page_idx * DST_KV_CACHE_STRIDE
             + DST_K_CACHE_STRIDE
@@ -204,20 +158,6 @@ def trtllm_prefill_attn_kvfp8_dequant(
     v_scale: torch.Tensor,
     dequant_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """为 TRT-LLM 预填充注意力创建模拟 KV 缓存。
-
-    当 KV 缓存为 FP8 而 query 为 BF16/FP16 时，需要将 FP8 KV 缓存反量化。
-
-    Args:
-        kv_cache: FP8 KV 缓存
-        block_tables_prefill: 预填充块表
-        k_scale: K 缩放因子
-        v_scale: V 缩放因子
-        dequant_dtype: 反量化数据类型（BF16 或 FP16）
-
-    Returns:
-        (mock_kv_cache, mock_block_table) 元组
-    """
     batch_size, num_of_page_per_token = block_tables_prefill.shape
     s = kv_cache.shape
     assert s[1] == 2
@@ -230,14 +170,14 @@ def trtllm_prefill_attn_kvfp8_dequant(
 
     strides = kv_cache.stride()
     assert strides[3] == head_size and strides[4] == 1, (
-        "对于 kv 缓存布局，(block_size, head_size) "
-        f"维度必须是连续的，得到步幅 {strides}"
+        "For kv cache layouts, (block_size, head_size) "
+        f"dimensions must be contiguous, got strides {strides}"
     )
 
     new_s = (batch_size * num_of_page_per_token + 1, s[1], s[2], s[3], s[4])
-    # mock kv cache 只包含此预填充所需的页面
+    # mock kv cache contains just the pages needed by this prefill
     mock_kv_cache = torch.empty(new_s, dtype=dequant_dtype, device=kv_cache.device)
-    # 我们简单地按顺序索引此预填充所需的页面
+    # we simply sequentially index the pages needed by this prefill
     mock_block_table = torch.arange(
         start=1,
         end=batch_size * num_of_page_per_token + 1,
@@ -264,26 +204,11 @@ def trtllm_prefill_attn_kvfp8_dequant(
 
 
 class BatchDCPPrefillWrapper:
-    """DCP（分布式上下文并行）预填充包装器。
-
-    包装 FlashInfer 的预填充接口以支持 DCP。
-
-    Attributes:
-        _dcp_combine: DCP 合并函数
-        _context: 上下文预填充包装器
-        _new_tokens: 新 token 预填充包装器
-    """
     def __init__(
         self,
         workspace_buffer: torch.Tensor | None = None,
         dcp_a2a: bool = False,
     ):
-        """初始化 DCP 预填充包装器。
-
-        Args:
-            workspace_buffer: 工作空间缓冲区
-            dcp_a2a: 是否使用 A2A 通信后端
-        """
         if dcp_a2a:
             self._dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
         else:
@@ -314,26 +239,7 @@ class BatchDCPPrefillWrapper:
         prefill_fixed_split_size: int,
         disable_split_kv: bool,
     ):
-        """计划预填充操作。
-
-        Args:
-            qo_indptr_cpu: QO 累积长度指针（CPU）
-            paged_kv_indptr_cpu: 分页 KV 累积长度指针（CPU）
-            paged_kv_indices: 分页 KV 索引
-            paged_kv_last_page_len_cpu: 分页 KV 最后一页长度（CPU）
-            page_size: 页面大小
-            num_qo_heads: QO 头数量
-            dcp_world_size: DCP 世界大小
-            num_kv_heads: KV 头数量
-            head_dim: 头维度
-            sm_scale: 缩放因子
-            window_left: 左窗口大小
-            logits_soft_cap: logits 软上限
-            q_data_type: Q 数据类型
-            kv_cache_dtype: KV 缓存数据类型
-            prefill_fixed_split_size: 预填充固定分割大小
-            disable_split_kv: 是否禁用 KV 分割
-        """
+        """Plan the prefill operation with given parameters."""
         self._context.plan(
             qo_indptr=qo_indptr_cpu,
             paged_kv_indptr=paged_kv_indptr_cpu,
@@ -343,7 +249,7 @@ class BatchDCPPrefillWrapper:
             num_kv_heads=num_kv_heads,
             head_dim_qk=head_dim,
             page_size=page_size,
-            causal=False,  # 这是上下文运行
+            causal=False,  # This is context run
             sm_scale=sm_scale,
             window_left=window_left,
             logits_soft_cap=logits_soft_cap,
@@ -359,7 +265,7 @@ class BatchDCPPrefillWrapper:
             num_kv_heads=num_kv_heads,
             head_dim_qk=head_dim,
             head_dim_vo=head_dim,
-            causal=True,  # 这是新 token 运行
+            causal=True,  # This is newtokens run
             sm_scale=sm_scale,
             window_left=window_left,
             logits_soft_cap=logits_soft_cap,
@@ -375,19 +281,6 @@ class BatchDCPPrefillWrapper:
         value: torch.Tensor,
         out: torch.Tensor,
     ):
-        """运行预填充操作。
-
-        Args:
-            layer: 注意力层
-            prefill_query: 预填充 query
-            kv_cache_permute: 置换后的 KV 缓存
-            key: Key 张量
-            value: Value 张量
-            out: 输出张量
-
-        Returns:
-            输出张量
-        """
         prefill_query_across_dcp = get_dcp_group().all_gather(
             prefill_query.contiguous(), dim=1
         )
@@ -425,17 +318,6 @@ class BatchDCPPrefillWrapper:
 
 
 class FlashInferBackend(AttentionBackend):
-    """FlashInfer 后端类。
-
-    基于 FlashInfer 库实现的高效注意力后端。
-    支持 TRT-LLM kernel、FP8 KV 缓存、Cascade 注意力等特性。
-
-    Class Attributes:
-        accept_output_buffer: 是否接受输出缓冲区
-        supported_dtypes: 支持的数据类型
-        supported_kv_cache_dtypes: 支持的 KV 缓存数据类型
-        forward_includes_kv_cache_update: 前向传播是否包含 KV 缓存更新
-    """
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -449,43 +331,20 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        """获取支持的内核块大小列表。
-
-        Note:
-            在 Blackwell 上，仅支持页面大小 16、32、64。
-
-        Returns:
-            支持的块大小列表
-        """
         # Note: Not sure for all platforms, but on Blackwell,
         # only support a page size of 16, 32, 64.
         return [16, 32, 64]
 
     @staticmethod
     def get_name() -> str:
-        """获取后端名称。
-
-        Returns:
-            后端名称 "FLASHINFER"
-        """
         return "FLASHINFER"
 
     @staticmethod
     def get_impl_cls() -> type["FlashInferImpl"]:
-        """获取注意力实现类。
-
-        Returns:
-            FlashInferImpl 类
-        """
         return FlashInferImpl
 
     @staticmethod
     def get_builder_cls() -> type["FlashInferMetadataBuilder"]:
-        """获取元数据构建器类。
-
-        Returns:
-            FlashInferMetadataBuilder 类
-        """
         return FlashInferMetadataBuilder
 
     @staticmethod
@@ -496,35 +355,12 @@ class FlashInferBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        """获取 KV 缓存形状。
-
-        Args:
-            num_blocks: 块数量
-            block_size: 块大小
-            num_kv_heads: KV 头数量
-            head_size: 头大小
-            cache_dtype_str: 缓存数据类型
-
-        Returns:
-            KV 缓存形状元组
-        """
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
-        """获取 KV 缓存步幅顺序。
-
-        Args:
-            include_num_layers_dimension: 是否包含层数维度
-
-        Returns:
-            步幅顺序元组
-
-        Raises:
-            ValueError: 如果缓存布局未知
-        """
         # `stride_order` indicates the permutation that gets us from
         # `get_kv_cache_shape` to the actual memory layout we want.
         cache_layout = get_kv_cache_layout()
@@ -544,17 +380,6 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_fp8_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
-        """获取 FlashInfer 的 FP8 数据类型。
-
-        Args:
-            kv_cache_dtype: KV 缓存数据类型
-
-        Returns:
-            对应的 FP8 数据类型
-
-        Raises:
-            ValueError: 如果数据类型未识别
-        """
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
             return torch.float8_e4m3fn
         elif kv_cache_dtype == "fp8_e5m2":
@@ -564,59 +389,33 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        """获取支持的头大小列表。
-
-        Returns:
-            支持的头大小列表 [64, 128, 256]
-        """
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
         return [64, 128, 256]
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        """检查是否支持指定的计算能力。
-
-        Args:
-            capability: 设备计算能力
-
-        Returns:
-            如果计算能力在 7.5 到 12.1 之间则返回 True
-        """
         return capability >= DeviceCapability(7, 5) and capability <= DeviceCapability(
             12, 1
         )
 
     @classmethod
     def supports_sink(cls) -> bool:
-        """检查是否支持 sink。
-
-        FlashInfer 在 TRTLLM 注意力可用时（SM100）支持 sink。
-
-        Returns:
-            是否支持 sink
-        """
+        """FlashInfer supports sinks when TRTLLM attention is available (SM100)."""
         from vllm.utils.flashinfer import (
             force_use_trtllm_attention,
             supports_trtllm_attention,
         )
 
-        # 尊重显式禁用标志（例如 --attention-config.use_trtllm_attention=0）
+        # Respect explicit disable flag (e.g.,
+        # --attention-config.use_trtllm_attention=0)
         if force_use_trtllm_attention() is False:
             return False
 
-        # 检查此平台是否支持 TRTLLM
+        # Check if TRTLLM is supported on this platform
         return supports_trtllm_attention()
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
-        """获取所需的 KV 缓存布局。
-
-        Args:
-            能力为 10.x 的设备返回 "HND"
-
-        Returns:
-            KV 缓存布局类型或 None
-        """
         capability = current_platform.get_device_capability()
         if capability is not None and capability.major == 10:
             return "HND"
@@ -627,46 +426,32 @@ class FlashInferBackend(AttentionBackend):
 
 @dataclass
 class FIPrefill:
-    """FlashInfer 原生预填充途径（非 TRTLLM）的元数据。
+    """Metadata for the native FlashInfer prefill pathway (non-TRTLLM)."""
 
-    Attributes:
-        wrapper: 预填充包装器
-    """
     wrapper: BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper
 
 
 @dataclass
 class FIDecode:
-    """FlashInfer 原生解码途径（非 TRTLLM）的元数据。
+    """Metadata for the native FlashInfer decode pathway (non-TRTLLM)."""
 
-    Attributes:
-        wrapper: 解码包装器
-    """
     wrapper: BatchDecodeWithPagedKVCacheWrapper
 
 
 @dataclass
 class TRTLLMPrefill:
-    """TRTLLM 预填充途径的元数据。
+    """Metadata for the TRTLLM prefill pathway."""
 
-    Attributes:
-        block_tables: 仅对应预填充请求的块表切片，形状 [num_prefills, max_num_blocks_per_seq]
-        seq_lens: 仅对应预填充请求的序列长度切片，形状 [num_prefills]
-        cum_seq_lens_q: Q 的累积序列长度
-        cum_seq_lens_kv: KV 的累积序列长度
-        max_q_len: 预填充请求中的最大 query 长度
-        max_seq_len: KV 缓存的最大序列长度
-    """
     block_tables: torch.Tensor
     """
-    仅对应预填充请求的块表切片。
-    形状：[num_prefills, max_num_blocks_per_seq]
+    The slice of the block table tensor corresponding *only* to prefill requests.
+    Shape: [num_prefills, max_num_blocks_per_seq]
     """
 
     seq_lens: torch.Tensor
     """
-    仅对应预填充请求的序列长度切片。
-    形状：[num_prefills]
+    The slice of the sequence lengths tensor corresponding *only* to prefill requests.
+    Shape: [num_prefills]
     """
 
     cum_seq_lens_q: torch.Tensor
@@ -674,111 +459,72 @@ class TRTLLMPrefill:
 
     max_q_len: int
     """
-    预填充请求中的最大 query 长度。
+    The maximum query length *among prefill requests*.
     """
 
     max_seq_len: int
-    """KV 缓存的最大序列长度。"""
+    """The maximum sequence length for KV Cache."""
 
 
 @dataclass
 class TRTLLMDecode:
-    """TRTLLM 解码途径的元数据。
+    """Metadata for the TRTLLM decode pathway."""
 
-    Attributes:
-        block_tables: 仅对应解码请求的块表切片，形状 [num_decodes, max_num_blocks_per_seq]
-        seq_lens: 仅对应解码请求的序列长度切片，形状 [num_decodes]
-        max_seq_len: KV 缓存的最大序列长度
-    """
     block_tables: torch.Tensor
     """
-    仅对应解码请求的块表切片。
-    形状：[num_decodes, max_num_blocks_per_seq]
+    The slice of the block table tensor corresponding *only* to decode requests.
+    Shape: [num_decodes, max_num_blocks_per_seq]
     """
 
     seq_lens: torch.Tensor
     """
-    仅对应解码请求的序列长度切片。
-    形状：[num_decodes]
+    The slice of the sequence lengths tensor corresponding *only* to decode requests.
+    Shape: [num_decodes]
     """
 
     max_seq_len: int
-    """KV 缓存的最大序列长度。"""
+    """The maximum sequence length for KV Cache."""
 
 
 @dataclass
 class FlashInferMetadata:
-    """FlashInfer 注意力元数据类。
-
-    存储 FlashInfer 注意力前向传播所需的元数据信息。
-
-    Attributes:
-        num_actual_tokens: 批次中的实际 token 总数（不包括 padding）
-        slot_mapping: 用于写入 K/V 到缓存的张量，形状 [num_actual_tokens]
-        q_data_type: Q 数据类型
-        num_decodes: 解码请求数
-        num_decode_tokens: 解码 token 数
-        num_prefills: 预填充请求数
-        num_prefill_tokens: 预填充 token 数
-        prefill: 预填充部分的元数据，如果 num_prefill_tokens == 0 则为 None
-        decode: 解码部分的元数据，如果 num_decode_tokens == 0 则为 None
-        use_cascade: 如果为 True，整个批次是 cascade 注意力调用，prefill 和 decode 都为 None
-        cascade_wrapper: Cascade 注意力包装器
-    """
     num_actual_tokens: int
-    """批次中的实际 token 总数（不包括 padding）。"""
+    """Total number of tokens in the batch (excluding padding)."""
 
     slot_mapping: torch.Tensor
-    """用于写入 K/V 到缓存的张量。形状：[num_actual_tokens]"""
+    """Tensor for writing K/V to the cache. Shape: [num_actual_tokens]"""
 
     q_data_type: torch.dtype
-    """Query 数据类型。"""
 
     num_decodes: int
-    """解码请求数。"""
-
     num_decode_tokens: int
-    """解码 token 数。"""
-
     num_prefills: int
-    """预填充请求数。"""
-
     num_prefill_tokens: int
-    """预填充 token 数。"""
 
     prefill: FIPrefill | TRTLLMPrefill | None
     """
-    保存批次预填充部分的元数据。
-    如果 num_prefill_tokens == 0 则为 None。
+    Holds the metadata for the prefill portion of the batch.
+    Will be `None` if `num_prefill_tokens == 0`.
     """
 
     decode: FIDecode | TRTLLMDecode | None
     """
-    保存批次解码部分的元数据。
-    如果 num_decode_tokens == 0 则为 None。
+    Holds the metadata for the decode portion of the batch.
+    Will be `None` if `num_decode_tokens == 0`.
     """
 
-    # --- 特殊情况：Cascade 注意力 ---
+    # --- Special Case: Cascade Attention ---
 
     use_cascade: bool
     """
-    如果为 True，整个批次是 cascade 注意力调用，
-    prefill 和 decode 字段都为 None。
+    If True, the entire batch is a cascade attention call, and the
+    `prefill` and `decode` fields will both be None.
     """
 
     cascade_wrapper: MultiLevelCascadeAttentionWrapper | None
-    """Cascade 注意力包装器。"""
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
-    """FlashInfer 元数据构建器类。
-
-    负责构建 FlashInfer 注意力运行所需的元数据对象。
-    支持 TRT-LLM kernel、FP8 KV 缓存、Cascade 注意力等特性。
-
-    Class Attributes:
-        reorder_batch_threshold: 重排序批次阈值
-    """
     reorder_batch_threshold: int = 1
 
     def __init__(
@@ -788,14 +534,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        """初始化元数据构建器。
-
-        Args:
-            kv_cache_spec: KV 缓存规格
-            layer_names: 层名称列表
-            vllm_config: vLLM 配置
-            device: 设备类型
-        """
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.cache_config = vllm_config.cache_config
         self.model_config = vllm_config.model_config
@@ -803,8 +541,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._workspace_buffer = None
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
-        ) = None  # 预填充/追加使用的包装器
-        self._decode_wrapper = None  # 解码使用的包装器（通用形状）
+        ) = None  # Wrapper for prefill/append
+        self._decode_wrapper = None  # Wrapper for decode (general shape)
 
         if vllm_is_batch_invariant():
             self.decode_fixed_split_size = 2048
@@ -831,7 +569,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
         )
         if self.enable_cuda_graph:
-            # 对于完整的 cudagraph 捕获，每个批次大小需要一个 `decode_wrapper`
+            # For full cudagraph capture, one `decode_wrapper` for each batch
+            # size is needed for FlashInfer.
             self._decode_wrappers_cudagraph: dict[
                 int, BatchDecodeWithPagedKVCacheWrapper
             ] = {}
@@ -848,7 +587,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 vllm_config.parallel_config.dcp_kv_cache_interleave_size
             )
         except AssertionError:
-            # DCP 可能在测试中未初始化
+            # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
             self.dcp_kv_cache_interleave_size = 1
@@ -874,9 +613,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
 
-        # 当不支持 TRTLLM 注意力或设置了 --attention-config.disable_flashinfer_q_quantization=1 时，
-        # 使用模型 dtype 作为 q dtype。否则，如果 kv 缓存为 fp8，则尝试使用 fp8 q，
-        # 如果构建 attn metadata 时未使用 TRTLLM 注意力 kernel，则回退到模型 dtype
+        # Use model dtype as q dtype when TRTLLM attn is not supported, or
+        # --attention-config.disable_flashinfer_q_quantization is set to 1. Otherwise,
+        # try to use fp8 q if kv cache is fp8, and will fall back to model dtype
+        # if TRTLLM attention kernel is not used when building attn metadata
         can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
 
         if (
@@ -887,15 +627,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             self.q_data_type = self.model_config.dtype
 
-        # 在所有情况下都优先使用 TRTLLM 注意力进行解码。
-        # 这允许我们使用 AttentionCGSupport.UNIFORM_BATCH 模式。
+        # Prefer TRTLLM attention for decoding in all cases.
+        # This allows us to use AttentionCGSupport.UNIFORM_BATCH mode.
         self.use_trtllm_decode_attention = can_use_trtllm
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=can_use_trtllm)
 
-        self._cascade_wrapper = None  # Cascade 注意力包装器
+        self._cascade_wrapper = None  # Wrapper for cascade attention
 
-        # 所有注意力层共享的全局超参数
-        # TODO: trtllm-gen backend 丢弃这个
+        # Global hyperparameters shared by all attention layers
+        # TODO: discard this for trtllm-gen backend
         self.global_hyperparameters = infer_global_hyperparameters(
             get_per_layer_parameters(vllm_config, layer_names, FlashInferImpl)
         )
@@ -909,31 +649,23 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "sinks, please use trtllm on blackwell or flash attention on "
                 "earlier GPUs."
             )
-        # 准备持久化缓冲区
-        # 由于我们在 ModelRunnerV2 中没有显式同步，我们不固定重用的 CPU 缓冲区，
-        # 以避免步骤 N 异步复制到 GPU 和步骤 N+1 缓冲区更新之间的竞争条件。
+        # Preparing persistent buffers
+        # Since we do not have explicit synchronization in ModelRunnerV2, we do not pin
+        # reused CPU buffers to avoid a race condition between step N async copies to
+        # GPU and step N+1 buffer updates.
         self.pin_memory = (
             not envs.VLLM_USE_V2_MODEL_RUNNER and is_pin_memory_available()
         )
         self.paged_kv_indptr = self._make_buffer(max_num_reqs + 1)
         self.paged_kv_indptr_cpu_buffer = torch.zeros_like(
             self.paged_kv_indptr.cpu, pin_memory=self.pin_memory
-        )  # CUDA graph 模式下 paged_kv_indptr.cpu 的可变额外缓冲区
+        )  # Extra buffer for mutable paged_kv_indptr.cpu in cuda graph mode
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
 
     def _make_buffer(
         self, *size: int | torch.SymInt, dtype: torch.dtype = torch.int32
     ) -> CpuGpuBuffer:
-        """创建 CPU/GPU 缓冲区。
-
-        Args:
-            *size: 缓冲区大小
-            dtype: 数据类型
-
-        Returns:
-            CpuGpuBuffer 对象
-        """
         return CpuGpuBuffer(
             *size,
             dtype=dtype,
@@ -949,22 +681,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        """获取 FlashInfer 注意力的 cudagraph 支持级别。
+        """Get the cudagraph support level for FlashInfer attention.
 
-        这取决于我们是否可以使用 TRTLLM 注意力进行解码，因为如果不可用，
-        我们只能使用 UNIFORM_SINGLE_TOKEN_DECODE。要检查这一点，我们必须使用
-        kv_cache_spec 中的 KV 头数量调用 can_use_trtllm_attention。
-        我们检查所有可用的 KV cache specs，只有当所有都支持 TRTLLM 注意力时
-        才返回 UNIFORM_BATCH。
-
-        Args:
-            vllm_config: vLLM 配置
-            kv_cache_spec: KV 缓存规格
-
-        Returns:
-            注意力 CUDA 图支持级别
+        This depends on whether we can use TRTLLM attention for decodes, since we can
+        only do UNIFORM_SINGLE_TOKEN_DECODE if it is unavailable.
+        To check this, we must call can_use_trtllm_attention with the number of KV
+        heads from the kv_cache_spec. We check all available KV cache specs and
+        only return UNIFORM_BATCH if all of them support TRTLLM attention.
         """
-        # 对于 UniformTypeKVCacheSpecs，检查所有包含的 specs
+        # For UniformTypeKVCacheSpecs, check all contained specs
         kv_specs = (
             kv_cache_spec.kv_cache_specs.values()
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
@@ -976,8 +701,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         has_trtllm_support: bool = len(kv_specs) > 0
         for spec in kv_specs:
             if not isinstance(spec, AttentionSpec):
-                # FlashInfer 仅适用于注意力，所以我们不考虑其他类型的 KV spec
-                #（例如 Mamba）。这主要用于类型检查。
+                # FlashInfer only applies to attention, so we don't consider other types
+                # of KV spec (e.g. Mamba) here. This is mostly for type checking.
                 continue
             if not can_use_trtllm_attention(
                 num_qo_heads=num_qo_heads,
@@ -992,11 +717,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def _get_workspace_buffer(self):
-        """获取工作空间缓冲区。
-
-        Returns:
-            工作空间缓冲区张量
-        """
         if self._workspace_buffer is None:
             buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
             if vllm_is_batch_invariant():
@@ -1007,11 +727,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         return self._workspace_buffer
 
     def set_workspace_buffer(self, workspace_buffer: torch.Tensor):
-        """设置工作空间缓冲区。
-
-        Args:
-            workspace_buffer: 工作空间缓冲区张量
-        """
         self._workspace_buffer = workspace_buffer
 
     def _get_prefill_wrapper(
@@ -1031,15 +746,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self, batch_size: int, use_cudagraph: bool = False):
-        """获取解码包装器。
-
-        Args:
-            batch_size: 批次大小
-            use_cudagraph: 是否使用 CUDA 图
-
-        Returns:
-            解码包装器
-        """
         if use_cudagraph:
             decode_wrapper = self._decode_wrappers_cudagraph.get(batch_size, None)
         else:
@@ -1061,12 +767,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 paged_kv_indptr_buffer=paged_kv_indptr,
                 paged_kv_indices_buffer=paged_kv_indices,
                 paged_kv_last_page_len_buffer=paged_kv_last_page_len,
-                # Tensor cores 默认启用，因为在最新 GPU 上，
-                # 对于所有注意力操作，性能至少与 cuda cores 一样好。
+                # Tensor cores are enabled by default because the perf would be
+                # at least as good as cuda cores for all attention ops in latest
+                # gpus.
                 use_tensor_cores=True,
             )
 
-            # 保存 decode wrapper
+            # save the decode wrapper
             if use_cudagraph:
                 self._decode_wrappers_cudagraph[batch_size] = decode_wrapper
             else:
@@ -1075,11 +782,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         return decode_wrapper
 
     def _get_cascade_wrapper(self):
-        """获取 Cascade 注意力包装器。
-
-        Returns:
-            Cascade 注意力包装器
-        """
         if self._cascade_wrapper is None:
             self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
                 2, self._get_workspace_buffer(), get_kv_cache_layout()
@@ -1094,20 +796,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs: int,
         page_size: int,
     ) -> torch.Tensor:
-        """计算 FlashInfer 注意力的 paged_kv_indptr、paged_kv_indices、paged_kv_last_page_len。
+        """
+        Compute paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len for FlashInfer
+        attention.
 
-        结果存储在 self.paged_kv_indptr、self.paged_kv_indices、
-        self.paged_kv_last_page_len 缓冲区中。
+        Results are stored in self.paged_kv_indptr,
+        self.paged_kv_indices, self.paged_kv_last_page_len buffers.
 
-        Args:
-            num_blocks_np: 每个序列的块数 numpy 数组
-            seq_lens_np: 序列长度 numpy 数组
-            block_table_tensor: 块表张量
-            num_reqs: 请求数
-            page_size: 页面大小
-
-        Returns:
-            paged_kv_indices，形状为 [num_actual_pages] 的 GPU 张量
+        Returns paged_kv_indices, a GPU tensor with shape [num_actual_pages].
         """
         # write self.paged_kv_indptr_cpu inplace (0-index is always 0)
         np.cumsum(
@@ -1498,14 +1194,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
 
 class FlashInferImpl(AttentionImpl):
-    """FlashInfer 注意力实现类。
-
-    基于 FlashInfer 库实现的高效注意力后端。
-    支持 TRT-LLM kernel、FP8 KV 缓存、Cascade 注意力等特性。
-
-    Class Attributes:
-        can_return_lse_for_decode: 是否可以为解码返回 LSE
-    """
     can_return_lse_for_decode: bool = True
 
     def __init__(
@@ -1522,21 +1210,6 @@ class FlashInferImpl(AttentionImpl):
         kv_sharing_target_layer_name: int | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
-        """初始化 FlashInfer 注意力实现。
-
-        Args:
-            num_heads: 注意力头数量
-            head_size: 头大小
-            scale: 缩放因子
-            num_kv_heads: KV 头数量
-            alibi_slopes: ALIBI 斜率列表
-            sliding_window: 滑动窗口大小
-            kv_cache_dtype: KV 缓存数据类型
-            logits_soft_cap: Logits 软化上限
-            attn_type: 注意力类型
-            kv_sharing_target_layer_name: KV 共享目标层名称
-            sinks: 注意力 sink 张量
-        """
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -1597,14 +1270,6 @@ class FlashInferImpl(AttentionImpl):
             self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
-        """检查是否支持融合输出量化。
-
-        Args:
-            quant_key: 量化键
-
-        Returns:
-            是否支持
-        """
         return (
             self.support_trtllm_attn
             and self.kv_cache_dtype.startswith("fp8")
@@ -1613,13 +1278,6 @@ class FlashInferImpl(AttentionImpl):
 
     # FlashInfer requires attention sinks to be float32
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        """在加载后处理权重。
-
-        FlashInfer 要求 attention sinks 为 float32 类型。
-
-        Args:
-            act_dtype: 激活数据类型（未使用）
-        """
         if self.sinks is not None and self.sinks.dtype != torch.float32:
             self.sinks = self.sinks.to(torch.float32)
 
@@ -1635,31 +1293,26 @@ class FlashInferImpl(AttentionImpl):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """使用 FlashInfer 进行前向传播。
+        """Forward pass with FlashInfer.
 
         Args:
-            layer: 注意力层
-            query: 形状 = [num_tokens, num_heads, head_size]
-            key: 形状 = [num_tokens, num_kv_heads, head_size]
-            value: 形状 = [num_tokens, num_kv_heads, head_size]
-            kv_cache: KV 缓存张量，可能的形状：
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache: KV cache tensor with different possible shapes:
                 - NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
                 - HND: [num_blocks, 2, num_kv_heads, block_size, head_size]
-            attn_metadata: 注意力元数据
-            output: 输出张量
-            output_scale: 输出缩放因子（用于融合量化）
-            output_block_scale: 输出块缩放因子（用于 NVFP4）
-
+            attn_metadata: Metadata for attention.
         Returns:
-            形状 = [num_tokens, num_heads * head_size] 的输出张量
+            shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
 
         if attn_metadata is None:
-            # 性能分析运行
+            # Profiling run.
             return output.fill_(0)
 
-        # 确保 query 数据类型与注意力元数据中的预期数据类型匹配
+        # Ensure query dtype matches the expected dtype from attention metadata
         assert attn_metadata.q_data_type == query.dtype, (
             f"Query dtype mismatch: expected {attn_metadata.q_data_type}, "
             f"got {query.dtype}"
@@ -1678,32 +1331,33 @@ class FlashInferImpl(AttentionImpl):
         prefill_use_trtllm = isinstance(attn_metadata.prefill, TRTLLMPrefill)
         decode_use_trtllm = isinstance(attn_metadata.decode, TRTLLMDecode)
 
-        # 当提供 output_scale 时发生 attn+quant 融合
+        # The attn+quant fusion happens when output_scale is provided.
         if output_scale is None:
             assert output_block_scale is None, (
-                "当未发生融合时不应提供 output_block_scale"
+                "output_block_scale is not supported when fusion has not happened"
             )
         else:
             assert attn_metadata.q_data_type == FP8_DTYPE, (
-                "当发生 attn+quant 融合时 Query 必须是 FP8。"
+                "Query must be FP8 when attn+quant fusion happened."
             )
             assert (attn_metadata.num_prefills == 0 or prefill_use_trtllm) and (
                 attn_metadata.num_decodes == 0 or decode_use_trtllm
-            ), "必须使用 TRT-LLM 注意力"
+            ), "Must use TRT-LLM attn"
 
             if output.dtype == FP8_DTYPE:
                 assert output_block_scale is None, (
-                    "output_block_scale 不应在 fp8 输出时提供"
+                    "output_block_scale should not be provided for fp8 output"
                 )
             elif output.dtype == FP4_DTYPE:
                 assert output_block_scale is not None, (
-                    "nvfp4 输出需要提供 output_block_scale"
+                    "output_block_scale is required for nvfp4 output"
                 )
             else:
-                raise ValueError(f"不支持的输出数据类型：{output.dtype}")
+                raise ValueError(f"Unsupported output dtype: {output.dtype}")
 
-            # TRTLLM 注意力 kernel 要求缩放因子作为主机标量传递，
-            # 在未启用 cuda graph 的 warmup 运行中将 o scale 存储为主机标量
+            # TRTLLM attn kernel requires to scale to pass as a host scalar,
+            # store the o scale as a host scalar in warmup run with cuda graph
+            # not enabled
             if layer._o_scale_float is None:
                 layer._o_scale_float = output_scale.cpu().item()
                 if output.dtype == FP8_DTYPE:
@@ -1711,16 +1365,19 @@ class FlashInferImpl(AttentionImpl):
                 elif output.dtype == FP4_DTYPE:
                     self.o_sf_scale = layer._o_scale_float
 
-        # 重要提示！
-        # NOTE(woosuk): 使用分段 CUDA 图时，此方法在 eager-mode PyTorch 中执行。
-        # 因此，我们需要小心此方法中的任何 CPU 开销。
-        # 例如，`view` 和 `slice`（或 `[:n]`）操作即使在不调用任何 GPU 操作的情况下也慢得惊人。
-        # 尽可能减少此方法中的 PyTorch 操作。
-        # 在此方法中进行任何更改时，请基准测试性能以确保不会引入任何开销。
+        # IMPORTANT!
+        # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
+        # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
+        # in this method. For example, `view` and `slice` (or `[:n]`) operations
+        # are surprisingly slow even in the case they do not invoke any GPU ops.
+        # Minimize the PyTorch ops in this method as much as possible.
+        # Whenever making a change in this method, please benchmark the
+        # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        # 当 kv_cache_dtype 为 fp8 时，FlashInfer api 要求数据为 fp8_e4m3 或 fp8_e5m2
+        # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
+        # to process the cache when the kv_cache_dtype is fp8
         if self.kv_sharing_target_layer_name is None and self.kv_cache_dtype.startswith(
             "fp8"
         ):
@@ -1729,7 +1386,7 @@ class FlashInferImpl(AttentionImpl):
             )
             kv_cache = kv_cache.view(torch_dtype)
 
-        # 输入和输出可能因 CUDA graphs 而被填充
+        # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
         key = key[:num_actual_tokens]
         value = value[:num_actual_tokens]
@@ -1737,36 +1394,32 @@ class FlashInferImpl(AttentionImpl):
         output = output[:num_actual_tokens]
 
         if attn_metadata.use_cascade:
-            # Cascade 注意力（罕见情况）
+            # Cascade attention (rare case).
             assert attn_metadata.cascade_wrapper is not None
             output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache))
             return output
 
-        # 使用 spec decoding 时，num_decodes 可能小于 num_decode_tokens，
-        # 因为一些 decode 请求可能有多个 query token
+        # When using spec decoding, num_decodes can be < num_decode_tokens
+        # because some decode requests may have more than one query token.
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_prefill_tokens = attn_metadata.num_prefill_tokens
 
-        # 获取 KV 缓存步幅顺序并置换
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
         kv_cache_permute = kv_cache.permute(*stride_order)
 
         use_dcp = self.dcp_world_size > 1
 
-        # 常规注意力（常见情况）
-        # 解码请求在前，预填充请求在后。
+        # Regular attention (common case).
+        # Decodes are at the front and prefills are at the back.
         if num_prefill_tokens > 0:
-            # 提取预填充 query
             prefill_query = query[num_decode_tokens:]
             assert prefill_query.shape[0] == num_prefill_tokens
 
             if not prefill_use_trtllm:
-                # 使用 FlashInfer 原生预填充
                 assert isinstance(attn_metadata.prefill, FIPrefill)
                 prefill_wrapper = attn_metadata.prefill.wrapper
                 assert prefill_wrapper is not None
                 if use_dcp:
-                    # 使用 DCP（分布式上下文并行）
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
                     assert prefill_wrapper._context._window_left == self.window_left
                     assert prefill_wrapper._context._logits_soft_cap == (
@@ -1790,7 +1443,6 @@ class FlashInferImpl(AttentionImpl):
                         out=output[num_decode_tokens:],
                     )
                 else:
-                    # 不使用 DCP
                     assert isinstance(
                         prefill_wrapper, BatchPrefillWithPagedKVCacheWrapper
                     )
@@ -1808,17 +1460,17 @@ class FlashInferImpl(AttentionImpl):
                         out=output[num_decode_tokens:],
                     )
             else:
-                # 使用 TRT-LLM 预填充
                 assert isinstance(attn_metadata.prefill, TRTLLMPrefill)
-                # prefill_query 可能是非连续或退化的步幅
-                # 首先确保内存连续性，然后用 reshape 修复退化的步幅
-                # contiguous() 本身在维度大小为 1 时无法修复退化的步幅
+                # prefill_query may be non-contiguous or have degenerate strides
+                # First ensure memory contiguity, then fix degenerate strides
+                # with reshape. contiguous() alone doesn't fix degenerate
+                # strides when a dimension has size 1.
                 prefill_query = prefill_query.contiguous().reshape(prefill_query.shape)
                 workspace_buffer = _get_trtllm_gen_workspace_buffer()
                 block_tables_prefill = attn_metadata.prefill.block_tables
                 seq_lens_prefill = attn_metadata.prefill.seq_lens
 
-                # 此路径需要 VLLM_KV_CACHE_LAYOUT = HND 启用
+                # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
                 assert is_strictly_contiguous(prefill_query)
                 assert is_strictly_contiguous(workspace_buffer)
@@ -1826,7 +1478,6 @@ class FlashInferImpl(AttentionImpl):
                 assert is_strictly_contiguous(seq_lens_prefill)
 
                 if output.dtype == FP4_DTYPE:
-                    # NVFP4 输出处理
                     assert self.o_sf_scale is not None
                     out = FP4Tensor(
                         data=output[num_decode_tokens:],
@@ -1842,23 +1493,24 @@ class FlashInferImpl(AttentionImpl):
                     attn_metadata.q_data_type != FP8_DTYPE
                     and self.kv_cache_dtype.startswith("fp8")
                 ):
-                    # TRTLLM 预填充注意力不支持 BF16 Q 和 fp8 kv cache
-                    # 所以要启用 fp8 kv cache 的预填充注意力，我们可以构建一个模拟块
-                    # 和模拟 kv cache，其中包含预填充中涉及的 BF16 KV
+                    # TRTLLM prefill attention does not support BF16 Q
+                    # and fp8 kv cache. So to enable prefill attention
+                    # with fp8 kv cache, we can construct a mock block
+                    # and mock kv cache with BF16 KV involved in the prefill
                     #
-                    # 内部 (block_size, head_size) 维度必须是连续的；
-                    # 外部维度可能有非规范步幅（例如跨层统一分配）。
-                    # 外部维度上的退化步幅会破坏 TMA 描述符
-                    # (参见 flashinfer-ai/flashinfer#2232)
+                    # The inner (block_size, head_size) dims must be
+                    # contiguous; outer dims may have non-canonical strides
+                    # (e.g. cross-layer unified allocation).
+                    # Degenerate strides on outer dims break TMA descriptors
+                    # (see flashinfer-ai/flashinfer#2232).
                     kv_strides = kv_cache_permute.stride()
                     assert (
                         kv_strides[-1] == 1
                         and kv_strides[-2] == kv_cache_permute.shape[-1]
                     ), (
-                        "KV 缓存内部维度 (block_size, head_size) 必须是 "
-                        f"连续的，得到步幅 {kv_strides}"
+                        "KV cache inner dims (block_size, head_size) must be "
+                        f"contiguous, got strides {kv_strides}"
                     )
-                    # 执行 FP8 KV 缓存反量化
                     mock_kv_cache, mock_block_table = trtllm_prefill_attn_kvfp8_dequant(
                         kv_cache_permute,
                         block_tables_prefill,
@@ -1867,11 +1519,9 @@ class FlashInferImpl(AttentionImpl):
                         attn_metadata.q_data_type,
                     )
                 else:
-                    # 不需要反量化
                     mock_kv_cache = kv_cache_permute
                     mock_block_table = block_tables_prefill
 
-                # 运行 TRT-LLM 批处理上下文注意力
                 trtllm_batch_context_with_kv_cache(
                     query=prefill_query,
                     kv_cache=mock_kv_cache,
@@ -1892,12 +1542,10 @@ class FlashInferImpl(AttentionImpl):
                 )
 
         if num_decode_tokens > 0:
-            # 提取解码 query
             decode_query = query[:num_decode_tokens]
             assert decode_query.shape[0] == num_decode_tokens
 
             if not decode_use_trtllm:
-                # 使用 FlashInfer 原生解码
                 assert isinstance(attn_metadata.decode, FIDecode)
                 decode_wrapper = attn_metadata.decode.wrapper
                 assert decode_wrapper is not None
@@ -1906,7 +1554,6 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._sm_scale == self.scale
 
                 if use_dcp:
-                    # 使用 DCP（分布式上下文并行）
                     decode_query = get_dcp_group().all_gather(
                         decode_query.contiguous(), dim=-2
                     )
@@ -1925,14 +1572,12 @@ class FlashInferImpl(AttentionImpl):
                         lse=lse,
                         return_lse=True,
                     )
-                    # 合并 DCP 输出
                     output[:num_decode_tokens] = self.dcp_combine(
                         output_tmp,
                         lse,
                         get_dcp_group(),
                     )
                 else:
-                    # 不使用 DCP
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_permute,
@@ -1941,37 +1586,36 @@ class FlashInferImpl(AttentionImpl):
                         out=output[:num_decode_tokens],
                     )
             else:
-                # 使用 TRT-LLM 解码
-                # decode_query 可能是非连续或退化的步幅
+                # decode_query may be non-contiguous or have degenerate strides
                 assert isinstance(attn_metadata.decode, TRTLLMDecode)
-                # 首先确保内存连续性，然后用 reshape 修复退化的步幅
-                # contiguous() 本身在维度大小为 1 时无法修复退化的步幅
+                # First ensure memory contiguity, then fix degenerate strides
+                # with reshape. contiguous() alone doesn't fix degenerate
+                # strides when a dimension has size 1.
                 decode_query = decode_query.contiguous().reshape(decode_query.shape)
                 workspace_buffer = _get_trtllm_gen_workspace_buffer()
                 block_tables_decode = attn_metadata.decode.block_tables
                 seq_lens_decode = attn_metadata.decode.seq_lens
 
-                # 此路径需要 VLLM_KV_CACHE_LAYOUT = HND 启用
+                # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
                 assert is_strictly_contiguous(decode_query)
                 assert is_strictly_contiguous(workspace_buffer)
                 assert is_strictly_contiguous(block_tables_decode)
                 assert is_strictly_contiguous(seq_lens_decode)
-                # kv_cache 外部维度可能是非连续的（例如
-                # 跨层统一分配），但内部维度
-                # (block_size, head_size) 必须是连续的且
-                # 步幅必须是规范的以避免 TMA 描述符
-                # 失败（参见 flashinfer-ai/flashinfer#2232）
+                # kv_cache outer dims may be non-contiguous (e.g.
+                # cross-layer unified allocation), but inner dims
+                # (block_size, head_size) must be contiguous and
+                # strides must be canonical to avoid TMA descriptor
+                # failures (see flashinfer-ai/flashinfer#2232).
                 kv_strides = kv_cache_permute.stride()
                 assert (
                     kv_strides[-1] == 1 and kv_strides[-2] == kv_cache_permute.shape[-1]
                 ), (
-                    "KV 缓存内部维度 (block_size, head_size) 必须是 "
-                    f"连续的，得到步幅 {kv_strides}"
+                    "KV cache inner dims (block_size, head_size) must be "
+                    f"contiguous, got strides {kv_strides}"
                 )
 
                 if output.dtype == FP4_DTYPE:
-                    # NVFP4 输出处理
                     assert self.o_sf_scale is not None
                     out = FP4Tensor(
                         data=output[:num_decode_tokens],
@@ -1983,14 +1627,13 @@ class FlashInferImpl(AttentionImpl):
                     assert self.o_sf_scale is None
                     out = output[:num_decode_tokens]
 
-                # 计算每个请求的 query 长度
                 if num_decode_tokens % attn_metadata.num_decodes != 0:
-                    # 当 dummy_run 强制注意力初始化 q_len = 0 时会触发
+                    # This gets triggered when the dummy_run forces
+                    # attention to be initialized with q_len = 0
                     q_len_per_req = 1
                 else:
                     q_len_per_req = num_decode_tokens // attn_metadata.num_decodes
 
-                # 运行 TRT-LLM 批处理解码注意力
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
                     kv_cache=kv_cache_permute,
@@ -2016,21 +1659,14 @@ class FlashInferImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
-        """执行 KV 缓存更新。
-
-        Args:
-            layer: 注意力层
-            key: Key 张量
-            value: Value 张量
-            kv_cache: KV 缓存张量
-            slot_mapping: 槽位映射
-        """
         if self.kv_sharing_target_layer_name is None:
-            # 重新塑造输入键和值并将其存储在缓存中。
-            # 如果与早期注意力层共享 KV 缓存则跳过此步骤。
-            # NOTE(woosuk): 这里 key 和 value 被填充而 slot_mapping 没有填充。
-            # 但是，我们不需要做 key[:num_actual_tokens] 和 value[:num_actual_tokens]，
-            # 因为 reshape_and_cache_flash op 使用 slot_mapping 的形状来确定实际 token 数。
+            # Reshape the input keys and values and store them in the cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
+            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+            # not padded. However, we don't need to do key[:num_actual_tokens]
+            # and value[:num_actual_tokens] because the reshape_and_cache_flash
+            # op uses the slot_mapping's shape to determine the number of
+            # actual tokens.
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
                 value,
@@ -2066,44 +1702,22 @@ def fast_plan_decode(
     fixed_split_size: int = -1,
     disable_split_kv: bool = False,
 ) -> None:
-    """用于 CUDA 图捕获/重放的快速 plan 函数。
-
-    这是 BatchDecodeWithPagedKVCacheWrapper::plan 的快速版本，
-    用于 CUDA 图捕获/重放，而无 CUDA 图版本则回到原始 plan。
-
-     modifications for cudagraph:
-    - 仅 indptr 和 last_page_len 缓冲区的主机到设备复制
-    - 避免 indices 缓冲区的设备到设备复制
-
-    代码部分 inspirated from FlashInfer repo 的原始 plan
-    和 SGlang repo 中 FlashInfer 的 fast_decode_plan 实现。
-
-    Args:
-        self: 解码包装器
-        indptr_cpu: 累积长度指针（CPU）
-        indices: 索引张量
-        last_page_len_cpu: 最后一页长度（CPU）
-        num_qo_heads: QO 头数量
-        num_kv_heads: KV 头数量
-        head_dim: 头维度
-        page_size: 页面大小
-        pos_encoding_mode: 位置编码模式
-        window_left: 左窗口大小
-        logits_soft_cap: logits 软上限
-        q_data_type: Q 数据类型
-        kv_data_type: KV 数据类型
-        o_data_type: 输出数据类型
-        data_type: 数据类型
-        sm_scale: 缩放因子
-        rope_scale: RoPE 缩放
-        rope_theta: RoPE theta
-        non_blocking: 是否非阻塞
-        fixed_split_size: 固定分割大小
-        disable_split_kv: 是否禁用 KV 分割
     """
-    # 如果是第一次调用，使用原始 plan 进行 warm up
-    # 如果我们为动态形状运行，则始终运行原始 plan
-    # 对于固定形状（cudagraph），此 warm up 是为了解码包装器生成_cached_module
+    A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for
+    cudagraph capture/replay, while the no cudagraph version turns back
+    to the original plan.
+    using original plan after passing host-side buffers:
+    - only host-to-device copy of indptr and last_page_len buffers
+    Modifications for cudagraph:
+    - only host-to-device copy of indptr and last_page_len buffers.
+    - avoid device-to-device copy of indices buffer.
+
+    Part of the code get inspiration from the original plan from FlashInfer repo
+    and the implementation of fast_decode_plan for FlashInfer in SGlang repo.
+    """
+    # Warm up with the original plan if it is first call, and always run the
+    # original plan if we run for dynamic shape. For fixed shape (cudagraph),
+    # this warm up is to generate the _cached_module for the decode wrapper.
     if not self.is_cuda_graph_enabled or getattr(self, "vllm_first_call", True):
         self.plan(
             indptr=indptr_cpu,
@@ -2132,7 +1746,7 @@ def fast_plan_decode(
         self.vllm_first_call = False
         return
 
-    assert self.is_cuda_graph_enabled, "这里应该仅使用 cudagraph"
+    assert self.is_cuda_graph_enabled, "Should be cudagraph only here"
 
     fast_decode_plan(
         self,

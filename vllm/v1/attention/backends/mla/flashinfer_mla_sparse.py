@@ -1,27 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlashInfer MLA Sparse Attention 后端模块。
+"""FlashInfer MLA Sparse Attention Backend.
 
-本模块实现了基于 FlashInfer 的稀疏 MLA 后端（仅支持 SM100/Blackwell 架构），负责：
-- 实现 FlashInferMLASparseBackend 类（仅支持 compute capability 10.0）
-- 实现 FlashInferMLASparseMetadataBuilder 用于构建注意力元数据
-- 实现 FlashInferMLASparseImpl 用于执行稀疏 MLA 前向传播
-- 支持 DeepSeek-V3.2 等使用 index_topk 的稀疏注意力模型
-- 使用 trtllm_batch_decode_with_kv_cache_mla 与 sparse_mla_top_k 参数
-- 要求 qk_nope_head_dim 在 [128, 192] 范围内
-- 使用 Triton kernel 将请求索引转换为全局索引
+This backend uses the FlashInfer TRT-LLM MLA kernel with sparse_mla_top_k
+for models like DeepSeek-V3.2 that use index-based sparse attention.
 
-对于稀疏 MLA：
-- block_tables 形状从 [batch_size, max_num_blocks]（稠密）
-  变为 [batch_size, q_len_per_request, sparse_mla_top_k]（稀疏）
-- 稀疏索引表示要关注的物理缓存槽位置
-- sparse_mla_top_k 参数必须设置为 topk 值
-
-主要类和函数：
-- FlashInferMLASparseBackend: 稀疏 MLA 后端类
-- FlashInferMLASparseMetadata: 稀疏注意力元数据
-- FlashInferMLASparseMetadataBuilder: 元数据构建器
-- FlashInferMLASparseImpl: 稀疏 MLA 实现类
+For sparse MLA:
+- block_tables shape changes from [batch_size, max_num_blocks] (dense)
+  to [batch_size, q_len_per_request, sparse_mla_top_k] (sparse)
+- The sparse indices represent physical cache slot positions to attend to
+- sparse_mla_top_k parameter must be set to the topk value
 """
 
 from dataclasses import dataclass

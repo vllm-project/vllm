@@ -1,488 +1,550 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Worker 工具函数模块。
-
-本模块提供了 Worker 相关的通用工具函数和接口定义，负责：
-- 定义 Worker 基础接口
-- 处理 Worker 包装和初始化
-- 支持多模态缓存管理
-- 提供分布式训练支持
-
-主要类：
-- WorkerBase: Worker 基础接口
-- WorkerWrapperBase: Worker 包装器
-"""
-
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, TypeVar
+import math
+from collections import defaultdict
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from itertools import product as iprod
+from typing import Any
 
 import torch
-import torch.nn as nn
 
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.tracing import instrument
-from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.system_utils import update_environment_variables
-from vllm.v1.kv_cache_interface import KVCacheSpec
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-    from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
-else:
-    SchedulerOutput = object
-    GrammarOutput = object
-    AsyncModelRunnerOutput = object
-    ModelRunnerOutput = object
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.models.interfaces import MultiModalEmbeddings
+from vllm.model_executor.models.utils import extract_layer_index
+from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import largest_power_of_2_divisor
+from vllm.utils.mem_utils import MemorySnapshot, format_gib
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionMetadataBuilder,
+    MultipleOf,
+)
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 logger = init_logger(__name__)
 
-_R = TypeVar("_R")
+
+@triton.jit
+def _zero_kv_blocks_kernel(
+    seg_addrs_ptr,
+    block_ids_ptr,
+    n_blocks,
+    N_SEGS: tl.constexpr,
+    PAGE_SIZE_EL: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Zero KV cache blocks across all segments in a single launch.
+
+    Each segment is a contiguous region of one block's data.  For backends
+    where blocks are outermost (block_dim=0) there is one segment per
+    buffer.  For backends where K/V is outermost (block_dim=1) there are
+    two segments per buffer (one for K, one for V).
+
+    seg_addrs_ptr holds absolute byte addresses (int64) for each segment,
+    allowing segments to live in different CUDA allocations.
+
+    Programs are mapped as (block_index, seg_index, chunk_index).
+    """
+    pid = tl.program_id(0)
+    chunks = PAGE_SIZE_EL // BLOCK_SIZE
+    work_per_block = N_SEGS * chunks
+    block_index = pid // work_per_block
+    if block_index >= n_blocks:
+        return
+    remainder = pid % work_per_block
+    seg_index = remainder // chunks
+    chunk_index = remainder % chunks
+    block_id = tl.load(block_ids_ptr + block_index)
+    seg_addr = tl.load(seg_addrs_ptr + seg_index)
+    ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
+    offset = (
+        block_id.to(tl.int64) * PAGE_SIZE_EL + chunk_index.to(tl.int64) * BLOCK_SIZE
+    )
+    cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
+    tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
 
 
-class WorkerBase:
-    """Worker 接口，允许 vLLM 清晰分离不同硬件的实现。
+class KVBlockZeroer:
+    """Manages efficient zeroing of KV cache blocks via a Triton kernel.
 
-    同时抽象了控制平面通信，例如向其他 Worker 传播请求元数据。
-
-    这是所有具体 Worker 实现的基类，定义了 Worker 必须实现的接口。
-
-    Attributes:
-        vllm_config: 完整的 vLLM 配置
-        model_config: 模型配置
-        cache_config: KV 缓存配置
-        lora_config: LoRA 配置
-        load_config: 加载配置
-        parallel_config: 并行配置
-        scheduler_config: 调度器配置
-        device_config: 设备配置
-        speculative_config: 推测解码配置
-        observability_config: 可观测性配置
-        kv_transfer_config: KV 传输配置
-        compilation_config: 编译配置
-        local_rank: 本地设备索引
-        rank: 分布式全局索引
-        distributed_init_method: 分布式初始化方法
-        is_driver_worker: 是否为 driver worker
-        device: 设备
-        model_runner: 模型运行器
+    Call :meth:`init_meta` once after KV caches are allocated to precompute
+    segment addresses, then call :meth:`zero_block_ids` each step to zero
+    newly-allocated blocks.
     """
 
-    def __init__(
+    def __init__(self, device: torch.device, pin_memory: bool):
+        self.device = device
+        self.pin_memory = pin_memory
+        self._meta: tuple[torch.Tensor, int, int, int] | None = None
+        self._id_cap: int = 0
+        self._ids_pinned: torch.Tensor | None = None
+        self._ids_gpu: torch.Tensor | None = None
+
+    def init_meta(
         self,
-        vllm_config: VllmConfig,
-        local_rank: int,
-        rank: int,
-        distributed_init_method: str,
-        is_driver_worker: bool = False,
+        attn_groups_iter: Iterable["AttentionGroup"],
+        kernel_block_sizes: list[int],
+        cache_dtype: str,
+        runner_only_attn_layers: set[str],
+        static_forward_context: dict[str, Any],
     ) -> None:
-        """初始化 Worker 基础组件。
+        """One-time precomputation for zero_block_ids.
 
-        Args:
-            vllm_config: 完整的 vLLM 配置
-            local_rank: 本地设备索引
-            rank: 分布式全局索引
-            distributed_init_method: 分布式初始化方法
-            is_driver_worker: 是否负责 driver 职责
+        Builds absolute-address table for the Triton zeroing kernel.
+        Each entry is the absolute byte address of a segment start on the
+        GPU, so segments in different CUDA allocations work correctly.
+
+        Block IDs from the scheduler reference logical blocks whose size
+        may differ from the kernel block size (virtual block splitting).
+        PAGE_SIZE_EL accounts for this ratio so that
+        ``block_id * PAGE_SIZE_EL`` lands at the correct offset.
+
+        Only AttentionSpec layers are processed; Mamba layers are skipped.
         """
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.cache_config = vllm_config.cache_config
-        self.lora_config = vllm_config.lora_config
-        self.load_config = vllm_config.load_config
-        self.parallel_config = vllm_config.parallel_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.device_config = vllm_config.device_config
-        self.speculative_config = vllm_config.speculative_config
-        self.observability_config = vllm_config.observability_config
-        self.kv_transfer_config = vllm_config.kv_transfer_config
-        self.compilation_config = vllm_config.compilation_config
-
-        from vllm.platforms import current_platform
-
-        self.current_platform = current_platform
-
-        self.parallel_config.rank = rank
-        self.local_rank = local_rank
-        self.rank = rank
-        self.distributed_init_method = distributed_init_method
-        self.is_driver_worker = is_driver_worker
-
-        # 设备和模型状态
-        self.device: torch.device | None = None
-        self.model_runner: nn.Module | None = None
-
-    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        """获取 KV 缓存实现的规格说明。
-
-        Returns:
-            KVCacheSpec 字典，键为层名
-        """
-        raise NotImplementedError
-
-    def compile_or_warm_up_model(self) -> float:
-        """通过编译/预热准备模型执行。
-
-        Returns:
-            累积的编译时间（秒）
-        """
-        raise NotImplementedError
-
-    def check_health(self) -> None:
-        """基本健康检查（可覆盖以添加设备特定检查）。"""
-        return
-
-    def init_device(self) -> None:
-        """初始化设备状态，如加载模型或其他设备内存分配。"""
-        raise NotImplementedError
-
-    def reset_mm_cache(self) -> None:
-        """重置多模态缓存。"""
-        reset_fn = getattr(self.model_runner, "reset_mm_cache", None)
-        if callable(reset_fn):
-            reset_fn()
-
-    def get_model(self) -> nn.Module:
-        """获取模型实例。"""
-        raise NotImplementedError
-
-    def apply_model(self, fn: Callable[[nn.Module], _R]) -> _R:
-        """对模型应用函数。
-
-        Args:
-            fn: 应用于模型的函数
-
-        Returns:
-            函数返回值
-        """
-        return fn(self.get_model())
-
-    def get_model_inspection(self) -> str:
-        """返回 transformers 风格的层次化模型视图。
-
-        Returns:
-            模型检查字符串
-        """
-        from vllm.model_inspection import format_model_inspection
-
-        return format_model_inspection(self.get_model())
-
-    def load_model(self, *, load_dummy_weights: bool = False) -> None:
-        """将模型加载到目标设备。
-
-        Args:
-            load_dummy_weights: 是否加载虚拟权重（用于测试）
-        """
-        raise NotImplementedError
-
-    def execute_model(
-        self, scheduler_output: SchedulerOutput
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        """执行模型前向传播。
-
-        如果此方法返回 None，则应立即调用 sample_tokens 以获取 ModelRunnerOutput。
-
-        注意：如果重新架构结构化输出并行，此设计可能会改变。
-
-        Args:
-            scheduler_output: 调度器输出
-
-        Returns:
-            ModelRunnerOutput、AsyncModelRunnerOutput 或 None
-        """
-        raise NotImplementedError
-
-    def sample_tokens(
-        self, grammar_output: GrammarOutput
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        """在 execute_model 返回 None 后立即调用。
-
-        Args:
-            grammar_output: 语法输出
-
-        Returns:
-            ModelRunnerOutput 或 AsyncModelRunnerOutput
-        """
-        raise NotImplementedError
-
-    def get_cache_block_size_bytes(self) -> int:
-        """返回单个缓存块的大小（字节）。
-
-        用于推测解码。
-
-        Returns:
-            缓存块大小（字节）
-        """
-        raise NotImplementedError
-
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        """添加 LoRA 适配器。
-
-        Args:
-            lora_request: LoRA 请求
-
-        Returns:
-            是否成功添加
-        """
-        raise NotImplementedError
-
-    def remove_lora(self, lora_id: int) -> bool:
-        """移除 LoRA 适配器。
-
-        Args:
-            lora_id: LoRA ID
-
-        Returns:
-            是否成功移除
-        """
-        raise NotImplementedError
-
-    def pin_lora(self, lora_id: int) -> bool:
-        """固定 LoRA 适配器（防止被驱逐）。
-
-        Args:
-            lora_id: LoRA ID
-
-        Returns:
-            是否成功固定
-        """
-        raise NotImplementedError
-
-    def list_loras(self) -> set[int]:
-        """列出所有活跃的 LoRA ID。
-
-        Returns:
-            LoRA ID 集合
-        """
-        raise NotImplementedError
-
-    @property
-    def vocab_size(self) -> int:
-        """从模型配置获取词汇表大小。
-
-        Returns:
-            词汇表大小
-        """
-        return self.model_config.get_vocab_size()
-
-    def shutdown(self) -> None:
-        """清理 Worker 持有的资源。"""
-        return
-
-
-class WorkerWrapperBase:
-    """Worker 包装器类。
-
-    此类代表 executor/engine 中的一个进程。负责延迟初始化 Worker
-    并处理 Worker 的生命周期。
-
-    工作流程：
-    1. 实例化 WorkerWrapper，记住 Worker 模块和类名
-    2. 调用 update_environment_variables 设置环境变量
-    3. 调用 init_worker 进行实际的 Worker 初始化
-
-    Attributes:
-        rpc_rank: Worker 在 executor 中的索引
-        global_rank: Worker 在分布式组中的全局索引
-        worker: Worker 实例
-        vllm_config: vLLM 配置
-        mm_receiver_cache: 多模态接收器缓存
-    """
-
-    def __init__(
-        self,
-        rpc_rank: int = 0,
-        global_rank: int | None = None,
-    ) -> None:
-        """使用给定的 vllm_config 和 rpc_rank 初始化 Worker 包装器。
-
-        注意：rpc_rank 是 Worker 在 executor 中的索引。在大多数情况下，
-        它也是 Worker 在分布式组中的索引。但是当多个 executor 一起工作时，
-        它们可能不同。
-
-        例如：在 SPMD 风格的离线推理中，TP=2，
-        用户可以启动 2 个 engines/executors，每个只有 1 个 worker。
-        所有 worker 的 rpc_rank=0，但它们在 TP 组中有不同的索引。
-
-        Args:
-            rpc_rank: executor 中的 Worker 索引
-            global_rank: 分布式全局索引（可选）
-        """
-        self.rpc_rank = rpc_rank
-        self.global_rank = self.rpc_rank if global_rank is None else global_rank
-
-        # 在调用 init_worker 后初始化
-        self.worker: WorkerBase
-        self.vllm_config: VllmConfig
-
-    def shutdown(self) -> None:
-        """关闭 Worker。"""
-        if self.worker is not None:
-            self.worker.shutdown()
-
-    def update_environment_variables(
-        self,
-        envs_list: list[dict[str, str]],
-    ) -> None:
-        """更新环境变量。
-
-        Args:
-            envs_list: 环境变量列表，每个元素对应一个 rank
-        """
-        envs = envs_list[self.rpc_rank]
-        update_environment_variables(envs)
-
-    @instrument(span_name="Worker init")
-    def init_worker(self, all_kwargs: list[dict[str, Any]]) -> None:
-        """初始化 Worker。
-
-        在这里我们注入一些常见的逻辑，然后初始化 Worker。
-        参数传递给 Worker 类构造函数。
-
-        Args:
-            all_kwargs: 所有 Worker 的参数列表
-        """
-        kwargs = all_kwargs[self.rpc_rank]
-
-        vllm_config: VllmConfig | None = kwargs.get("vllm_config")
-        assert vllm_config is not None, (
-            "初始化 Worker 需要提供 vllm_config"
-        )
-        self.vllm_config = vllm_config
-
-        # 启用线程的跟踪函数调用
-        vllm_config.enable_trace_function_call_for_thread()
-
-        from vllm.plugins import load_general_plugins
-
-        load_general_plugins()
-
-        parallel_config = vllm_config.parallel_config
-        if isinstance(parallel_config.worker_cls, str):
-            worker_class: type[WorkerBase] = resolve_obj_by_qualname(
-                parallel_config.worker_cls
-            )
-        else:
-            raise ValueError(
-                "不再支持传递 worker_cls。"
-                "请将类保持在单独的模块中，"
-                "并以字符串形式传递类的限定名。"
+        seen_ptrs: set[int] = set()
+        seg_addrs: list[int] = []
+        page_size_el: int | None = None
+
+        for group in attn_groups_iter:
+            spec = group.kv_cache_spec
+            if type(spec) is not FullAttentionSpec:
+                continue
+            if group.kv_cache_group_id >= len(kernel_block_sizes):
+                continue
+            kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
+            ratio = spec.block_size // kernel_bs
+            block_dim = group.backend.get_kv_cache_block_dim(
+                kernel_bs,
+                spec.num_kv_heads,
+                spec.head_size,
+                cache_dtype_str=cache_dtype,
             )
 
-        # 处理 Worker 扩展类
-        if parallel_config.worker_extension_cls:
-            worker_extension_cls = resolve_obj_by_qualname(
-                parallel_config.worker_extension_cls
-            )
-            extended_calls = []
-            if worker_extension_cls not in worker_class.__bases__:
-                # 检查 worker 和 worker_extension_cls 之间的冲突
-                for attr in dir(worker_extension_cls):
-                    if attr.startswith("__"):
-                        continue
-                    assert not hasattr(worker_class, attr), (
-                        f"Worker 类 {worker_class} 已经有属性"
-                        f" {attr}，这与 Worker"
-                        f" 扩展类 {worker_extension_cls} 冲突。"
+            for layer_name in group.layer_names:
+                if layer_name in runner_only_attn_layers:
+                    continue
+                kv = static_forward_context[layer_name].kv_cache[0]
+                if isinstance(kv, list):
+                    continue
+                dp = kv.data_ptr()
+                if dp in seen_ptrs:
+                    continue
+                seen_ptrs.add(dp)
+
+                el = kv.element_size()
+                cur_bytes = kv.stride(block_dim) * el
+                assert cur_bytes % 4 == 0
+                kernel_block_el = cur_bytes // 4
+                cur_page_el = kernel_block_el * ratio
+                if page_size_el is None:
+                    page_size_el = cur_page_el
+                else:
+                    assert page_size_el == cur_page_el, (
+                        f"Non-uniform page sizes: {page_size_el} vs {cur_page_el}"
                     )
-                    if callable(getattr(worker_extension_cls, attr)):
-                        extended_calls.append(attr)
-                # 动态继承 Worker 扩展类
-                worker_class.__bases__ = worker_class.__bases__ + (
-                    worker_extension_cls,
-                )
-                logger.info(
-                    "将 %s 注入到 %s 以扩展 collective_rpc 调用 %s",
-                    worker_extension_cls,
-                    worker_class,
-                    extended_calls,
-                )
 
-        # 处理多模态缓存
-        shared_worker_lock = kwargs.pop("shared_worker_lock", None)
-        if shared_worker_lock is None:
-            msg = (
-                "缺少 `shared_worker_lock` 参数，这是 executor 需要的。"
-                "此参数用于 mm_processor_cache_type='shm'。"
-            )
+                block_stride_bytes = cur_bytes
+                outer_dims = [
+                    d
+                    for d in range(block_dim)
+                    if kv.stride(d) * el > block_stride_bytes
+                ]
+                outer_strides = [kv.stride(d) * el for d in outer_dims]
+                for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
+                    off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
+                    seg_addrs.append(dp + off_bytes)
 
-            mm_config = vllm_config.model_config.multimodal_config
-            if mm_config and mm_config.mm_processor_cache_type == "shm":
-                raise ValueError(msg)
-            else:
-                logger.warning_once(msg)
-
-            self.mm_receiver_cache = None
-        else:
-            self.mm_receiver_cache = (
-                MULTIMODAL_REGISTRY.worker_receiver_cache_from_config(
-                    vllm_config,
-                    shared_worker_lock,
-                )
-            )
-
-        with set_current_vllm_config(self.vllm_config):
-            # 使 vLLM 配置在 Worker 初始化期间可用
-            self.worker = worker_class(**kwargs)
-
-    def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
-        """从配置初始化 Worker。
-
-        Args:
-            kv_cache_configs: KV 缓存配置列表
-        """
-        kv_cache_config = kv_cache_configs[self.global_rank]
-        assert self.vllm_config is not None
-        with set_current_vllm_config(self.vllm_config):
-            self.worker.initialize_from_config(kv_cache_config)  # type: ignore
-
-    def init_device(self):
-        """初始化设备。"""
-        assert self.vllm_config is not None
-        with set_current_vllm_config(self.vllm_config):
-            # 使 vLLM 配置在设备初始化期间可用
-            self.worker.init_device()  # type: ignore
-
-    def __getattr__(self, attr: str):
-        """委托给底层 Worker。"""
-        return getattr(self.worker, attr)
-
-    def _apply_mm_cache(self, scheduler_output: SchedulerOutput) -> None:
-        """应用多模态缓存到调度器输出。
-
-        Args:
-            scheduler_output: 调度器输出
-        """
-        mm_cache = self.mm_receiver_cache
-        if mm_cache is None:
+        if not seg_addrs or page_size_el is None:
+            self._meta = None
             return
 
-        for req_data in scheduler_output.scheduled_new_reqs:
-            req_data.mm_features = mm_cache.get_and_update_features(
-                req_data.mm_features
+        blk_size = min(largest_power_of_2_divisor(page_size_el), 1024)
+        self._id_cap = 8192
+        self._ids_pinned = torch.empty(
+            self._id_cap,
+            dtype=torch.int64,
+            pin_memory=self.pin_memory,
+        )
+        self._ids_gpu = torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
+        self._meta = (
+            torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
+            page_size_el,
+            blk_size,
+            len(seg_addrs),
+        )
+
+    def zero_block_ids(self, block_ids: list[int]) -> None:
+        """Zero the KV cache memory for the given block IDs."""
+        if not block_ids or self._meta is None:
+            return
+        seg_addrs, page_size_el, blk_size, n_segs = self._meta
+        n_blocks = len(block_ids)
+        if n_blocks > self._id_cap:
+            self._id_cap = n_blocks * 2
+            self._ids_pinned = torch.empty(
+                self._id_cap,
+                dtype=torch.int64,
+                pin_memory=self.pin_memory,
             )
+            self._ids_gpu = torch.empty(
+                self._id_cap, dtype=torch.int64, device=self.device
+            )
+        assert self._ids_pinned is not None and self._ids_gpu is not None
+        self._ids_pinned[:n_blocks].numpy()[:] = block_ids
+        idx = self._ids_gpu[:n_blocks]
+        idx.copy_(self._ids_pinned[:n_blocks], non_blocking=True)
+        grid = (n_blocks * n_segs * (page_size_el // blk_size),)
+        _zero_kv_blocks_kernel[grid](
+            seg_addrs,
+            idx,
+            n_blocks,
+            N_SEGS=n_segs,
+            PAGE_SIZE_EL=page_size_el,
+            BLOCK_SIZE=blk_size,
+        )
 
-    def execute_model(
-        self, scheduler_output: SchedulerOutput
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        """执行模型。
 
-        Args:
-            scheduler_output: 调度器输出
+@dataclass
+class AttentionGroup:
+    backend: type[AttentionBackend]
+    layer_names: list[str]
+    kv_cache_spec: KVCacheSpec
+    kv_cache_group_id: int
+    # When ubatching is enabled we will have a metadata builder for each ubatch
+    # so that if they use internal persistent buffers for cudagraphs, and they
+    # won't have to worry about conflicting with the other ubatches.
+    metadata_builders: list[AttentionMetadataBuilder] = field(
+        default_factory=lambda: []
+    )
 
-        Returns:
-            ModelRunnerOutput 或 AsyncModelRunnerOutput
-        """
-        self._apply_mm_cache(scheduler_output)
+    def create_metadata_builders(
+        self,
+        vllm_config,
+        device,
+        kernel_block_size: int | None = None,
+        num_metadata_builders: int = 1,
+    ):
+        kv_cache_spec_builder = (
+            self.kv_cache_spec.copy_with_new_block_size(kernel_block_size)
+            if kernel_block_size is not None
+            else self.kv_cache_spec
+        )
+        self.metadata_builders = [
+            self.backend.get_builder_cls()(
+                kv_cache_spec_builder,
+                self.layer_names,
+                vllm_config,
+                device,
+            )
+            for _ in range(num_metadata_builders)
+        ]
 
-        return self.worker.execute_model(scheduler_output)
+    def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
+        assert len(self.metadata_builders) > ubatch_id
+        return self.metadata_builders[ubatch_id]
 
-    def reset_mm_cache(self) -> None:
-        """重置多模态缓存。"""
-        mm_receiver_cache = self.mm_receiver_cache
-        if mm_receiver_cache is not None:
-            mm_receiver_cache.clear_cache()
 
-        self.worker.reset_mm_cache()
+def select_common_block_size(
+    kv_manager_block_size: int,
+    backends: list[type[AttentionBackend]],
+) -> int:
+    """
+    Select a block size that is supported by all backends and is a factor of
+    kv_manager_block_size.
+
+    If kv_manager_block_size is supported by all backends, return it directly.
+    Otherwise, return the max supported size.
+
+    Args:
+        kv_manager_block_size: Block size of KV cache.
+        backends: List of attention backend classes.
+
+    Returns:
+        The selected block size.
+
+    Raises:
+        ValueError: If no valid block size found.
+    """
+
+    def block_size_is_supported(
+        backends: list[type[AttentionBackend]], block_size: int
+    ) -> bool:
+        """Check if the block size is supported by all backends."""
+        for backend in backends:
+            is_supported = False
+            for supported_size in backend.get_supported_kernel_block_sizes():
+                if isinstance(supported_size, int):
+                    if block_size == supported_size:
+                        is_supported = True
+                elif isinstance(supported_size, MultipleOf):
+                    if block_size % supported_size.base == 0:
+                        is_supported = True
+                else:
+                    raise ValueError(f"Unknown supported size: {supported_size}")
+            if not is_supported:
+                return False
+        return True
+
+    # Case 1: if the block_size of kv cache manager is supported by all backends,
+    # return it directly.
+    if block_size_is_supported(backends, kv_manager_block_size):
+        return kv_manager_block_size
+
+    # Case 2: otherwise, the block_size must be an `int`-format supported size of
+    # at least one backend. Iterate over all `int`-format supported sizes in
+    # descending order and return the first one that is supported by all backends.
+    # Simple proof:
+    # If the supported size b is in MultipleOf(x_i) format for all attention
+    # backends i, and b a factor of kv_manager_block_size, then
+    # kv_manager_block_size also satisfies MultipleOf(x_i) for all i. We will
+    # return kv_manager_block_size in case 1.
+    all_int_supported_sizes = set(
+        supported_size
+        for backend in backends
+        for supported_size in backend.get_supported_kernel_block_sizes()
+        if isinstance(supported_size, int)
+    )
+
+    for supported_size in sorted(all_int_supported_sizes, reverse=True):
+        if kv_manager_block_size % supported_size != 0:
+            continue
+        if block_size_is_supported(backends, supported_size):
+            return supported_size
+    raise ValueError(f"No common block size for {kv_manager_block_size}. ")
+
+
+def prepare_kernel_block_sizes(
+    kv_cache_config: KVCacheConfig, attn_groups: list[list[AttentionGroup]]
+) -> list[int]:
+    """
+    Generate kernel_block_sizes that matches each block_size.
+
+    For attention backends that support virtual block splitting,
+    use the supported block sizes from the backend.
+    For other backends (like Mamba), use the same block size (no splitting).
+
+    Args:
+        kv_cache_config: The KV cache configuration.
+        attn_groups: Attention groups indexed by KV cache group id.
+
+    Returns:
+        List of kernel block sizes for each cache group.
+    """
+    kernel_block_sizes = []
+    for kv_cache_gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        kv_cache_spec = kv_cache_group.kv_cache_spec
+        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+            # All layers in the UniformTypeKVCacheSpecs have the same type,
+            # pick an arbitrary one to dispatch.
+            kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
+        if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+            continue
+        if isinstance(kv_cache_spec, AttentionSpec):
+            # This is an attention backend that supports virtual block splitting.
+            kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
+            group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
+            selected_kernel_size = select_common_block_size(
+                kv_manager_block_size, group_backends
+            )
+            kernel_block_sizes.append(selected_kernel_size)
+        elif isinstance(kv_cache_spec, MambaSpec):
+            # This is likely Mamba or other non-attention cache, no splitting.
+            kernel_block_sizes.append(kv_cache_spec.block_size)
+        else:
+            raise NotImplementedError(
+                f"unknown kv cache spec {kv_cache_group.kv_cache_spec}"
+            )
+    return kernel_block_sizes
+
+
+def sanity_check_mm_encoder_outputs(
+    mm_embeddings: MultiModalEmbeddings,
+    expected_num_items: int,
+) -> None:
+    """
+    Perform sanity checks for the result of
+    [`vllm.model_executor.models.SupportsMultiModal.embed_multimodal`][].
+    """
+    assert isinstance(mm_embeddings, (list, tuple, torch.Tensor)), (
+        "Expected multimodal embeddings to be a list/tuple of 2D tensors, "
+        f"or a single 3D tensor, but got {type(mm_embeddings)} "
+        "instead. This is most likely due to incorrect implementation "
+        "of the model's `embed_multimodal` method."
+    )
+
+    assert len(mm_embeddings) == expected_num_items, (
+        "Expected number of multimodal embeddings to match number of "
+        f"input items: {expected_num_items}, but got {len(mm_embeddings)=} "
+        "instead. This is most likely due to incorrect implementation "
+        "of the model's `embed_multimodal` method."
+    )
+
+    assert all(e.ndim == 2 for e in mm_embeddings), (
+        "Expected multimodal embeddings to be a sequence of 2D tensors, "
+        f"but got tensors with shapes {[e.shape for e in mm_embeddings]} "
+        "instead. This is most likely due to incorrect implementation "
+        "of the model's `embed_multimodal` method."
+    )
+
+
+def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
+    """
+    Calculate the amount of memory required by vLLM, then validate
+    that the current amount of free memory is sufficient for that.
+    """
+    requested_memory = math.ceil(
+        init_snapshot.total_memory * cache_config.gpu_memory_utilization
+    )
+
+    if init_snapshot.free_memory < requested_memory:
+        raise ValueError(
+            f"Free memory on device {init_snapshot.device_} "
+            f"({format_gib(init_snapshot.free_memory)}/"
+            f"{format_gib(init_snapshot.total_memory)} GiB) on startup "
+            f"is less than desired GPU memory utilization "
+            f"({cache_config.gpu_memory_utilization}, "
+            f"{format_gib(requested_memory)} GiB). Decrease GPU memory "
+            f"utilization or reduce GPU memory used by other processes."
+        )
+
+    return requested_memory
+
+
+def add_kv_sharing_layers_to_kv_cache_groups(
+    shared_kv_cache_layers: dict[str, str],
+    kv_cache_groups: list[KVCacheGroupSpec],
+    runner_only_attn_layers: set[str] | None = None,
+) -> None:
+    """
+    Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
+    for layers that do not allocate its own KV cache, based on the mapping in
+    `shared_kv_cache_layers`. Adds these layers to the corresponding KV cache
+    group, which is needed to ensure that attention metadata is assigned later.
+
+    Args:
+        shared_kv_cache_layers: Layer pairings for cross-layer KV sharing.
+            If an Attention layer `layer_name` is in the keys of this dict, it
+            means this layer will perform attention using the keys and values
+            from the KV cache of `shared_kv_cache_layers[layer_name]`.
+        kv_cache_groups: The KV cache groups of the model.
+    """
+    layer_to_kv_cache_group: dict[str, KVCacheGroupSpec] = {}
+    for kv_cache_group in kv_cache_groups:
+        for layer_name in kv_cache_group.layer_names:
+            layer_to_kv_cache_group[layer_name] = kv_cache_group
+
+    for layer_name, target_layer_name in shared_kv_cache_layers.items():
+        tgt_kv_cache_group = layer_to_kv_cache_group[target_layer_name]
+        tgt_kv_cache_group.layer_names.append(layer_name)
+
+        if runner_only_attn_layers is not None:
+            runner_only_attn_layers.add(layer_name)
+
+
+def bind_kv_cache(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Attention],
+    runner_kv_caches: list[torch.Tensor],
+    num_attn_module: int = 1,
+) -> None:
+    """
+    Bind the allocated KV cache to both ModelRunner and forward context so
+    that the KV cache can be used in the forward pass.
+
+    This function:
+      1) Fills the ModelRunner's kv cache list (`runner_kv_caches`) with
+         kv_caches.
+      2) Associates each attention layer in the `forward_context` with its
+         corresponding KV cache in kv_caches.
+
+    Args:
+        kv_caches: The allocated kv_caches with layer names as keys.
+        forward_context: The global forward context containing all Attention
+            layers with layer names as keys.
+        runner_kv_caches: The kv_cache declared by ModelRunner.
+    """
+    # Bind kv_caches to ModelRunner
+    assert len(runner_kv_caches) == 0
+
+    # Convert kv_caches dict to a list of tensors in the order of layer_index.
+    index2name = defaultdict(list)
+    for layer_name in kv_caches:
+        index2name[extract_layer_index(layer_name, num_attn_module)].append(layer_name)
+
+    for layer_index in sorted(index2name.keys()):
+        layer_names = index2name[layer_index]
+        if len(layer_names) > 1:
+            # One typical case is encoder-decoder model, e.g., bart.
+            # The cross attention and self attention in the same decoder layer
+            # has different layer_name but the same layer_index.
+
+            # TODO - analyze where runner_kv_caches is used and the right
+            # way to ensure it properly reflects multiple attention layers
+            # in the same decoder block.
+            if (
+                current_platform.is_cuda_alike()
+                or current_platform.is_xpu()
+                or current_platform.is_cpu()
+            ):
+                # We know that the GPU / CPU runner is not impacted by this
+                # case. Some test code depends on runner_kv_caches, but
+                # not in a way that's impacted by ignoring this.
+                pass
+            else:
+                raise NotImplementedError
+        for layer_name in layer_names:
+            runner_kv_caches.append(kv_caches[layer_name])
+
+    # Bind kv_caches to forward context
+    for layer_name, kv_cache in kv_caches.items():
+        # NOTE: Keep list wrapper for layers that index kv_cache by engine slot.
+        forward_context[layer_name].kv_cache = [kv_cache]
+
+
+def is_residual_scattered_for_sp(
+    vllm_config: VllmConfig, num_input_tokens: int
+) -> bool:
+    """Check if the residual tensor is scattered for sequence parallelism.
+
+    The residual tensor is scattered across tensor parallel ranks when sequence
+    parallelism and tensor parallelism is enabled.
+
+    This follows the same logic as SequenceParallelismPass.is_applicable_for_range():
+    - In full-graph compilation mode (no splitting ops or using inductor graph
+      partition), SP is always applied
+    - Otherwise, SP is only applied for specific shapes in compile_sizes
+    """
+    if not vllm_config.compilation_config.pass_config.enable_sp:
+        return False
+
+    tp = vllm_config.parallel_config.tensor_parallel_size
+
+    if tp == 1:
+        return False
+
+    # When sequence parallelism is enabled, we always pad num_input_tokens
+    # to be a multiple of tensor_parallel_size (tp) earlier.
+    assert num_input_tokens % tp == 0
+
+    if (
+        not vllm_config.compilation_config.splitting_ops
+        or vllm_config.compilation_config.use_inductor_graph_partition
+    ):
+        return True
+    compile_sizes = vllm_config.compilation_config.compile_sizes
+    if compile_sizes is None:
+        return False
+    return num_input_tokens in compile_sizes

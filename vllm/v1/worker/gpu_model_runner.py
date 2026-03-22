@@ -1,20 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GPU 模型运行器模块。
 
-本模块实现了 GPU 模型运行器类，负责：
-- 管理模型加载和初始化
-- 执行模型前向传播和采样
-- 支持 CUDA Graph 捕获和回放
-- 处理 KV 缓存管理
-- 支持 LoRA 适配器
-- 支持多模态输入
-- 支持推测解码
-- 支持多种注意力后端
-
-主要类：
-- GPUModelRunner: GPU 模型运行器实现类
-"""
 import functools
 import gc
 import itertools

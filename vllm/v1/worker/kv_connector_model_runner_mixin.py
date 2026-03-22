@@ -1,14 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""KV 连接器模型运行器混入模块。
-
-本模块定义 KV 连接器功能混入类，负责：
-- 管理 KV 连接器的生命周期
-- 处理 KV 缓存的异步传输
-- 支持 uniform KV cache 布局
-
-主要类：
-- KVConnectorModelRunnerMixin: KV 连接器功能混入类
+"""
+Define KV connector functionality mixin for model runners.
 """
 
 import copy
@@ -43,29 +36,19 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-# 定义为模型运行器（GPU、TPU）的 KV 连接器功能混入类
+# Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
 class KVConnectorModelRunnerMixin:
-    """KV 连接器功能混入类。
-
-    提供 KV 连接器的标准接口，用于管理 KV 缓存的传输。
-    """
+    @staticmethod
+    def ensure_kv_transfer_shutdown() -> None:
+        # has_kv_transfer_group can be None during interpreter shutdown.
+        if has_kv_transfer_group and has_kv_transfer_group():  # type: ignore[truthy-function]
+            ensure_kv_transfer_shutdown()
 
     @staticmethod
     def kv_connector_no_forward(
         scheduler_output: "SchedulerOutput", vllm_config: VllmConfig
     ) -> ModelRunnerOutput:
-        """KV 连接器无 forward 时的处理。
-
-        即使没有工作要做，也执行 KV 发送/接收。
-
-        Args:
-            scheduler_output: 调度器输出
-            vllm_config: vLLM 配置
-
-        Returns:
-            模型运行器输出
-        """
-        # 即使没有工作要做，也执行 KV 发送/接收
+        # KV send/recv even if no work to do.
         with (
             set_forward_context(None, vllm_config),
             KVConnectorModelRunnerMixin._get_kv_connector_output(
@@ -86,15 +69,6 @@ class KVConnectorModelRunnerMixin:
         scheduler_output: "SchedulerOutput",
         defer_finalize: bool = False,
     ) -> AbstractContextManager[KVConnectorOutput | None]:
-        """获取 KV 连接器输出上下文管理器（如果有 KV 传输）。
-
-        Args:
-            scheduler_output: 调度器输出
-            defer_finalize: 是否延迟完成
-
-        Returns:
-            KV 连接器输出上下文管理器
-        """
         return (
             KVConnectorModelRunnerMixin._get_kv_connector_output(
                 scheduler_output, defer_finalize=defer_finalize
@@ -105,17 +79,17 @@ class KVConnectorModelRunnerMixin:
 
     @staticmethod
     def finalize_kv_connector() -> None:
-        """完成 KV 连接器：等待保存完成并清除元数据。
+        """Finalize the KV connector: wait_for_save and clear metadata.
 
-        当 defer_finalize=True 时，在 draft model forward 后调用。
+        Call after draft model forward when defer_finalize=True was used.
         """
         if has_kv_transfer_group():
             kv_connector = get_kv_transfer_group()
             kv_connector.wait_for_save()
             kv_connector.clear_connector_metadata()
 
-    # 此上下文管理器必须在活动的前向上下文中使用
-    # 它封装了 execute_model 内的整个 KV 连接器生命周期
+    # This context manager must be used within an active forward context.
+    # It encapsulates the entire KV connector lifecycle within execute_model
     @staticmethod
     @contextmanager
     def _get_kv_connector_output(
@@ -123,33 +97,18 @@ class KVConnectorModelRunnerMixin:
         wait_for_save: bool = True,
         defer_finalize: bool = False,
     ) -> Generator[KVConnectorOutput, None, None]:
-        """获取 KV 连接器输出的上下文管理器。
-
-        管理 KV 连接器的完整生命周期：
-        1. 绑定连接器元数据
-        2. 启动异步 KV 缓存传输
-        3. 获取已完成的传输和统计信息
-        4. 清除连接器元数据
-
-        Args:
-            scheduler_output: 调度器输出
-            wait_for_save: 是否等待保存完成
-            defer_finalize: 是否延迟完成
-
-        Yields:
-            KV 连接器输出
-        """
         output = KVConnectorOutput()
 
-        # 使用 forward() 的 KVConnector 元数据更新 KVConnector
+        # Update KVConnector with the KVConnector metadata forward().
         kv_connector = get_kv_transfer_group()
         assert isinstance(kv_connector, KVConnectorBase)
         assert scheduler_output.kv_connector_metadata is not None
         kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
 
-        # 后台 KV 缓存传输发生在这里
-        # 这些传输设计为异步的，涉及的请求可能与运行中的请求不重叠
-        # 在这里执行以节省 collective_rpc
+        # Background KV cache transfers happen here.
+        # These transfers are designed to be async and the requests
+        # involved may be disjoint from the running requests.
+        # Do this here to save a collective_rpc.
         kv_connector.start_load_kv(get_forward_context())
         try:
             yield output
@@ -174,29 +133,33 @@ class KVConnectorModelRunnerMixin:
         attn_groups: list[list[AttentionGroup]],
         cache_dtype: CacheDType,
     ) -> bool:
-        """确定是否应该使用统一的 KV 布局。
+        """
+        Determines whether a uniform KV layout should be used.
+        A uniform layout means all layers KV caches will share the same
+        underlying tensor, where for a given block number, the respective
+        KV data for all layers will be contiguous.
+        This will allow efficient KV transfer of per-block KV data for all
+        layers at once.
+        Note this layout will only be applied given 3 conditions:
+        1. The KV Cache config contains just a single group where all layers
+            have the same page size.
+        2. A KV connector is configured, and the KV connector instance prefers
+            to use this layout (prefer_cross_layer_blocks() returns True)
+        2. The flash attention backend supports this layout
+            (get_kv_cache_stride_order(True) includes a placement for a
+            num_layers dimension)
 
-        统一布局意味着所有层的 KV 缓存将共享相同的底层张量，
-        其中对于给定的块号，所有层的相应 KV 数据将是连续的。
-        这将允许一次性高效地传输所有层的每块 KV 数据。
-
-        注意：只有在满足以下 3 个条件时才会应用此布局：
-        1. KV 缓存配置只包含一个组，其中所有层具有相同的页面大小
-        2. 配置了 KV 连接器，并且 KV 连接器实例更喜欢使用此布局
-           (prefer_cross_layer_blocks() 返回 True)
-        3. flash attention 后端支持此布局
-           (get_kv_cache_stride_order(True) 包含 num_layers 维度的放置)
-
-        注意：num_layers 维度在统一层张量中的实际放置将由
-        注意力后端决定。因此，如果注意力后端不支持，
-        层的 KV 数据可能仍然不是每块连续的。
+        Note that the actual placement of the num_layers dimensions
+        in the unified layers tensors will be determined by the attention
+        backend.
+        Thus, the layers KV data may still not be contiguous per block
+        if the attention backend does not support it.
 
         Args:
-            attn_groups: 此模型的注意力组列表
-            cache_dtype: KV 缓存数据类型
-
+            attn_groups: The list of attention groups for this model
+            cache_dtype: The KV cache dtype
         Returns:
-            如果应该使用统一 KV 缓存布局则返回 True
+            True if we should use a uniform KV cache layout.
         """
 
         if not has_kv_transfer_group():
@@ -228,12 +191,12 @@ class KVConnectorModelRunnerMixin:
         except (AttributeError, NotImplementedError):
             return False
 
-        # 检查注意力后端是否包含层维度
+        # check that attention backend includes a layers dimension
         if len(kv_cache_stride_order) != len(kv_cache_shape) + 1:
             return False
 
-        # stride_order[0] == 0 表示 num_layers 在物理布局中保持第一
-        # （恒等排列），因此不支持跨层
+        # stride_order[0] == 0 means num_layers stays first in physical
+        # layout (identity permutation), so cross-layer is unsupported.
         return kv_cache_stride_order[0] != 0
 
     @staticmethod
@@ -244,22 +207,24 @@ class KVConnectorModelRunnerMixin:
         device: torch.device,
         kernel_block_sizes: list[int],
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor, type[AttentionBackend]]:
-        """为所有层具有相同布局的简单情况初始化和重塑 KV 缓存。
+        """
+        Initializes and reshapes KV caches for the simple case where all
+        layers have the same layout.
 
-        此函数假设 use_uniform_kv_cache() 返回 True。
+        This function assumes use_uniform_kv_cache() returned True.
 
         Args:
-            kv_cache_config: KV 缓存配置
-            attn_groups: 此模型的注意力组列表
-            cache_dtype: KV 缓存数据类型
-            device: 要分配的 torch 设备
-            kernel_block_sizes: 每个 KV 缓存组的内核块大小
-
+            kv_cache_config: The KV cache config
+            attn_groups: The list of attention groups for this model
+            cache_dtype: The KV cache dtype
+            device: The torch device to allocate on.
+            kernel_block_sizes: The kernel block sizes for each KV cache group.
         Returns:
-            元组 (kv_caches, cross_layers_kv_cache, attn_backend)，其中：
-                kv_caches 是从层名映射到其相应 KV 缓存内存缓冲区的字典
-                cross_layers_kv_cache 是跨层 KV 缓存张量
-                attn_backend 是匹配此张量的注意力后端
+            A tuple (kv_caches, cross_layers_kv_cache, attn_backend) where:
+                kv_caches is a dict mapping between layer names to their
+                    corresponding memory buffer for KV cache.
+                cross_layers_kv_cache is the cross layers kv cache tensor
+                attn_backend is the attention backend matching this tensor
         """
         attn_group = attn_groups[0][0]
         kv_cache_spec = attn_group.kv_cache_spec
@@ -291,7 +256,7 @@ class KVConnectorModelRunnerMixin:
             cache_dtype_str=cache_dtype,
         )
 
-        # 在形状前添加 num_layers 维度
+        # prepend a num_layers dimension into the shape
         kv_cache_shape = (num_layers,) + kv_cache_shape
 
         try:
@@ -304,16 +269,16 @@ class KVConnectorModelRunnerMixin:
 
         kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
 
-        logger.info("分配形状为 %s 的跨层 KV 缓存", kv_cache_shape)
+        logger.info("Allocating a cross layer KV cache of shape %s", kv_cache_shape)
 
-        # 为所有层分配一个连续缓冲区
+        # allocate one contiguous buffer for all layers
         cross_layers_kv_cache = (
             torch.zeros(total_size, dtype=torch.int8, device=device)
             .view(kv_cache_spec.dtype)
             .view(kv_cache_shape)
         )
 
-        # 保持原始 KV 形状视图
+        # Maintain original KV shape view.
         inv_order = [
             kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
         ]

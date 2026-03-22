@@ -1,17 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ROCM Aiter Unified Attention 后端模块。
-
-本模块实现了基于 ROCm Aiter Unified Attention 的注意力后端，负责：
-- 实现 Aiter Unified Attention 后端类
-- 使用 Triton unified attention kernel
-- 支持编码器和解码器注意力
-- 支持 FP8 量化和融合输出量化
-
-主要类：
-- RocmAiterUnifiedAttentionBackend: Aiter Unified Attention 后端类
-- RocmAiterUnifiedAttentionImpl: 后端实现类
-"""
+"""Attention layer with PagedAttention and Triton prefix prefill."""
 
 import torch
 
@@ -34,32 +23,14 @@ logger = init_logger(__name__)
 
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
-    """Rocm Aiter Unified Attention 后端类。
-
-    基于 ROCm Aiter Unified Attention 实现的注意力后端。
-    支持所有注意力类型（解码器、编码器、编码器 - 解码器）。
-    """
     accept_output_buffer: bool = True
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        """获取支持的内核块大小列表。
-
-        Returns:
-            支持的块大小列表 [MultipleOf(16)]
-        """
         return [MultipleOf(16)]
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
-        """获取首选块大小。
-
-        Args:
-            default_block_size: 默认块大小
-
-        Returns:
-            首选块大小 64
-        """
         logger.warning_once(
             "[ROCM_AITER_UNIFIED_ATTN]: Setting kv cache block size to 64."
         )
@@ -67,66 +38,30 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
 
     @classmethod
     def supports_block_size(cls, block_size: int | None) -> bool:
-        """检查是否支持指定的块大小。
-
-        Args:
-            block_size: 块大小
-
-        Returns:
-            是否支持（必须是 16 的倍数）
-        """
         if block_size is None:
             return True
         return block_size % 16 == 0
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
-        """检查是否支持指定的头大小。
-
-        Args:
-            head_size: 头大小
-
-        Returns:
-            是否支持（必须 >= 32）
-        """
         return head_size >= 32
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        """检查是否支持 multimodal 前缀。
-
-        Returns:
-            True（支持）
-        """
         return True
 
     @classmethod
     def supports_sink(cls) -> bool:
-        """检查是否支持 sink token。
-
-        Returns:
-            True（支持）
-        """
         return True
 
     forward_includes_kv_cache_update: bool = False
 
     @staticmethod
     def get_name() -> str:
-        """获取后端名称。
-
-        Returns:
-            后端名称 "ROCM_AITER_UNIFIED_ATTN"
-        """
         return "ROCM_AITER_UNIFIED_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["RocmAiterUnifiedAttentionImpl"]:
-        """获取注意力实现类。
-
-        Returns:
-            RocmAiterUnifiedAttentionImpl 类
-        """
         return RocmAiterUnifiedAttentionImpl
 
     @staticmethod
@@ -137,55 +72,21 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        """获取 KV 缓存形状。
-
-        Args:
-            num_blocks: 块数量
-            block_size: 块大小
-            num_kv_heads: KV 头数量
-            head_size: 头大小
-            cache_dtype_str: 缓存数据类型
-
-        Returns:
-            KV 缓存形状元组
-
-        Raises:
-            ValueError: 如果块大小不是 16 的倍数
-        """
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
-        """检查是否使用级联注意力。
-
-        Returns:
-            False（不支持级联注意力）
-        """
         return False
 
     @staticmethod
     def get_builder_cls() -> type["RocmAttentionMetadataBuilder"]:
-        """获取元数据构建器类。
-
-        Returns:
-            RocmAttentionMetadataBuilder 类
-        """
         return RocmAttentionMetadataBuilder
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """检查是否支持指定的注意力类型。
-
-        RocmAiterUnifiedAttention 支持所有注意力类型。
-
-        Args:
-            attn_type: 注意力类型
-
-        Returns:
-            是否支持
-        """
+        """RocmAiterUnifiedAttention supports all attention types."""
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,
@@ -195,20 +96,7 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
 
 
 class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
-    """Rocm Aiter Unified Attention 实现类。
-
-    基于 ROCm Aiter Unified Attention 实现的注意力后端。
-    使用 Triton unified attention kernel，支持编码器和解码器注意力。
-    """
     def fused_output_quant_supported(self, quant_key: QuantKey):
-        """检查是否支持融合输出量化。
-
-        Args:
-            quant_key: 量化密钥
-
-        Returns:
-            是否支持（仅支持 kFp8StaticTensorSym）
-        """
         return quant_key == kFp8StaticTensorSym
 
     def __init__(
@@ -225,21 +113,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         kv_sharing_target_layer_name: int | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
-        """初始化 Rocm Aiter Unified Attention 实现。
-
-        Args:
-            num_heads: 注意力头数量
-            head_size: 头大小
-            scale: 缩放因子
-            num_kv_heads: KV 头数量
-            alibi_slopes: ALIBI 斜率列表
-            sliding_window: 滑动窗口大小
-            kv_cache_dtype: KV 缓存数据类型
-            logits_soft_cap: Logits 软化上限
-            attn_type: 注意力类型
-            kv_sharing_target_layer_name: KV 共享目标层名称
-            sinks: sink token 张量
-        """
         super().__init__(
             num_heads,
             head_size,
@@ -273,21 +146,17 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """使用 FlashAttention 进行前向传播。
+        """Forward pass with FlashAttention.
 
         Args:
-            layer: 注意力层
-            query: 形状 = [num_tokens, num_heads, head_size]
-            key: 形状 = [num_tokens, num_kv_heads, head_size]
-            value: 形状 = [num_tokens, num_kv_heads, head_size]
-            kv_cache: 形状 = [2, num_blocks, block_size, num_kv_heads, head_size]
-            attn_metadata: 注意力元数据
-            output: 输出张量
-            output_scale: 输出缩放因子
-            output_block_scale: 输出块缩放因子
-
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, block_size, num_kv_heads, head_size]
+            attn_metadata: Metadata for attention.
         Returns:
-            形状 = [num_tokens, num_heads * head_size] 的输出张量
+            shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
 
@@ -390,15 +259,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ):
-        """执行 KV 缓存更新。
-
-        Args:
-            layer: 注意力层
-            key: Key 张量
-            value: Value 张量
-            kv_cache: KV 缓存张量
-            slot_mapping: 槽位映射
-        """
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
@@ -418,11 +278,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         )
 
     def fused_rope_kvcache_supported(self):
-        """检查是否支持融合 RoPE KV 缓存。
-
-        Returns:
-            是否支持（需要 rocm_aiter_ops 启用）
-        """
         return rocm_aiter_ops.is_enabled()
 
     def do_rope_and_kv_cache_update(
@@ -437,19 +292,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        """执行 RoPE 和 KV 缓存更新。
-
-        Args:
-            layer: 注意力层
-            query: Query 张量
-            key: Key 张量
-            value: Value 张量
-            positions: 位置
-            cos_sin_cache: RoPE cos/sin 缓存
-            is_neox: 是否 NeoX 格式
-            kv_cache: KV 缓存张量
-            layer_slot_mapping: 层槽位映射
-        """
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching

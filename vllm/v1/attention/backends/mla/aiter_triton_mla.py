@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Aiter Triton MLA 后端模块。
-
-本模块实现了基于 ROCm Aiter Triton 的 MLA 后端，负责：
-- 继承 AiterMLABackend 并重命名为 AITER_TRITON_MLA
-- 使用 Triton MHA kernel 执行 MLA 计算
-- 支持 LSE 转置以适配 Triton MHA 输出格式
-
-主要类：
-- AiterTritonMLABackend: Aiter Triton MLA 后端类
-- AiterTritonMLAImpl: Aiter Triton MLA 实现类
-"""
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLABackend, AiterMLAImpl
 
 

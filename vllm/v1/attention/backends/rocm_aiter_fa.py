@@ -1,27 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ROCM Aiter Flash Attention 后端模块。
-
-本模块实现了基于 ROCm Aiter Flash Attention 的注意力后端，负责：
-- 实现 Aiter Flash Attention 后端类
-- 支持解码、预填充和扩展（extend）请求
-- 支持 FP8 KV 缓存和 shuffle 布局
-- 支持滑动窗口注意力
-- 支持级联注意力
-
-主要类：
-- AiterFlashAttentionBackend: Aiter Flash Attention 后端类
-- AiterFlashAttentionMetadata: Aiter Flash Attention 元数据类
-- AiterFlashAttentionMetadataBuilder: 元数据构建器
-- AiterFlashAttentionImpl: 后端实现类
-
-辅助类：
-- AiterFlashAttentionDecodeMetadata: 解码元数据
-- AiterFlashAttentionPrefillMetadata: 预填充元数据
-- AiterChunkSlidingWindowMetadata: 分块滑动窗口元数据
-- AiterChunkContextMetadata: 分块上下文元数据
-- AiterFlashAttentionChunkPrefillMetadata: 分块预填充元数据
-"""
+"""Attention layer with AiterFlashAttention."""
 
 from dataclasses import dataclass
 from typing import ClassVar
@@ -59,26 +38,9 @@ if current_platform.is_rocm():
     from vllm.triton_utils import tl, triton
 
     def block_size(x, head_dim):
-        """计算块大小。
-
-        Args:
-            x: 元素大小相关参数
-            head_dim: 头维度
-
-        Returns:
-            计算得到的块大小
-        """
         return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))
 
     def num_programs(total_tokens):
-        """计算程序数量。
-
-        Args:
-            total_tokens: 总 token 数
-
-        Returns:
-            计算单元数量
-        """
         return min(total_tokens, num_compute_units())
 
     @triton.jit
@@ -102,30 +64,6 @@ if current_platform.is_rocm():
         CACHE_FORMAT: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
-        """Triton kernel 用于从 KV 缓存中 gather 数据。
-
-        支持 NHD 和 SHUFFLE 两种缓存布局格式。
-
-        Args:
-            key_cache_ptr: K 缓存指针
-            value_cache_ptr: V 缓存指针
-            key_ptr: K 输出指针
-            value_ptr: V 输出指针
-            block_table_ptr: 块表指针
-            cu_seqlens_kv_ptr: KV 累积序列长度指针
-            token_to_batch_ptr: token 到批次映射指针
-            seq_start_ptr: 序列起始指针
-            k_scale_ptr: K 缩放因子指针
-            v_scale_ptr: V 缩放因子指针
-            num_heads: 头数量
-            head_size: 头大小
-            x: 分块参数
-            max_block_num: 最大块数
-            DEQUANT: 是否反量化
-            PAGE_SIZE: 页面大小
-            CACHE_FORMAT: 缓存格式
-            BLOCK_SIZE: 块大小
-        """
         token_id = tl.program_id(0)
         head_id = tl.program_id(1)
         col_offsets = tl.arange(0, BLOCK_SIZE)
@@ -147,7 +85,7 @@ if current_platform.is_rocm():
         slot_id = batch_offset % PAGE_SIZE
 
         if CACHE_FORMAT == "NHD":
-            # KV 缓存布局为
+            # for kv cache layout as
             # K: [num_blocks, page_size, num_head, head_dim]
             # V: [num_blocks, page_size, num_head, head_dim]
             key_cache_ptr_offset = (
@@ -175,7 +113,7 @@ if current_platform.is_rocm():
             tl.store(value_ptr_offset + col_offsets, v_reg)
 
         elif CACHE_FORMAT == "SHUFFLE":
-            # KV 缓存布局为
+            # for kv cache layout as
             # K: [num_blocks, num_head, head_dim // x, page_size, x]
             # V: [num_blocks, num_head, page_size // x, head_dim, x]
             key_cache_ptr_offset = (
@@ -218,34 +156,17 @@ if current_platform.is_rocm():
         kv_cache_layout: str,
         total_tokens: int,
     ):
-        """从 KV 缓存中 gather 数据的封装函数。
-
-        Args:
-            key_cache: K 缓存
-            value_cache: V 缓存
-            key: K 输出
-            value: V 输出
-            block_tables: 块表
-            k_scales: K 缩放因子
-            v_scales: V 缩放因子
-            cu_seqlens_kv: KV 累积序列长度
-            token_to_batch: token 到批次映射
-            seq_starts: 序列起始
-            dequant: 是否反量化
-            kv_cache_layout: KV 缓存布局
-            total_tokens: 总 token 数
-        """
         assert kv_cache_layout in ["NHD", "SHUFFLE"], (
-            "kv_cache_layout 仅支持 NHD, SHUFFLE"
+            "kv_cache_layout only support NHD, SHUFFLE"
         )
         head_dim = key.shape[2]
         x = 16 // key_cache.element_size()
-        # 目前仅支持带反量化的 gather cache
-        assert dequant is True, "目前仅支持带反量化的 gather cache"
-        # 对于 K 缓存布局：[num_blocks, num_heads, page_size, head_dim]
+        # assert dequant is True, "Currently, we only support "\
+        # "gather cache with dequant"
+        # For k cache layout: [num_blocks, num_heads, page_size, head_dim]
         assert head_dim == key_cache.shape[3], (
-            "我们假设你的 KV 缓存布局是 [num_blocks, "
-            "page_size, num_heads, head_dim]，但实际不是"
+            "We assume your kv cache layout is [num_blocks, "
+            "page_size, num_heads, head_dim], but got otherwise"
         )
         page_size = key_cache.shape[1]
         num_heads = key_cache.shape[2]
@@ -291,26 +212,6 @@ if current_platform.is_rocm():
         QUANT: tl.constexpr,
         IS_FNUZ: tl.constexpr,
     ):
-        """Triton kernel 用于 shuffle 布局的 KV 缓存更新。
-
-        Args:
-            key_ptr: K 输入指针
-            value_ptr: V 输入指针
-            key_cache_ptr: K 缓存指针
-            value_cache_ptr: V 缓存指针
-            slot_mapping_ptr: 槽位映射指针
-            k_scale_ptr: K 缩放因子指针
-            v_scale_ptr: V 缩放因子指针
-            x: 分块参数
-            k_stride0: K 步幅
-            v_stride0: V 步幅
-            block_size: 块大小
-            head_size: 头大小
-            num_kv_heads: KV 头数量
-            BLOCK_SIZE: 块大小
-            QUANT: 是否量化
-            IS_FNUZ: 是否 FNUZ 格式
-        """
         tid = tl.program_id(0)
         head_id = tl.program_id(1)
         offset = tl.arange(0, BLOCK_SIZE)
@@ -356,18 +257,6 @@ if current_platform.is_rocm():
         k_scales: torch.Tensor,
         v_scales: torch.Tensor,
     ):
-        """Shuffle 布局的 KV 缓存更新封装函数。
-
-        Args:
-            key: K 输入
-            value: V 输入
-            key_cache: K 缓存
-            value_cache: V 缓存
-            slot_mapping: 槽位映射
-            kv_cache_dtype: KV 缓存数据类型
-            k_scales: K 缩放因子
-            v_scales: V 缩放因子
-        """
         num_tokens = slot_mapping.shape[0]
         _, num_kv_heads, head_size = key.shape
         num_blocks, block_size, _, _ = key_cache.shape
@@ -416,276 +305,99 @@ logger = init_logger(__name__)
 
 @dataclass
 class AiterFlashAttentionDecodeMetadata:
-    """Aiter Flash Attention 解码元数据。
-
-    Attributes:
-        max_query_len: 最大 query 长度
-        min_query_len: 最小 query 长度
-        max_seq_len: 最大序列长度
-        query_start_loc: query 起始位置
-    """
     max_query_len: int
-    """最大 query 长度。"""
-
     min_query_len: int
-    """最小 query 长度。"""
-
     max_seq_len: int
-    """最大序列长度。"""
-
     query_start_loc: torch.Tensor
-    """query 起始位置张量。"""
 
 
 @dataclass
 class AiterFlashAttentionPrefillMetadata:
-    """Aiter Flash Attention 预填充元数据。
-
-    Attributes:
-        max_query_len: 最大 query 长度
-        min_query_len: 最小 query 长度
-        max_seq_len: 最大序列长度
-        query_start_loc: query 起始位置
-    """
     max_query_len: int
-    """最大 query 长度。"""
-
     min_query_len: int
-    """最小 query 长度。"""
-
     max_seq_len: int
-    """最大序列长度。"""
-
     query_start_loc: torch.Tensor
-    """query 起始位置张量。"""
 
 
 @dataclass
 class AiterChunkSlidingWindowMetadata:
-    """Aiter 分块滑动窗口元数据。
-
-    Attributes:
-        swa_seqlens: 滑动窗口序列长度
-        swa_cu_seqlens: 滑动窗口累积序列长度
-        swa_seq_starts: 滑动窗口序列起始
-        swa_token_to_batch: 滑动窗口 token 到批次映射
-        swa_max_seqlens: 滑动窗口最大序列长度
-        swa_total_tokens: 滑动窗口总 token 数
-        swa_workspace: 滑动窗口工作空间
-    """
     swa_seqlens: torch.Tensor
-    """滑动窗口序列长度张量。"""
-
     swa_cu_seqlens: torch.Tensor
-    """滑动窗口累积序列长度张量。"""
-
     swa_seq_starts: torch.Tensor
-    """滑动窗口序列起始张量。"""
-
     swa_token_to_batch: torch.Tensor
-    """滑动窗口 token 到批次映射张量。"""
-
     swa_max_seqlens: int
-    """滑动窗口最大序列长度。"""
-
     swa_total_tokens: int
-    """滑动窗口总 token 数。"""
-
     swa_workspace: torch.Tensor
-    """滑动窗口工作空间张量。"""
 
 
 @dataclass
 class AiterChunkContextMetadata:
-    """Aiter 分块上下文元数据。
-
-    Attributes:
-        workspace: 工作空间
-        cu_seq_lens_chunk: 分块累积序列长度
-        chunk_starts: 块起始
-        token_to_batch: token 到批次映射
-        seq_tot: 每个块的总序列长度
-        max_seq_lens: 每个块的最大序列长度
-        seq_lens: 序列长度
-        num_chunks: 块数量
-        total_token_per_batch: 每个批次的总 token 数
-        swa_metadata: 滑动窗口元数据
-    """
     workspace: torch.Tensor
-    """工作空间张量。"""
-
     cu_seq_lens_chunk: torch.Tensor
-    """分块累积序列长度张量。"""
-
     chunk_starts: torch.Tensor
-    """块起始张量。"""
-
     token_to_batch: torch.Tensor
-    """token 到批次映射张量。"""
-
     seq_tot: list[int]
-    """每个块的总序列长度列表。"""
-
     max_seq_lens: list[int]
-    """每个块的最大序列长度列表。"""
-
     seq_lens: torch.Tensor
-    """序列长度张量。"""
-
     num_chunks: int
-    """块数量。"""
-
     total_token_per_batch: list[int]
-    """每个批次的总 token 数列表。"""
-
     swa_metadata: AiterChunkSlidingWindowMetadata | None
-    """滑动窗口元数据。"""
 
 
 @dataclass
 class AiterFlashAttentionChunkPrefillMetadata:
-    """Aiter Flash Attention 分块预填充元数据。
-
-    Attributes:
-        max_query_len: 最大 query 长度
-        min_query_len: 最小 query 长度
-        max_seq_len: 最大序列长度
-        query_start_loc: query 起始位置
-        chunk_context_metadata: 分块上下文元数据
-    """
     max_query_len: int
-    """最大 query 长度。"""
-
     min_query_len: int
-    """最小 query 长度。"""
-
     max_seq_len: int
-    """最大序列长度。"""
-
     query_start_loc: torch.Tensor
-    """query 起始位置张量。"""
-
     chunk_context_metadata: AiterChunkContextMetadata
-    """分块上下文元数据。"""
 
 
 @dataclass
 class AiterFlashAttentionMetadata:
-    """Aiter Flash Attention 元数据类。
-
-    存储 Aiter Flash Attention 前向传播所需的元数据信息。
-
-    Attributes:
-        num_actual_tokens: 实际 token 数（不包括 padding）
-        num_actual_kv_tokens: 实际 KV token 数
-        max_query_len: 最大 query 长度
-        query_start_loc: query 起始位置
-        max_seq_len: 最大序列长度
-        seq_lens: 序列长度
-        slot_mapping: 槽位映射
-        block_table: 块表
-        num_decodes: 解码请求数
-        num_decode_tokens: 解码 token 数
-        num_prefills: 预填充请求数
-        num_prefill_tokens: 预填充 token 数
-        num_extends: 扩展请求数
-        num_extend_tokens: 扩展 token 数
-        decode_metadata: 解码元数据
-        prefill_metadata: 预填充元数据
-        extend_metadata: 扩展元数据
-        use_cascade: 是否使用级联注意力
-        common_prefix_len: 公共前缀长度
-        total_tokens: 总 token 数
-        k_scale: K 缩放因子
-        v_scale: V 缩放因子
-    """
-    # NOTE(sang): context_len、query_len 和 seq_len 的定义：
-    # |---------- N-1 次迭代 --------|
-    # |---------------- N 次迭代 ---------------------|
-    # |- tokenA -|......................|-- 新 token ---|
+    # NOTE(sang): Definition of context_len, query_len, and seq_len.
+    # |---------- N-1 iteration --------|
+    # |---------------- N iteration ---------------------|
+    # |- tokenA -|......................|-- newTokens ---|
     # |---------- context_len ----------|
     # |-------------------- seq_len ---------------------|
     #                                   |-- query_len ---|
 
-    num_actual_tokens: int
-    """实际 token 数（不包括 padding）。"""
-
+    num_actual_tokens: int  # Number of tokens excluding padding.
     num_actual_kv_tokens: int
-    """实际 KV token 数。"""
-
     max_query_len: int
-    """最大 query 长度。"""
-
     query_start_loc: torch.Tensor
-    """query 起始位置张量。"""
-
     max_seq_len: int
-    """最大序列长度。"""
-
     seq_lens: torch.Tensor
-    """序列长度张量。"""
-
     slot_mapping: torch.Tensor
-    """槽位映射张量。"""
-
     block_table: torch.Tensor
-    """块表张量。"""
 
-    # 预填充和解码分割
+    # prefill and decode split
     num_decodes: int
-    """解码请求数。"""
-
     num_decode_tokens: int
-    """解码 token 数。"""
-
     num_prefills: int
-    """预填充请求数。"""
-
     num_prefill_tokens: int
-    """预填充 token 数。"""
-
     num_extends: int
-    """扩展请求数。"""
-
     num_extend_tokens: int
-    """扩展 token 数。"""
 
     decode_metadata: AiterFlashAttentionDecodeMetadata | None
-    """解码元数据。"""
-
     prefill_metadata: AiterFlashAttentionPrefillMetadata | None
-    """预填充元数据。"""
-
     extend_metadata: AiterFlashAttentionChunkPrefillMetadata | None
-    """扩展元数据。"""
 
-    # 用于级联注意力
+    # For cascade attention.
     use_cascade: bool
-    """是否使用级联注意力。"""
-
     common_prefix_len: int
-    """公共前缀长度。"""
-
     total_tokens: int
-    """总 token 数。"""
 
-    # 仅用于启用了 shuffle_kv_cache 的 fp8 shuffle 布局 KV 缓存
-    # 我们为每一层分配 kv_scale，因为我们未来可能会为 KV 缓存集成每 token 量化
+    # Only for fp8 shuffle layout kv cache, we allocate kv_scale for each layer
+    # since we might integrate per token quant for kv cache in the future.
     k_scale: dict[str, torch.Tensor] | None
-    """K 缩放因子的字典。"""
-
     v_scale: dict[str, torch.Tensor] | None
-    """V 缩放因子的字典。"""
 
 
 class AiterFlashAttentionMetadataBuilder(
     AttentionMetadataBuilder[AiterFlashAttentionMetadata]
 ):
-    """Aiter Flash Attention 元数据构建器类。
-
-    负责构建 Aiter Flash Attention 运行所需的元数据对象。
-    支持解码、预填充和扩展请求的元数据构建。
-    """
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
@@ -695,14 +407,6 @@ class AiterFlashAttentionMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        """初始化 Aiter Flash Attention 元数据构建器。
-
-        Args:
-            kv_cache_spec: KV 缓存规格
-            layer_names: 层名称列表
-            vllm_config: vLLM 配置
-            device: 设备类型
-        """
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         self.model_config = vllm_config.model_config
@@ -750,14 +454,6 @@ class AiterFlashAttentionMetadataBuilder(
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ):
-        """为 CUDA 图捕获构建元数据。
-
-        Args:
-            common_attn_metadata: 通用注意力元数据
-
-        Returns:
-            构建的 AiterFlashAttentionMetadata 对象
-        """
         self.total_tokens = (
             self.model_config.max_model_len
             * self.vllm_config.scheduler_config.max_num_partial_prefills
@@ -772,16 +468,6 @@ class AiterFlashAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> "AiterFlashAttentionMetadata":
-        """构建 Aiter Flash Attention 元数据。
-
-        Args:
-            common_prefix_len: 公共前缀长度
-            common_attn_metadata: 通用注意力元数据
-            fast_build: 是否快速构建
-
-        Returns:
-            构建的 AiterFlashAttentionMetadata 对象
-        """
         assert self.reorder_batch_threshold is not None
         split_ret = split_decodes_prefills_and_extends(
             common_attn_metadata,
@@ -999,18 +685,12 @@ class AiterFlashAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         draft_index: int,
     ) -> AiterFlashAttentionMetadata:
-        """为预测草稿构建元数据。
+        """
+        Build attention metadata for draft model without CPU-GPU sync.
 
-        为 EAGLE 预测草稿构建注意力元数据，无需 CPU-GPU 同步。
-        所有请求都是统一解码，因此可以跳过 split_decodes_prefills_and_extends()
-        和所有会破坏 CUDA 图捕获的.cpu()/.item() 调用。
-
-        Args:
-            common_attn_metadata: 通用注意力元数据
-            draft_index: 草稿索引
-
-        Returns:
-            构建的 AiterFlashAttentionMetadata 对象
+        During EAGLE drafting all requests are uniform decodes, so we can
+        skip split_decodes_prefills_and_extends() and avoid all .cpu() /
+        .item() calls that would otherwise break CUDA graph capture.
         """
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
@@ -1048,20 +728,10 @@ class AiterFlashAttentionMetadataBuilder(
         )
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
-        """检查是否使用级联注意力。
-
-        Returns:
-            False（不支持级联注意力）
-        """
         return False
 
 
 class AiterFlashAttentionBackend(AttentionBackend):
-    """Aiter Flash Attention 后端类。
-
-    基于 ROCm Aiter Flash Attention 实现的注意力后端。
-    支持解码、预填充和扩展请求，支持 FP8 KV 缓存和 shuffle 布局。
-    """
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -1075,16 +745,7 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """检查是否支持指定的注意力类型。
-
-        ROCM AITER FA 支持解码器注意力和编码器 - 解码器（交叉）注意力。
-
-        Args:
-            attn_type: 注意力类型
-
-        Returns:
-            是否支持
-        """
+        """ROCM AITER FA supports decoder and encoder-decoder (cross) attention."""
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER_DECODER,
@@ -1092,49 +753,24 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        """获取支持的内核块大小列表。
-
-        Returns:
-            支持的块大小列表 [16, 32]
-        """
         return [16, 32]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        """获取支持的头大小列表。
-
-        Returns:
-            支持的头大小列表 [64, 128, 256]
-        """
         return [64, 128, 256]
 
     forward_includes_kv_cache_update: bool = False
 
     @staticmethod
     def get_name() -> str:
-        """获取后端名称。
-
-        Returns:
-            后端名称 "FLASH_ATTN"
-        """
         return "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["AiterFlashAttentionImpl"]:
-        """获取注意力实现类。
-
-        Returns:
-            AiterFlashAttentionImpl 类
-        """
         return AiterFlashAttentionImpl
 
     @staticmethod
     def get_builder_cls() -> type["AiterFlashAttentionMetadataBuilder"]:
-        """获取元数据构建器类。
-
-        Returns:
-            AiterFlashAttentionMetadataBuilder 类
-        """
         return AiterFlashAttentionMetadataBuilder
 
     @staticmethod
@@ -1145,35 +781,12 @@ class AiterFlashAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        """获取 KV 缓存形状。
-
-        Args:
-            num_blocks: 块数量
-            block_size: 块大小
-            num_kv_heads: KV 头数量
-            head_size: 头大小
-            cache_dtype_str: 缓存数据类型
-
-        Returns:
-            KV 缓存形状元组
-
-        Raises:
-            ValueError: 如果块大小不是 16 的倍数
-        """
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        """检查是否支持指定的计算能力。
-
-        Args:
-            capability: 设备计算能力
-
-        Returns:
-            是否支持（仅支持 MI3XX 系列）
-        """
         from vllm.platforms.rocm import on_mi3xx
 
         # DeviceCapability is currently created using torch.cuda.get_device_capability()
@@ -1183,11 +796,6 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
 
 class AiterFlashAttentionImpl(AttentionImpl):
-    """Aiter Flash Attention 实现类。
-
-    基于 ROCm Aiter Flash Attention 实现的注意力后端。
-    支持解码、预填充和扩展请求，支持滑动窗口和 FP8 KV 缓存。
-    """
     def __init__(
         self,
         num_heads: int,
@@ -1201,20 +809,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: int | None = None,
     ) -> None:
-        """初始化 Aiter Flash Attention 实现。
-
-        Args:
-            num_heads: 注意力头数量
-            head_size: 头大小
-            scale: 缩放因子
-            num_kv_heads: KV 头数量
-            alibi_slopes: ALIBI 斜率列表
-            sliding_window: 滑动窗口大小
-            kv_cache_dtype: KV 缓存数据类型
-            logits_soft_cap: Logits 软化上限
-            attn_type: 注意力类型
-            kv_sharing_target_layer_name: KV 共享目标层名称
-        """
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -1254,20 +848,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         k_scale: float,
         v_scale: float,
     ):
-        """为滑动窗口执行扩展注意力计算。
-
-        Args:
-            attn_metadata: 注意力元数据
-            query: Query 张量
-            key_cache: Key 缓存
-            value_cache: Value 缓存
-            output: 输出张量
-            cu_seqlens_q: Query 累积序列长度
-            max_seqlen_q: 最大 Query 序列长度
-            block_table: 块表
-            k_scale: K 缩放因子
-            v_scale: V 缩放因子
-        """
         assert attn_metadata.extend_metadata is not None
         assert attn_metadata.extend_metadata.chunk_context_metadata is not None
         chunked_metadata = attn_metadata.extend_metadata.chunk_context_metadata
@@ -1334,27 +914,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
     ):
-        """执行扩展前向传播。
-
-        处理扩展请求的注意力计算，支持滑动窗口和分块上下文。
-
-        Args:
-            attn_metadata: 注意力元数据
-            query: Query 张量
-            key: Key 张量
-            value: Value 张量
-            key_cache: Key 缓存
-            value_cache: Value 缓存
-            output: 输出张量
-            cu_seqlens_q: Query 累积序列长度
-            max_seqlen_q: 最大 Query 序列长度
-            max_seqlen_k: 最大 Key 序列长度
-            min_seqlen_q: 最小 Query 序列长度
-            block_table: 块表
-            slot_mapping: 槽位映射
-            k_scale: K 缩放因子
-            v_scale: V 缩放因子
-        """
         if self.sliding_window[0] != -1:
             self.extend_for_sliding_window(
                 attn_metadata,
@@ -1469,22 +1028,17 @@ class AiterFlashAttentionImpl(AttentionImpl):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """使用 AiterFlashAttention 进行前向传播。
+        """Forward pass with AiterFlashAttention.
 
         Args:
-            layer: 注意力层
-            query: 形状 = [num_tokens, num_heads, head_size]
-            key: 形状 = [num_tokens, num_kv_heads, head_size]
-            value: 形状 = [num_tokens, num_kv_heads, head_size]
-            kv_cache: 形状 = [2, num_blocks, block_size, num_kv_heads, head_size]
-            attn_metadata: 注意力元数据
-            output: 输出张量
-            output_scale: 输出缩放因子
-            output_block_scale: 输出块缩放因子
-
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, block_size, num_kv_heads, head_size]
+            attn_metadata: Metadata for attention.
         Returns:
-            形状 = [num_tokens, num_heads * head_size] 的输出张量
-
+            shape = [num_tokens, num_heads * head_size]
         NOTE: FP8 quantization, flash-attn expect the size of
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
@@ -1762,15 +1316,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ):
-        """执行 KV 缓存更新。
-
-        Args:
-            layer: 注意力层
-            key: Key 张量
-            value: Value 张量
-            kv_cache: KV 缓存张量
-            slot_mapping: 槽位映射
-        """
         key_cache, value_cache = kv_cache.unbind(0)
 
         # key and value may be None in the case of cross attention. They are
@@ -1818,14 +1363,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
             )
 
     def fused_rope_kvcache_supported(self):
-        """检查是否支持融合 RoPE KV 缓存。
-
-        仅在不使用 shuffle KV 缓存布局时支持融合；
-        shuffle 布局使用不同的缓存更新路径。
-
-        Returns:
-            是否支持
-        """
         # Only support fusion when shuffle KV cache layout is not used;
         # shuffle layout uses a different cache update path.
         return (
@@ -1845,19 +1382,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        """执行 RoPE 和 KV 缓存更新。
-
-        Args:
-            layer: 注意力层
-            query: Query 张量
-            key: Key 张量
-            value: Value 张量
-            positions: 位置
-            cos_sin_cache: RoPE cos/sin 缓存
-            is_neox: 是否 NeoX 格式
-            kv_cache: KV 缓存张量
-            layer_slot_mapping: 层槽位映射
-        """
         key_cache, value_cache = kv_cache.unbind(0)
         flash_layout = True
 

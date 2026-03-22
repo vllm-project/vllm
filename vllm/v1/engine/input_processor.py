@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""输入处理器模块。
-
-本模块实现了 vLLM V1 引擎的输入处理功能，负责：
-- 将原始输入（提示词、ProcessorInputs）转换为 EngineCoreRequest
-- 验证采样参数和池化参数
-- 处理 LoRA 请求验证
-- 处理多模态输入
-- 分配唯一的请求 ID
-
-主要类：
-- InputProcessor: 输入处理器类
-"""
 
 import time
 from collections.abc import Mapping
@@ -48,15 +36,6 @@ logger = init_logger(__name__)
 
 
 class InputProcessor:
-    """输入处理器类。
-
-    负责将原始输入转换为 EngineCoreRequest，包括：
-    - 输入验证
-    - 参数验证
-    - 多模态数据处理
-    - 请求 ID 分配
-    """
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -64,13 +43,6 @@ class InputProcessor:
         *,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
-        """初始化输入处理器。
-
-        Args:
-            vllm_config: 全局配置
-            renderer: 渲染器
-            mm_registry: 多模态注册表
-        """
         self.vllm_config = vllm_config
         self.model_config = model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -93,7 +65,7 @@ class InputProcessor:
             self.skip_prompt_length_check = (
                 mm_budget.processor.info.skip_prompt_length_check
             )
-            mm_budget.reset_cache()  # 不再使用
+            mm_budget.reset_cache()  # Not used anymore
 
         self.input_preprocessor = InputPreprocessor(
             vllm_config,
@@ -103,15 +75,9 @@ class InputProcessor:
 
     @property
     def tokenizer(self) -> TokenizerLike | None:
-        """返回分词器。"""
         return self.renderer.tokenizer
 
     def get_tokenizer(self) -> TokenizerLike:
-        """获取分词器。
-
-        Returns:
-            分词器实例
-        """
         return self.renderer.get_tokenizer()
 
     def _validate_params(
@@ -119,16 +85,7 @@ class InputProcessor:
         params: SamplingParams | PoolingParams,
         supported_tasks: tuple[SupportedTask, ...],
     ) -> None:
-        """验证采样参数或池化参数的有效性。
-
-        Args:
-            params: 采样参数或池化参数
-            supported_tasks: 支持的任务类型列表
-
-        Raises:
-            ValueError: 参数不支持或任务类型不匹配时抛出
-            TypeError: 参数类型不正确时抛出
-        """
+        """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
         if isinstance(params, SamplingParams):
             supported_generation_tasks = [
                 task for task in supported_tasks if task in GENERATION_TASKS
@@ -171,14 +128,6 @@ class InputProcessor:
             )
 
     def _validate_lora(self, lora_request: LoRARequest | None) -> None:
-        """验证 LoRA 请求的有效性。
-
-        Args:
-            lora_request: LoRA 请求
-
-        Raises:
-            ValueError: 当提供 LoRA 请求但 LoRA 未启用时抛出
-        """
         if lora_request is None:
             return
 
@@ -202,18 +151,10 @@ class InputProcessor:
         mm_hash: str,
         lora_request: LoRARequest | None,
     ) -> str:
-        """获取多模态标识符。
-
-        当 enable_tower_connector_lora 为 True 时，多模态嵌入
-        会随 LoRA 请求而变化。因此，mm_hash 必须基于
-        LoRA 请求生成，以防止错误的缓存命中。
-
-        Args:
-            mm_hash: 多模态哈希值
-            lora_request: LoRA 请求
-
-        Returns:
-            多模态标识符字符串
+        """
+        When enable_tower_connector_lora is True, multi-modal embeddings
+        vary depending on the LoRA request. Therefore, the mm_hash must be
+        generated based on the LoRA request to prevent incorrect cache hits.
         """
         if (
             lora_request is None
@@ -225,16 +166,8 @@ class InputProcessor:
 
     @staticmethod
     def assign_request_id(request: EngineCoreRequest):
-        """分配请求 ID。
-
-        将外部提供的请求 ID 替换为内部请求 ID，
-        添加 8 个随机字符以确保唯一性。
-
-        Args:
-            request: 引擎核心请求
-
-        Raises:
-            ValueError: 当 external_req_id 字段已被设置时抛出
+        """Replace the externally supplied request ID with an internal request ID
+        that adds 8 random characters in order to ensure uniqueness.
         """
         if request.external_req_id is not None:
             raise ValueError(
@@ -265,33 +198,6 @@ class InputProcessor:
         data_parallel_rank: int | None = None,
         resumable: bool = False,
     ) -> EngineCoreRequest:
-        """处理输入并生成 EngineCoreRequest。
-
-        负责将原始输入转换为引擎核心请求，包括：
-        - 参数验证
-        - 多模态数据处理
-        - 停止字符串处理
-        - 请求 ID 分配
-
-        Args:
-            request_id: 请求 ID
-            prompt: 提示词或处理器输入
-            params: 采样参数或池化参数
-            supported_tasks: 支持的任务类型列表
-            arrival_time: 到达时间，默认为当前时间
-            lora_request: LoRA 请求
-            tokenization_kwargs: 分词参数字典（已废弃）
-            trace_headers: 分布式追踪头信息
-            priority: 请求优先级
-            data_parallel_rank: 数据并行 rank
-            resumable: 是否可恢复
-
-        Returns:
-            EngineCoreRequest: 引擎核心请求
-
-        Raises:
-            ValueError: 参数无效或数据并行 rank 超出范围时抛出
-        """
         self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
 
@@ -425,15 +331,6 @@ class InputProcessor:
         prompt_len: int,
         prompt_type: Literal["encoder", "decoder"],
     ):
-        """验证提示词长度。
-
-        Args:
-            prompt_len: 提示词长度
-            prompt_type: 提示词类型（"encoder" 或 "decoder"）
-
-        Raises:
-            ValueError: 提示词为空或超出最大长度时抛出
-        """
         if self.skip_prompt_length_check:
             return
 
@@ -481,16 +378,6 @@ class InputProcessor:
         prompt_inputs: SingletonInputs,
         prompt_type: Literal["encoder", "decoder"],
     ) -> None:
-        """验证模型输入的有效性。
-
-        Args:
-            prompt_inputs: 单例输入
-            prompt_type: 提示词类型（"encoder" 或 "decoder"）
-
-        Raises:
-            ValueError: 提示词为空、超出最大长度、多模态嵌入超出缓存大小
-                      或 token ID 超出词汇表范围时抛出
-        """
         model_config = self.model_config
         tokenizer = self.tokenizer
 
@@ -545,14 +432,6 @@ class InputProcessor:
         encoder_inputs: SingletonInputs | None,
         decoder_inputs: SingletonInputs,
     ):
-        """验证模型输入的有效性。
-
-        分别验证 encoder 和 decoder 输入。
-
-        Args:
-            encoder_inputs: Encoder 输入（可选）
-            decoder_inputs: Decoder 输入
-        """
         if encoder_inputs is not None:
             self._validate_model_input(encoder_inputs, prompt_type="encoder")
 

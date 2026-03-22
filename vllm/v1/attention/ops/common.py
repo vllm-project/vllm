@@ -1,27 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""注意力通用操作模块。
-
-本模块实现了注意力机制中的通用操作，负责：
-- 实现上下文并行（Context Parallel）的注意力输出校正
-- 实现 LSE（Log-Sum-Exp）的 All-Gather 和 Reduce-Scatter
-- 实现序列的打包（pack）和解包（unpack）操作
-- 使用 Triton kernel 加速计算
-
-主要类：
-- CPTritonContext: Triton 上下文管理类
-
-主要函数：
-- _correct_attn_cp_out_kernel: 校正注意力输出的 Triton kernel
-- correct_attn_out: 使用 all-gathered LSE 校正注意力输出
-- _cp_lse_common: LSE 通用处理函数
-- cp_lse_ag_out_rs: LSE All-Gather + Reduce-Scatter
-- cp_lse_ag_out_ar: LSE All-Gather + All-Reduce
-- _pack_seq_kernel: 打包序列的 Triton kernel
-- pack_seq_triton: 打包不同长度的序列
-- _unpack_seq_triton_kernel: 解包序列的 Triton kernel
-- unpack_seq_triton: 解包打包的序列
-"""
 import torch
 
 from vllm.distributed.parallel_state import GroupCoordinator
@@ -45,27 +23,6 @@ def _correct_attn_cp_out_kernel(
     N_ROUNDED: tl.constexpr,
     IS_BASE_E: tl.constexpr,
 ):
-    """应用 all-gathered LSE 校正每个 rank 的注意力输出。
-
-    在上下文并行（Context Parallel）中，各 rank 仍需执行跨 rank 约减
-    以获得最终的注意力输出。
-
-    Args:
-        outputs_ptr: 输入张量指针，形状 [B, H, D]
-        lses_ptr: 输入张量指针，形状 [N, B, H]
-        new_output_ptr: 输出张量指针，形状 [B, H, D]
-        vlse_ptr: 输出张量指针，形状 [B, H]
-        outputs_stride_B: 输出第 B 维步幅
-        outputs_stride_H: 输出第 H 维步幅
-        outputs_stride_D: 输出第 D 维步幅
-        lses_stride_N: LSE 第 N 维步幅
-        lses_stride_B: LSE 第 B 维步幅
-        lses_stride_H: LSE 第 H 维步幅
-        lse_idx: LSE 索引
-        HEAD_DIM: 头维度
-        N_ROUNDED: 填充后的 N
-        IS_BASE_E: 是否以 e 为底
-    """
     """
     Apply the all-gathered lses to correct each local rank's attention
     output. we still need perform a cross-rank reduction to obtain the
@@ -138,24 +95,12 @@ def _correct_attn_cp_out_kernel(
 
 
 class CPTritonContext:
-    """Triton 上下文管理类。
-
-    用于避免 Triton JIT 重新编译，通过缓存 kernel 实例来提高效率。
-    """
+    """The CPTritonContext is used to avoid recompilation of the Triton JIT."""
 
     def __init__(self):
-        """初始化上下文。"""
         self.inner_kernel = None
 
     def call_kernel(self, kernel, grid, *regular_args, **const_args):
-        """调用 kernel。
-
-        Args:
-            kernel: Triton kernel
-            grid: grid 配置
-            *regular_args: 常规参数
-            **const_args: 常量参数
-        """
         if self.inner_kernel is None:
             self.inner_kernel = kernel[grid](*regular_args, **const_args)
         else:
@@ -169,17 +114,16 @@ def correct_attn_out(
     ctx: CPTritonContext,
     is_lse_base_on_e: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """使用 all-gathered LSE 校正注意力输出。
+    """Correct the attention output using the all-gathered lses.
 
     Args:
-        out: 形状 [B, H, D] 的张量
-        lses: 形状 [N, B, H] 的张量
-        cp_rank: 当前 rank 在上下文并行组中的索引
-        ctx: Triton 上下文以避免重新编译
-        is_lse_base_on_e: 是否以 e 为底
+        out: Tensor of shape [ B, H, D ]
+        lses: Tensor of shape [ N, B, H ]
+        cp_rank: Current rank in the context-parallel group
+        ctx: Triton context to avoid recompilation
 
     Returns:
-        (out, lse) 元组，包含校正后的注意力和最终的 log-sum-exp
+        Tuple of (out, lse) with corrected attention and final log-sum-exp.
     """
     if ctx is None:
         ctx = CPTritonContext()
@@ -241,18 +185,6 @@ def _cp_lse_common(
     ctx: CPTritonContext | None = None,
     is_lse_base_on_e=True,
 ):
-    """上下文并行 LSE 通用处理函数。
-
-    Args:
-        cp_attn_out: 形状 [B, H, D] 的注意力输出
-        cp_attn_lse: 形状 [B, H] 的 LSE
-        cp_group: 上下文并行组
-        ctx: Triton 上下文（可选）
-        is_lse_base_on_e: 是否以 e 为底
-
-    Returns:
-        校正后的注意力输出和 LSE
-    """
     """
     cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
@@ -285,19 +217,6 @@ def cp_lse_ag_out_rs(
     return_lse: bool = False,
     is_lse_base_on_e=True,
 ):
-    """上下文并行 LSE All-Gather + Reduce-Scatter。
-
-    Args:
-        cp_attn_out: 形状 [B, H, D] 的注意力输出
-        cp_attn_lse: 形状 [B, H] 的 LSE
-        cp_group: 上下文并行组
-        ctx: Triton 上下文（可选）
-        return_lse: 是否返回 LSE
-        is_lse_base_on_e: 是否以 e 为底
-
-    Returns:
-        校正后的注意力输出（和 LSE）
-    """
     """
     cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
@@ -323,19 +242,6 @@ def cp_lse_ag_out_ar(
     return_lse: bool = False,
     is_lse_base_on_e=True,
 ):
-    """上下文并行 LSE All-Gather + All-Reduce。
-
-    Args:
-        cp_attn_out: 形状 [B, H, D] 的注意力输出
-        cp_attn_lse: 形状 [B, H] 的 LSE
-        cp_group: 上下文并行组
-        ctx: Triton 上下文（可选）
-        return_lse: 是否返回 LSE
-        is_lse_base_on_e: 是否以 e 为底
-
-    Returns:
-        校正后的注意力输出（和 LSE）
-    """
     """
     cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
@@ -362,21 +268,6 @@ def _pack_seq_kernel(
     BLOCK_T: tl.constexpr,  # timesteps per program
     BLOCK_D: tl.constexpr,  # features per program
 ):
-    """打包序列的 Triton kernel。
-
-    将不同长度的序列打包成批处理张量。
-
-    Args:
-        x_ptr: 输入指针 [N, D]
-        out_ptr: 输出指针 [B, Lmax, D]
-        lengths_ptr: 序列长度指针 [B]
-        N: 总 token 数
-        D: 特征维度
-        Lmax: 最大序列长度
-        PAD_VALUE: 填充值
-        BLOCK_T: 时间维度块大小
-        BLOCK_D: 特征维度块大小
-    """
     pid_b = tl.program_id(0)  # batch id
     pid_t = tl.program_id(1)  # block over time dimension
     pid_d = tl.program_id(2)  # block over feature dimension
@@ -420,18 +311,6 @@ def pack_seq_triton(
     block_t: int = 64,
     block_d: int = 64,
 ) -> torch.Tensor:
-    """使用 Triton 打包不同长度的序列。
-
-    Args:
-        x: 形状 [N, ...] 的输入张量，N 是总 token 数
-        lengths: 形状 [B] 的序列长度
-        pad_value: 填充值
-        block_t: 时间维度块大小
-        block_d: 特征维度块大小
-
-    Returns:
-        形状 [B, Lmax, ...] 的打包张量
-    """
     """
     Pack sequences of different lengths into a batched tensor.
 
@@ -497,20 +376,6 @@ def _unpack_seq_triton_kernel(
     BLOCK_T: tl.constexpr,  # timesteps per program
     BLOCK_D: tl.constexpr,  # features per program
 ):
-    """解包序列的 Triton kernel。
-
-    将打包的张量解包回原始格式。
-
-    Args:
-        packed_ptr: 打包张量指针 [B, Lmax, D]
-        out_ptr: 输出指针 [N, D]
-        lengths_ptr: 序列长度指针 [B]
-        B: 批次大小
-        Lmax: 最大序列长度
-        D: 特征维度
-        BLOCK_T: 时间维度块大小
-        BLOCK_D: 特征维度块大小
-    """
     pid_b = tl.program_id(0)  # batch id
     pid_t = tl.program_id(1)  # block over time dimension
     pid_d = tl.program_id(2)  # block over feature dimension
@@ -549,17 +414,6 @@ def unpack_seq_triton(
     block_t: int = 64,
     block_d: int = 64,
 ) -> torch.Tensor:
-    """使用 Triton 解包打包的序列张量。
-
-    Args:
-        packed_tensor: 形状 [B, Lmax, ...] 的打包张量
-        lengths: 形状 [B] 的序列长度
-        block_t: 时间维度块大小
-        block_d: 特征维度块大小
-
-    Returns:
-        形状 [N, ...] 的解包张量，N = sum(lengths)
-    """
     """
     Unpack a packed decode query tensor back to the original format.
     Efficient Triton implementation.

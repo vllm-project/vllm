@@ -1,14 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""EC 连接器模型运行器混入模块。
-
-本模块定义 EC（Encoder Cache）连接器功能混入类，负责：
-- 保存编码器缓存到连接器
-- 获取已完成的 EC 传输
-- 管理 EC 连接器的生命周期
-
-主要类：
-- ECConnectorModelRunnerMixin: EC 连接器功能混入类
+"""
+Define EC connector functionality mixin for model runners.
 """
 
 from collections.abc import Generator
@@ -28,26 +21,15 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-# 定义为模型运行器（GPU、TPU）的 EC 连接器功能混入类
+# Defined as a EC connector functionality mixin for ModelRunner (GPU, TPU)
 class ECConnectorModelRunnerMixin:
-    """EC 连接器功能混入类。
-
-    提供 EC 连接器的标准接口，用于管理编码器缓存的传输。
-    """
-
     @staticmethod
     def maybe_save_ec_to_connector(
         encoder_cache: dict[str, torch.Tensor],
         mm_hash: str,
-    ) -> None:
-        """保存编码器缓存到连接器（如果有 EC 传输）。
-
-        Args:
-            encoder_cache: 编码器缓存字典
-            mm_hash: 多模态哈希值
-        """
+    ):
         if not has_ec_transfer():
-            logger.debug("没有 EC 传输，请检查")
+            logger.debug("Not have ec transfer please check")
             return
         connector = get_ec_transfer()
         connector.save_caches(encoder_cache=encoder_cache, mm_hash=mm_hash)
@@ -56,14 +38,6 @@ class ECConnectorModelRunnerMixin:
     def get_finished_ec_transfers(
         scheduler_output: "SchedulerOutput",
     ) -> tuple[set[str] | None, set[str] | None]:
-        """获取已完成的 EC 传输。
-
-        Args:
-            scheduler_output: 调度器输出
-
-        Returns:
-            (已完成的发送请求 ID 集合，已完成的接收请求 ID 集合) 元组
-        """
         if has_ec_transfer():
             return get_ec_transfer().get_finished(scheduler_output.finished_req_ids)
         return None, None
@@ -74,16 +48,6 @@ class ECConnectorModelRunnerMixin:
         encoder_cache: dict[str, torch.Tensor],
         **kwargs,
     ) -> AbstractContextManager[ECConnectorOutput | None]:
-        """获取 EC 连接器输出上下文管理器（如果有 EC 传输）。
-
-        Args:
-            scheduler_output: 调度器输出
-            encoder_cache: 编码器缓存字典
-            **kwargs: 其他参数
-
-        Returns:
-            EC 连接器输出上下文管理器
-        """
         return (
             ECConnectorModelRunnerMixin._get_ec_connector_output(
                 scheduler_output, encoder_cache, **kwargs
@@ -92,8 +56,8 @@ class ECConnectorModelRunnerMixin:
             else nullcontext()
         )
 
-    # 此上下文管理器必须在活动的前向上下文中使用
-    # 它封装了 execute_model 内的整个 EC 连接器生命周期
+    # This context manager must be used within an active forward context.
+    # It encapsulates the entire EC connector lifecycle within execute_model
     @staticmethod
     @contextmanager
     def _get_ec_connector_output(
@@ -101,22 +65,6 @@ class ECConnectorModelRunnerMixin:
         encoder_cache: dict[str, torch.Tensor],
         **kwargs,
     ) -> Generator[ECConnectorOutput, None, None]:
-        """获取 EC 连接器输出的上下文管理器。
-
-        管理 EC 连接器的完整生命周期：
-        1. 绑定连接器元数据
-        2. 为 consumer 或 both roles 加载缓存
-        3. 获取已完成的传输
-        4. 清除连接器元数据
-
-        Args:
-            scheduler_output: 调度器输出
-            encoder_cache: 编码器缓存字典
-            **kwargs: 其他参数
-
-        Yields:
-            EC 连接器输出
-        """
         output = ECConnectorOutput()
 
         ec_connector = get_ec_transfer()
@@ -124,7 +72,7 @@ class ECConnectorModelRunnerMixin:
         assert scheduler_output.ec_connector_metadata is not None
         ec_connector.bind_connector_metadata(scheduler_output.ec_connector_metadata)
 
-        # 为 consumer 或 both roles 加载缓存
+        # Load caches for consumer or both roles
         if ec_connector.is_consumer:
             ec_connector.start_load_caches(encoder_cache, **kwargs)
 

@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""注意力后端工具函数模块。
-
-本模块提供了注意力后端相关的工具函数和数据结构，负责：
-- 管理 KV 缓存布局（NHD/HND）
-- 定义每层参数数据结构
-- 提供注意力后端辅助函数
-- 支持调度器和输入批次的类型导入
-
-主要类：
-- PerLayerParameters: 每层参数数据类
-
-主要函数：
-- is_valid_kv_cache_layout: 验证 KV 缓存布局是否有效
-- get_kv_cache_layout: 获取 KV 缓存布局
-- set_kv_cache_layout: 设置 KV 缓存布局
-"""
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, make_dataclass
@@ -61,29 +45,12 @@ PAD_SLOT_ID = -1
 
 
 def is_valid_kv_cache_layout(value: str) -> bool:
-    """验证 KV 缓存布局是否有效。
-
-    Args:
-        value: 要验证的布局字符串
-
-    Returns:
-        如果布局有效返回 True
-    """
     return value in get_args(KVCacheLayoutType)
 
 
 @functools.lru_cache
 def get_kv_cache_layout():
-    """获取 KV 缓存布局。
-
-    按以下优先级确定布局：
-    1. 全局覆盖变量 _KV_CACHE_LAYOUT_OVERRIDE
-    2. 用户通过环境变量 VLLM_KV_CACHE_LAYOUT 指定
-    3. KV 连接器默认布局
-
-    Returns:
-        KV 缓存布局（"NHD" 或 "HND"）
-    """
+    # Format specified by the code.
     global _KV_CACHE_LAYOUT_OVERRIDE
 
     cache_layout: Literal["NHD", "HND"] | None = None
@@ -112,28 +79,17 @@ def get_kv_cache_layout():
 
 
 def set_kv_cache_layout(cache_layout: KVCacheLayoutType):
-    """设置 KV 缓存布局。
-
-    Args:
-        cache_layout: KV 缓存布局（"NHD" 或 "HND"）
-    """
     global _KV_CACHE_LAYOUT_OVERRIDE
     _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
 
 
 @dataclass
 class PerLayerParameters:
-    """每层参数数据类。
-
-    目前，FlashInfer 后端仅支持所有层共享相同超参数值的模型。
-    不应用于 trtllm-gen 后端，因为它支持不同的超参数值。
-
-    Attributes:
-        window_left: 左窗口大小
-        logits_soft_cap: logits 软上限
-        sm_scale: SM 缩放因子
-        has_sinks: 是否有 sinks
-        has_same_window_lefts: 是否所有层都有相同的 window_left
+    """
+    Currently, FlashInfer backend only support models in which all layers share
+    the same values for the following hyperparameters. Should not be used for
+    trtllm-gen backend since it supports different values for the following
+    hyperparameters.
     """
 
     window_left: int
@@ -148,15 +104,9 @@ class PerLayerParameters:
 def get_per_layer_parameters(
     vllm_config: VllmConfig, layer_names: list[str], cls_: type["AttentionImpl"]
 ) -> dict[str, PerLayerParameters]:
-    """扫描层并确定在 `plan` 期间使用的超参数。
-
-    Args:
-        vllm_config: vLLM 配置
-        layer_names: 层名列表
-        cls_: 注意力实现类类型
-
-    Returns:
-        每层参数字典，键为层名
+    """
+    Scan layers in `layer_names` and determine some hyperparameters
+    to use during `plan`.
     """
 
     layers = get_layers_from_vllm_config(
@@ -187,19 +137,16 @@ def get_per_layer_parameters(
 def infer_global_hyperparameters(
     per_layer_params: dict[str, PerLayerParameters],
 ) -> PerLayerParameters:
-    """推断全局超参数。
+    """
+    Currently, FlashInfer backend other than trtllm-gen
+    only support models in which all layers share
+    the same values for the following hyperparameters:
+    - `window_left`
+    - `logits_soft_cap`
+    - `sm_scale`
 
-    目前，除 trtllm-gen 外的 FlashInfer 后端仅支持所有层共享相同
-    超参数值的模型。此函数断言所有层共享相同的超参数值并返回全局值。
-
-    Args:
-        per_layer_params: 每层参数字典
-
-    Returns:
-        全局超参数
-
-    Raises:
-        AssertionError: 如果没有注意力层或层之间参数不一致
+    So this function asserts that all layers share the same values for these
+    hyperparameters and returns the global values.
     """
 
     assert len(per_layer_params) > 0, "No attention layers found in the model."

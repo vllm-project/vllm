@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""上下文并行工具函数模块。
-
-本模块提供上下文并行（CP）相关的辅助函数，负责：
-- 检查注意力层的 CP 兼容性
-- 获取总的 CP 世界大小
-
-主要函数：
-- check_attention_cp_compatibility: 检查注意力 CP 兼容性
-- get_total_cp_world_size: 获取总的 CP 世界大小
-"""
 from typing import TYPE_CHECKING, Any, cast
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
@@ -22,19 +12,6 @@ else:
 
 
 def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
-    """检查注意力层的上下文并行兼容性。
-
-    验证注意力层实现是否支持配置的 CP 功能：
-    - MTP 与非平凡 interleave size 的配合
-    - DCP 需要返回 softmax LSE
-    - PCP 需要注意力实现支持
-
-    Args:
-        vllm_config: vLLM 配置
-
-    Raises:
-        AssertionError: 如果不支持配置的 CP 功能
-    """
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
     dcp_size = vllm_config.parallel_config.decode_context_parallel_size
     interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
@@ -52,36 +29,29 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                 )
             if dcp_size > 1:
                 assert layer_impl.need_to_return_lse_for_decode, (
-                    "DCP 需要注意力实现返回 decode 的 softmax lse，但实现 "
+                    "DCP requires attention impls to return"
+                    " the softmax lse for decode, but the impl "
                     f"{layer_impl.__class__.__name__} "
-                    "不返回 decode 的 softmax lse。"
+                    "does not return the softmax lse for decode."
                 )
 
             if pcp_size > 1:
                 assert layer_impl.supports_pcp, (
-                    "PCP 需要注意力实现支持，但实现 "
-                    f"{layer_impl.__class__.__name__} "
-                    "不支持 PCP。"
+                    "PCP requires attention impls' support, "
+                    f"but the impl {layer_impl.__class__.__name__} "
+                    "does not support PCP."
                 )
 
 
-def get_total_cp_world_size() -> int:
-    """获取总的上下文并行世界大小。
-
-    计算 DCP 和 PCP 的总世界大小。
-    如果组未初始化（例如在测试中），则返回 1。
-
-    Returns:
-        总的 CP 世界大小
-    """
+def get_total_cp_world_size():
     try:
         pcp_world_size = get_pcp_group().world_size
     except AssertionError:
-        # PCP 可能在测试中未初始化
+        # PCP might not be initialized in testing
         pcp_world_size = 1
     try:
         dcp_world_size = get_dcp_group().world_size
     except AssertionError:
-        # DCP 可能在测试中未初始化
+        # DCP might not be initialized in testing
         dcp_world_size = 1
     return dcp_world_size * pcp_world_size

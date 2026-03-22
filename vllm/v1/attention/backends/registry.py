@@ -1,22 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention 后端注册表模块。
-
-本模块实现了注意力后端的枚举和注册机制，负责：
-- 定义所有支持的注意力后端枚举
-- 提供后端类的动态解析和注册功能
-- 支持 Mamba 后端注册
-- 提供友好的错误提示
-
-主要类：
-- _AttentionBackendEnumMeta: 注意力后端枚举元类
-- AttentionBackendEnum: 注意力后端枚举
-- MambaAttentionBackendEnum: Mamba 注意力后端枚举
-
-主要函数：
-- register_backend: 注册自定义注意力后端
-- register_mamba_backend: 注册自定义 Mamba 后端
-"""
+"""Attention backend registry"""
 
 from collections.abc import Callable
 from enum import Enum, EnumMeta
@@ -32,23 +16,10 @@ logger = init_logger(__name__)
 
 
 class _AttentionBackendEnumMeta(EnumMeta):
-    """注意力后端枚举元类。
-
-    为 AttentionBackendEnum 提供更好的错误提示。
-    """
+    """Metaclass for AttentionBackendEnum to provide better error messages."""
 
     def __getitem__(cls, name: str):
-        """通过名称获取后端，提供友好的错误提示。
-
-        Args:
-            name: 后端名称
-
-        Returns:
-            对应的枚举值
-
-        Raises:
-            ValueError: 如果名称无效，会列出所有有效选项
-        """
+        """Get backend by name with helpful error messages."""
         try:
             return super().__getitem__(name)
         except KeyError:
@@ -61,23 +32,13 @@ class _AttentionBackendEnumMeta(EnumMeta):
 
 
 class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
-    """注意力后端枚举类。
+    """Enumeration of all supported attention backends.
 
-    枚举所有支持的注意力后端。枚举值是默认的类路径，
-    可以通过 register_backend() 在运行时覆盖。
+    The enum value is the default class path, but this can be overridden
+    at runtime using register_backend().
 
-    要获取实际的后端类（尊重覆盖），使用：backend.get_class()
-
-    支持的后端包括：
-    - FLASH_ATTN: Flash Attention
-    - FLASH_ATTN_DIFFKV: Flash Attention DiffKV
-    - TRITON_ATTN: Triton Attention
-    - ROCM_ATTN: ROCm Attention
-    - ROCM_AITER_MLA: ROCm Aiter MLA
-    - FLASHINFER: FlashInfer
-    - FLASHMLA: Flash MLA
-    - CPU_ATTN: CPU Attention
-    - 等等...
+    To get the actual backend class (respecting overrides), use:
+        backend.get_class()
     """
 
     FLASH_ATTN = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
@@ -126,16 +87,13 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     CUSTOM = None
 
     def get_path(self, include_classname: bool = True) -> str:
-        """获取后端的类路径（尊重覆盖）。
-
-        Args:
-            include_classname: 是否包含类名（False 则只返回模块路径）
+        """Get the class path for this backend (respects overrides).
 
         Returns:
-            完整的类路径字符串
+            The fully qualified class path string
 
         Raises:
-            ValueError: 如果使用了未注册的 CUSTOM 后端
+            ValueError: If Backend.CUSTOM is used without being registered
         """
         path = _ATTN_OVERRIDES.get(self, self.value)
         if not path:
@@ -148,42 +106,38 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         return path
 
     def get_class(self) -> "type[AttentionBackend]":
-        """获取后端类（尊重覆盖）。
+        """Get the backend class (respects overrides).
 
         Returns:
-            后端类
+            The backend class
 
         Raises:
-            ImportError: 如果无法导入后端类
-            ValueError: 如果使用了未注册的 CUSTOM 后端
+            ImportError: If the backend class cannot be imported
+            ValueError: If Backend.CUSTOM is used without being registered
         """
         return resolve_obj_by_qualname(self.get_path())
 
     def is_overridden(self) -> bool:
-        """检查此外端是否有覆盖。
+        """Check if this backend has been overridden.
 
         Returns:
-            如果后端有注册的覆盖则返回 True
+            True if the backend has a registered override
         """
         return self in _ATTN_OVERRIDES
 
     def clear_override(self) -> None:
-        """清除此外端的任何覆盖，恢复为默认值。"""
+        """Clear any override for this backend, reverting to the default."""
         _ATTN_OVERRIDES.pop(self, None)
 
 
 class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
-    """Mamba 注意力后端枚举类。
+    """Enumeration of all supported mamba attention backends.
 
-    枚举所有支持的 Mamba 注意力后端。枚举值是默认的类路径，
-    可以通过 register_backend() 在运行时覆盖。
+    The enum value is the default class path, but this can be overridden
+    at runtime using register_backend().
 
-    支持的后端包括：
-    - MAMBA1: Mamba1
-    - MAMBA2: Mamba2
-    - SHORT_CONV: Short Conv
-    - LINEAR: Linear Attention
-    - GDN_ATTN: GDN Attention
+    To get the actual backend class (respecting overrides), use:
+        backend.get_class()
     """
 
     MAMBA1 = "vllm.v1.attention.backends.mamba1_attn.Mamba1AttentionBackend"
@@ -196,16 +150,13 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     CUSTOM = None
 
     def get_path(self, include_classname: bool = True) -> str:
-        """获取后端的类路径（尊重覆盖）。
-
-        Args:
-            include_classname: 是否包含类名（False 则只返回模块路径）
+        """Get the class path for this backend (respects overrides).
 
         Returns:
-            完整的类路径字符串
+            The fully qualified class path string
 
         Raises:
-            ValueError: 如果使用了未注册的 CUSTOM 后端
+            ValueError: If Backend.CUSTOM is used without being registered
         """
         path = _MAMBA_ATTN_OVERRIDES.get(self, self.value)
         if not path:
@@ -218,27 +169,27 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         return path
 
     def get_class(self) -> "type[AttentionBackend]":
-        """获取后端类（尊重覆盖）。
+        """Get the backend class (respects overrides).
 
         Returns:
-            后端类
+            The backend class
 
         Raises:
-            ImportError: 如果无法导入后端类
-            ValueError: 如果使用了未注册的 CUSTOM 后端
+            ImportError: If the backend class cannot be imported
+            ValueError: If Backend.CUSTOM is used without being registered
         """
         return resolve_obj_by_qualname(self.get_path())
 
     def is_overridden(self) -> bool:
-        """检查此 backend 是否有覆盖。
+        """Check if this backend has been overridden.
 
         Returns:
-            如果 backend 有注册的覆盖则返回 True
+            True if the backend has a registered override
         """
         return self in _MAMBA_ATTN_OVERRIDES
 
     def clear_override(self) -> None:
-        """清除此后端的任何覆盖，恢复为默认值。"""
+        """Clear any override for this backend, reverting to the default."""
         _MAMBA_ATTN_OVERRIDES.pop(self, None)
 
 
@@ -261,40 +212,33 @@ def register_backend(
     class_path: str | None = None,
     is_mamba: bool = False,
 ) -> Callable[[type], type]:
-    """注册或覆盖后端实现。
-
-    可以作为装饰器使用，也可以直接调用。
+    """Register or override a backend implementation.
 
     Args:
-        backend: 要注册的 AttentionBackendEnum 成员
-        class_path: 可选的类路径。如果未提供且作为装饰器使用，
-                    将自动生成自类。
-        is_mamba: 是否为 Mamba 后端
+        backend: The AttentionBackendEnum member to register
+        class_path: Optional class path. If not provided and used as
+            decorator, will be auto-generated from the class.
 
     Returns:
-        如果 class_path 为 None 则返回装饰器函数，否则无操作
+        Decorator function if class_path is None, otherwise a no-op
 
     Examples:
-        # 覆盖现有的注意力后端
+        # Override an existing attention backend
         @register_backend(AttentionBackendEnum.FLASH_ATTN)
         class MyCustomFlashAttn:
-            pass
-
-        # 注册自定义后端
-        register_backend(AttentionBackendEnum.CUSTOM,
             ...
 
-        # 覆盖现有的 Mamba 注意力后端
+        # Override an existing mamba attention backend
         @register_backend(MambaAttentionBackendEnum.LINEAR, is_mamba=True)
         class MyCustomMambaAttn:
             ...
 
-        # 注册自定义第三方后端
+        # Register a custom third-party attention backend
         @register_backend(AttentionBackendEnum.CUSTOM)
         class MyCustomBackend:
             ...
 
-        # 直接注册
+        # Direct registration
         register_backend(
             AttentionBackendEnum.CUSTOM,
             "my.module.MyCustomBackend"

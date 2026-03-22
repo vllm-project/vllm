@@ -1,29 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlashMLA Sparse Attention 后端模块。
-
-本模块实现了 DeepSeek 优化的稀疏 FlashMLA 后端（支持 Hopper 和 Blackwell 架构），负责：
-- 实现 FlashMLASparseBackend 类（支持 compute capability 9.0 和 10.0）
-- 实现 FlashMLASparseMetadataBuilder 用于构建注意力元数据
-- 实现 FlashMLASparseImpl 用于执行稀疏 MLA 前向传播
-- 支持 DeepSeek-V3.2 等使用 index_topk 的稀疏注意力模型
-- 支持 FP8 KV 缓存（使用 flash_mla_sparse_fwd）
-- 支持混合批次模式（mixed batch）和分离预填充/解码模式
-- 使用 Triton kernel 将请求索引转换为全局索引
-
-FP8 KV 缓存格式说明：
-- 每个 token 的 KV 缓存为 656 字节
-- 前 512 字节：量化的 NoPE 部分（512 个 float8_e4m3 值）
-- 接下来 16 字节：缩放因子（4 个 float32 值）
-- 最后 128 字节：RoPE 部分（64 个 bfloat16 值，未量化）
-
-主要类和函数：
-- FlashMLASparseBackend: 稀疏 MLA 后端类
-- FlashMLASparseMetadata: 稀疏注意力元数据
-- FlashMLASparseMetadataBuilder: 元数据构建器
-- FlashMLASparseImpl: 稀疏 MLA 实现类
-- get_prefill_workspace_size: 计算预填充工作区大小
-"""
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 

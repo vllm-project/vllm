@@ -1,18 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""传统 LLMEngine 包装器模块。
 
-本模块实现了 vLLM V1 引擎的传统包装器，用于向后兼容：
-- 提供与 V0 引擎兼容的接口
-- 处理输入输出处理
-- 管理请求生命周期
-- 支持 LoRA 适配器管理
-- 支持性能分析、睡眠/唤醒等功能
-- 统计数据记录
-
-主要类：
-- LLMEngine: 传统引擎包装器类
-"""
+import time
 from collections.abc import Callable, Mapping
 from copy import copy
 from typing import Any
@@ -57,17 +46,7 @@ _R = TypeVar("_R", default=Any)
 
 
 class LLMEngine:
-    """传统 LLMEngine 包装器，用于向后兼容。
-
-    提供与 V0 引擎兼容的接口，支持：
-    - 同步请求处理
-    - 流式输出
-    - 并行采样（n > 1）
-    - LoRA 适配器管理
-    - 性能分析
-    - 睡眠/唤醒控制
-    - 统计数据记录
-    """
+    """Legacy LLMEngine for backwards compatibility."""
 
     def __init__(
         self,
@@ -81,19 +60,6 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
-        """初始化 LLMEngine。
-
-        Args:
-            vllm_config: 全局配置
-            executor_class: 执行器类
-            log_stats: 是否记录统计数据
-            aggregate_engine_logging: 是否聚合引擎日志
-            usage_context: 使用上下文
-            stat_loggers: 统计日志器列表
-            mm_registry: 多模态注册表
-            use_cached_outputs: 是否使用缓存输出（已废弃）
-            multiprocess_mode: 是否启用多进程模式
-        """
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.observability_config = vllm_config.observability_config
@@ -180,17 +146,6 @@ class LLMEngine:
         stat_loggers: list[StatLoggerFactory] | None = None,
         disable_log_stats: bool = False,
     ) -> "LLMEngine":
-        """从 VllmConfig 创建 LLMEngine 实例。
-
-        Args:
-            vllm_config: 全局配置
-            usage_context: 使用上下文
-            stat_loggers: 统计日志器列表
-            disable_log_stats: 是否禁用统计日志
-
-        Returns:
-            LLMEngine 实例
-        """
         return cls(
             vllm_config=vllm_config,
             executor_class=Executor.get_class(vllm_config),
@@ -208,17 +163,7 @@ class LLMEngine:
         stat_loggers: list[StatLoggerFactory] | None = None,
         enable_multiprocessing: bool = False,
     ) -> "LLMEngine":
-        """从引擎参数创建 LLMEngine 实例。
-
-        Args:
-            engine_args: 引擎参数
-            usage_context: 使用上下文
-            stat_loggers: 统计日志器列表
-            enable_multiprocessing: 是否启用多进程
-
-        Returns:
-            LLMEngine 实例
-        """
+        """Creates an LLM engine from the engine arguments."""
 
         # Create the engine configs.
         vllm_config = engine_args.create_engine_config(usage_context)
@@ -239,33 +184,15 @@ class LLMEngine:
         )
 
     def get_num_unfinished_requests(self) -> int:
-        """获取未完成的请求数量。
-
-        Returns:
-            未完成请求数
-        """
         return self.output_processor.get_num_unfinished_requests()
 
     def has_unfinished_requests(self) -> bool:
-        """检查是否有未完成的请求。
-
-        Returns:
-            是否有未完成请求
-        """
         has_unfinished = self.output_processor.has_unfinished_requests()
         if self.dp_group is None:
             return has_unfinished or self.engine_core.dp_engines_running()
         return self.has_unfinished_requests_dp(has_unfinished)
 
     def has_unfinished_requests_dp(self, has_unfinished: bool) -> bool:
-        """在数据并行场景下检查是否有未完成的请求。
-
-        Args:
-            has_unfinished: 当前引擎的未完成请求状态
-
-        Returns:
-            所有 DP 引擎的聚合状态
-        """
         aggregated_has_unfinished = ParallelConfig.has_unfinished_dp(
             self.dp_group, has_unfinished
         )
@@ -274,11 +201,6 @@ class LLMEngine:
         return aggregated_has_unfinished
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        """获取支持的任务类型列表。
-
-        Returns:
-            支持的任务类型元组
-        """
         if not hasattr(self, "_supported_tasks"):
             # Cache the result
             self._supported_tasks = self.engine_core.get_supported_tasks()
@@ -286,12 +208,7 @@ class LLMEngine:
         return self._supported_tasks
 
     def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
-        """中止请求，从 EngineCore 和 Detokenizer 中移除。
-
-        Args:
-            request_ids: 请求 ID 列表
-            internal: 是否为内部调用
-        """
+        """Remove request_ids from EngineCore and Detokenizer."""
 
         request_ids = self.output_processor.abort_requests(request_ids, internal)
         self.engine_core.abort_requests(request_ids)
@@ -308,31 +225,6 @@ class LLMEngine:
         priority: int = 0,
         prompt_text: str | None = None,
     ) -> str:
-        """添加请求到引擎进行处理。
-
-        负责：
-        - 输入验证
-        - 处理原始输入为 EngineCoreRequest
-        - 支持并行采样（n > 1）
-        - 添加请求到输出处理器和引擎核心
-
-        Args:
-            request_id: 请求 ID
-            prompt: 提示词或处理器输入
-            params: 采样参数或池化参数
-            arrival_time: 到达时间
-            lora_request: LoRA 请求
-            tokenization_kwargs: 分词参数字典
-            trace_headers: 分布式追踪头信息
-            priority: 请求优先级
-            prompt_text: 提示词文本
-
-        Returns:
-            请求 ID
-
-        Raises:
-            TypeError: request_id 不是字符串时抛出
-        """
         # Validate the request_id type.
         if not isinstance(request_id, str):
             raise TypeError(f"request_id must be a string, got {type(request_id)}")
@@ -400,17 +292,6 @@ class LLMEngine:
         return req_id
 
     def step(self) -> list[RequestOutput | PoolingRequestOutput]:
-        """执行引擎调度步骤。
-
-        负责：
-        1. 从 EngineCore 获取 EngineCoreOutput
-        2. 处理输出生成 RequestOutput
-        3. 中止因停止字符串完成的请求
-        4. 记录统计数据
-
-        Returns:
-            请求输出列表
-        """
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
             self.engine_core.execute_dummy_batch()
@@ -451,113 +332,63 @@ class LLMEngine:
         return processed_outputs.request_outputs
 
     def start_profile(self, profile_prefix: str | None = None):
-        """启动性能分析。
-
-        Args:
-            profile_prefix: 性能分析文件前缀
-        """
         self.engine_core.profile(True, profile_prefix)
 
     def stop_profile(self):
-        """停止性能分析。"""
         self.engine_core.profile(False)
 
     def reset_mm_cache(self):
-        """重置多模态缓存。"""
         self.renderer.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
-        """重置前缀缓存。
-
-        Args:
-            reset_running_requests: 是否重置运行中的请求
-            reset_connector: 是否重置连接器
-
-        Returns:
-            是否成功重置
-        """
         return self.engine_core.reset_prefix_cache(
             reset_running_requests, reset_connector
         )
 
     def reset_encoder_cache(self) -> None:
-        """重置编码器缓存以使所有缓存的编码器输出失效。
+        """Reset the encoder cache to invalidate all cached encoder outputs.
 
-        当模型权重更新时应调用此方法，以确保不会重复使用
-        旧权重计算的过时视觉嵌入。
+        This should be called when model weights are updated to ensure
+        stale vision embeddings computed with old weights are not reused.
         """
         self.engine_core.reset_encoder_cache()
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort"):
-        """使引擎进入睡眠状态。
-
-        Args:
-            level: 睡眠级别
-            mode: 暂停模式
-        """
         self.engine_core.sleep(level, mode)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
     def wake_up(self, tags: list[str] | None = None):
-        """唤醒引擎。
-
-        Args:
-            tags: 唤醒标签
-        """
         self.engine_core.wake_up(tags)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(0, 0)
 
     def is_sleeping(self) -> bool:
-        """检查引擎是否处于睡眠状态。
-
-        Returns:
-            是否处于睡眠状态
-        """
         return self.engine_core.is_sleeping()
 
     def get_metrics(self) -> list[Metric]:
-        """获取性能指标快照。
-
-        Returns:
-            指标列表
-
-        Raises:
-            AssertionError: 统计日志未启用时抛出
-        """
         assert self.log_stats, "Stat logging disabled"
         return get_metrics_snapshot()
 
     @property
     def tokenizer(self) -> TokenizerLike | None:
-        """返回分词器。
-
-        Returns:
-            分词器实例或 None
-        """
         return self.renderer.tokenizer
 
     def get_tokenizer(self) -> TokenizerLike:
-        """获取分词器。
-
-        Returns:
-            分词器实例
-        """
         return self.renderer.get_tokenizer()
 
     def do_log_stats(self) -> None:
-        """记录统计数据（如果日志记录已启用）。"""
+        """Log stats if logging is enabled."""
         if self.logger_manager:
             self.logger_manager.log()
 
     def do_log_stats_with_interval(self) -> None:
-        """当时间间隔过去后记录统计数据。"""
+        """Log stats when the time interval has passed."""
         now = time.time()
         if not hasattr(self, "_last_log_time"):
             self._last_log_time = now
@@ -566,44 +397,19 @@ class LLMEngine:
             self._last_log_time = now
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        """加载新的 LoRA 适配器到引擎中供未来请求使用。
-
-        Args:
-            lora_request: LoRA 请求
-
-        Returns:
-            是否成功添加
-        """
+        """Load a new LoRA adapter into the engine for future requests."""
         return self.engine_core.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        """移除已加载的 LoRA 适配器。
-
-        Args:
-            lora_id: LoRA ID
-
-        Returns:
-            是否成功移除
-        """
+        """Remove an already loaded LoRA adapter."""
         return self.engine_core.remove_lora(lora_id)
 
     def list_loras(self) -> set[int]:
-        """列出所有已注册的适配器 ID。
-
-        Returns:
-            适配器 ID 集合
-        """
+        """List all registered adapters."""
         return self.engine_core.list_loras()
 
     def pin_lora(self, lora_id: int) -> bool:
-        """防止适配器被驱逐。
-
-        Args:
-            lora_id: LoRA ID
-
-        Returns:
-            是否成功固定
-        """
+        """Prevent an adapter from being evicted."""
         return self.engine_core.pin_lora(lora_id)
 
     def collective_rpc(
@@ -613,32 +419,12 @@ class LLMEngine:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
-        """在 Worker 上执行集体 RPC 调用。
-
-        Args:
-            method: 方法名或可调用对象
-            timeout: 超时时间（秒）
-            args: 位置参数
-            kwargs: 关键字参数
-
-        Returns:
-            RPC 结果列表
-        """
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
-        """在模型上应用函数。
-
-        Args:
-            func: 应用于模型的可调用对象
-
-        Returns:
-            函数结果列表
-        """
         return self.collective_rpc("apply_model", args=(func,))
 
     def __del__(self):
-        """析构函数，清理数据并行组资源。"""
         dp_group = getattr(self, "dp_group", None)
         if dp_group is not None and not self.external_launcher_dp:
             stateless_destroy_torch_distributed_process_group(dp_group)

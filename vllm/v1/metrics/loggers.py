@@ -1,29 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""指标日志记录器模块。
-
-本模块实现了 vLLM 的指标日志记录功能，负责：
-- 定义统计日志记录器的基础接口（StatLoggerBase）
-- 提供日志记录器实现（LoggingStatLogger）
-- 提供聚合日志记录器（AggregatedLoggingStatLogger）
-- 提供 Prometheus 指标导出（PrometheusStatLogger）
-- 支持自定义统计日志记录器插件
-- 管理多引擎的指标记录和聚合
-
-主要类：
-- StatLoggerBase: 统计日志记录器基础接口
-- AggregateStatLoggerBase: 聚合统计日志记录器基类
-- LoggingStatLogger: 日志记录器实现
-- AggregatedLoggingStatLogger: 聚合日志记录器
-- PerEngineStatLoggerAdapter: 每引擎日志记录器适配器
-- PrometheusStatLogger: Prometheus 指标记录器
-- StatLoggerManager: 统计日志记录器管理器
-
-主要函数：
-- load_stat_logger_plugin_factories: 加载统计日志记录器插件
-- build_buckets: 构建指标桶
-- build_1_2_5_buckets: 构建 1-2-5 序列桶
-"""
 
 import logging
 import time
@@ -62,26 +38,15 @@ StatLoggerFactory = AggregateStatLoggerFactory | PerEngineStatLoggerFactory
 
 
 class StatLoggerBase(ABC):
-    """日志记录器的基础接口。
+    """Interface for logging metrics.
 
-    API 用户可以定义实现此接口的自定义日志记录器。
-    但是请注意，SchedulerStats 和 IterationStats 类
-    不被视为稳定的接口，可能会在未来版本中更改。
-
-    Attributes:
-        vllm_config: vLLM 配置
-        engine_index: 引擎索引
+    API users may define custom loggers that implement this interface.
+    However, note that the `SchedulerStats` and `IterationStats` classes
+    are not considered stable interfaces and may change in future versions.
     """
 
     @abstractmethod
-    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
-        """初始化统计日志记录器。
-
-        Args:
-            vllm_config: vLLM 配置
-            engine_index: 引擎索引，默认为 0
-        """
-        ...
+    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0): ...
 
     @abstractmethod
     def record(
@@ -90,48 +55,19 @@ class StatLoggerBase(ABC):
         iteration_stats: IterationStats | None,
         mm_cache_stats: MultiModalCacheStats | None = None,
         engine_idx: int = 0,
-    ):
-        """记录统计信息。
-
-        Args:
-            scheduler_stats: 调度器统计
-            iteration_stats: 迭代统计
-            mm_cache_stats: 多模态缓存统计
-            engine_idx: 引擎索引
-        """
-        ...
+    ): ...
 
     @abstractmethod
-    def log_engine_initialized(self):
-        """记录引擎已初始化。"""
-        ...
+    def log_engine_initialized(self): ...
 
     def log(self):  # noqa
-        """执行日志记录。"""
         pass
 
     def record_sleep_state(self, is_awake: int, level: int):  # noqa
-        """记录睡眠状态。
-
-        Args:
-            is_awake: 是否唤醒
-            level: 睡眠级别
-        """
         pass
 
 
 def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
-    """加载统计日志记录器插件工厂。
-
-    从插件组加载所有统计日志记录器插件，
-    并验证它们是否是 StatLoggerBase 的子类。
-
-    Returns:
-        统计日志记录器工厂列表
-
-    Raises:
-        TypeError: 如果插件不是 StatLoggerBase 的子类
-    """
     factories: list[StatLoggerFactory] = []
 
     for name, plugin_class in load_plugins_by_group(STAT_LOGGER_PLUGINS_GROUP).items():
@@ -139,8 +75,8 @@ def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
             plugin_class, StatLoggerBase
         ):
             raise TypeError(
-                f"统计日志记录器插件 {name!r} 必须是 "
-                f"StatLoggerBase 的子类（得到 {plugin_class!r}）。"
+                f"Stat logger plugin {name!r} must be a subclass of "
+                f"StatLoggerBase (got {plugin_class!r})."
             )
 
         factories.append(plugin_class)
@@ -149,58 +85,23 @@ def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
 
 
 class AggregateStatLoggerBase(StatLoggerBase):
-    """聚合统计日志记录器基类。
-
-    用于在多个 DP 引擎之间聚合指标。
-    """
+    """Abstract base class for loggers that
+    aggregate across multiple DP engines."""
 
     @abstractmethod
-    def __init__(self, vllm_config: VllmConfig, engine_indexes: list[int]):
-        """初始化聚合统计日志记录器。
-
-        Args:
-            vllm_config: vLLM 配置
-            engine_indexes: 引擎索引列表
-        """
-        ...
+    def __init__(self, vllm_config: VllmConfig, engine_indexes: list[int]): ...
 
 
 class LoggingStatLogger(StatLoggerBase):
-    """日志统计记录器。
-
-    将统计信息记录到标准输出的日志记录器。
-
-    Attributes:
-        engine_index: 引擎索引
-        vllm_config: vLLM 配置
-        last_scheduler_stats: 上次调度器统计
-        prefix_caching_metrics: 前缀缓存指标
-        connector_prefix_caching_metrics: 连接器前缀缓存指标
-        mm_caching_metrics: 多模态缓存指标
-        spec_decoding_logging: 推测解码日志
-        kv_connector_logging: KV 连接器日志
-        cudagraph_logging: CUDA Graph 日志
-        last_prompt_throughput: 上次提示吞吐量
-        last_generation_throughput: 上次生成吞吐量
-        engine_is_idle: 引擎是否空闲
-        aggregated: 是否聚合
-    """
-
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
-        """初始化日志统计记录器。
-
-        Args:
-            vllm_config: vLLM 配置
-            engine_index: 引擎索引，默认为 0
-        """
         self.engine_index = engine_index
         self.vllm_config = vllm_config
         self._reset(time.monotonic())
 
         self.last_scheduler_stats = SchedulerStats()
 
-        # 缓存指标，不能重置
-        # TODO: 使间隔可配置
+        # Caching metrics. This cannot be reset.
+        # TODO: Make the interval configurable.
         self.prefix_caching_metrics = CachingMetrics()
         self.connector_prefix_caching_metrics = CachingMetrics()
         self.mm_caching_metrics = CachingMetrics()
@@ -223,54 +124,27 @@ class LoggingStatLogger(StatLoggerBase):
             self.perf_metrics_logging = PerfMetricsLogging(vllm_config)
 
     def _reset(self, now):
-        """重置统计。
-
-        Args:
-            now: 当前时间（单调时间）
-        """
         self.last_log_time = now
 
-        # 当前本地日志间隔内跟踪的统计
+        # Tracked stats over current local logging interval.
         self.num_prompt_tokens: int = 0
         self.num_generation_tokens: int = 0
         self.num_corrupted_reqs: int = 0
         self.num_preemptions: int = 0
 
     def _enable_perf_stats(self) -> bool:
-        """检查是否启用性能统计。
-
-        Returns:
-            是否启用 MFU 指标
-        """
         return self.vllm_config.observability_config.enable_mfu_metrics
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
-        """跟踪迭代统计。
-
-        保存用于 token 计数器的跟踪统计。
-        对提示吞吐量使用计算的 token（不包括缓存/传输的）。
-
-        Args:
-            iteration_stats: 迭代统计
-        """
-        # 保存用于 token 计数器的跟踪统计
-        # 对提示吞吐量使用计算的 token（不包括缓存/传输的）
+        # Save tracked stats for token counters.
+        # Use computed tokens for prompt throughput (excludes cached/transferred)
         self.num_prompt_tokens += iteration_stats.prompt_token_stats.computed
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
         self.num_preemptions += iteration_stats.num_preempted_reqs
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
-        """计算跟踪统计的吞吐量指标。
-
-        Args:
-            tracked_stats: 跟踪的统计
-            now: 当前时间
-
-        Returns:
-            吞吐量（tokens/s）
-        """
-        # 计算跟踪统计的摘要指标
+        # Compute summary metrics for tracked stats
         delta_time = now - self.last_log_time
         if delta_time <= 0.0:
             return 0.0
@@ -278,11 +152,6 @@ class LoggingStatLogger(StatLoggerBase):
 
     @property
     def log_prefix(self):
-        """返回日志前缀。
-
-        Returns:
-            引擎日志前缀
-        """
         return "Engine {:03d}: ".format(self.engine_index)
 
     def record(
@@ -292,17 +161,7 @@ class LoggingStatLogger(StatLoggerBase):
         mm_cache_stats: MultiModalCacheStats | None = None,
         engine_idx: int = 0,
     ):
-        """记录统计信息到标准输出。
-
-        记录迭代统计、调度器统计、缓存统计等信息，
-        并更新相应的指标。
-
-        Args:
-            scheduler_stats: 调度器统计
-            iteration_stats: 迭代统计
-            mm_cache_stats: 多模态缓存统计
-            engine_idx: 引擎索引
-        """
+        """Log Stats to standard output."""
         if iteration_stats:
             self._track_iteration_stats(iteration_stats)
 
@@ -331,11 +190,6 @@ class LoggingStatLogger(StatLoggerBase):
             self.mm_caching_metrics.observe(mm_cache_stats)
 
     def _update_stats(self):
-        """更新统计信息。
-
-        计算当前时间间隔内的吞吐量，并重置跟踪统计。
-        同时检测引擎是否处于空闲状态。
-        """
         now = time.monotonic()
         prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
         generation_throughput = self._get_throughput(self.num_generation_tokens, now)
@@ -353,19 +207,10 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_prompt_throughput = prompt_throughput
 
     def aggregate_scheduler_stats(self):
-        """聚合调度器统计。
-
-        对于每引擎日志记录器，此方法为空操作。
-        """
         # noop for per engine loggers
         return
 
     def log(self):
-        """执行日志记录。
-
-        更新统计信息，聚合并输出日志。
-        空闲引擎使用 debug 级别，否则使用 info 级别。
-        """
         self._update_stats()
         self.aggregate_scheduler_stats()
         # Avoid log noise on an idle production system
@@ -424,10 +269,6 @@ class LoggingStatLogger(StatLoggerBase):
             self.perf_metrics_logging.log(log_fn=log_fn, log_prefix=self.log_prefix)
 
     def log_engine_initialized(self):
-        """记录引擎已初始化。
-
-        当缓存块数量确定后，记录引擎初始化信息。
-        """
         if self.vllm_config.cache_config.num_gpu_blocks:
             logger.debug(
                 "Engine %03d: vllm cache_config_info with initialization "
@@ -438,22 +279,11 @@ class LoggingStatLogger(StatLoggerBase):
 
 
 class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
-    """聚合日志统计记录器。
-
-    在多个数据并行引擎之间聚合指标。
-    """
-
     def __init__(
         self,
         vllm_config: VllmConfig,
         engine_indexes: list[int],
     ):
-        """初始化聚合日志统计记录器。
-
-        Args:
-            vllm_config: vLLM 配置
-            engine_indexes: 引擎索引列表
-        """
         self.engine_indexes = engine_indexes
         self.last_scheduler_stats_dict: dict[int, SchedulerStats] = {
             idx: SchedulerStats() for idx in self.engine_indexes
@@ -463,22 +293,9 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
 
     @property
     def log_prefix(self):
-        """返回日志前缀。
-
-        Returns:
-            聚合引擎日志前缀
-        """
         return "{} Engines Aggregated: ".format(len(self.engine_indexes))
 
     def _enable_perf_stats(self) -> bool:
-        """检查是否启用性能统计。
-
-        对于聚合日志记录器，禁用每 GPU 性能统计，
-        因为跨引擎聚合可能导致误导性数字。
-
-        Returns:
-            False（总是禁用）
-        """
         # Adding per_gpu perf stats across engines can lead to misleading numbers.
         return False
 
@@ -489,16 +306,6 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
         mm_cache_stats: MultiModalCacheStats | None = None,
         engine_idx: int = 0,
     ):
-        """记录统计信息。
-
-        记录各引擎的统计信息并保存用于聚合。
-
-        Args:
-            scheduler_stats: 调度器统计
-            iteration_stats: 迭代统计
-            mm_cache_stats: 多模态缓存统计
-            engine_idx: 引擎索引
-        """
         if engine_idx not in self.engine_indexes:
             logger.warning("Unexpected engine_idx: %d", engine_idx)
             return
@@ -513,10 +320,6 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             self.last_scheduler_stats_dict[engine_idx] = scheduler_stats
 
     def aggregate_scheduler_stats(self):
-        """聚合所有引擎的调度器统计。
-
-        对所有引擎的请求数量和 KV 缓存使用率进行聚合。
-        """
         self.last_scheduler_stats = SchedulerStats()
         for last_scheduler_stats in self.last_scheduler_stats_dict.values():
             self.last_scheduler_stats.num_waiting_reqs += (
@@ -531,17 +334,9 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
         self.last_scheduler_stats.kv_cache_usage /= len(self.last_scheduler_stats_dict)
 
     def log(self):
-        """执行日志记录。
-
-        调用父类的日志记录方法。
-        """
         LoggingStatLogger.log(self)
 
     def log_engine_initialized(self):
-        """记录引擎已初始化。
-
-        记录所有引擎的初始化信息。
-        """
         if self.vllm_config.cache_config.num_gpu_blocks:
             logger.info(
                 "%d Engines: vllm cache_config_info with initialization "
@@ -552,25 +347,12 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
 
 
 class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
-    """每引擎日志记录器适配器。
-
-    为每个引擎创建独立的日志记录器实例，
-    并代理所有日志记录调用到相应的引擎日志记录器。
-    """
-
     def __init__(
         self,
         vllm_config: VllmConfig,
         engine_indexes: list[int],
         per_engine_stat_logger_factory: PerEngineStatLoggerFactory,
     ) -> None:
-        """初始化每引擎日志记录器适配器。
-
-        Args:
-            vllm_config: vLLM 配置
-            engine_indexes: 引擎索引列表
-            per_engine_stat_logger_factory: 每引擎日志记录器工厂
-        """
         self.per_engine_stat_loggers = {}
         self.engine_indexes = engine_indexes
         for engine_index in engine_indexes:
@@ -585,14 +367,6 @@ class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
         mm_cache_stats: MultiModalCacheStats | None = None,
         engine_idx: int = 0,
     ):
-        """记录统计信息到对应的引擎日志记录器。
-
-        Args:
-            scheduler_stats: 调度器统计
-            iteration_stats: 迭代统计
-            mm_cache_stats: 多模态缓存统计
-            engine_idx: 引擎索引
-        """
         if engine_idx not in self.per_engine_stat_loggers:
             logger.warning("Unexpected engine_idx: %d", engine_idx)
             return
@@ -604,22 +378,15 @@ class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
         )
 
     def log(self):
-        """执行所有引擎的日志记录。"""
         for per_engine_stat_logger in self.per_engine_stat_loggers.values():
             per_engine_stat_logger.log()
 
     def log_engine_initialized(self):
-        """记录所有引擎已初始化。"""
         for per_engine_stat_logger in self.per_engine_stat_loggers.values():
             per_engine_stat_logger.log_engine_initialized()
 
 
 class PrometheusStatLogger(AggregateStatLoggerBase):
-    """Prometheus 指标记录器。
-
-    将 vLLM 指标导出到 Prometheus 监控系统。
-    """
-
     _gauge_cls = Gauge
     _counter_cls = Counter
     _histogram_cls = Histogram
@@ -630,14 +397,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     def __init__(
         self, vllm_config: VllmConfig, engine_indexes: list[int] | None = None
     ):
-        """初始化 Prometheus 指标记录器。
-
-        注册所有 Prometheus 指标。
-
-        Args:
-            vllm_config: vLLM 配置
-            engine_indexes: 引擎索引列表，默认为 [0]
-        """
         if engine_indexes is None:
             engine_indexes = [0]
 
@@ -1223,7 +982,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         # TODO: This metric might be incorrect in case of using multiple
         # api_server counts which uses prometheus mp.
-        # See: https://github.com/vllm-project/vllm/pull/18053
         self.gauge_lora_info: Gauge | None = None
         if vllm_config.lora_config is not None:
             if len(self.engine_indexes) > 1:
@@ -1247,15 +1005,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
 
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
-        """记录配置指标信息。
-
-        将配置信息作为 Prometheus 指标记录。
-        Info 类型指标在 Prometheus 多进程模式下使用 Gauge 模拟。
-
-        Args:
-            type: 指标类型（如 "cache_config"）
-            config_obj: 支持指标信息的配置对象
-        """
         metrics_info = config_obj.metrics_info()
         metrics_info["engine"] = ""
 
@@ -1286,16 +1035,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         mm_cache_stats: MultiModalCacheStats | None = None,
         engine_idx: int = 0,
     ):
-        """记录统计信息到 Prometheus。
-
-        更新所有已注册的 Prometheus 指标。
-
-        Args:
-            scheduler_stats: 调度器统计
-            iteration_stats: 迭代统计
-            mm_cache_stats: 多模态缓存统计
-            engine_idx: 引擎索引
-        """
         """Log to prometheus."""
         if scheduler_stats is not None:
             self.gauge_scheduler_running[engine_idx].set(
@@ -1443,14 +1182,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 )
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
-        """记录引擎睡眠状态。
-
-        更新 Prometheus 指标以反映引擎的睡眠状态。
-
-        Args:
-            sleep: 睡眠标志，0=唤醒，1=睡眠
-            level: 睡眠级别，1=卸载权重，2=丢弃所有
-        """
         awake = 1
         discard_all = 0
         weights_offloaded = 0
@@ -1470,25 +1201,14 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_engine_sleep_state["awake"][engine_idx].set(awake)
 
     def log_engine_initialized(self):
-        """记录引擎已初始化。
-
-        使用缓存配置信息记录引擎初始化指标。
-        """
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
 
 def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
-    """构建指标桶。
+    """
+    Builds a list of buckets with increasing powers of 10 multiplied by
+    mantissa values until the value exceeds the specified maximum.
 
-    通过递增的 10 的幂次乘以尾数值来构建桶，
-    直到值超过指定的最大值。
-
-    Args:
-        mantissa_lst: 尾数列表
-        max_value: 最大值
-
-    Returns:
-        桶列表
     """
     exponent = 0
     buckets: list[int] = []
@@ -1503,36 +1223,25 @@ def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
 
 
 def build_1_2_5_buckets(max_value: int) -> list[int]:
-    """构建 1-2-5 序列桶。
-
-    示例：
+    """
+    Example:
     >>> build_1_2_5_buckets(100)
     [1, 2, 5, 10, 20, 50, 100]
-
-    Args:
-        max_value: 最大值
-
-    Returns:
-        1-2-5 序列桶列表
     """
     return build_buckets([1, 2, 5], max_value)
 
 
 class StatLoggerManager:
-    """统计日志记录器管理器。
+    """
+    StatLoggerManager:
+        Logging happens at the level of the EngineCore (per scheduler).
+         * DP: >1 EngineCore per AsyncLLM - loggers for each EngineCore.
+         * With Local Logger, just make N copies for N EngineCores.
+         * With Prometheus, we need a single logger with N "labels"
 
-    日志记录发生在 EngineCore 级别（每个调度器）。
-
-    - DP（数据并行）：每个 AsyncLLM 有多个 EngineCore，每个 EngineCore 有自己的日志记录器
-    - 使用 Local Logger 时，为 N 个 EngineCore 创建 N 份副本
-    - 使用 Prometheus 时，需要单个日志记录器处理 N 个"labels"
-
-    该类从 AsyncLLM 中抽象出这些实现细节，
-    允许 AsyncLLM 简单地调用 .record() 和 .log() 方法。
-
-    Attributes:
-        engine_indexes: 引擎索引列表
-        stat_loggers: 统计日志记录器列表
+        This class abstracts away this implementation detail from
+        the AsyncLLM, allowing the AsyncLLM to just call .record()
+        and .log() to a simple interface.
     """
 
     def __init__(
@@ -1544,16 +1253,6 @@ class StatLoggerManager:
         aggregate_engine_logging: bool = False,
         client_count: int = 1,
     ):
-        """初始化统计日志记录器管理器。
-
-        Args:
-            vllm_config: vLLM 配置
-            engine_idxs: 引擎索引列表，默认为 [0]
-            custom_stat_loggers: 自定义统计日志记录器工厂列表
-            enable_default_loggers: 是否启用默认日志记录器
-            aggregate_engine_logging: 是否聚合引擎日志记录
-            client_count: 客户端数量
-        """
         self.engine_indexes = engine_idxs if engine_idxs else [0]
         self.stat_loggers: list[AggregateStatLoggerBase] = []
         stat_logger_factories: list[StatLoggerFactory] = []
@@ -1603,14 +1302,6 @@ class StatLoggerManager:
         mm_cache_stats: MultiModalCacheStats | None = None,
         engine_idx: int | None = None,
     ):
-        """记录统计信息到所有日志记录器。
-
-        Args:
-            scheduler_stats: 调度器统计
-            iteration_stats: 迭代统计
-            mm_cache_stats: 多模态缓存统计
-            engine_idx: 引擎索引，默认为 0
-        """
         if engine_idx is None:
             engine_idx = 0
         for stat_logger in self.stat_loggers:
@@ -1622,21 +1313,13 @@ class StatLoggerManager:
             )
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
-        """记录睡眠状态到所有日志记录器。
-
-        Args:
-            sleep: 睡眠标志
-            level: 睡眠级别
-        """
         for logger in self.stat_loggers:
             logger.record_sleep_state(sleep, level)
 
     def log(self):
-        """执行所有日志记录器的日志记录。"""
         for logger in self.stat_loggers:
             logger.log()
 
     def log_engine_initialized(self):
-        """记录所有引擎已初始化。"""
         for agg_logger in self.stat_loggers:
             agg_logger.log_engine_initialized()

@@ -1,26 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlexAttention 后端模块。
-
-本模块实现了基于 PyTorch FlexAttention 的注意力后端，负责：
-- 实现 FlexAttention 后端类
-- 支持块级注意力掩码
-- 支持滑动窗口注意力
-- 支持 Prefix LM 注意力
-- 支持物理到逻辑块索引映射
-
-主要类：
-- FlexAttentionBackend: Flex Attention 后端类
-- FlexAttentionMetadata: Flex Attention 元数据类
-- FlexAttentionMetadataBuilder: 元数据构建器
-- FlexAttentionImpl: 后端实现类
-
-主要函数：
-- physical_to_logical_mapping: 物理块到逻辑块的逆映射
-- unique_static_unsorted: 去重并保持顺序
-- causal_mask_mod: 因果掩码
-- get_kernel_options: 获取内核选项
-"""
+"""Attention layer with FlexAttention."""
 
 import math
 from dataclasses import dataclass
@@ -69,14 +49,6 @@ flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
 
 
 def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
-    """从累积偏移量生成文档 ID 张量。
-
-    Args:
-        offsets: 累积偏移量张量
-
-    Returns:
-        文档 ID 张量
-    """
     device = offsets.device
     counts = offsets[1:] - offsets[:-1]
     return torch.repeat_interleave(
@@ -85,16 +57,6 @@ def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
 
 
 def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
-    """将张量填充到指定倍数的长度。
-
-    Args:
-        x: 输入张量
-        multiple: 目标倍数
-        dim: 填充维度
-
-    Returns:
-        填充后的张量
-    """
     difference = (multiple - (x.shape[dim] % multiple)) % multiple
     if difference == 0:
         return x
@@ -112,17 +74,6 @@ def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
 
 
 class FlexAttentionBackend(AttentionBackend):
-    """FlexAttention 后端类。
-
-    基于 PyTorch FlexAttention 实现的注意力后端。
-    支持因果掩码、滑动窗口、Prefix LM 等多种注意力模式。
-
-    Class Attributes:
-        accept_output_buffer: 是否接受输出缓冲区
-        supported_dtypes: 支持的数据类型
-        supported_kv_cache_dtypes: 支持的 KV 缓存数据类型
-        forward_includes_kv_cache_update: 前向传播是否包含 KV 缓存更新
-    """
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
@@ -139,41 +90,20 @@ class FlexAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        """获取后端名称。
-
-        Returns:
-            后端名称 "FLEX_ATTENTION"
-        """
         return "FLEX_ATTENTION"
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """FlexAttention 支持解码器和仅编码器注意力。
-
-        Args:
-            attn_type: 注意力类型
-
-        Returns:
-            是否支持
-        """
+        """FlexAttention supports both decoder and encoder-only attention."""
         return attn_type in (AttentionType.DECODER, AttentionType.ENCODER_ONLY)
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        """FlexAttention 支持多模态 prefix 的完整注意力。
-
-        Returns:
-            True
-        """
+        """FlexAttention supports full attention for image tokens."""
         return True
 
     @staticmethod
     def get_impl_cls() -> type["FlexAttentionImpl"]:
-        """获取注意力实现类。
-
-        Returns:
-            FlexAttentionImpl 类
-        """
         return FlexAttentionImpl
 
     @staticmethod
@@ -184,45 +114,18 @@ class FlexAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        """获取 KV 缓存形状。
-
-        Args:
-            num_blocks: 块数量
-            block_size: 块大小
-            num_kv_heads: KV 头数量
-            head_size: 头大小
-            cache_dtype_str: 缓存数据类型
-
-        Returns:
-            KV 缓存形状元组
-        """
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def get_builder_cls() -> type["FlexAttentionMetadataBuilder"]:
-        """获取元数据构建器类。
-
-        Returns:
-            FlexAttentionMetadataBuilder 类
-        """
         return FlexAttentionMetadataBuilder
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
-        """判断是否使用 cascade 注意力。
-
-        Returns:
-            False（不支持 cascade 注意力）
-        """
         return False
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        """获取支持的头大小列表。
-
-        Returns:
-            空列表（动态支持）
-        """
         return []
 
 
@@ -233,11 +136,12 @@ def physical_to_logical_mapping(
     block_size: int,
     total_blocks: int,
 ) -> torch.Tensor:
-    """创建从物理块位置到逻辑索引的逆映射。
+    """
+    Creates an inverse mapping from physical block locations to logical indices.
 
-    原始 block_table 将逻辑块映射到物理位置：
+    The original block_table maps from logical blocks to physical locations:
 
-    逻辑到物理（原始 block_table）:
+    Logical to Physical (Original block_table):
     ┌───────────────────────────────────────────┐
     │ Request 0:                                │
     │                                           │
@@ -247,9 +151,9 @@ def physical_to_logical_mapping(
     │ Physical Blocks: 3  5  1  7  4  2  0  6   │
     └───────────────────────────────────────────┘
 
-    此函数创建逆映射：
+    This function creates the inverse mapping:
 
-    物理到逻辑（逆映射）:
+    Physical to Logical (Inverse mapping):
     ┌───────────────────────────────────────────┐
     │ Request 0:                                │
     │                                           │
@@ -259,47 +163,53 @@ def physical_to_logical_mapping(
     │ Logical Blocks:  6  2  5  0  4  1  7  3   │
     └───────────────────────────────────────────┘
 
-    如果多个逻辑块映射到同一个物理块，此函数返回最新的（最大）逻辑块索引。
+    If multiple logical blocks map to the same physical block,
+    this function returns the latest (maximum) logical block index.
 
-    如果物理块没有被任何逻辑块映射，其在结果中的值将为 -1。
+    If a physical block is not mapped to by any logical block,
+    its value in the result will be -1.
 
-    重要：垃圾值保护
+    IMPORTANT: Garbage Value Protection
     ────────────────────────────────────
-    block_table 张量可能在未使用的位置包含垃圾值
-    （超出实际序列长度）。例如，如果一个序列只需要 3 个块，
-    但表有 8 个块的空间：
+    The block_table tensor may contain garbage values in unused positions
+    (beyond the actual sequence length). For example, if a sequence only
+    needs 3 blocks but the table has space for 8:
 
         block_table[0] = [10, 25, 7, 999, 1234, 888, ...]
                                     ^^^^^^^^^^^^^^^^^^^^
-                                    垃圾值
+                                    garbage values
 
-    这些垃圾值会导致问题，因为：
-    1. 它们可能偶然映射到有效的物理块
-    2. scatter_ 操作将为它们分配逻辑索引
-    3. 后续的注意力计算将错误地访问这些块
+    These garbage values can cause issues because:
+    1. They may map to valid physical blocks by coincidence
+    2. The scatter_ operation will assign them logical indices
+    3. Later attention computations may incorrectly access these blocks
 
-    为防止这种情况，我们使用 seq_lens 和 block_size 来屏蔽未使用的
-    条目，确保只处理有效的块引用。
+    To prevent this, we use seq_lens and block_size to mask out unused
+    entries, ensuring only valid block references are processed.
 
-    重要：复用的物理块（滑动窗口/混合注意力）
+    IMPORTANT: Reused physical blocks (sliding-window / hybrid attention)
     ────────────────────────────────────────────────────────────────────
-    对于某些注意力类型，物理缓存块可以随时间复用。
-    这可能导致相同的物理块 ID 在 block_table 的某一行中
-    在不同的逻辑块索引处多次出现。在这种情况下，只有最新的
-    逻辑块索引对应于该物理块的当前内容。因此，逆映射必须
-    为每个物理块 ID 选择最大的逻辑块索引。
+    For some attention types, physical cache blocks can be reused over time.
+    This can cause the same physical block id to appear multiple times in a row
+    of `block_table` at different logical block indices. In that case, only the
+    latest logical block index corresponds to the current contents of that
+    physical block. Therefore, the inverse mapping must pick the maximum logical
+    block index for each physical block id.
 
     Args:
-        block_table: 形状为 [max_reqs, max_num_blocks] 的张量，
-            将逻辑块映射到物理位置。可能在未使用的位置包含垃圾值。
-        seq_lens: 每个请求的序列长度张量。用于确定每个序列实际需要多少块。
-        block_size: 每个块的 token 大小。与 seq_lens 一起用于计算每个序列的有效块数。
-        total_blocks: 可用的物理块总数
+        block_table: Tensor of shape [max_reqs, max_num_blocks]
+            mapping logical blocks to physical locations. May contain
+            garbage values in unused positions.
+        seq_lens: Tensor of sequence lengths for each request. Used to
+            determine how many blocks are actually needed per sequence.
+        block_size: Size of each block in tokens. Used with seq_lens to
+            compute the number of valid blocks per sequence.
+        total_blocks: Total number of physical blocks available
 
     Returns:
-        形状为 [max_reqs, total_blocks] 的张量，其中每个条目
-        physical_to_logical[req_id, physical_block] 包含该物理块的逻辑块索引，
-        如果未使用则为 -1。
+        A tensor of shape [max_reqs, total_blocks] where each entry
+        physical_to_logical[req_id, physical_block] contains the logical
+        block index for that physical block, or -1 if unused.
     """
     max_reqs, max_num_blocks = block_table.shape
     device = block_table.device
@@ -308,7 +218,7 @@ def physical_to_logical_mapping(
         (max_reqs, total_blocks), -1, dtype=torch.long, device=device
     )
 
-    # 只处理有效块以避免垃圾值
+    # Only process valid blocks to avoid garbage values
     num_blocks_per_seq: torch.Tensor = cdiv(seq_lens, block_size)
     mask = (
         torch.arange(max_num_blocks, device=device)[None, :]
@@ -323,7 +233,7 @@ def physical_to_logical_mapping(
     physical_to_logical.scatter_reduce_(
         -1, valid_block_table.to(torch.int64), valid_logical_indices, reduce="amax"
     )
-    # 注意：块 0 似乎总是空的，所以我们手动重置它
+    # NB - Seems like block 0 is always empty so we reset it manually
     physical_to_logical[:, 0] = -1
     return physical_to_logical
 
@@ -331,34 +241,23 @@ def physical_to_logical_mapping(
 def unique_static_unsorted(
     x: torch.Tensor,
     *,
-    M: int,  # 最大正值（0 表示”跳过”）
-    dim: int = -1,  # 去重轴
-    ignored_val: int = 0,  # 要忽略的值
-    pad_val: int = -1,  # 未使用槽位的标记
+    M: int,  # maximum positive value (0 is “skip me”)
+    dim: int = -1,  # axis along which to deduplicate
+    ignored_val: int = 0,  # value to ignore
+    pad_val: int = -1,  # sentinel for unused slots
 ) -> torch.Tensor:
-    “””
-    去重并保持顺序，然后左打包唯一值，其余用 pad_val 填充。
+    """
+    - Keeps the first occurrence of each non-zero value while preserving order,
+      then left-packs those uniques and fills the rest with `pad_val`.
+    - Returns (packed, keep_mask) with the *same shape* as `x`.
+    - Requires that all values be in the range [0, M]
+    - Skips ignored_val
 
-    - 保持每个非零值的第一次出现，同时保持顺序
-    - 返回 (packed, keep_mask)，形状与 x 相同
-    - 要求所有值在 [0, M] 范围内
-    - 跳过 ignored_val
+    Works on CPU or GPU, no Python loops, O(B·N) time / O(B·M) memory.
 
-    在 CPU 或 GPU 上工作，无 Python 循环，O(B·N) 时间 / O(B·M) 内存。
-
-    示例：
+    Example:
     x =[3, 1, 0, 1, 2], M=3, ignored_val=0 => [3, 1, 2, -1, -1]
-
-    Args:
-        x: 输入张量
-        M: 最大正值
-        dim: 去重轴
-        ignored_val: 要忽略的值
-        pad_val: 未使用槽位的标记
-
-    Returns:
-        去重并打包后的张量
-    “””
+    """
     if not (-1 <= pad_val <= M):
         raise ValueError("`pad_val` must lie in [-1, M]")
 
@@ -394,75 +293,53 @@ def unique_static_unsorted(
 def causal_mask_mod(
     b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
 ):
-    """因果掩码函数。
-
-    用于 FlexAttention 的因果掩码，确保每个位置只能注意到之前的位置。
-
-    Args:
-        b: 批次索引
-        h: 注意力头索引
-        q_idx: Query 位置索引
-        kv_idx: Key/Value 位置索引
-
-    Returns:
-        因果掩码布尔值：q_idx >= kv_idx 时为 True
-    """
     return q_idx >= kv_idx
 
 
 @dataclass
 class FlexAttentionMetadata:
-    """FlexAttention 元数据类。
+    causal: bool
+    num_actual_tokens: int  # Number of tokens excluding padding.
+    max_query_len: int
+    query_start_loc: torch.Tensor
+    max_seq_len: int
+    seq_lens: torch.Tensor
+    block_table: torch.Tensor
+    slot_mapping: torch.Tensor
 
-    存储 FlexAttention 前向传播所需的所有元数据。
-    """
-    causal: bool  # 是否使用因果掩码
-    num_actual_tokens: int  # 实际 token 数量（不包括 padding）
-    max_query_len: int  # 最大 query 长度
-    query_start_loc: torch.Tensor  # 每个 query 的起始位置累积和
-    max_seq_len: int  # 最大序列长度
-    seq_lens: torch.Tensor  # 每个序列的实际长度
-    block_table: torch.Tensor  # 块表，将逻辑块映射到物理块
-    slot_mapping: torch.Tensor  # slot 映射
+    use_cascade: bool
+    common_prefix_len: int
+    cu_prefix_query_lens: torch.Tensor | None
+    prefix_kv_lens: torch.Tensor | None
+    suffix_kv_lens: torch.Tensor | None
 
-    use_cascade: bool  # 是否使用 cascade 注意力（暂未实现）
-    common_prefix_len: int  # 公共前缀长度（暂未实现）
-    cu_prefix_query_lens: torch.Tensor | None  # 前缀 query 长度累积和（暂未实现）
-    prefix_kv_lens: torch.Tensor | None  # 前缀 KV 长度（暂未实现）
-    suffix_kv_lens: torch.Tensor | None  # 后缀 KV 长度（暂未实现）
+    # Block info
+    total_cache_tokens: int
+    block_size: int
+    max_possible_sequence_length: int
+    num_reqs: int
+    physical_to_logical: torch.Tensor
+    decode_offset: torch.Tensor
+    num_blocks_per_seq: torch.Tensor
 
-    # 块相关信息
-    total_cache_tokens: int  # 缓存中的总 token 数
-    block_size: int  # 块大小
-    max_possible_sequence_length: int  # 最大可能的序列长度
-    num_reqs: int  # 请求数量
-    physical_to_logical: torch.Tensor  # 物理块到逻辑块的映射
-    decode_offset: torch.Tensor  # 解码偏移量
-    num_blocks_per_seq: torch.Tensor  # 每个序列的块数
+    # For logging.
+    num_input_tokens: int = 0  # Number of tokens including padding.
 
-    # 用于日志记录
-    num_input_tokens: int = 0  # 输入 token 数量（包括 padding）
-
-    # Flex 元数据
-    num_blocks: int = 0  # 块数量
-    block_mask: BlockMask | None = None  # 块掩码
-    score_mod: _score_mod_signature | None = None  # 分数修改函数
-    logical_mask_mod: _mask_mod_signature = causal_mask_mod  # 逻辑掩码函数
-    doc_ids: torch.Tensor | None = None  # 文档 ID
-    direct_build: bool = True  # 是否直接构建
-    q_block_size: int = 16  # Query 块大小
-    kv_block_size: int = 16  # KV 块大小
-    transformed_score_mod: _score_mod_signature | None = None  # 转换后的分数修改函数
-    sliding_window: int | None = None  # 滑动窗口大小
-    mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None  # 多模态前缀范围
+    # Flex Metadata
+    num_blocks = 0
+    block_mask: BlockMask | None = None
+    score_mod: _score_mod_signature | None = None
+    logical_mask_mod: _mask_mod_signature = causal_mask_mod
+    doc_ids: torch.Tensor | None = None
+    direct_build: bool = True
+    q_block_size: int = 16
+    kv_block_size: int = 16
+    transformed_score_mod: _score_mod_signature | None = None
+    sliding_window: int | None = None
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
 
     @cached_property
     def logical_block_ids(self):
-        """获取逻辑块 ID 序列。
-
-        Returns:
-            从 0 到最大块数的逻辑块 ID 张量
-        """
         return torch.arange(
             cdiv(self.max_seq_len, self.block_size),
             device=self.block_table.device,
@@ -475,55 +352,45 @@ class FlexAttentionMetadata:
         q_idx: torch.Tensor,
         physical_kv_idx: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """将物理索引转换为逻辑索引（包括 query 和 kv）。
+        """Convert physical indices to logical indices for both query and kv.
 
-        注意：is_within_lower_bound 检查序列是否从块边界开始。
-
-        Args:
-            request_lookup: 请求查找表
-            q_idx: Query 索引
-            physical_kv_idx: 物理 KV 索引
+        NB is_within_lower_bound: do sequences start on block_boundaries?
 
         Returns:
-            (is_valid, logical_q_idx, logical_kv_idx) 元组
-            - is_valid: KV 索引是否有效
-            - logical_q_idx: 逻辑 query 索引
-            - logical_kv_idx: 逻辑 KV 索引
+            tuple of (is_valid, logical_q_idx, logical_kv_idx)
         """
-        # 将 query 索引映射到对应的请求索引
+        # Map query indices to corresponding request indices
         q_req = request_lookup[q_idx]
 
-        # 将物理 KV 索引转换为逻辑索引
+        # Convert physical KV indices to logical indices
         physical_kv_block = physical_kv_idx // self.block_size
         physical_kv_offset = physical_kv_idx % self.block_size
         logical_block_idx = self.physical_to_logical[q_req, physical_kv_block]
         logical_kv_idx = logical_block_idx * self.block_size + physical_kv_offset
 
-        # 确定有效的 kv 索引
+        # Determine valid kv indices
         live_block = logical_block_idx >= 0
         within_upper_bound = logical_kv_idx < self.seq_lens[q_req]
         within_lower_bound = logical_kv_idx >= 0
         is_valid = live_block & within_upper_bound & within_lower_bound
 
-        # 将物理 query 索引转换为逻辑索引
+        # Convert physical query indices to logical indices
         local_q_idx = q_idx - self.query_start_loc[q_req]
         logical_q_idx = local_q_idx + self.decode_offset[q_req]
 
         return is_valid, logical_q_idx, logical_kv_idx
 
     def get_causal_mask_mod(self) -> _mask_mod_signature:
-        """为 FlexAttention 创建因果掩码函数。
+        """Creates the mask_mod function for FlexAttention.
 
-        此函数创建组合掩码函数，处理：
-        1. Paged attention 块映射
-        2. 从打包的 query 序列到逻辑 query 条目的映射
+        This function creates the combined mask mod function that handles:
+            1. The paged attention block mapping
+            2. The mapping from packed query sequences to logical query entries
 
-        默认情况下，它还会向 query 索引添加解码偏移量。
-        有了这些信息，我们可以创建传递给掩码函数的"逻辑"索引，
-        使掩码函数对 query 和 key/value 张量的布局不可知。
-
-        Returns:
-            最终掩码函数
+        It also by defaults adds the decoding offset to the query indices.
+        With this info we create the "logical" indices that are passed to
+        mask_mod functions. This allows mask mod functions to be agnostic to
+        layout of the query and key/value tensors.
         """
         assert self.doc_ids is not None
 
@@ -536,7 +403,7 @@ class FlexAttentionMetadata:
             (is_valid, logical_q_idx, logical_kv_idx) = (
                 self._convert_physical_to_logical(self.doc_ids, q_idx, physical_kv_idx)
             )
-            # 仅对有效索引应用掩码修改
+            # Apply mask modification only for valid indices
             return torch.where(
                 is_valid,
                 self.logical_mask_mod(b, h, logical_q_idx, logical_kv_idx),
@@ -546,15 +413,13 @@ class FlexAttentionMetadata:
         return final_mask_mod
 
     def get_bidirectional_mask_mod(self) -> _mask_mod_signature:
-        """为 FlexAttention 创建编码器双向掩码函数。
+        """Creates the encoder mask_mod function for FlexAttention.
 
-        由于编码器双向注意力不使用 KV 缓存运行，
-        此函数基于打包的 query 序列创建掩码。
-
-        Returns:
-            双向掩码函数
+        Since the encoder bidirectional attention doesn't run with
+        KV cache, this function creates a mask based on the
+        packed query sequences.
         """
-        # 创建从 query 索引到请求编号的查找映射
+        # Create a lookup mapping from query indices -> request number
         request_lookup = _offsets_to_doc_ids_tensor(self.query_start_loc)
 
         def final_mask_mod(
@@ -568,13 +433,10 @@ class FlexAttentionMetadata:
         return final_mask_mod
 
     def get_sliding_window_mask_mod(self) -> _mask_mod_signature:
-        """为 FlexAttention 创建滑动窗口掩码函数。
+        """Creates the sliding window mask_mod function for FlexAttention.
 
-        注意：这里的滑动窗口掩码是双向的，我们需要将其与
-        编码器/解码器的双向/因果掩码结合使用。
-
-        Returns:
-            滑动窗口掩码函数
+        Note that the sliding window mask here is bidirectional, we need
+        to mask it with the bidirectional/causal mask for encoder/decoder.
         """
 
         if self.sliding_window is None:
@@ -603,11 +465,7 @@ class FlexAttentionMetadata:
         return final_mask_mod if self.causal else sliding_window_mask_mod
 
     def get_prefix_lm_mask_mod(self) -> _mask_mod_signature:
-        """为 FlexAttention 创建 Prefix LM 掩码函数。
-
-        Returns:
-            Prefix LM 掩码函数
-        """
+        """Creates the prefix LM mask_mod function for FlexAttention."""
 
         assert self.doc_ids is not None
         request_lookup = self.doc_ids
@@ -646,46 +504,34 @@ class FlexAttentionMetadata:
         return final_mask_mod
 
     def get_mask_mod(self):
-        """获取组合掩码函数。
-
-        分阶段构建掩码：
-        - Stage-1: 初始化基础掩码（解码器用因果掩码，编码器用双向掩码）
-        - Stage-2: 为特殊注意力类型添加额外的掩码
-
-        Returns:
-            组合后的掩码函数
-        """
-        # Stage-1: 初始化基础掩码函数
-        # （解码器使用因果掩码，编码器使用双向掩码）
+        # Stage-1: initialize the base mask_mod
+        # (causal mask for decoder or bidirectional mask for encoder)
         if self.causal:
             mask_mod = self.get_causal_mask_mod()
         else:
             mask_mod = self.get_bidirectional_mask_mod()
-        # Stage-2: 在前向运行期间为特殊注意力添加额外的 mask_mod，
-        # 创建组合的 mask_mod
+        # stage-2: add external mask_mod for special attention during
+        # forwarding runtime to create the combined mask_mod.
         if self.sliding_window is not None:
-            # 为滑动窗口注意力添加滑动窗口掩码
+            # Add sliding window mask for sliding window attention
             sliding_window_mask_mod = self.get_sliding_window_mask_mod()
             mask_mod = and_masks(mask_mod, sliding_window_mask_mod)
         if self.mm_prefix_range:
-            # 为视觉 - 语言 Prefix LM 注意力添加 Prefix LM 掩码
+            # Add prefix LM mask for vision-language prefix LM attention
             prefix_lm_mask_mod = self.get_prefix_lm_mask_mod()
             mask_mod = or_masks(mask_mod, prefix_lm_mask_mod)
         return mask_mod
 
     def get_transformed_score_mod(self) -> _score_mod_signature | None:
-        """为 FlexAttention 创建转换后的分数修改函数。
+        """Creates the transformed score_mod function for FlexAttention.
 
-        此函数包装用户的 score_mod 以处理物理到逻辑索引的转换，
-        类似于 get_mask_mod 处理掩码函数的方式。
-
-        Returns:
-            转换后的分数修改函数，如果未设置则返回 None
+        This function wraps the user's score_mod to handle physical-to-logical
+        index conversion, similar to how get_mask_mod works for mask functions.
         """
         if self.score_mod is None:
             return None
 
-        # 创建从 query 索引到请求编号的查找映射
+        # Create a lookup mapping from query indices -> request number
         request_lookup = _offsets_to_doc_ids_tensor(self.query_start_loc)
         user_score_mod = self.score_mod
 
@@ -713,26 +559,26 @@ class FlexAttentionMetadata:
         return transformed_score_mod
 
     def _build_block_mask_direct(self) -> BlockMask:
-        """直接构建块掩码，用于标准因果注意力。
+        """Direct block mask construction for standard causal attention.
 
-        此方法使用 BlockMask.from_kv_blocks 直接构建块掩码，
-        比通用的 create_block_mask 方法更高效。
+        This method constructs the block mask directly using
+        BlockMask.from_kv_blocks which is much more efficient than the
+        generic create_block_mask approach.
 
-        直接路径的工作原理如下：
-        1. 对于每个 query token，使用 max_seq_len 从 block_table 获取块，
-           如果需要，排除滑动窗口之外的块
-           （这会为较短的序列获取比需要更多的块）
-        2. 将 query token 分组为 q_block_size 大小的块
-        3. 对于每组，使用 unique_static_unsorted 去重
-        4. 使用去重后的块索引创建 BlockMask
+        The direct path works as follows:
+        1. For each query token, fetch blocks from block_table using max_seq_len
+           and exclude out of sliding window blocks if needed.
+           (this fetches more blocks than needed for shorter sequences)
+        2. Group query tokens into chunks of q_block_size
+        3. For each group, deduplicate the blocks using unique_static_unsorted
+        4. Create BlockMask using the deduplicated block indices
 
-        当一组 q_block_size token 包含多个序列 ID（doc_ids）时，
-        会发生高估。在这种情况下，我们为组中的每个序列获取所有块，
-        即使单个 query token 可能只需要这些块的子集（基于因果掩码
-        和它们的位置）。
+        Over-estimation occurs when a group of q_block_size tokens contains
+        multiple sequence IDs (doc_ids). In this case, we fetch ALL blocks for
+        each sequence represented in the group, even though individual query
+        tokens may only need a subset of those blocks based on causal masking
+        and their position.
 
-        Returns:
-            构建的块掩码
         """
         page_to_block_ratio = self.kv_block_size // self.block_size
         if page_to_block_ratio != 1:
@@ -785,17 +631,12 @@ class FlexAttentionMetadata:
             "mask_mod": self.mask_mod,
         }
 
-        # compute_q_blocks 参数在 PyTorch 2.9+ 中可用
+        # compute_q_blocks parameter is available in PyTorch 2.9+
         if is_torch_equal_or_newer("2.9.0.dev0"):
             block_mask_kwargs["compute_q_blocks"] = False
         return BlockMask.from_kv_blocks(**block_mask_kwargs)
 
     def build_block_mask(self) -> BlockMask:
-        """构建块掩码。
-
-        Returns:
-            构建的块掩码
-        """
         mask_mod = self.get_mask_mod()
         kv_len = self.total_cache_tokens if self.causal else self.num_actual_tokens
         return create_block_mask_compiled(
@@ -809,16 +650,12 @@ class FlexAttentionMetadata:
         )
 
     def __post_init__(self):
-        """初始化后处理。
-
-        设置文档 ID、块数量、掩码函数等。
-        """
         assert self.use_cascade is False, "Not implemented yet."
         assert self.common_prefix_len == 0, "Not implemented yet."
         assert self.cu_prefix_query_lens is None, "Not implemented yet."
         assert self.prefix_kv_lens is None, "Not implemented yet."
         assert self.suffix_kv_lens is None, "Not implemented yet."
-        # 创建从 query 索引到请求编号的查找映射
+        # Create a lookup mapping from query indices -> request number
         self.doc_ids = _offsets_to_doc_ids_tensor(self.query_start_loc)
         self.num_blocks = self.total_cache_tokens // self.block_size
 
@@ -832,11 +669,6 @@ class FlexAttentionMetadata:
 
 
 class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadata]):
-    """FlexAttention 元数据构建器类。
-
-    负责构建 FlexAttention 运行所需的元数据对象。
-    """
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -844,14 +676,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        """初始化元数据构建器。
-
-        Args:
-            kv_cache_spec: KV 缓存规格
-            layer_names: 层名称列表
-            vllm_config: vLLM 配置
-            device: 设备类型
-        """
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         self.model_config = vllm_config.model_config
@@ -876,16 +700,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> FlexAttentionMetadata:
-        """构建 FlexAttention 元数据。
-
-        Args:
-            common_prefix_len: 公共前缀长度
-            common_attn_metadata: 通用注意力元数据
-            fast_build: 是否快速构建
-
-        Returns:
-            构建的 FlexAttentionMetadata 对象
-        """
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -940,9 +754,9 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             total_cache_tokens=total_cache_tokens,
             decode_offset=offset_tensor,
             num_blocks_per_seq=num_blocks_per_seq,
-            # FIXME(Isotr0py): direct build 在构建编码器模型的 bidirectional
-            # 注意力块掩码时有问题，暂时禁用。
-            # 参见：https://github.com/vllm-project/vllm/pull/27329#issuecomment-3431484053
+            # FIXME(Isotr0py): direct build has issue to build bidirectional
+            # attention block mask for encoder-only models, disable it temporarily.
+            # see: https://github.com/vllm-project/vllm/pull/27329#issuecomment-3431484053
             direct_build=(self.direct_build and common_attn_metadata.causal),
             q_block_size=self.q_block_size,
             kv_block_size=self.kv_block_size,
@@ -950,23 +764,14 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         return out
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
-        """判断是否使用 cascade 注意力。
-
-        Returns:
-            False（FlexAttention 不支持 cascade 注意力）
-        """
         return False
 
 
 class FlexAttentionImpl(AttentionImpl):
-    """FlexAttention 实现类。
-
-    基于 PyTorch FlexAttention 的注意力实现。
-    """
-    sliding_window: int | None  # 滑动窗口大小
-    alibi_slopes: torch.Tensor | None  # ALIBI 斜率
-    logits_soft_cap: float | None  # Logits 软化上限
-    mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None  # 多模态前缀范围
+    sliding_window: int | None
+    alibi_slopes: torch.Tensor | None
+    logits_soft_cap: float | None
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
 
     def __init__(
         self,
@@ -982,20 +787,6 @@ class FlexAttentionImpl(AttentionImpl):
         kv_sharing_target_layer_name: str | None = None,
         **kwargs,
     ) -> None:
-        """初始化 FlexAttention 实现。
-
-        Args:
-            num_heads: 注意力头数量
-            head_size: 头大小
-            scale: 缩放因子
-            num_kv_heads: KV 头数量
-            alibi_slopes: ALIBI 斜率列表
-            sliding_window: 滑动窗口大小
-            kv_cache_dtype: KV 缓存数据类型
-            logits_soft_cap: Logits 软化上限
-            attn_type: 注意力类型
-            kv_sharing_target_layer_name: KV 共享目标层名称
-        """
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -1036,14 +827,7 @@ class FlexAttentionImpl(AttentionImpl):
 
     @staticmethod
     def view_as_4d(tensor: torch.Tensor) -> torch.Tensor:
-        """将 3D 张量视为 4D。
-
-        Args:
-            tensor: 输入张量
-
-        Returns:
-            4D 张量
-        """
+        """View a 3d tensor as 4D."""
         if tensor.ndim == 4:
             return tensor
         assert tensor.ndim == 3
@@ -1057,15 +841,6 @@ class FlexAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
-        """更新 KV 缓存。
-
-        Args:
-            layer: 注意力层
-            key: Key 张量
-            value: Value 张量
-            kv_cache: KV 缓存
-            slot_mapping: Slot 映射
-        """
         if self.attn_type == AttentionType.ENCODER_ONLY:
             return
 
@@ -1093,21 +868,17 @@ class FlexAttentionImpl(AttentionImpl):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """使用 FlexAttention 进行前向传播。
+        """Forward pass with FLexAttention.
 
         Args:
-            layer: 注意力层
-            query: 形状 = [num_tokens, num_heads, head_size]
-            key: 形状 = [num_tokens, num_kv_heads, head_size]
-            value: 形状 = [num_tokens, num_kv_heads, head_size]
-            kv_cache: 形状 = [2, num_blocks, block_size, num_kv_heads, head_size]
-            attn_metadata: 注意力元数据
-            output: 输出张量
-            output_scale: 输出缩放因子（不支持）
-            output_block_scale: 输出块缩放因子（不支持）
-
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, block_size, num_kv_heads, head_size]
+            attn_metadata: Metadata for attention.
         Returns:
-            形状 = [num_tokens, num_heads * head_size] 的输出张量
+            shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
         if output_scale is not None or output_block_scale is not None:
@@ -1118,8 +889,10 @@ class FlexAttentionImpl(AttentionImpl):
         enable_gqa = self.num_kv_heads != self.num_heads
 
         if attn_metadata is None:
-            # 性能分析运行
+            # Profiling run.
             return output.fill_(0)
+            # query = self.view_as_4d(query).permute(0, 2, 1, 3)
+            # return torch.empty_like(query)
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
@@ -1127,7 +900,7 @@ class FlexAttentionImpl(AttentionImpl):
         if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
             if attn_metadata.direct_build:
-                # 更新注意力元数据中的掩码函数
+                # update mask mod in attention metadata
                 attn_metadata.mask_mod = attn_metadata.get_mask_mod()
             needs_rebuild_block_mask = True
 
@@ -1154,9 +927,9 @@ class FlexAttentionImpl(AttentionImpl):
             if (key_tensor.size(-2) > num_actual_tokens) or (
                 value_tensor.size(-2) > num_actual_tokens
             ):
-                # 在仅编码器模型中使用 torch.compile 时，
-                # qkv 可能会被填充，这可能导致异常。
-                # 参见：https://github.com/vllm-project/vllm/pull/24872#discussion_r2353252290
+                # In the encoder-only model with torch.compile,
+                # qkv might be padded, which might cause exception.
+                # see: https://github.com/vllm-project/vllm/pull/24872#discussion_r2353252290
                 key_tensor = key_tensor[:, :, :num_actual_tokens, :]
                 value_tensor = value_tensor[:, :, :num_actual_tokens, :]
 
@@ -1164,7 +937,7 @@ class FlexAttentionImpl(AttentionImpl):
             assert self.attn_type == AttentionType.DECODER
             key_cache, value_cache = kv_cache.unbind(0)
 
-            # 去除 block_size 维度
+            # View out the block_size dim
             key_cache = key_cache.view(-1, self.num_kv_heads, self.head_size)
             value_cache = value_cache.view(-1, self.num_kv_heads, self.head_size)
             query, key_tensor, value_tensor = map(
@@ -1174,7 +947,7 @@ class FlexAttentionImpl(AttentionImpl):
 
             query = query[:, :, :num_actual_tokens, :]
 
-        # 暂时不起作用 -> 违反约束
+        # Doesn't work for now -> constraint violation
         # torch._dynamo.try_mark_dynamic(query, 2)
 
         assert attn_metadata.block_mask is not None
@@ -1194,7 +967,7 @@ class FlexAttentionImpl(AttentionImpl):
             kernel_options=kernel_options,
         )
 
-        # Flex 目前没有 out 变体，依赖于结尾融合
+        # Flex doesn't have an out variant today, rely on epilogue fusion
         out = out.permute(0, 2, 1, 3).squeeze(0)
         output[:num_actual_tokens, :, :].copy_(out)
         return output
@@ -1203,33 +976,12 @@ class FlexAttentionImpl(AttentionImpl):
 def get_kernel_options(
     query, block_m, block_n, use_direct_build: bool
 ) -> dict[str, int | bool]:
-    """获取 FlexAttention 内核选项。
-
-    根据硬件配置和输入张量特性确定最优的块大小和其他内核选项。
-
-    Args:
-        query: Query 张量
-        block_m: Query 块大小
-        block_n: KV 块大小
-        use_direct_build: 是否使用直接构建
-
-    Returns:
-        内核选项字典
-    """
     kernel_options: dict[str, int | bool] = {
         "FORCE_USE_FLEX_ATTENTION": True,
     }
 
     def ensure_divisible(candidate: int, block_size: int) -> int:
-        """选择一个能整除逻辑块的核块大小。
-
-        Args:
-            candidate: 候选块大小
-            block_size: 逻辑块大小
-
-        Returns:
-            合适的块大小
-        """
+        """Pick a kernel block size that divides the logical block."""
         if block_size <= 0:
             return candidate
         candidate = min(candidate, block_size)
@@ -1261,12 +1013,12 @@ def get_kernel_options(
 
         if torch.cuda.is_available():
             device_props = torch.cuda.get_device_properties()
-            # ROCm 没有暴露 shared_memory_per_block_optin 属性
-            # AMD GPU 每个工作组通常有 64KB LDS（本地数据共享）
+            # ROCm doesn't expose shared_memory_per_block_optin attribute
+            # AMD GPUs typically have 64KB LDS (Local Data Share) per workgroup
             if hasattr(device_props, "shared_memory_per_block_optin"):
                 max_shared_memory = device_props.shared_memory_per_block_optin
             elif current_platform.is_rocm():
-                # ROCm 回退：使用 64KB
+                # ROCm fallback: use 64KB
                 max_shared_memory = 65536
             else:
                 raise RuntimeError(

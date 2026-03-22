@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ExtractHiddenStatesProposer 模块。
-
-本模块实现了基于提取隐藏状态的推测解码 proposer，负责：
-- 缓存目标模型的隐藏状态到 KV 缓存
-- 无需实际注意力计算，仅提取和存储隐藏状态
-- 用于 KV 转移（KV transfer）等场景
-
-主要类：
-- ExtractHiddenStatesProposer: 提取隐藏状态的 proposer
-
-注意：此 proposer 不进行实际的推测，而是返回采样的 token 作为草稿 token，
-确保它们总是能验证通过。主要目的是缓存隐藏状态而非推测。
-"""
 
 from __future__ import annotations
 
@@ -37,48 +24,9 @@ PADDING_SLOT_ID = -1
 
 
 class ExtractHiddenStatesProposer:
-    """提取隐藏状态的推测解码 proposer。
-
-    该 proposer 使用 ExtractHiddenStatesModel 模型在 KV 缓存中
-    缓存隐藏状态，而不进行实际的注意力计算。
-    这允许我们提取和存储隐藏状态以供后续使用（如 KV 转移）。
-
-    此 proposer 不进行实际的推测，而是返回采样的 token 作为"草稿"token，
-    确保它们总是能验证通过（匹配）。主要目的是缓存隐藏状态，而非推测。
-
-    Attributes:
-        vllm_config: vLLM 配置
-        device: 设备（CUDA）
-        dtype: 数据类型
-        dp_rank: 数据并行 rank
-        model: 加载的模型（在 load_model 中初始化）
-        attn_layer_names: 注意力层名称列表
-        attn_metadata_builder: 注意力元数据构建器
-        max_num_tokens: 最大 token 数量用于缓冲区
-        hf_config: HuggingFace 模型配置
-        num_hidden_states: 隐藏状态数量（由 eagle_aux_hidden_state_layer_ids 决定）
-        hidden_size: 隐藏层大小
-        hidden_states: 隐藏状态缓冲区 [max_num_tokens, num_hidden_states, hidden_size]
-        cudagraph_dispatcher: CUDA Graph 调度器
-        _slot_mapping_buffer: 槽映射缓冲区
-    """
-
     def __init__(self, vllm_config: VllmConfig, device):
-        """初始化 ExtractHiddenStatesProposer。
-
-        Args:
-            vllm_config: vLLM 配置
-            device: 设备（CUDA）
-
-        Raises:
-            AssertionError: 如果 speculative_config 未设置
-            AssertionError: 如果 num_speculative_tokens 不等于 1
-            ValueError: 如果 disable_padded_drafter_batch 为 True
-            ValueError: 如果 eagle_aux_hidden_state_layer_ids 未设置
-        """
         assert vllm_config.speculative_config is not None
 
-        # 提取隐藏状态方法要求 num_speculative_tokens == 1
         assert vllm_config.speculative_config.num_speculative_tokens == 1
         if vllm_config.speculative_config.disable_padded_drafter_batch:
             raise ValueError(
@@ -90,12 +38,12 @@ class ExtractHiddenStatesProposer:
         self.dtype = vllm_config.model_config.dtype
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
-        # 模型和注意力层跟踪（在 load_model 中初始化）
+        # Model and attention layer tracking (initialized in load_model)
         self.model: nn.Module | None = None
         self.attn_layer_names: list[str] = []
         self.attn_metadata_builder: AttentionMetadataBuilder | None = None
 
-        # 缓冲区的最大 token 数量
+        # Maximum number of tokens for buffers
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens + max_batch_size
@@ -110,7 +58,6 @@ class ExtractHiddenStatesProposer:
             )
         self.num_hidden_states = len(layer_ids)
         self.hidden_size = vllm_config.model_config.get_hidden_size()
-        # 分配隐藏状态缓冲区
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.num_hidden_states, self.hidden_size),
             dtype=self.dtype,
@@ -118,7 +65,6 @@ class ExtractHiddenStatesProposer:
         )
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
 
-        # 分配槽映射缓冲区
         self._slot_mapping_buffer = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=device
         )
@@ -132,34 +78,38 @@ class ExtractHiddenStatesProposer:
         | list[dict[str, torch.Tensor]]
         | None = None,
     ) -> torch.Tensor:
-        """通过调用 ExtractHiddenStatesModel 生成草稿 token。
+        """Propose draft tokens by calling the ExtractHiddenStatesModel model.
 
-        ExtractHiddenStatesModel 在 KV 缓存中缓存隐藏状态，
-        而不进行实际的注意力计算。这允许我们提取和存储隐藏状态
-        以供后续使用（如 KV 转移）。
+        The ExtractHiddenStatesModel caches the hidden states in the KV cache
+        without performing actual attention computation. This allows us to
+        extract and store hidden states for later use (e.g., KV transfer).
 
-        此 proposer 不进行实际的推测，而是返回采样的 token 作为"草稿"token，
-        确保它们总是能验证通过（匹配）。主要目的是缓存隐藏状态，而非推测。
+        This proposer doesn't actually perform speculation - it returns the
+        sampled tokens as "draft" tokens, ensuring they always verify (match).
+        The main purpose is to cache hidden states, not to speculate.
 
         Args:
-            sampled_token_ids: 来自目标模型的采样 token ID [batch_size, 1]
-            target_hidden_states: 来自目标模型的隐藏状态列表
-                （每个辅助隐藏状态层一个）
-            common_attn_metadata: 注意力元数据
-            slot_mappings: KV 缓存的槽映射（未使用，为接口兼容性提供）
+            sampled_token_ids: Sampled token IDs from the target model
+            target_hidden_states: List of hidden state tensors from target model
+                                (one per aux hidden state layer)
+            common_attn_metadata: Attention metadata
+            slot_mappings: Slot mappings for KV cache (unused, provided for
+                          interface compatibility)
 
         Returns:
-            草稿 token，形状与 sampled_token_ids 相同
+            Tuple of:
+                - Draft tokens matching sampled tokens, shape [batch_size, 1]
+                - KV connector output (if KV transfer is active), else None
         """
         assert self.model is not None and isinstance(target_hidden_states, list)
 
-        # target_hidden_states 是列表，每个元素是一个层的张量
-        # 每个张量形状：[num_tokens, hidden_size]
-        # 堆叠为形状：[num_tokens, num_hidden_states, hidden_size]
+        # target_hidden_states is a list of tensors (one per layer)
+        # Each tensor has shape [num_tokens, hidden_size]
+        # Stack to shape: [num_tokens, num_hidden_states, hidden_size]
         stacked_hidden_states = torch.stack(target_hidden_states, dim=1)
         num_tokens = stacked_hidden_states.shape[0]
 
-        # 复制隐藏状态到缓冲区
+        # Copy hidden states to buffer
         self.hidden_states[:num_tokens] = stacked_hidden_states
 
         assert self.attn_metadata_builder is not None
@@ -167,20 +117,18 @@ class ExtractHiddenStatesProposer:
             common_attn_metadata=common_attn_metadata, draft_index=0
         )
 
-        # 我们假设所有 cache-only 层属于同一个 KV 缓存组，
-        # 因此使用相同的注意力元数据。
+        # We assume all cache-only layers belong to the same KV cache group,
+        # thus using the same attention metadata.
         per_layer_attn_metadata = {}
         for layer_name in self.attn_layer_names:
             per_layer_attn_metadata[layer_name] = attn_metadata
 
-        # 确定批次执行模式和填充
         cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(num_tokens)
         )
         if num_tokens_across_dp is not None:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
-        # 设置 forward 上下文并执行模型
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
@@ -195,8 +143,8 @@ class ExtractHiddenStatesProposer:
                 hidden_states=self.hidden_states[:num_input_tokens],
             )
 
-        # 返回采样的 token 作为"草稿"token
-        # 形状：[batch_size, 1] 与 num_speculative_tokens=1 匹配
+        # Return the sampled tokens as "draft" tokens
+        # Shape: [batch_size, 1] to match num_speculative_tokens=1
         return sampled_token_ids
 
     def _get_slot_mapping(
@@ -204,16 +152,9 @@ class ExtractHiddenStatesProposer:
         num_tokens: int,
         slot_mapping: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """返回 cache-only 注意力层的 slot_mapping 字典。
+        """Return slot_mapping dict for cache-only attention layers.
 
-        如果提供了 slot_mapping，首先将其复制到缓冲区中。
-
-        Args:
-            num_tokens: token 数量
-            slot_mapping: 输入的槽映射（可选）
-
-        Returns:
-            槽映射字典，每个注意力层名称对应同一个视图
+        If slot_mapping is provided, copies it into the buffer first.
         """
         if slot_mapping is not None:
             num_actual = slot_mapping.shape[0]
@@ -229,26 +170,15 @@ class ExtractHiddenStatesProposer:
         num_tokens: int,
         use_cudagraphs: bool = True,
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
-        """确定批次执行模式和填充 token 数量。
-
-        Args:
-            num_tokens: 实际 token 数量
-            use_cudagraphs: 是否使用 CUDA Graphs
-
-        Returns:
-            三元组：
-                - cudagraph_mode: CUDA Graph 模式
-                - num_tokens_padded: 填充后的 token 数量
-                - num_tokens_across_dp: 跨数据并行的 token 数量（如果启用 DP）
-        """
         cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
             num_tokens,
             valid_modes=({CUDAGraphMode.NONE} if not use_cudagraphs else None),
         )
         num_tokens_padded = batch_desc.num_tokens
 
-        # 当启用数据并行时需要额外协调，因为我们需要跨 rank 同步
-        # TODO(Flechman): 支持 DBO ubatching
+        # Extra coordination when running data-parallel since we need to
+        # coordinate across ranks
+        # TODO(Flechman): support DBO ubatching
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
@@ -264,30 +194,28 @@ class ExtractHiddenStatesProposer:
                 "DBO ubatching not implemented for extract_hidden_states"
             )
 
-            # 提取 DP 同步后的值
+            # Extract DP-synced values
             if num_tokens_across_dp is not None:
                 dp_rank = self.dp_rank
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
-                # 使用 DP 填充重新 dispatch 以获得正确的 batch_descriptor
+                # Re-dispatch with DP padding so we have the correct
+                # batch_descriptor
                 cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
                     num_tokens_padded,
                     valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
                 )
-                # 断言确保商定的 token 数量正确
-                # 否则 num_tokens_across_dp 将不再有效
+                # Assert to make sure the agreed upon token count is correct
+                # otherwise num_tokens_across_dp will no-longer be valid
                 assert batch_desc.num_tokens == num_tokens_padded
                 num_tokens_across_dp[dp_rank] = num_tokens_padded
 
         return cudagraph_mode, num_tokens_padded, num_tokens_across_dp
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
-        """初始化 CUDA Graph 调度器的键。
+        """Initialize cudagraph dispatcher keys.
 
-        仅支持 PIECEWISE CUDA Graphs（通过 mixed_mode）。
-        应在 adjust_cudagraph_sizes_for_spec_decode 之后调用。
-
-        Args:
-            cudagraph_mode: CUDA Graph 模式
+        Only supports PIECEWISE cudagraphs (via mixed_mode).
+        Should be called after adjust_cudagraph_sizes_for_spec_decode.
         """
         assert self.vllm_config.speculative_config is not None
         if (
@@ -309,14 +237,6 @@ class ExtractHiddenStatesProposer:
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
-        """运行虚拟推理以初始化模型。
-
-        Args:
-            num_tokens: token 数量
-            use_cudagraphs: 是否使用 CUDA Graphs
-            is_graph_capturing: 是否正在捕获图
-            slot_mappings: 槽映射（可选）
-        """
         assert self.model is not None, "Model must be initialized before dummy_run"
         cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(
@@ -327,7 +247,7 @@ class ExtractHiddenStatesProposer:
         if num_tokens_across_dp is not None:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
-        # 在 CUDA Graph 捕获期间使用我们自己的槽映射缓冲区
+        # Use our own slot mapping buffer during cudagraph capture.
         if (
             self.attn_layer_names
             and slot_mappings is not None
@@ -352,17 +272,7 @@ class ExtractHiddenStatesProposer:
     def _build_attn_metadata_builder(
         self, draft_attn_layers: dict[str, AttentionLayerBase]
     ) -> AttentionMetadataBuilder:
-        """从草稿注意力层构建注意力元数据构建器。
-
-        Args:
-            draft_attn_layers: 草稿注意力层字典
-
-        Returns:
-            注意力元数据构建器
-
-        Raises:
-            ValueError: 如果没有找到注意力层
-        """
+        """Build the attention metadata builder from draft attention layers."""
         if not draft_attn_layers:
             raise ValueError("No attention layers found for ExtractHiddenStatesModel")
         layer = next(iter(draft_attn_layers.values()))
@@ -382,28 +292,17 @@ class ExtractHiddenStatesProposer:
         gpu_input_batch: InputBatch,
         discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """为推测解码准备下一个 token ID。
+        """
+        Prepare next token IDs for speculative decoding.
 
-        由于 num_speculative_tokens == 1，sampled_token_ids 的形状为
-        (batch_size, 1)。对于每个请求，我们使用采样的 token
-        （如果有效且未被丢弃）或使用来自请求状态的备份 token。
-
-        Args:
-            common_attn_metadata: 通用注意力元数据
-            sampled_token_ids: 采样的 token ID
-            requests: 请求状态字典
-            gpu_input_batch: GPU 输入批次
-            discard_request_mask: 丢弃请求掩码
-
-        Returns:
-            二元组：
-                - next_token_ids: 下一个 token ID
-                - valid_sampled_tokens_count: 有效采样 token 数量
+        Since num_speculative_tokens == 1, sampled_token_ids has shape
+        (batch_size, 1). For each request we either use the sampled token
+        (if valid and not discarded) or a backup token from the request state.
         """
         num_reqs = gpu_input_batch.num_reqs
         device = sampled_token_ids.device
 
-        # 为被丢弃/无效的请求计算备份 token
+        # Compute backup tokens for discarded / invalid requests
         backup_tokens_gpu = torch.tensor(
             [
                 requests[gpu_input_batch.req_ids[i]].get_token_id(
@@ -417,12 +316,11 @@ class ExtractHiddenStatesProposer:
 
         assert discard_request_mask.dtype == torch.bool
 
-        # 当 num_speculative_tokens == 1 时，恰好有一个 token
+        # With num_speculative_tokens == 1, there is exactly one token
         sampled = sampled_token_ids[:, 0]
         is_valid = (sampled >= 0) & (sampled < gpu_input_batch.vocab_size)
         valid_sampled_tokens_count = is_valid.to(torch.int32)
 
-        # 使用采样 token 当且仅当有效且未被丢弃
         use_sampled = is_valid & ~discard_request_mask[:num_reqs]
         next_token_ids = torch.where(
             use_sampled, sampled.to(torch.int32), backup_tokens_gpu
@@ -431,17 +329,17 @@ class ExtractHiddenStatesProposer:
         return next_token_ids, valid_sampled_tokens_count
 
     def load_model(self, target_model: nn.Module) -> None:
-        """加载 ExtractHiddenStatesModel 模型。
+        """Load the ExtractHiddenStatesModel model.
 
-        该方法实例化 ExtractHiddenStatesModel 模型，该模型用于
-        在推测解码期间缓存隐藏状态。模型使用 cache-only 注意力
-        （无计算，仅缓存 KV 状态）。
+        This method instantiates the ExtractHiddenStatesModel model which is used
+        to cache hidden states during speculative decoding. The model uses
+        cache-only attention (no computation, just caching KV states).
 
         Args:
-            target_model: 目标模型（为与 EagleProposer 接口兼容而传入，
-                但此处不使用）
+            target_model: The target model (passed for compatibility with
+                         EagleProposer interface, but not used here)
         """
-        # 在加载草稿模型之前获取目标模型的注意力层
+        # Get the target model's attention layers before loading draft model
         target_attn_layer_names = set(
             get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()  # type: ignore[type-abstract]
         )
@@ -455,7 +353,7 @@ class ExtractHiddenStatesProposer:
                 vllm_config=self.vllm_config, model_config=draft_model_config
             )
 
-        # 识别草稿模型的注意力层（与目标模型的差异）
+        # Identify draft model's attention layers (difference from target)
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
@@ -466,7 +364,6 @@ class ExtractHiddenStatesProposer:
             if name not in target_attn_layer_names
         }
         self.attn_layer_names = list(draft_attn_layers.keys())
-        # ExtractHiddenStatesModel 应该恰好有一个注意力层
         assert len(draft_attn_layers) == 1, (
             "ExtractHiddenStatesModel should have exactly one "
             f"attention layer, found {len(draft_attn_layers)}"
@@ -476,11 +373,9 @@ class ExtractHiddenStatesProposer:
         )
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
-        """验证所有 drafting 层属于同一个 KV 缓存组。
+        """Validate all drafting layers belong to the same KV cache group.
 
-        由于在 load_model 中断言只有一个注意力层，这自然满足。
-
-        Args:
-            kv_cache_config: KV 缓存配置
+        With exactly one attention layer (asserted in load_model), this is
+        trivially satisfied.
         """
         assert len(self.attn_layer_names) == 1

@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""XPU Worker 模块。
-
-本模块定义 XPU（Intel GPU）设备专用的 Worker，负责：
-- 继承 GPU Worker 并适配 XPU 后端
-- 初始化 XPU 分布式环境
-- 管理 XPU 设备内存
-- 支持 Torch 性能分析器（CPU 和 XPU 活动）
-- 初始化工作空间管理器
-
-主要类：
-- XPUWorker: XPU Worker 类
-"""
 import gc
 import os
 from typing import Any
@@ -35,14 +23,7 @@ logger = init_logger(__name__)
 
 
 class XPUWorker(Worker):
-    """XPU Worker 类。
-
-    继承自 GPU Worker，适配 XPU 后端运行环境。
-    主要功能：
-    - 支持 XPU 设备初始化和内存管理
-    - 支持 Torch 性能分析器（CPU 和 XPU 活动）
-    - 初始化 oneCCL 分布式环境
-    """
+    """A XPU worker class."""
 
     def __init__(
         self,
@@ -52,15 +33,6 @@ class XPUWorker(Worker):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
-        """初始化 XPU Worker。
-
-        Args:
-            vllm_config: vLLM 配置
-            local_rank: 本地 rank
-            rank: 全局 rank
-            distributed_init_method: 分布式初始化方法
-            is_driver_worker: 是否为 driver worker
-        """
         super().__init__(
             vllm_config, local_rank, rank, distributed_init_method, is_driver_worker
         )
@@ -81,18 +53,6 @@ class XPUWorker(Worker):
             )
 
     def init_device(self):
-        """初始化 XPU 设备。
-
-        执行以下操作：
-        1. 设置 XPU 设备索引
-        2. 检查数据类型支持
-        3. 初始化 oneCCL 分布式环境
-        4. 执行全局 all_reduce 用于 oneCCL 预热
-        5. 设置随机种子
-        6. 获取内存快照
-        7. 初始化工作空间管理器
-        8. 创建模型运行器
-        """
         device = self.device_config.device
         if (
             isinstance(device, torch.device)

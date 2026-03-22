@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton 合并注意力状态操作模块。
-
-本模块实现了合并前后缀注意力状态的操作，使用 Triton kernel。
-基于 https://www.arxiv.org/pdf/2501.01005 第 2.2 节实现。
-
-主要用于合并 split-KV 场景下的部分注意力结果。
-
-主要函数：
-- merge_attn_states: 合并注意力状态
-- merge_attn_states_kernel: Triton kernel 实现
-"""
 
 import torch
 
@@ -27,19 +16,6 @@ def merge_attn_states(
     suffix_lse: torch.Tensor,
     output_lse: torch.Tensor | None = None,
 ) -> None:
-    """合并注意力状态（prefix 和 suffix）。
-
-    基于 https://www.arxiv.org/pdf/2501.01005 第 2.2 节实现，
-    用于合并 split-KV 场景下的部分注意力结果。
-
-    Args:
-        output: 输出张量 [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-        prefix_output: prefix 输出张量
-        prefix_lse: prefix LSE [NUM_HEADS, NUM_TOKENS]
-        suffix_output: suffix 输出张量
-        suffix_lse: suffix LSE [NUM_HEADS, NUM_TOKENS]
-        output_lse: 输出 LSE（可选）
-    """
     num_tokens = output.shape[0]
     num_query_heads = output.shape[1]
     head_size = output.shape[2]
@@ -79,24 +55,6 @@ def merge_attn_states_kernel(
     PADDED_HEAD_SIZE: tl.constexpr,
     OUTPUT_LSE: tl.constexpr,
 ):
-    """合并注意力状态的 Triton kernel。
-
-    将 prefix 和 suffix 的注意力输出和 LSE 合并为最终结果。
-    使用数值稳定的方式计算加权和。
-
-    Args:
-        output: 输出张量指针
-        output_lse: 输出 LSE 指针
-        prefix_output: prefix 输出指针
-        prefix_lse: prefix LSE 指针
-        suffix_output: suffix 输出指针
-        suffix_lse: suffix LSE 指针
-        prefix_head_stride: prefix 头步幅
-        output_head_stride: 输出头步幅
-        HEAD_SIZE: 头维度
-        PADDED_HEAD_SIZE: 填充后的头维度（2 的幂）
-        OUTPUT_LSE: 是否输出 LSE
-    """
     token_idx = tl.program_id(0)
     num_tokens = tl.num_programs(0)
     head_idx = tl.program_id(1)

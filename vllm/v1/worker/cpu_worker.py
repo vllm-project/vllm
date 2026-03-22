@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU Worker 模块。
-
-本模块定义 CPU 设备专用的 Worker，负责：
-- 继承 GPU Worker 并适配 CPU 后端
-- 初始化 CPU 分布式环境
-- 管理 OpenMP 线程绑定
-- 支持 Torch 性能分析器
-- 处理 NUMA 节点绑定
-
-主要类：
-- CPUWorker: CPU Worker 类
-"""
 import os
 import platform
 import sys
@@ -34,14 +22,6 @@ logger = init_logger(__name__)
 
 
 class CPUWorker(Worker):
-    """CPU Worker 类。
-
-    继承自 GPU Worker，适配 CPU 后端运行环境。
-    主要功能：
-    - 禁用 custom all reduce
-    - 支持 Torch 性能分析器（仅 CPU 活动）
-    - 管理 OpenMP 线程绑定和 NUMA 节点分配
-    """
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -50,15 +30,6 @@ class CPUWorker(Worker):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
-        """初始化 CPU Worker。
-
-        Args:
-            vllm_config: vLLM 配置
-            local_rank: 本地 rank
-            rank: 全局 rank
-            distributed_init_method: 分布式初始化方法
-            is_driver_worker: 是否为 driver worker
-        """
         super().__init__(
             vllm_config,
             local_rank,
@@ -82,15 +53,6 @@ class CPUWorker(Worker):
             )
 
     def init_device(self):
-        """初始化设备。
-
-        执行以下操作：
-        1. 检查关键库是否已预加载（libtcmalloc、libiomp）
-        2. 设置 OpenMP 线程绑定
-        3. 初始化分布式环境
-        4. 设置随机种子
-        5. 创建模型运行器
-        """
         # Check whether critical libraries are loaded
         def check_preloaded_libs(name: str):
             ld_preload_list = os.environ.get("LD_PRELOAD", "")
@@ -165,37 +127,17 @@ class CPUWorker(Worker):
         )
 
     def sleep(self, level: int = 1) -> None:
-        """休眠（CPU 不支持）。
-
-        Args:
-            level: 休眠级别
-        """
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        """唤醒（CPU 不支持）。
-
-        Args:
-            tags: 唤醒标签
-        """
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 
     def determine_available_memory(self) -> int:
-        """确定可用内存。
-
-        Returns:
-            CPU KV 缓存空间（字节）
-        """
         return self.cache_config.cpu_kvcache_space_bytes or 0
 
     def compile_or_warm_up_model(self) -> float:
-        """编译或预热模型。
-
-        Returns:
-            编译时间
-        """
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
@@ -205,18 +147,15 @@ class CPUWorker(Worker):
     def _get_autobind_cpu_ids(
         self, cpu_selector: Callable[[list[LogicalCPUInfo]], list[LogicalCPUInfo]]
     ) -> str:
-        """获取自动绑定的 CPU ID 列表。
-
-        根据 NUMA 节点返回要绑定的 CPU ID。
-        当前对于 rank N，仅选择可用 NUMA 节点列表中第 N 个节点上的 CPU ID。
-
+        """
+        Return CPU ids to bind based on NUMA nodes.
+        Currently for rank N, only CPU ids on the N-th node in available NUMA
+        node list will be selected.
         Args:
-            cpu_selector: 可调用对象，用于从物理核心的 CPU 列表中选择 CPU。
-                输入是 LogicalCPUInfo 列表（按 LogicalCPUInfo.id 排序），
-                应返回选中的 LogicalCPUInfo 列表。
-
-        Returns:
-            CPU ID 逗号分隔的字符串
+            cpu_selector: a callable object to select CPUs from a CPU list
+            of a physical core. The input is a LogicalCPUInfo list, sorted by
+            the LogicalCPUInfo.id. A selected LogicalCPUInfo list should be
+            returned.
         """
         # simulate multiple numa nodes, for testing
         sim_multi_numa_nodes = os.environ.get("VLLM_CPU_SIM_MULTI_NUMA", "0") != "0"
@@ -292,12 +231,6 @@ class CPUWorker(Worker):
         return ",".join([str(x.id) for x in logical_cpu_list])
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        """性能分析。
-
-        Args:
-            is_start: 是否开始分析
-            profile_prefix: 分析前缀
-        """
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         if is_start:

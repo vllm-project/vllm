@@ -1,18 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GPU 输入批次数据模块。
-
-本模块定义 GPU 输入批次相关的数据结构，负责：
-- 管理 GPU 输入批次的状态
-- 处理请求的添加和移除
-- 管理采样相关的参数
-- 处理 LoRA 适配器映射
-- 支持 pooling 模型和 spec decode
-
-主要类：
-- CachedRequestState: 缓存的请求状态数据类
-- InputBatch: GPU 输入批次类
-"""
+# Datastructures defining a GPU input batch
 
 from dataclasses import dataclass
 from typing import cast
@@ -40,32 +28,32 @@ from vllm.v1.worker.block_table import MultiGroupBlockTable
 
 @dataclass
 class CachedRequestState:
-    """缓存的请求状态数据类。
+    req_id: str
+    prompt_token_ids: list[int] | None
+    mm_features: list[MultiModalFeatureSpec]
+    sampling_params: SamplingParams | None
+    generator: torch.Generator | None
 
-    存储每个请求的缓存状态信息，包括 token ID、采样参数、
-    块分配信息等。
+    block_ids: tuple[list[int], ...]
+    num_computed_tokens: int
+    output_token_ids: list[int]
 
-    Attributes:
-        req_id: 请求 ID
-        prompt_token_ids: prompt token ID 列表
-        mm_features: 多模态特征列表
-        sampling_params: 采样参数
-        generator: 随机数生成器
-        block_ids: 块 ID 元组（每个 KV 缓存组）
-        num_computed_tokens: 已计算的 token 数量
-        output_token_ids: 输出 token ID 列表
-        mrope_positions: M-ROPE 位置
-        mrope_position_delta: M-ROPE 位置增量
-        xdrope_positions: X-ROPE 位置
-        lora_request: LoRA 请求
-        prompt_embeds: prompt 嵌入
-        prev_num_draft_len: 上一个 draft 长度（用于 async_scheduling + spec_decode）
-        pooling_params: pooling 参数（用于 pooling 模型）
-        pooling_states: pooling 状态（用于 pooling 模型）
-    """
+    mrope_positions: torch.Tensor | None = None
+    mrope_position_delta: int | None = None
+
+    xdrope_positions: torch.Tensor | None = None
+
+    lora_request: LoRARequest | None = None
+    prompt_embeds: torch.Tensor | None = None
+
+    # Used when both async_scheduling and spec_decode are enabled.
+    prev_num_draft_len: int = 0
+
+    # for pooling models
+    pooling_params: PoolingParams | None = None
+    pooling_states: PoolingStates | None = None
 
     def __post_init__(self):
-        """初始化后处理：计算 prompt token 数量和 pooling 状态。"""
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds
         )
@@ -75,25 +63,9 @@ class CachedRequestState:
 
     @property
     def num_tokens(self) -> int:
-        """获取总 token 数量。
-
-        Returns:
-            prompt token 数量 + 输出 token 数量
-        """
         return self.num_prompt_tokens + len(self.output_token_ids)
 
     def get_token_id(self, idx: int) -> int:
-        """获取指定索引的 token ID。
-
-        Args:
-            idx: token 索引
-
-        Returns:
-            token ID，如果索引超出范围则返回 -1
-
-        Raises:
-            ValueError: 如果尝试访问通过 prompt_embeds 提供的 token
-        """
         if idx < self.num_prompt_tokens:
             if self.prompt_token_ids is None:
                 raise ValueError(
@@ -107,21 +79,6 @@ class CachedRequestState:
 
 
 class InputBatch:
-    """GPU 输入批次管理类。
-
-    管理 GPU 输入批次的状态，包括请求状态、token ID、采样参数等。
-    支持动态添加和移除请求，并提供批量操作的高效实现。
-
-    Attributes:
-        is_pooling_model: 是否为 pooling 模型
-        is_spec_decode: 是否启用 spec decode
-        max_num_reqs: 最大请求数量
-        max_model_len: 最大模型长度
-        max_num_batched_tokens: 最大批次 token 数
-        device: 计算设备
-        pin_memory: 是否使用 pinned memory
-        vocab_size: 词汇表大小
-    """
     def __init__(
         self,
         max_num_reqs: int,
@@ -139,24 +96,6 @@ class InputBatch:
         is_pooling_model: bool = False,
         cp_kv_cache_interleave_size: int = 1,
     ):
-        """初始化 GPU 输入批次。
-
-        Args:
-            max_num_reqs: 最大请求数量
-            max_model_len: 最大模型长度
-            max_num_batched_tokens: 最大批次 token 数
-            device: 计算设备
-            pin_memory: 是否使用 pinned memory
-            vocab_size: 词汇表大小
-            block_sizes: 每个 KV 缓存组的块大小
-            kernel_block_sizes: 内核块大小
-            max_num_blocks_per_req: 每个请求的最大块数
-            logitsprocs: logits 处理器
-            logitsprocs_need_output_token_ids: logits 处理器是否需要输出 token ID
-            is_spec_decode: 是否启用 spec decode
-            is_pooling_model: 是否为 pooling 模型
-            cp_kv_cache_interleave_size: CP KV 缓存交错大小
-        """
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
@@ -344,25 +283,13 @@ class InputBatch:
 
     @property
     def req_ids(self) -> list[str]:
-        """获取请求 ID 列表。
-
-        Returns:
-            请求 ID 列表
-        """
         # None elements should only be present transiently
         # while performing state updates to the batch.
         return cast(list[str], self._req_ids)
 
     def _register_add_request(self, request: "CachedRequestState") -> int:
-        """跟踪添加请求操作以支持 logits 处理器。
-
-        不适用于 pooling 模型。
-
-        Args:
-            request: 缓存的请求状态
-
-        Returns:
-            新请求的索引
+        """Track add-request operations for logits processors.
+        Not applicable to pooling models.
         """
 
         # Fill the next empty index if there is one.
@@ -390,14 +317,6 @@ class InputBatch:
         self,
         request: "CachedRequestState",
     ) -> int:
-        """添加请求到批次中。
-
-        Args:
-            request: 缓存的请求状态
-
-        Returns:
-            请求的索引
-        """
         req_index = self._register_add_request(request)
 
         req_id = request.req_id
@@ -536,12 +455,6 @@ class InputBatch:
     def update_req_spec_token_ids(
         self, request: CachedRequestState, scheduled_spec_tokens: dict[str, list[int]]
     ) -> None:
-        """更新请求的 spec token IDs。
-
-        Args:
-            request: 缓存的请求状态
-            scheduled_spec_tokens: 调度的 spec token 字典
-        """
         req_id = request.req_id
         req_index = self.req_id_to_index[req_id]
         cur_spec_token_ids = self.spec_token_ids[req_index]
@@ -566,16 +479,6 @@ class InputBatch:
         cur_spec_token_ids.extend(spec_token_ids)
 
     def remove_request(self, req_id: str) -> int | None:
-        """移除请求。
-
-        注意：调用此方法后必须跟随调用 condense()。
-
-        Args:
-            req_id: 要移除的请求 ID
-
-        Returns:
-            被移除请求的索引，如果未找到则返回 None
-        """
         """This method must always be followed by a call to condense().
 
         Args:
@@ -630,12 +533,6 @@ class InputBatch:
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
-        """交换两个请求的状态。
-
-        Args:
-            i1: 第一个请求索引
-            i2: 第二个请求索引
-        """
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
         # Only swap the active token prefix for each request. Copying full
@@ -748,23 +645,11 @@ class InputBatch:
             )
 
     def _get_active_token_count(self, req_index: int) -> int:
-        """获取活跃 token 数量。
-
-        Args:
-            req_index: 请求索引
-
-        Returns:
-            活跃 token 数量
-        """
         return int(self.num_tokens_no_spec[req_index]) + len(
             self.spec_token_ids[req_index]
         )
 
     def condense(self) -> None:
-        """将非空请求滑动到较低的空闲索引。
-
-        末尾的连续空索引不会被填充。
-        """
         """Slide non-empty requests down into lower, empty indices.
 
         Any consecutive empty indices at the very end of the list are not
@@ -893,7 +778,6 @@ class InputBatch:
         del self.spec_token_ids[num_reqs:]
 
     def refresh_metadata(self):
-        """刷新元数据：应用批次更新到采样元数据。"""
         """Apply any batch updates to sampling metadata."""
 
         if self.is_pooling_model:
@@ -912,11 +796,6 @@ class InputBatch:
             self.sampling_metadata = self._make_sampling_metadata()
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
-        """生成采样元数据。
-
-        Returns:
-            采样元数据
-        """
         num_reqs = self.num_reqs
         if not self.all_greedy:
             temperature = copy_slice(
@@ -1001,29 +880,14 @@ class InputBatch:
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:
-        """获取 pooling 参数列表。
-
-        Returns:
-            pooling 参数列表
-        """
         assert len(self.req_ids) == len(self.pooling_params)
         return [self.pooling_params[req_id] for req_id in self.req_ids]
 
     def get_pooling_states(self) -> list[PoolingStates]:
-        """获取 pooling 状态列表。
-
-        Returns:
-            pooling 状态列表
-        """
         assert len(self.req_ids) == len(self.pooling_states)
         return [self.pooling_states[req_id] for req_id in self.req_ids]
 
     def get_pooling_metadata(self) -> PoolingMetadata:
-        """获取 pooling 元数据。
-
-        Returns:
-            pooling 元数据
-        """
         pooling_params = self.get_pooling_params()
         pooling_states = self.get_pooling_states()
 
@@ -1035,11 +899,6 @@ class InputBatch:
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
-        """创建 prompt token IDs 张量。
-
-        Returns:
-            prompt token IDs 张量
-        """
         num_reqs = self.num_reqs
         max_prompt_len = self.num_prompt_tokens[:num_reqs].max()
         prompt_token_ids_cpu_tensor = torch.empty(
@@ -1059,19 +918,16 @@ class InputBatch:
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
-        """生成 LoRA 输入数据。
-
-        Args:
-            num_scheduled_tokens: 每个请求调度的 token 数量数组
-            num_sampled_tokens: 每个请求采样的 token 数量数组
-
+        """
+        Given the num_scheduled_tokens for each request in the batch, return
+        datastructures used to activate the current LoRAs.
         Returns:
-            包含以下内容的元组：
-            - prompt_lora_mapping: 大小为 np.sum(num_sampled_tokens) 的元组，
-              prompt_lora_mapping[i] 是第 i 个采样 token 的 LoRA ID
-            - token_lora_mapping: 大小为 np.sum(num_scheduled_tokens) 的元组，
-              token_lora_mapping[i] 是第 i 个 token 的 LoRA ID
-            - lora_requests: 活动 LoRA 请求集合
+            1. prompt_lora_mapping: A tuple of size np.sum(num_sampled_tokens)
+               where, prompt_lora_mapping[i] is the LoRA id to use for the ith
+               sampled token.
+            2. token_lora_mapping: A tuple of size np.sum(num_scheduled_tokens)
+               where, token_lora_mapping[i] is the LoRA id to use for ith token.
+            3. lora_requests: Set of relevant LoRA requests.
         """
 
         req_lora_mapping = self.request_lora_mapping[: self.num_reqs]
@@ -1089,14 +945,10 @@ class InputBatch:
         sampled_token_ids_cpu: torch.Tensor,
         async_copy_ready_event: torch.Event,
     ) -> None:
-        """设置异步采样的 token IDs。
-
-        在异步调度情况下，存储 sampled_token_ids_cpu 张量和对应的复制就绪事件。
-        如果需要，用于在采样前修复 output_token_ids。
-
-        Args:
-            sampled_token_ids_cpu: 采样的 token IDs CPU 张量
-            async_copy_ready_event: 异步复制就绪事件
+        """
+        In async scheduling case, store ref to sampled_token_ids_cpu
+        tensor and corresponding copy-ready event. Used to repair
+        output_token_ids prior to sampling, if needed by logits processors.
         """
         if self.sampling_metadata.output_token_ids:
             self.sampled_token_ids_cpu = sampled_token_ids_cpu
@@ -1106,11 +958,10 @@ class InputBatch:
             self.async_copy_ready_event = None
 
     def update_async_output_token_ids(self) -> None:
-        """更新异步输出 token IDs。
-
-        在异步调度情况下，一旦采样的 token IDs 完成复制到 CPU，
-        就从先前步骤更新 sampling metadata 中的 output_token_ids。
-        在 logits 处理器需要之前调用此方法。
+        """
+        In async scheduling case, update output_token_ids in sampling metadata
+        from prior steps sampled token ids once they've finished copying to CPU.
+        This is called right before they are needed by the logits processors.
         """
         output_token_ids = self.sampling_metadata.output_token_ids
         if self.sampled_token_ids_cpu is None or not output_token_ids:
@@ -1147,14 +998,10 @@ class InputBatch:
             req_output_token_ids[first_placeholder:end_index] = new_ids
 
     def update_async_spec_token_ids(self, draft_token_ids: list[list[int]]) -> None:
-        """更新异步 spec token IDs。
-
-        在异步调度情况下，用先前步骤的真实 draft token IDs 更新
-        sampling metadata 中的 spec_token_ids。在 rejection sampler
-        需要用于 penalty/bad_words 计算之前调用此方法。
-
-        Args:
-            draft_token_ids: draft token IDs 列表
+        """
+        In async scheduling case, update spec_token_ids in sampling metadata with
+        real draft token ids from prior step. This is called right before they are
+        needed by the rejection sampler for penalty/bad_words computation.
         """
         if not draft_token_ids or not self.prev_req_id_to_index:
             return
@@ -1172,56 +1019,26 @@ class InputBatch:
 
     @property
     def num_reqs(self) -> int:
-        """获取请求数量。
-
-        Returns:
-            当前批次中的请求数量
-        """
         return len(self.req_id_to_index)
 
     @property
     def all_greedy(self) -> bool:
-        """检查是否所有请求都使用贪婪采样。
-
-        Returns:
-            如果所有请求都是贪婪采样则返回 True
-        """
         return len(self.random_reqs) == 0
 
     @property
     def all_random(self) -> bool:
-        """检查是否所有请求都使用随机采样。
-
-        Returns:
-            如果所有请求都是随机采样则返回 True
-        """
         return len(self.greedy_reqs) == 0
 
     @property
     def no_top_p(self) -> bool:
-        """检查是否没有请求使用 top_p 采样。
-
-        Returns:
-            如果没有请求使用 top_p 则返回 True
-        """
         return len(self.top_p_reqs) == 0
 
     @property
     def no_top_k(self) -> bool:
-        """检查是否没有请求使用 top_k 采样。
-
-        Returns:
-            如果没有请求使用 top_k 则返回 True
-        """
         return len(self.top_k_reqs) == 0
 
     @property
     def no_penalties(self) -> bool:
-        """检查是否没有请求使用任何惩罚。
-
-        Returns:
-            如果没有请求使用 frequency/presence/repetition 惩罚则返回 True
-        """
         return (
             len(self.presence_penalties_reqs) == 0
             and len(self.frequency_penalties_reqs) == 0
@@ -1230,18 +1047,8 @@ class InputBatch:
 
     @property
     def max_num_logprobs(self) -> int | None:
-        """获取最大 logprobs 数量。
-
-        Returns:
-            所有请求中最大的 logprobs 值，如果没有请求需要 logprobs 则返回 None
-        """
         return max(self.num_logprobs.values()) if self.num_logprobs else None
 
     @property
     def no_allowed_token_ids(self) -> bool:
-        """检查是否没有请求设置允许 token ID。
-
-        Returns:
-            如果没有请求设置允许 token ID 则返回 True
-        """
         return len(self.has_allowed_token_ids) == 0

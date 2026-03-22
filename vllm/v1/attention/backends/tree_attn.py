@@ -1,18 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""树形注意力后端模块。
-
-本模块实现了基于 Tree Attention 的注意力后端，负责：
-- 实现树形注意力后端类
-- 支持预测解码中的树形结构注意力
-- 使用 Triton unified attention kernel
-
-主要类：
-- TreeAttentionBackend: 树形注意力后端类
-- TreeAttentionMetadata: 树形注意力元数据类
-- TreeAttentionMetadataBuilder: 元数据构建器
-- TreeAttentionImpl: 后端实现类
-"""
+"""Attention layer with TreeAttention."""
 
 import ast
 from dataclasses import dataclass
@@ -42,10 +30,6 @@ logger = init_logger(__name__)
 
 
 class TreeAttentionBackend(AttentionBackend):
-    """树形注意力后端类。
-
-    基于 Tree Attention 实现的注意力后端，支持预测解码中的树形结构。
-    """
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -57,38 +41,18 @@ class TreeAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        """获取支持的内核块大小列表。
-
-        Returns:
-            支持的块大小列表 [MultipleOf(16)]
-        """
         return [MultipleOf(16)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        """获取支持的头大小列表。
-
-        Returns:
-            支持的头大小列表
-        """
         return [32, 64, 96, 128, 160, 192, 224, 256]
 
     @staticmethod
     def get_name() -> str:
-        """获取后端名称。
-
-        Returns:
-            后端名称 "TREE_ATTN"
-        """
         return "TREE_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["TreeAttentionImpl"]:
-        """获取注意力实现类。
-
-        Returns:
-            TreeAttentionImpl 类
-        """
         return TreeAttentionImpl
 
     @staticmethod
@@ -99,131 +63,54 @@ class TreeAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        """获取 KV 缓存形状。
-
-        Args:
-            num_blocks: 块数量
-            block_size: 块大小
-            num_kv_heads: KV 头数量
-            head_size: 头大小
-            cache_dtype_str: 缓存数据类型
-
-        Returns:
-            KV 缓存形状元组
-
-        Raises:
-            ValueError: 如果块大小不是 16 的倍数
-        """
         if block_size % 16 != 0:
-            raise ValueError("块大小必须是 16 的倍数。")
+            raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def get_builder_cls() -> type["TreeAttentionMetadataBuilder"]:
-        """获取元数据构建器类。
-
-        Returns:
-            TreeAttentionMetadataBuilder 类
-        """
         return TreeAttentionMetadataBuilder
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
-        """检查是否使用 cascade 注意力。
-
-        Returns:
-            False（树形注意力不支持 cascade）
-        """
         return False
 
 
 @dataclass
 class TreeAttentionMetadata:
-    """树形注意力元数据类。
-
-    存储树形注意力前向传播所需的元数据信息。
-
-    Attributes:
-        num_actual_tokens: 实际 token 数（不包括 padding）
-        max_query_len: 最大 query 长度
-        query_start_loc: query 起始位置
-        max_seq_len: 最大序列长度
-        seq_lens: 序列长度
-        block_table: 块表
-        slot_mapping: 槽位映射
-        num_prefill_tokens: 预填充 token 数
-        num_decode_tokens: 解码 token 数
-        num_prefills: 预填充请求数
-        num_decodes: 解码请求数
-        tree_attn_bias: 树形注意力偏置
-        _cached_prefill_metadata: 缓存的预填充元数据
-        _cached_decode_metadata: 缓存的解码元数据
-    """
-    num_actual_tokens: int
-    """实际 token 数（不包括 padding）。"""
-
+    num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
-    """最大 query 长度。"""
-
     query_start_loc: torch.Tensor
-    """query 起始位置张量。"""
-
     max_seq_len: int
-    """最大序列长度。"""
-
     seq_lens: torch.Tensor
-    """序列长度张量。"""
-
     block_table: torch.Tensor
-    """块表张量。"""
-
     slot_mapping: torch.Tensor
-    """槽位映射张量。"""
 
     num_prefill_tokens: int = 0
-    """预填充 token 数。"""
-
     num_decode_tokens: int = 0
-    """解码 token 数。"""
-
     num_prefills: int = 0
-    """预填充请求数。"""
-
     num_decodes: int = 0
-    """解码请求数。"""
 
     tree_attn_bias: torch.Tensor | None = None
-    """树形注意力偏置张量。"""
 
-    # 缓存的预填充/解码元数据
+    # Cached Prefill/decode metadata.
     _cached_prefill_metadata: "TreeAttentionMetadata | None" = None
-    """缓存的预填充元数据。"""
-
     _cached_decode_metadata: "TreeAttentionMetadata | None" = None
-    """缓存的解码元数据。"""
 
     @property
     def prefill_metadata(self) -> "TreeAttentionMetadata | None":
-        """获取预填充元数据。
-
-        如果批次中没有预填充请求则返回 None。
-        否则返回缓存的预填充元数据或构建新的元数据。
-
-        Returns:
-            预填充元数据或 None
-        """
         if self.num_prefills == 0:
             return None
 
         if self._cached_prefill_metadata is not None:
-            # 恢复缓存的预填充阶段注意力元数据结构
+            # Recover cached prefill-phase attention
+            # metadata structure
             return self._cached_prefill_metadata
 
-        # 为预填充请求提取相关张量
         q_start_loc = self.query_start_loc[self.num_decodes :]
         q_seqlens = torch.diff(q_start_loc)
         kv_seqlens = self.seq_lens[self.num_decodes :]
-        # 构建并缓存预填充阶段注意力元数据结构
+        # Construct & cache prefill-phase attention metadata structure
         self._cached_prefill_metadata = TreeAttentionMetadata(
             num_actual_tokens=self.num_prefill_tokens,
             max_query_len=int(q_seqlens.max().item()),
@@ -237,26 +124,18 @@ class TreeAttentionMetadata:
 
     @property
     def decode_metadata(self) -> "TreeAttentionMetadata | None":
-        """获取解码元数据。
-
-        如果批次中没有解码请求则返回 None。
-        否则返回缓存的解码元数据或构建新的元数据。
-
-        Returns:
-            解码元数据或 None
-        """
         if self.num_decode_tokens == 0:
             return None
 
         if self._cached_decode_metadata is not None:
-            # 恢复缓存的解码阶段注意力元数据结构
+            # Recover cached decode-phase attention
+            # metadata structure
             return self._cached_decode_metadata
 
-        # 为解码请求提取相关张量
         q_start_loc = self.query_start_loc[: self.num_decodes + 1]
         q_seqlens = torch.diff(q_start_loc)
         kv_seqlens = self.seq_lens[: self.num_decodes]
-        # 构建并缓存解码阶段注意力元数据结构
+        # Construct & cache decode-phase attention metadata structure
         self._cached_decode_metadata = TreeAttentionMetadata(
             num_actual_tokens=self.num_decode_tokens,
             max_query_len=int(q_seqlens.max().item()),
@@ -271,11 +150,6 @@ class TreeAttentionMetadata:
 
 
 class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadata]):
-    """树形注意力元数据构建器类。
-
-    负责构建树形注意力运行所需的元数据对象。
-    支持树形注意力偏置的构建和管理。
-    """
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -283,28 +157,18 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        """初始化树形注意力元数据构建器。
-
-        Args:
-            kv_cache_spec: KV 缓存规格
-            layer_names: 层名称列表
-            vllm_config: vLLM 配置
-            device: 设备类型
-        """
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         self.block_size = kv_cache_spec.block_size
 
-        # 获取预测解码的树形结构配置
         spec_config = vllm_config.speculative_config
         spec_token_tree: str | None = None
         if spec := spec_config:
             spec_token_tree = spec.speculative_token_tree
-        # 解析树形选择
         tree_choices: list[tuple[int, ...]] = (
             ast.literal_eval(spec_token_tree) if spec_token_tree is not None else [(0,)]
         )
-        # 构建树形注意力偏置
+        # Construct the tree attention bias.
         depth_counts = _get_depth_counts(tree_choices)
         self.tree_attn_bias = _prepare_tree_attn_bias(
             tree_choices,
@@ -313,7 +177,6 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
             device=device,
         )
 
-        # 设置重排序批次阈值
         self.reorder_batch_threshold = self.tree_attn_bias.shape[0]
 
     def build(
@@ -322,26 +185,13 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> TreeAttentionMetadata:
-        """构建树形注意力元数据。
-
-        Args:
-            common_prefix_len: 公共前缀长度
-            common_attn_metadata: 通用注意力元数据
-            fast_build: 是否快速构建
-
-        Returns:
-            构建的 TreeAttentionMetadata 对象
-        """
-        # 使用树形注意力偏置的大小作为解码阈值
         decode_threshold = self.tree_attn_bias.shape[0]
-        # 分割解码和预填充请求
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata, decode_threshold=decode_threshold
             )
         )
 
-        # 提取通用元数据字段
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         q_start_loc = common_attn_metadata.query_start_loc
         max_query_len = common_attn_metadata.max_query_len
@@ -350,7 +200,6 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         block_table = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
-        # 构建树形注意力元数据
         return TreeAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             num_prefill_tokens=num_prefill_tokens,
@@ -371,44 +220,28 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         common_attn_metadata: CommonAttentionMetadata,
         draft_index: int,
     ) -> TreeAttentionMetadata:
-        """为预测草稿构建元数据。
-
-        Args:
-            common_attn_metadata: 通用注意力元数据
-            draft_index: 草稿索引
-
-        Returns:
-            构建的 TreeAttentionMetadata 对象
-        """
-        # 缓存原始树形注意力偏置
+        # Cache the original tree attention bias.
         orig_tree_attn_bias = self.tree_attn_bias
 
         if draft_index == 0:
-            # 在根级别使用预填充进行草稿
+            # Use prefill for drafting at the root level.
             self.tree_attn_bias = torch.empty(0)
         else:
-            # 为草稿切片树形注意力偏置，排除根级别
+            # Slice the tree attention bias for drafting. Exclude
+            # the root level.
             start, end = 1, 1 + common_attn_metadata.max_query_len
             self.tree_attn_bias = self.tree_attn_bias[start:end, start:end].contiguous()
 
-        # 构建注意力元数据
+        # Build attention bias.
         attn_metadata = self.build(0, common_attn_metadata, fast_build=True)
 
-        # 重置树形注意力偏置为原始值
+        # Reset the tree attention bias to the original value.
         self.tree_attn_bias = orig_tree_attn_bias
         return attn_metadata
 
 
 def _get_depth_counts(sorted_tree_choices: list[tuple[int, ...]]) -> list[int]:
-    """计算树形结构中每个深度的选择数量。
-
-    Args:
-        sorted_tree_choices: 排序后的树形选择列表
-
-    Returns:
-        每个深度的计数列表
-    """
-    # 计算树形结构中每个深度的选择数量
+    # Count the number of choices at each depth of the tree.
     depth_counts = []
     prev_depth = 0
     for path in sorted_tree_choices:
@@ -426,42 +259,27 @@ def _prepare_tree_attn_bias(
     dtype: torch.dtype | None,
     device: torch.device | None,
 ) -> torch.Tensor:
-    """准备树形注意力偏置张量。
-
-    构建树形注意力掩码，其中：
-    - 对角线设置为 0（每个 token 关注自身）
-    - 根节点设置为 0（所有 token 关注根节点）
-    - 所有祖先节点设置为 0
-
-    Args:
-        sorted_tree_choices: 排序后的树形选择列表
-        depth_counts: 每个深度的计数列表
-        dtype: 数据类型
-        device: 设备类型
-
-    Returns:
-        树形注意力偏置张量
-    """
-    # +1 来自额外的根节点
+    # +1 comes from the additional root node.
     tree_len = len(sorted_tree_choices) + 1
     tree_attn_mask = torch.full(
         (tree_len, tree_len), -torch.inf, device=device, dtype=dtype
     )
 
-    # 设置对角线为全 0，每个 token 应该关注自身
+    # Set diagonal to all zeros. Each token should
+    # attend to itself.
     mask_val = 0
     for i in range(tree_len):
         tree_attn_mask[i, i] = mask_val
 
-    # 设置根节点为全 0，所有 token 关注它
+    # Set root to all zeros. All tokens attend to it.
     tree_attn_mask[:, 0] = mask_val
 
-    # 设置所有祖先节点为 0
+    # Set all ancestors to zeros.
     start = 0
     for i in range(len(depth_counts)):
         for j in range(depth_counts[i]):
             cur_tree_choice = sorted_tree_choices[start + j]
-            # 获取祖先位置
+            # Retrieve ancestor position.
             if len(cur_tree_choice) == 1:
                 continue
             ancestor_idx = []
@@ -475,10 +293,6 @@ def _prepare_tree_attn_bias(
 
 
 class TreeAttentionImpl(AttentionImpl):
-    """树形注意力实现类。
-
-    基于 Triton unified attention kernel 实现的树形注意力后端。
-    """
     def __init__(
         self,
         num_heads: int,
@@ -492,20 +306,6 @@ class TreeAttentionImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
     ) -> None:
-        """初始化树形注意力实现。
-
-        Args:
-            num_heads: 注意力头数量
-            head_size: 头大小
-            scale: 缩放因子
-            num_kv_heads: KV 头数量
-            alibi_slopes: ALIBI 斜率列表
-            sliding_window: 滑动窗口大小
-            kv_cache_dtype: KV 缓存数据类型
-            logits_soft_cap: Logits 软化上限
-            attn_type: 注意力类型
-            kv_sharing_target_layer_name: KV 共享目标层名称
-        """
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -517,7 +317,7 @@ class TreeAttentionImpl(AttentionImpl):
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
         if logits_soft_cap is None:
-            # logits_soft_cap 设置为 0 表示没有软化上限
+            # Setting logits_soft_cap to 0 means no soft cap.
             logits_soft_cap = 0
         self.logits_soft_cap = logits_soft_cap
         if sliding_window is None:
@@ -527,8 +327,10 @@ class TreeAttentionImpl(AttentionImpl):
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
-                "TreeAttentionImpl 不支持编码器自注意力和 "
-                "编码器/解码器交叉注意力。"
+                "Encoder self-attention and "
+                "encoder/decoder cross-attention "
+                "are not implemented for "
+                "TreeAttentionImpl."
             )
 
     def do_kv_cache_update(
@@ -539,21 +341,14 @@ class TreeAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
-        """执行 KV 缓存更新。
-
-        Args:
-            layer: 注意力层
-            key: Key 张量
-            value: Value 张量
-            kv_cache: KV 缓存张量
-            slot_mapping: 槽位映射
-        """
         key_cache, value_cache = kv_cache.unbind(0)
 
-        # 重新塑造输入键和值并将其存储在缓存中。
-        # NOTE(woosuk): 这里 key 和 value 被填充而 slot_mapping 没有填充。
-        # 但是，我们不需要做 key[:num_actual_tokens] 和 value[:num_actual_tokens]，
-        # 因为 reshape_and_cache_flash op 使用 slot_mapping 的形状来确定实际 token 数。
+        # Reshape the input keys and values and store them in the cache.
+        # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+        # not padded. However, we don't need to do key[:num_actual_tokens]
+        # and value[:num_actual_tokens] because the reshape_and_cache_flash
+        # op uses the slot_mapping's shape to determine the number of
+        # actual tokens.
         ops.reshape_and_cache_flash(
             key,
             value,
@@ -577,31 +372,27 @@ class TreeAttentionImpl(AttentionImpl):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """使用树形注意力进行前向传播。
+        """Forward pass with TreeAttention.
 
         Args:
-            layer: 注意力层
-            query: 形状 = [num_tokens, num_heads, head_size]
-            key: 形状 = [num_tokens, num_kv_heads, head_size]
-            value: 形状 = [num_tokens, num_kv_heads, head_size]
-            kv_cache: 形状 = [2, num_blocks, block_size, num_kv_heads, head_size]
-            attn_metadata: 注意力元数据
-            output: 输出张量
-            output_scale: 输出缩放因子
-            output_block_scale: 输出块缩放因子
-
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, block_size, num_kv_heads, head_size]
+            attn_metadata: Metadata for attention.
         Returns:
-            形状 = [num_tokens, num_heads * head_size] 的输出张量
+            shape = [num_tokens, num_heads * head_size]
         """
-        assert output is not None, "必须提供输出张量。"
+        assert output is not None, "Output tensor must be provided."
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
-                "TreeAttentionImpl 尚未支持融合输出量化"
+                "fused output quantization is not yet supported for TreeAttentionImpl"
             )
 
         if attn_metadata is None:
-            # 性能分析运行
+            # Profiling run.
             return output.fill_(0)
 
         key_cache, value_cache = kv_cache.unbind(0)
@@ -609,8 +400,6 @@ class TreeAttentionImpl(AttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
         descale_shape = (attn_metadata.query_start_loc.shape[0] - 1, key.shape[1])
-
-        # 处理预填充请求
         if prefill_meta := attn_metadata.prefill_metadata:
             unified_attention(
                 q=query[num_decode_tokens:num_actual_tokens],
@@ -627,12 +416,11 @@ class TreeAttentionImpl(AttentionImpl):
                 window_size=self.sliding_window,
                 block_table=prefill_meta.block_table,
                 softcap=self.logits_soft_cap,
-                q_descale=None,  # 不支持
+                q_descale=None,  # Not supported
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
             )
 
-        # 处理解码请求
         if decode_meta := attn_metadata.decode_metadata:
             unified_attention(
                 q=query[:num_decode_tokens],
@@ -650,7 +438,7 @@ class TreeAttentionImpl(AttentionImpl):
                 window_size=self.sliding_window,
                 block_table=decode_meta.block_table,
                 softcap=self.logits_soft_cap,
-                q_descale=None,  # 不支持
+                q_descale=None,  # Not supported
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
             )

@@ -1,16 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""TPU 输入批次数据模块。
-
-本模块定义 TPU 输入批次相关的数据结构，负责：
-- 管理 TPU 输入批次的状态
-- 处理请求的添加和移除
-- 管理采样相关的参数
-- 处理 LoRA 适配器映射
-
-主要类：
-- InputBatch: TPU 输入批次类
-"""
+# Datastructures defining a TPU input batch
 
 from typing import cast
 
@@ -29,19 +19,6 @@ _SAMPLING_EPS = 1e-5
 
 
 class InputBatch:
-    """TPU 输入批次管理类。
-
-    管理 TPU 输入批次的状态，包括请求状态、token ID、采样参数等。
-    支持动态添加和移除请求，并提供批量操作的高效实现。
-
-    Attributes:
-        max_num_reqs: 最大请求数量
-        max_model_len: 最大模型长度
-        max_num_batched_tokens: 最大批次 token 数
-        device: 计算设备
-        pin_memory: 是否使用 pinned memory
-        vocab_size: 词汇表大小
-    """
     def __init__(
         self,
         max_num_reqs: int,
@@ -189,11 +166,6 @@ class InputBatch:
 
     @property
     def req_ids(self) -> list[str]:
-        """获取请求 ID 列表。
-
-        Returns:
-            请求 ID 列表
-        """
         # None elements should only be present transiently
         # while performing state updates to the batch.
         return cast(list[str], self._req_ids)
@@ -203,12 +175,6 @@ class InputBatch:
         request: "CachedRequestState",
         req_index: int | None = None,
     ) -> None:
-        """添加请求到批次中。
-
-        Args:
-            request: 缓存的请求状态
-            req_index: 请求索引（可选，默认为当前请求数）
-        """
         if req_index is None:
             req_index = self.num_reqs
         assert req_index < self.max_num_reqs
@@ -323,16 +289,6 @@ class InputBatch:
             self.request_lora_mapping[req_index] = 0
 
     def remove_request(self, req_id: str) -> int | None:
-        """移除请求。
-
-        注意：调用此方法后必须跟随调用 condense()。
-
-        Args:
-            req_id: 请求 ID
-
-        Returns:
-            如果找到请求则返回其索引，否则返回 None
-        """
         """This method must always be followed by a call to condense()."""
 
         req_index = self.req_id_to_index.pop(req_id, None)
@@ -372,12 +328,6 @@ class InputBatch:
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
-        """交换两个请求的状态。
-
-        Args:
-            i1: 第一个请求索引
-            i2: 第二个请求索引
-        """
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
         self._req_ids[i1], self._req_ids[i2] = self._req_ids[i2], self._req_ids[i1]  # noqa
@@ -455,11 +405,6 @@ class InputBatch:
         self.block_table.swap_row(i1, i2)
 
     def condense(self, empty_req_indices: list[int]) -> None:
-        """压缩批次：将非空请求移动到较低的空闲索引。
-
-        Args:
-            empty_req_indices: 空请求索引列表（按降序排列）
-        """
         """Move non-empty requests down into lower, empty indices.
 
         Args:
@@ -550,11 +495,6 @@ class InputBatch:
         del self.req_output_token_ids[self.num_reqs :]
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
-        """创建 prompt token IDs 张量。
-
-        Returns:
-            包含 prompt token IDs 的张量
-        """
         max_prompt_len = self.num_prompt_tokens[: self.num_reqs].max()
         prompt_token_ids_cpu_tensor = torch.empty(
             (self.num_reqs, max_prompt_len),
@@ -573,19 +513,15 @@ class InputBatch:
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
-        """生成 LoRA 输入数据。
-
-        Args:
-            num_scheduled_tokens: 每个请求调度的 token 数量数组
-            num_sampled_tokens: 每个请求采样的 token 数量数组
-
+        """
+        Given the num_scheduled_tokens for each request in the batch, return
+        datastructures used to activate the current LoRAs.
         Returns:
-            包含以下内容的元组：
-            - prompt_lora_mapping: 大小为 self.num_reqs 的元组，prompt_lora_mapping[i]
-              是第 i 个 prompt 的 LoRA ID
-            - token_lora_mapping: 大小为 np.sum(num_scheduled_tokens) 的元组，
-              token_lora_mapping[i] 是第 i 个 token 的 LoRA ID
-            - lora_requests: 活动 LoRA 请求集合
+            1. prompt_lora_mapping: A tuple of size self.num_reqs where,
+               prompt_lora_mapping[i] is the LoRA id to use for the ith prompt.
+            2. token_lora_mapping: A tuple of size np.sum(num_scheduled_tokens)
+               where, token_lora_mapping[i] is the LoRA id to use for ith token.
+            3. lora_requests: Set of relevant LoRA requests.
         """
 
         req_lora_mapping = self.request_lora_mapping[: self.num_reqs]
@@ -599,65 +535,30 @@ class InputBatch:
 
     @property
     def num_reqs(self) -> int:
-        """获取请求数量。
-
-        Returns:
-            当前批次中的请求数量
-        """
         return len(self.req_id_to_index)
 
     @property
     def all_greedy(self) -> bool:
-        """检查是否所有请求都使用贪婪采样。
-
-        Returns:
-            如果所有请求都是贪婪采样则返回 True
-        """
         return len(self.random_reqs) == 0
 
     @property
     def all_random(self) -> bool:
-        """检查是否所有请求都使用随机采样。
-
-        Returns:
-            如果所有请求都是随机采样则返回 True
-        """
         return len(self.greedy_reqs) == 0
 
     @property
     def no_top_p(self) -> bool:
-        """检查是否没有请求使用 top_p 采样。
-
-        Returns:
-            如果没有请求使用 top_p 则返回 True
-        """
         return len(self.top_p_reqs) == 0
 
     @property
     def no_top_k(self) -> bool:
-        """检查是否没有请求使用 top_k 采样。
-
-        Returns:
-            如果没有请求使用 top_k 则返回 True
-        """
         return len(self.top_k_reqs) == 0
 
     @property
     def no_min_p(self) -> bool:
-        """检查是否没有请求使用 min_p 采样。
-
-        Returns:
-            如果没有请求使用 min_p 则返回 True
-        """
         return len(self.min_p_reqs) == 0
 
     @property
     def no_penalties(self) -> bool:
-        """检查是否没有请求使用任何惩罚。
-
-        Returns:
-            如果没有请求使用 frequency/presence/repetition 惩罚则返回 True
-        """
         return (
             len(self.presence_penalties_reqs) == 0
             and len(self.frequency_penalties_reqs) == 0
@@ -666,18 +567,8 @@ class InputBatch:
 
     @property
     def max_num_logprobs(self) -> int | None:
-        """获取最大 logprobs 数量。
-
-        Returns:
-            所有请求中最大的 logprobs 值，如果没有请求需要 logprobs 则返回 None
-        """
         return max(self.num_logprobs.values()) if self.num_logprobs else None
 
     @property
     def no_allowed_token_ids(self) -> bool:
-        """检查是否没有请求设置允许 token ID。
-
-        Returns:
-            如果没有请求设置允许 token ID 则返回 True
-        """
         return len(self.has_allowed_token_ids) == 0

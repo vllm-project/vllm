@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton MLA 后端模块。
-
-本模块实现了基于 Triton kernel 的 MLA 后端，负责：
-- 实现 TritonMLABackend 类（支持所有 compute capability）
-- 实现 TritonMLAImpl 用于执行 MLA 前向传播
-- 支持 FP8 KV 缓存（在 Triton kernel 内部反量化为 BF16）
-- 使用 decode_attention_fwd 执行解码注意力计算
-- 支持批次不变性（batch invariance）
-
-主要类和函数：
-- TritonMLABackend: MLA 后端类
-- TritonMLAImpl: MLA 实现类
-"""
 
 from typing import ClassVar
 

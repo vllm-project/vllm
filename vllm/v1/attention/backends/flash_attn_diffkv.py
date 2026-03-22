@@ -1,16 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlashAttention DiffKV 后端模块。
-
-本模块实现了支持不同 K/V 头大小的 FlashAttention 后端，负责：
-- 实现 DiffKV 版本的 FlashAttention 后端
-- 支持 K 和 V 有不同的头大小
-- 使用 Triton kernel 进行 KV 缓存更新
-
-主要类：
-- FlashAttentionDiffKVBackend: DiffKV FlashAttention 后端类
-- FlashAttentionDiffKVImpl: DiffKV 实现类
-"""
+"""Attention layer with FlashAttention."""
 
 import torch
 
@@ -36,42 +26,19 @@ logger = init_logger(__name__)
 
 
 class FlashAttentionDiffKVBackend(FlashAttentionBackend):
-    """FlashAttention DiffKV 后端类。
-
-    支持 K 和 V 有不同头大小的 FlashAttention 后端。
-    默认 V 的头大小为 128。
-
-    Class Attributes:
-        head_size_v: V 的头大小，默认为 128
-    """
     # Default to 128 for this backend
     head_size_v: int = 128
 
     @classmethod
     def set_head_size_v(cls, head_size_v: int) -> None:
-        """设置 V 的头大小。
-
-        Args:
-            head_size_v: V 的头大小
-        """
         cls.head_size_v = head_size_v
 
     @staticmethod
     def get_name() -> str:
-        """获取后端名称。
-
-        Returns:
-            后端名称 "FLASH_ATTN_DIFFKV"
-        """
         return "FLASH_ATTN_DIFFKV"
 
     @staticmethod
     def get_impl_cls() -> type["FlashAttentionImpl"]:
-        """获取注意力实现类。
-
-        Returns:
-            FlashAttentionDiffKVImpl 类
-        """
         return FlashAttentionDiffKVImpl
 
     # Do not modify the interface of get_kv_cache_shape,
@@ -84,21 +51,6 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        """获取 KV 缓存形状。
-
-        Args:
-            num_blocks: 块数量
-            block_size: 块大小
-            num_kv_heads: KV 头数量
-            head_size: K 的头大小
-            cache_dtype_str: 缓存数据类型
-
-        Returns:
-            KV 缓存形状元组
-
-        Raises:
-            ValueError: 如果块大小不是 16 的倍数
-        """
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (
@@ -112,17 +64,6 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
-        """获取 KV 缓存步幅顺序。
-
-        Args:
-            include_num_layers_dimension: 是否包含层数维度
-
-        Returns:
-            步幅顺序元组
-
-        Raises:
-            ValueError: 如果缓存布局未知
-        """
         # `stride_order` indicates the permutation that gets
         # us from `get_kv_cache_shape` to the actual memory layout we want.
         cache_layout = get_kv_cache_layout()
@@ -144,10 +85,6 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
 
 
 class FlashAttentionDiffKVImpl(FlashAttentionImpl):
-    """FlashAttention DiffKV 实现类。
-
-    支持 K 和 V 有不同头大小的 FlashAttention 实现。
-    """
     def forward(
         self,
         layer: torch.nn.Module,
@@ -160,55 +97,52 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """FlashAttention 前向传播（DiffKV 版本）。
+        """Forward pass with FlashAttention.
 
         Args:
-            layer: 注意力层模块
-            query: 形状 = [num_tokens, num_heads, head_size]
-            key: 形状 = [num_tokens, num_kv_heads, head_size]
-            value: 形状 = [num_tokens, num_kv_heads, head_size_v]
-            kv_cache: 形状 = [num_blocks, block_size, num_kv_heads, head_size + head_size_v]
-            attn_metadata: 注意力元数据
-            output: 输出张量
-            output_scale: 输出缩放因子（不支持）
-            output_block_scale: 输出块缩放因子（不支持）
-
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size_v]
+            kv_cache: shape =
+                [num_blocks, block_size, num_kv_heads, head_size + head_size_v]
+            attn_metadata: Metadata for attention.
         Returns:
-            形状 = [num_tokens, num_heads * head_size_v] 的输出张量
-
-        Note:
-            FP8 量化时，flash-attn 期望 {q,k,v}_descale 的大小为
-            (num_sequences, num_kv_heads)。我们使用 torch 的 .expand()
-            来避免复制值。
+            shape = [num_tokens, num_heads * head_size_v]
+        NOTE: FP8 quantization, flash-attn expect the size of
+              {q,k,v}_descale to be (num_sequences, num_kv_heads).
+              We use torch's .expand() to avoid duplicating values
         """
-        assert output is not None, "必须提供输出张量。"
+        assert output is not None, "Output tensor must be provided."
         assert self.vllm_flash_attn_version is not None, (
-            "未检测到 FlashAttention 版本。"
+            "FlashAttention version not detected."
         )
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
-                "FlashAttentionImpl 不支持融合输出量化。"
+                "fused output quantization is not yet supported for FlashAttentionImpl"
             )
 
         if attn_metadata is None:
-            # 性能分析运行。
+            # Profiling run.
             return output.fill_(0)
 
         attn_type = self.attn_type
 
-        # 重要提示！
-        # NOTE(woosuk): 使用分段 CUDA 图时，此方法在 eager-mode PyTorch 中执行。
-        # 因此，我们需要小心此方法中的任何 CPU 开销。
-        # 例如，`view`和`slice`（或`[:n]`）操作即使在不调用任何 GPU 操作的情况下也慢得惊人。
-        # 尽可能减少此方法中的 PyTorch 操作。
-        # 在此方法中进行任何更改时，请基准测试性能以确保不会引入任何开销。
+        # IMPORTANT!
+        # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
+        # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
+        # in this method. For example, `view` and `slice` (or `[:n]`) operations
+        # are surprisingly slow even in the case they do not invoke any GPU ops.
+        # Minimize the PyTorch ops in this method as much as possible.
+        # Whenever making a change in this method, please benchmark the
+        # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        # 以不同方式处理编码器注意力 - 不需要 KV 缓存
+        # Handle encoder attention differently - no KV cache needed
         if attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
-            # 对于编码器注意力，我们直接使用 Q、K、V 张量而不进行缓存
+            # For encoder attention,
+            # we use direct Q, K, V tensors without caching
             return self._forward_encoder_attention(
                 query[:num_actual_tokens],
                 key[:num_actual_tokens],
@@ -218,26 +152,28 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                 layer,
             )
 
-        # 对于解码器和交叉注意力，按原样使用 KV 缓存
-        # K 和 V 有不同的头大小
+        # For decoder and cross-attention, use KV cache as before
+        # Different head_size for K and V
         key_cache = kv_cache[..., : self.head_size]
         value_cache = kv_cache[..., self.head_size :]
 
-        # key 和 value 在交叉注意力的情况下可能为 None。
-        # 它们基于编码器的输出计算一次，然后缓存在 KV 缓存中。
+        # key and value may be None in the case of cross attention. They are
+        # calculated once based on the output from the encoder and then cached
+        # in KV cache.
         if (
             self.kv_sharing_target_layer_name is None
             and key is not None
             and value is not None
         ):
-            # 重塑输入键和值并将其存储在缓存中。
-            # 如果与早期注意力层共享 KV 缓存，则跳过此操作。
-            # NOTE(woosuk): 在这里，key 和 value 经过 padding，而 slot_mapping 没有。
-            # 但是，我们不需要执行 key[:num_actual_tokens] 和 value[:num_actual_tokens]，
-            # 因为 reshape_and_cache_flash 操作使用 slot_mapping 的形状来确定
-            # 实际 token 的数量。
+            # Reshape the input keys and values and store them in the cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
+            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+            # not padded. However, we don't need to do key[:num_actual_tokens]
+            # and value[:num_actual_tokens] because the reshape_and_cache_flash
+            # op uses the slot_mapping's shape to determine the number of
+            # actual tokens.
 
-            # 为不同头大小的 K 和 V 更新 kv_cache
+            # kv_cache update for different head_size K and V
             triton_reshape_and_cache_flash_diffkv(
                 key,
                 value,
@@ -249,7 +185,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             )
 
         if self.kv_cache_dtype.startswith("fp8"):
-            # query 在注意力层中量化
+            # queries are quantized in the attention layer
             dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
                 self.kv_cache_dtype
             )
@@ -311,7 +247,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                 )
                 return output
 
-        # Cascade 注意力（罕见情况）。
+        # Cascade attention (rare case).
         cascade_attention(
             output[:num_actual_tokens],
             query[:num_actual_tokens],

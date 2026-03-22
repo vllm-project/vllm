@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Cutlass MLA 后端模块。
-
-本模块实现了基于 CUTLASS 的 MLA 后端（仅支持 SM100/Blackwell 架构），负责：
-- 实现 CutlassMLABackend 类（仅支持 compute capability 10.0）
-- 实现 CutlassMLAMetadataBuilder 用于构建注意力元数据
-- 实现 CutlassMLAImpl 用于执行 MLA 前向传播
-- 支持 FP8 KV 缓存
-- 实现 SM100Workspace 管理工作区缓冲区
-- 使用 ops.sm100_cutlass_mla_decode 执行解码
-
-主要类和函数：
-- CutlassMLABackend: MLA 后端类
-- CutlassMLAMetadataBuilder: 元数据构建器
-- SM100Workspace: SM100 工作区管理类
-- CutlassMLAImpl: MLA 实现类
-"""
 
 import os
 from typing import ClassVar

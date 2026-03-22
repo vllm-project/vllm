@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""vLLM V1 引擎核心模块。
-
-本模块实现了 vLLM V1 引擎的核心逻辑，包括：
-- EngineCore: 引擎核心类，负责调度、执行和输出
-- EngineCoreProc: 引擎核心进程类，使用 ZMQ 在后台进程中运行
-- DPEngineCoreProc: 数据并行场景下的引擎核心进程类
-
-主要功能：
-- 请求调度和执行
-- KV 缓存管理
-- 多模态输入处理
-- 结构化输出处理
-- 数据并行协调
-- 弹性 EP 扩缩容
-- 性能分析支持
-- LoRA 适配器管理
-"""
 import os
 import queue
 import signal
@@ -100,17 +83,7 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 
 
 class EngineCore:
-    """vLLM 引擎的核心循环类。
-
-    负责：
-    - 模型初始化和 KV 缓存配置
-    - 请求调度和执行
-    - 输出处理和更新
-    - 多模态缓存管理
-    - 前缀缓存和编码器缓存管理
-    - 性能分析
-    - LoRA 适配器管理
-    """
+    """Inner loop of vLLM's Engine."""
 
     def __init__(
         self,
@@ -120,16 +93,7 @@ class EngineCore:
         executor_fail_callback: Callable | None = None,
         include_finished_set: bool = False,
     ):
-        """初始化引擎核心。
-
-        Args:
-            vllm_config: 全局配置
-            executor_class: 执行器类
-            log_stats: 是否记录统计信息
-            executor_fail_callback: 执行器失败回调
-            include_finished_set: 是否在输出中包含已完成的请求集合
-        """
-        # 加载插件（需要在引擎/调度器级别加载）
+        # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
 
         load_general_plugins()
@@ -144,7 +108,7 @@ class EngineCore:
 
         self.log_stats = log_stats
 
-        # 初始化模型
+        # Setup Model.
         self.model_executor = executor_class(vllm_config)
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
@@ -154,16 +118,16 @@ class EngineCore:
         if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self._eep_scale_up_before_kv_init()
 
-        # 配置 KV 缓存并在性能分析后更新 CacheConfig
+        # Setup KV Caches and update CacheConfig after profiling.
         kv_cache_config = self._initialize_kv_caches(vllm_config)
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
-        # 初始化调度器
+        # Setup scheduler.
         Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
 
         if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
-            # 没有 KV 缓存的编码器模型不支持 chunked prefill
-            # 但 SSM 模型呢？
+            # Encoder models without KV cache don't support
+            # chunked prefill. But do SSM models?
             if vllm_config.scheduler_config.enable_chunked_prefill:
                 logger.warning("Disabling chunked prefill for model without KVCache")
                 vllm_config.scheduler_config.enable_chunked_prefill = False
@@ -186,36 +150,36 @@ class EngineCore:
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
-        # 初始化多模态注册表和接收器缓存
         mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(
             vllm_config
         )
 
-        # 如果为调度器初始化了 KV 连接器，我们需要从所有工作节点收集
-        # 握手元数据，以便调度器中的连接器具有完整的上下文
+        # If a KV connector is initialized for scheduler, we want to collect
+        # handshake metadata from all workers so the connector in the scheduler
+        # will have the full context
         kv_connector = self.scheduler.get_kv_connector()
         if kv_connector is not None:
-            # 收集并存储来自工作节点的 KV 连接器握手元数据
-            # （在 KV 缓存注册之后）
+            # Collect and store KV connector xfer metadata from workers
+            # (after KV cache registration)
             xfer_handshake_metadata = (
                 self.model_executor.get_kv_connector_handshake_metadata()
             )
 
             if xfer_handshake_metadata:
-                # xfer_handshake_metadata 是来自工作节点的字典列表
-                # 每个字典已经有结构 {tp_rank: metadata}
-                # 将所有工作节点字典合并为单个字典
+                # xfer_handshake_metadata is list of dicts from workers
+                # Each dict already has structure {tp_rank: metadata}
+                # Merge all worker dicts into a single dict
                 content: dict[int, Any] = {}
                 for worker_dict in xfer_handshake_metadata:
                     if worker_dict is not None:
                         content.update(worker_dict)
                 kv_connector.set_xfer_handshake_metadata(content)
 
-        # 设置用于流水线并行的批处理队列
-        # 用于调度批次的批处理队列，使我们能够异步
-        # 调度和执行批次，是流水线并行所必需的
-        # 以消除流水线气泡
+        # Setup batch queue for pipeline parallelism.
+        # Batch queue for scheduled batches. This enables us to asynchronously
+        # schedule and execute batches, and is required by pipeline parallelism
+        # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
         self.batch_queue: (
             deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
@@ -224,14 +188,12 @@ class EngineCore:
             logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
-        # EC 消费者标志和池化模型标志
         self.is_ec_consumer = (
             vllm_config.ec_transfer_config is None
             or vllm_config.ec_transfer_config.is_ec_consumer
         )
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
-        # 初始化请求块哈希函数（用于前缀缓存）
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
         if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
             caching_hash_fn = get_hash_fn_by_name(
@@ -243,69 +205,61 @@ class EngineCore:
                 scheduler_block_size, caching_hash_fn
             )
 
-        # 设置步进函数和异步调度标志
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
-        # 中止请求队列
         self.aborts_queue = queue.Queue[list[str]]()
 
-        # 空闲状态回调列表
         self._idle_state_callbacks: list[Callable] = []
 
-        # 标记启动堆为静态以便 GC 忽略
-        # 减少最老代收集的暂停时间
+        # Mark the startup heap as static so that it's ignored by GC.
+        # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
-        # 如果启用，在静态变量冻结后附加 GC 调试器
+        # If enable, attach GC debugger after static variable freeze.
         maybe_attach_gc_debug_callback()
-        # 启用环境变量缓存（例如，假设此后不再有环境变量覆盖）
+        # Enable environment variable cache (e.g. assume no more
+        # environment variable overrides after this point)
         enable_envs_cache()
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
-        """初始化 KV 缓存。
-
-        Args:
-            vllm_config: 全局配置
-
-        Returns:
-            KV 缓存配置
-        """
         start = time.time()
 
-        # 获取模型需要的所有 kv 缓存
+        # Get all kv cache needed by the model
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
             if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-                # NOTE(yongji): 应该在 _eep_scale_up_before_kv_init 期间已经设置
+                # NOTE(yongji): should already be set
+                # during _eep_scale_up_before_kv_init
                 assert self.available_gpu_memory_for_kv_cache > 0
                 available_gpu_memory = [self.available_gpu_memory_for_kv_cache] * len(
                     kv_cache_specs
                 )
             else:
-                # 性能分析模型的峰值内存使用以确定可以为 kv 缓存分配多少内存
+                # Profiles the peak memory usage of the model to determine how
+                # much memory can be allocated for kv cache.
                 available_gpu_memory = self.model_executor.determine_available_memory()
                 self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
         else:
-            # 不需要 KV 缓存的无注意力模型
+            # Attention free models don't need memory for kv cache
             available_gpu_memory = [0] * len(kv_cache_specs)
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
 
-        # 在 KV 缓存配置之前跟踪 max_model_len 以检测自动适配变化
+        # Track max_model_len before KV cache config to detect auto-fit changes
         max_model_len_before = vllm_config.model_config.max_model_len
 
         kv_cache_configs = get_kv_cache_configs(
             vllm_config, kv_cache_specs, available_gpu_memory
         )
 
-        # 如果自动适配减少了 max_model_len，同步新值到工作节点
-        # 这是必需的，因为工作节点在内存分析之前已经生成
-        # 并且缓存了原始的（更大的）max_model_len
+        # If auto-fit reduced max_model_len, sync the new value to workers.
+        # This is needed because workers were spawned before memory profiling
+        # and have the original (larger) max_model_len cached.
         max_model_len_after = vllm_config.model_config.max_model_len
         if max_model_len_after != max_model_len_before:
             self.collective_rpc("update_max_model_len", args=(max_model_len_after,))
@@ -320,7 +274,7 @@ class EngineCore:
 
         vllm_config.validate_block_size()
 
-        # 初始化 kv 缓存并预热执行
+        # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
@@ -332,27 +286,20 @@ class EngineCore:
         return scheduler_kv_cache_config
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        """获取支持的任务类型。
-
-        Returns:
-            支持的任务类型元组
-        """
         return self.model_executor.supported_tasks
 
     def add_request(self, request: Request, request_wave: int = 0):
-        """添加请求到调度器。
+        """Add request to the scheduler.
 
-        Args:
-            request: 请求对象
-            request_wave: 在 DP 场景下表示该请求预期属于哪个波次
+        `request_wave`: indicate which wave of requests this is expected to
+        belong to in DP case
         """
-        # 验证 request_id 类型
+        # Validate the request_id type.
         if not isinstance(request.request_id, str):
             raise TypeError(
                 f"request_id must be a string, got {type(request.request_id)}"
             )
 
-        # 验证池化任务
         if pooling_params := request.pooling_params:
             supported_pooling_tasks = [
                 task for task in self.get_supported_tasks() if task in POOLING_TASKS
@@ -364,7 +311,6 @@ class EngineCore:
                     f"Supported tasks: {supported_pooling_tasks}"
                 )
 
-        # 验证 KV 传输参数
         if request.kv_transfer_params is not None and (
             not self.scheduler.get_kv_connector()
         ):
@@ -376,28 +322,24 @@ class EngineCore:
         self.scheduler.add_request(request)
 
     def abort_requests(self, request_ids: list[str]):
-        """从调度器中止请求。
+        """Abort requests from the scheduler."""
 
-        Args:
-            request_ids: 请求 ID 列表
-        """
-        # TODO: 调度器不需要知道具体的完成原因，
-        # 待定是否传播（即客户端中止 vs 停止条件满足）
+        # TODO: The scheduler doesn't really need to know the
+        # specific finish reason, TBD whether we propagate that
+        # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
-        """执行模型并在失败时记录详细信息。
-
-        Args:
-            scheduler_output: 调度器输出
-        """
+        """Execute the model and log detailed info on failure."""
         try:
             yield
         except Exception as err:
-            # 我们不想在这里捕获 BaseException，因为我们只想
-            # 在异常是由于 execute_model 本身的错误时转储信息
-            # NOTE: 此方法不抛出异常
+            # We do not want to catch BaseException here since we're only
+            # interested in dumping info when the exception is due to an
+            # error from execute_model itself.
+
+            # NOTE: This method is exception-free
             dump_engine_exception(
                 self.vllm_config, scheduler_output, self.scheduler.make_stats()
             )
@@ -405,11 +347,6 @@ class EngineCore:
 
     @contextmanager
     def log_iteration_details(self, scheduler_output: SchedulerOutput):
-        """记录迭代详细信息（如果启用）。
-
-        Args:
-            scheduler_output: 调度器输出
-        """
         if not self.vllm_config.observability_config.enable_logging_iteration_details:
             yield
             return
@@ -439,34 +376,30 @@ class EngineCore:
         self._iteration_index += 1
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
-        """调度、执行和生成输出。
+        """Schedule, execute, and make output.
 
-        Returns:
-            输出字典和模型是否执行的标志
+        Returns tuple of outputs and a flag indicating whether the model
+        was executed.
         """
-        # 检查调度器中是否有任何请求 remaining - 未完成或已完成但尚未从批次中移除
+
+        # Check for any requests remaining in the scheduler - unfinished,
+        # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
-        # 获取语法约束 bitmask，用于限制采样只能选择符合语法/格式的 token
-        # 例如：JSON Mode、正则表达式等结构化输出场景
-        # bitmask 会屏蔽掉非法 token，物理上保证输出符合指定格式
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
-            self.log_error_detail(scheduler_output),      # 记录错误详情
-            self.log_iteration_details(scheduler_output), # 记录迭代详情
+            self.log_error_detail(scheduler_output),
+            self.log_iteration_details(scheduler_output),
         ):
-            # 等待异步模型执行完成（future 是之前 execute_model 提交的异步任务）
             model_output = future.result()
             if model_output is None:
-                # 如果没有预取输出，则执行采样（使用语法约束）
                 model_output = self.model_executor.sample_tokens(grammar_output)
 
-        # 处理中止请求：检查在模型执行期间用户是否发送了取消请求
-        # 放在这里是确保在处理输出前先清理已取消的请求
+        # Before processing the model output, process any aborts that happened
+        # during the model execution.
         self._process_aborts_queue()
-        # 将模型输出转换为引擎输出，并更新调度器内部状态
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
@@ -474,17 +407,11 @@ class EngineCore:
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
-        """步进后处理。
-
-        当使用异步调度时，我们无法提前获取 draft token ids，
-        因此我们在工作节点进程中更新 draft token ids，
-        不需要在这里更新。
-
-        Args:
-            model_executed: 模型是否已执行
-        """
+        # When using async scheduling we can't get draft token ids in advance,
+        # so we update draft token ids in the worker process and don't
+        # need to update draft token ids here.
         if not self.async_scheduling and self.use_spec_decode and model_executed:
-            # 获取 draft token ids
+            # Take the draft token ids.
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
@@ -492,29 +419,26 @@ class EngineCore:
     def step_with_batch_queue(
         self,
     ) -> tuple[dict[int, EngineCoreOutputs] | None, bool]:
-        """使用批队列调度和执行批次。
+        """Schedule and execute batches with the batch queue.
+        Note that if nothing to output in this step, None is returned.
 
-        如果此步骤没有输出，返回 None。
-
-        执行流程：
-        1. 如果批队列未满，尝试调度新批次。如果调度了新批次，直接返回空输出。
-           即：填充批队列的优先级高于获取模型输出（流水线预填充策略）
-        2. 如果没有新调度的批次（队列已满或无请求可调度），则阻塞等待
-           批队列中第一个批次的模型执行完成
-        3. 用模型输出更新调度器状态
-
-        Returns:
-            tuple[dict[int, EngineCoreOutputs] | None, bool]:
-                - EngineCoreOutputs 字典或 None（无输出时）
-                - bool 表示模型是否执行了 token
+        The execution flow is as follows:
+        1. Try to schedule a new batch if the batch queue is not full.
+        If a new batch is scheduled, directly return an empty engine core
+        output. In other words, fulfilling the batch queue has a higher priority
+        than getting model outputs.
+        2. If there is no new scheduled batch, meaning that the batch queue
+        is full or no other requests can be scheduled, we block until the first
+        batch in the job queue is finished.
+        3. Update the scheduler from the output.
         """
 
         batch_queue = self.batch_queue
         assert batch_queue is not None
 
-        # 尝试调度新批次（如果队列未满）
-        # 注意：如果所有请求都已调度，scheduler 可能返回空批次
-        # 这个操作是非阻塞的
+        # Try to schedule a new batch if the batch queue is not full, but
+        # the scheduler may return an empty batch if all requests are scheduled.
+        # Note that this is not blocking.
         assert len(batch_queue) < self.batch_queue_size
 
         model_executed = False
@@ -522,7 +446,6 @@ class EngineCore:
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
             with self.log_error_detail(scheduler_output):
-                # 异步执行模型，non_block=True 表示不阻塞
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
                 )
@@ -530,11 +453,12 @@ class EngineCore:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
             if self.is_pooling_model or not model_executed:
-                # pooling 模型或无请求被调度：不需要采样，直接使用执行结果
+                # No sampling required (no requests scheduled).
                 future = cast(Future[ModelRunnerOutput], exec_future)
             else:
                 if not scheduler_output.pending_structured_output_tokens:
-                    # 没有在等待结构化输出的 token，立即获取语法 bitmask 并采样
+                    # We aren't waiting for any tokens, get any grammar output
+                    # and sample immediately.
                     grammar_output = self.scheduler.get_grammar_bitmask(
                         scheduler_output
                     )
@@ -542,27 +466,29 @@ class EngineCore:
                         grammar_output, non_block=True
                     )
                 else:
-                    # 需要延迟采样：先处理上一步的模型输出后再计算语法 bitmask
+                    # We need to defer sampling until we have processed the model output
+                    # from the prior step.
                     deferred_scheduler_output = scheduler_output
 
             if not deferred_scheduler_output:
-                # 将此步骤的 future 加入队列
+                # Add this step's future to the queue.
                 batch_queue.appendleft((future, scheduler_output, exec_future))
                 if (
                     model_executed
                     and len(batch_queue) < self.batch_queue_size
                     and not batch_queue[-1][0].done()
                 ):
-                    # 队列未满且下一个 worker 响应未完成时，不阻塞等待
-                    # 优先继续填充批队列以维持流水线
+                    # Don't block on next worker response unless the queue is full
+                    # or there are no more requests to schedule.
                     return None, True
 
         elif not batch_queue:
-            # 队列为空：不应该到达这里
-            # 此方法只在调度器有请求或队列非空时才被调用
+            # Queue is empty. We should not reach here since this method should
+            # only be called when the scheduler contains requests or the queue
+            # is non-empty.
             return None, False
 
-        # 阻塞等待批队列中的下一个结果
+        # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
         with (
             self.log_error_detail(scheduler_output),
@@ -570,34 +496,36 @@ class EngineCore:
         ):
             model_output = future.result()
             if model_output is None:
-                # sample_tokens() 返回 None 意味着原始 execute_model() 调用失败
-                # 抛出该异常
+                # None from sample_tokens() implies that the original execute_model()
+                # call failed - raise that exception.
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
 
-        # 在处理模型输出之前，处理模型执行期间发生的任何中止请求
+        # Before processing the model output, process any aborts that happened
+        # during the model execution.
         self._process_aborts_queue()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
 
-        # NOTE(nick): 延迟处理的任务可以在此处处理，或保存到场并在下次
-        # step_with_batch_queue 被调用时立即处理。后者有利于 TTFT（首 token 时间），
-        # 但可能对 TPOT（每输出 token 时间）/吞吐量稍差
+        # NOTE(nick): We can either handle the deferred tasks here or save
+        # in a field and do it immediately once step_with_batch_queue is
+        # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
-            # 如果带结构化输出的 speculative decoding 正在运行，
-            # 需要先从上一步获取 draft token ids，然后才能为延迟的请求
-            # 计算语法 bitmask
+            # If we are doing speculative decoding with structured output,
+            # we need to get the draft token ids from the prior step before
+            # we can compute the grammar bitmask for the deferred request.
             if self.use_spec_decode:
                 draft_token_ids = self.model_executor.take_draft_token_ids()
                 assert draft_token_ids is not None
-                # 更新 scheduler_output 中的 draft token ids，用于过滤
-                # 无效的 spec token，这些会被填充为 -1 并在语法 bitmask
-                # 计算时被跳过
+                # Update the draft token ids in the scheduler output to
+                # filter out the invalid spec tokens, which will be padded
+                # with -1 and skipped by the grammar bitmask computation.
                 self.scheduler.update_draft_token_ids_in_output(
                     draft_token_ids, deferred_scheduler_output
                 )
-            # 现在有了计算 bitmask 所需的 token，为延迟请求获取 bitmask 并采样
+            # We now have the tokens needed to compute the bitmask for the
+            # deferred request. Get the bitmask and call sample tokens.
             grammar_output = self.scheduler.get_grammar_bitmask(
                 deferred_scheduler_output
             )

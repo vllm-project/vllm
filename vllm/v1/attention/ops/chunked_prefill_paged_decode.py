@@ -1,20 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""分块预填充 - 分页解码注意力操作模块。
-
-本模块实现了分块预填充和解码的注意力操作，负责：
-- 实现 Triton paged attention kernel
-- 支持分块预填充（chunked prefill）
-- 支持分页解码（paged decode）
-- 支持 FP8 KV 缓存
-- 支持 ALIBI 斜率和滑动窗口
-- 支持 sink token
-
-主要函数：
-- cdiv_fn: 向上取整除法
-- kernel_paged_attention_2d: Triton paged attention kernel
-- chunked_prefill_paged_decode: 分块预填充 - 分页解码封装函数
-"""
 
 # Authors:
 #  - Burkhard Ringlein <ngl@zurich.ibm.com>
@@ -35,15 +20,6 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 
 @triton.jit
 def cdiv_fn(x, y):
-    """向上取整除法。
-
-    Args:
-        x: 被除数
-        y: 除数
-
-    Returns:
-        向上取整的结果
-    """
     return (x + y - 1) // y
 
 
@@ -92,60 +68,6 @@ def kernel_paged_attention_2d(
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
-    """Triton paged attention kernel（2D 版本）。
-
-    实现分页注意力的解码阶段计算，支持：
-    - 多查询/_kv 头比例（GQA）
-    - FP8 KV 缓存反量化
-    - ALIBI 斜率
-    - 滑动窗口注意力
-    - Sink token
-    - 输出量化
-
-    Args:
-        output_ptr: 输出指针
-        query_ptr: Query 指针
-        key_cache_ptr: Key 缓存指针
-        value_cache_ptr: Value 缓存指针
-        sink_ptr: Sink 指针
-        block_tables_ptr: 块表指针
-        seq_lens_ptr: 序列长度指针
-        alibi_slopes_ptr: ALIBI 斜率指针
-        scale: 缩放因子
-        k_scale: K 缩放因子
-        v_scale: V 缩放因子
-        out_scale_inv: 输出缩放因子的倒数
-        num_query_heads: Query 头数量
-        num_queries_per_kv: 每个 KV 头对应的 Query 头数
-        num_queries_per_kv_padded: 填充后的每个 KV 头对应的 Query 头数
-        block_table_stride: 块表步幅
-        query_stride_0: Query 第 0 维步幅
-        query_stride_1: Query 第 1 维步幅
-        output_stride_0: 输出第 0 维步幅
-        output_stride_1: 输出第 1 维步幅
-        BLOCK_SIZE: 块大小
-        PHYSICAL_BLOCK_SIZE: 物理块大小
-        HEAD_SIZE: 头大小
-        HEAD_SIZE_PADDED: 填充后的头大小（2 的幂）
-        USE_ALIBI_SLOPES: 是否使用 ALIBI 斜率
-        SLIDING_WINDOW: 滑动窗口大小
-        x: K 缓存分块参数
-        stride_k_cache_0: K 缓存第 0 维步幅
-        stride_k_cache_1: K 缓存第 1 维步幅
-        stride_k_cache_2: K 缓存第 2 维步幅
-        stride_k_cache_3: K 缓存第 3 维步幅
-        stride_k_cache_4: K 缓存第 4 维步幅
-        stride_v_cache_0: V 缓存第 0 维步幅
-        stride_v_cache_1: V 缓存第 1 维步幅
-        stride_v_cache_2: V 缓存第 2 维步幅
-        stride_v_cache_3: V 缓存第 3 维步幅
-        filter_by_query_len: 是否按 query 长度过滤
-        query_start_len_ptr: Query 起始长度指针
-        USE_SINKS: 是否使用 sink
-        USE_FP8: 是否使用 FP8 输出
-        FP8_MIN: FP8 最小值
-        FP8_MAX: FP8 最大值
-    """
     seq_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
 
@@ -345,41 +267,6 @@ def chunked_prefill_paged_decode(
     sinks=None,
     is_block_table_ptr: bool = False,
 ):
-    """分块预填充 - 分页解码注意力封装函数。
-
-    该函数处理两种情况：
-    1. max_query_len > 1: 使用 context_attention_fwd 处理预填充
-    2. max_query_len == 1: 使用 paged attention 处理解码
-
-    支持：
-    - FP8 KV 缓存
-    - ALIBI 斜率
-    - 滑动窗口注意力
-    - Sink token
-    - 非标准块大小（如 544）
-
-    Args:
-        query: Query 张量 [num_tokens, num_query_heads, head_size]
-        key: Key 张量 [num_tokens, num_kv_heads, head_size]（可为 None）
-        value: Value 张量 [num_tokens, num_kv_heads, head_size]
-        output: 输出张量
-        kv_cache_dtype: KV 缓存数据类型
-        key_cache: Key 缓存
-        value_cache: Value 缓存
-        block_table: 块表
-        query_start_loc: Query 起始位置
-        seq_lens: 序列长度
-        max_seq_len: 最大序列长度
-        max_query_len: 最大 Query 长度
-        k_scale: K 缩放因子
-        v_scale: V 缩放因子
-        alibi_slopes: ALIBI 斜率（可选）
-        sliding_window: 滑动窗口大小（可选）
-        sm_scale: Softmax 缩放因子（可选）
-        output_scale: 输出缩放因子（可选）
-        sinks: Sink token 张量（可选）
-        is_block_table_ptr: block_table 是否为指针
-    """
     if sm_scale is None:
         sm_scale = 1.0 / (query.shape[2] ** 0.5)
 

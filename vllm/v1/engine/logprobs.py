@@ -1,17 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Logprobs 处理器模块。
 
-本模块实现了 vLLM V1 引擎的 logprobs 处理功能，负责：
-- 处理采样 logprobs（生成 token 的对数概率）
-- 处理提示词 logprobs（提示词 token 的对数概率）
-- 累积 logprob 计算
-- Token 解码和 UTF-8 校正
-- 支持扁平 logprobs 格式
-
-主要类：
-- LogprobsProcessor: Logprobs 处理器
-"""
+import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -37,22 +27,16 @@ NONES = itertools.repeat(None)
 
 @dataclass
 class LogprobsProcessor:
-    """Logprobs 处理器。
+    # Tokenizer for this request,
+    # None if detokenization is disabled.
+    tokenizer: TokenizerLike | None
 
-    负责处理请求的 logprobs，包括：
-    - 采样 logprobs（生成 token 的对数概率）
-    - 提示词 logprobs（提示词 token 的对数概率）
-    - 累积 logprob 计算
-    - Token 解码和 UTF-8 校正
-
-    Attributes:
-        tokenizer: 请求的分词器，如果禁用反词元化则为 None
-        logprobs: 采样 logprobs 列表
-        prompt_logprobs: 提示词 logprobs 列表
-        cumulative_logprob: 累积 logprob
-        num_logprobs: 采样 logprobs 数量
-        num_prompt_logprobs: 提示词 logprobs 数量
-    """
+    # Logprobs for this request
+    logprobs: SampleLogprobs | None
+    prompt_logprobs: PromptLogprobs | None
+    cumulative_logprob: float | None
+    num_logprobs: int | None
+    num_prompt_logprobs: int | None
 
     @classmethod
     def from_new_request(
@@ -60,15 +44,6 @@ class LogprobsProcessor:
         tokenizer: TokenizerLike | None,
         request: EngineCoreRequest,
     ) -> "LogprobsProcessor":
-        """从新请求创建 Logprobs 处理器。
-
-        Args:
-            tokenizer: 分词器
-            request: 引擎核心请求
-
-        Returns:
-            LogprobsProcessor 实例
-        """
         sampling_params = request.sampling_params
         assert sampling_params is not None
         num_logprobs = sampling_params.logprobs
@@ -91,13 +66,14 @@ class LogprobsProcessor:
         )
 
     def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
-        """使用来自 EngineCore 的采样 logprobs 更新。
+        """Update with sample logprobs from EngineCore.
 
-        如果 EngineCore 在上一步中生成了多个 token（例如在 spec decoding 中），
-        外部列表长度可能大于 1。
+        Outer lists are only of len > 1 if EngineCore made
+        >1 tokens in prior step (e.g. in spec decoding).
 
         Args:
-            logprobs_lists: logprob token 列表、logprobs 和 ranks 的元组
+          logprobs_lists: the lists of logprob tokens, logprobs, and ranks.
+
         """
 
         assert self.num_logprobs is not None
@@ -142,10 +118,12 @@ class LogprobsProcessor:
         self,
         prompt_logprobs_tensors: LogprobsTensors,
     ) -> None:
-        """使用来自 EngineCore 的提示词 logprobs 更新。
+        """Update with prompt logprobs from EngineCore.
 
         Args:
-            prompt_logprobs_tensors: 包含提示词 logprobs 张量的元组
+          prompt_logprobs_tensors: tuple containing the prompt logprobs
+                                   tensors.
+
         """
 
         # Prompt logprobs are enabled.
@@ -200,16 +178,18 @@ class LogprobsProcessor:
             )
 
     def pop_prompt_logprobs(self) -> PromptLogprobs | None:
-        """弹出并返回所有请求的提示词 logprobs。
+        """Pop and return all request prompt logprobs
 
-        Logprobs 处理器会在一个或多个 prefill 块上聚合提示词 logprobs。
-        此方法一次性返回所有提示词 logprobs 然后清除它们。
-        确保正确的 RequestOutputKind.DELTA 语义，
-        即在 prefill 结束时一次性返回所有提示词 logprobs。
+        The logprobs processor aggregates prompt chunk logprobs
+        over one or more prefill chunks. This method returns
+        all prompt logprobs at once and then forgets them.
+        Ensures correct RequestOutputKind.DELTA semantics
+        wherein all prompt logprobs are returned at once at
+        the end of prefill.
 
         Returns:
-            如果提示词 logprobs 被禁用则返回 None，
-            否则返回所有提示词 logprobs 列表
+          None if prompt logprobs are disabled for this request.
+          List of all prompt logprobs, otherwise.
         """
         plp = self.prompt_logprobs
         if plp:
@@ -217,17 +197,7 @@ class LogprobsProcessor:
         return plp
 
     def _correct_decoded_token(self, idx: int, tokens: list[int]) -> str:
-        """校正解码后的 token。
-
-        处理 UTF-8 不完整字符的情况，尝试使用前一个 token 进行完整解码。
-
-        Args:
-            idx: 当前 token 索引
-            tokens: token IDs 列表
-
-        Returns:
-            校正后的解码字符串，如果无法校正则返回空字符串
-        """
+        assert self.tokenizer is not None, "self.tokenizer should not be None"
 
         # try with prev token id in same list
         if idx > 0:
@@ -254,21 +224,11 @@ class LogprobsProcessor:
     def _verify_tokens(
         self, decoded_tokens_list: list[str], tokens: list[int]
     ) -> list[str]:
-        """验证并校正解码后的 token。
-
-        检查 UTF-8 不完整字符并进行校正。
-
-        Args:
-            decoded_tokens_list: 解码后的 token 文本列表
-            tokens: token IDs 列表
-
-        Returns:
-            校正后的解码 token 列表
-        """
         corrected_decoded_token_map = dict()
         for idx, text in enumerate(decoded_tokens_list):
             if text.endswith("�"):
-                # utf-8 字符结尾表示可能是来自字节回退词元化的未完成字节序列
+                # utf-8 char at the end means it's a potential unfinished byte sequence
+                # from byte fallback tokenization.
                 corrected_decoded_token_map[idx] = self._correct_decoded_token(
                     idx, tokens
                 )
@@ -279,11 +239,6 @@ class LogprobsProcessor:
         return decoded_tokens_list
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
-        """从引擎输出更新 logprobs。
-
-        Args:
-            output: 引擎核心输出
-        """
         if output.new_logprobs is not None:
             self._update_sample_logprobs(output.new_logprobs)
         if output.new_prompt_logprobs_tensors is not None:

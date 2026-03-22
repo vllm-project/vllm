@@ -1,20 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU Attention 后端模块。
-
-本模块实现了基于 CPU 的注意力后端，负责：
-- 实现 CPU Attention 后端类
-- 支持 SDPA（Scaled Dot Product Attention）用于预填充
-- 支持解码器和编码器注意力
-- 处理 KV 缓存更新
-- 支持 ALiBi 和滑动窗口
-
-主要类：
-- CPUAttentionBackend: CPU Attention 后端类
-- CPUAttentionMetadata: CPU Attention 元数据类
-- CPUAttentionMetadataBuilder: 元数据构建器
-- CPUAttentionBackendImpl: 后端实现类
-"""
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -44,15 +29,6 @@ _CPU_ARCH_PREFER_MIXED_BATCH = (CpuArchEnum.X86, CpuArchEnum.ARM, CpuArchEnum.S3
 
 
 class CPUAttentionBackend(AttentionBackend):
-    """CPU Attention 后端类。
-
-    基于 CPU 实现的注意力后端。
-    支持 SDPA 用于预填充阶段，使用自定义 kernel 处理解码阶段。
-
-    Class Attributes:
-        accept_output_buffer: 是否接受输出缓冲区
-        supported_dtypes: 支持的数据类型
-    """
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
@@ -62,32 +38,16 @@ class CPUAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        """获取支持的头大小列表。
-
-        Returns:
-            支持的头大小列表
-        """
         return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256]
 
     @staticmethod
     def get_name() -> str:
-        """获取后端名称。
-
-        Returns:
-            后端名称 "CPU_ATTN"
-        """
         return "CPU_ATTN"
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """CPU attention 支持解码器、仅编码器和编码器 - 解码器注意力。
-
-        Args:
-            attn_type: 注意力类型
-
-        Returns:
-            是否支持
-        """
+        """CPU attention supports decoder,
+        encoder-only and encoder-decoder attention."""
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,
@@ -97,20 +57,10 @@ class CPUAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["CPUAttentionBackendImpl"]:
-        """获取注意力实现类。
-
-        Returns:
-            CPUAttentionBackendImpl 类
-        """
         return CPUAttentionBackendImpl
 
     @staticmethod
     def get_builder_cls() -> type["CPUAttentionMetadataBuilder"]:
-        """获取元数据构建器类。
-
-        Returns:
-            CPUAttentionMetadataBuilder 类
-        """
         return CPUAttentionMetadataBuilder
 
     @staticmethod
@@ -121,76 +71,34 @@ class CPUAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        """获取 KV 缓存形状。
-
-        Args:
-            num_blocks: 块数量
-            block_size: 块大小
-            num_kv_heads: KV 头数量
-            head_size: 头大小
-            cache_dtype_str: 缓存数据类型
-
-        Returns:
-            KV 缓存形状元组
-        """
         return 2, num_blocks, num_kv_heads, block_size, head_size
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
-        """判断是否使用 cascade 注意力。
-
-        Returns:
-            CPU 后端返回 False（不支持 cascade 注意力）
-        """
         return False
 
 
 @dataclass
 class CPUAttentionMetadata:
-    """CPU Attention 元数据类。
-
-    存储 CPU Attention 前向传播所需的元数据信息。
-
-    Attributes:
-        isa: 指令集架构
-        num_actual_tokens: 实际 token 数量（不包括 padding）
-        max_query_len: 最大 query 长度
-        query_start_loc: query 起始位置张量
-        max_seq_len: 最大序列长度
-        seq_lens: 序列长度张量
-        block_table: 块表张量
-        slot_mapping: slot 映射张量
-        scheduler_metadata: 调度器元数据
-        causal: 是否因果注意力
-        use_sdpa_prefill: 是否使用 SDPA 预填充
-        num_decode_tokens: 解码 token 数量
-        sdpa_attn_masks: SDPA 注意力掩码列表
-        sdpa_start_loc: SDPA 起始位置张量
-    """
-    isa: str  # 指令集架构
-    num_actual_tokens: int  # 实际 token 数量（不包括 padding）
-    max_query_len: int  # 最大 query 长度
-    query_start_loc: torch.Tensor  # query 起始位置张量
-    max_seq_len: int  # 最大序列长度
-    seq_lens: torch.Tensor  # 序列长度张量
-    block_table: torch.Tensor  # 块表张量
-    slot_mapping: torch.Tensor  # slot 映射张量
-    scheduler_metadata: torch.Tensor | None  # 调度器元数据
-    causal: bool = True  # 是否因果注意力
+    isa: str
+    num_actual_tokens: int  # Number of tokens excluding padding.
+    max_query_len: int
+    query_start_loc: torch.Tensor
+    max_seq_len: int
+    seq_lens: torch.Tensor
+    block_table: torch.Tensor
+    slot_mapping: torch.Tensor
+    scheduler_metadata: torch.Tensor | None
+    causal: bool = True
 
     # can be removed after deprecate sdpa
-    use_sdpa_prefill: bool = False  # 是否使用 SDPA 预填充
-    num_decode_tokens: int = 0  # 解码 token 数量
-    sdpa_attn_masks: list[torch.Tensor | None] | None = None  # SDPA 注意力掩码列表
-    sdpa_start_loc: torch.Tensor | None = None  # SDPA 起始位置张量
+    use_sdpa_prefill: bool = False
+    num_decode_tokens: int = 0
+    sdpa_attn_masks: list[torch.Tensor | None] | None = None
+    sdpa_start_loc: torch.Tensor | None = None
 
 
 class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]):
-    """CPU Attention 元数据构建器类。
-
-    负责构建 CPU Attention 所需的元数据。
-    支持 SDPA 预填充和自定义 decode kernel 的混合批处理。
-    """
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -198,22 +106,14 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         vllm_config: VllmConfig,
         device: torch.device,
     ) -> None:
-        """初始化 CPU Attention 元数据构建器。
-
-        Args:
-            kv_cache_spec: KV 缓存规格
-            layer_names: 层名列表
-            vllm_config: vLLM 配置
-            device: 计算设备
-        """
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         self.use_sdpa_prefill = False
         reorder_batch_threshold = None
         if current_platform.get_cpu_architecture() not in _CPU_ARCH_PREFER_MIXED_BATCH:
-            # 在这种情况下，decode seq 被重新排序到 prefill seq 前面
-            # 以分割 decode 和 prefill。然后使用 SDPA 进行 prefill，
-            # 使用 cpu_attention_with_kv_cache 进行 decode
+            # in this case, decode seqs are reordered to the front of prefill seqs
+            # to split decode and prefill. Then use SDPA for prefill and
+            # cpu_attention_with_kv_cache for decode
             reorder_batch_threshold = 1
             self.use_sdpa_prefill = True
 
@@ -242,16 +142,6 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> CPUAttentionMetadata:
-        """构建 CPU Attention 元数据。
-
-        Args:
-            common_prefix_len: 公共前缀长度
-            common_attn_metadata: 通用注意力元数据
-            fast_build: 是否快速构建（禁用 AOT 调度）
-
-        Returns:
-            CPUAttentionMetadata 对象
-        """
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -265,7 +155,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         sdpa_start_loc = query_start_loc
         num_decode_tokens = 0
         if self.use_sdpa_prefill and causal:
-            # Decoder，需要重新排序和截断
+            # Decoder, need reorder and truncate
             assert self.reorder_batch_threshold
             (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
                 split_decodes_and_prefills(
@@ -314,12 +204,6 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
 
 
 class CPUAttentionBackendImpl(AttentionImpl):
-    """CPU Attention 后端实现类。
-
-    基于 CPU 实现的注意力后端。
-    使用 SDPA（Scaled Dot Product Attention）进行预填充，
-    使用自定义 kernel 进行解码。
-    """
     def __init__(
         self,
         num_heads: int,
@@ -334,21 +218,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
         kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
-        """初始化 CPU Attention 后端实现。
-
-        Args:
-            num_heads: 注意力头数量
-            head_size: 头大小
-            scale: 缩放因子
-            num_kv_heads: KV 头数量
-            alibi_slopes: ALiBi 斜率
-            sliding_window: 滑动窗口大小
-            kv_cache_dtype: KV 缓存数据类型
-            logits_soft_cap: logits 软上限
-            attn_type: 注意力类型
-            kv_sharing_target_layer_name: KV 共享目标层名
-            sinks: sink 张量
-        """
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         self.num_heads = num_heads
         self.head_size = head_size
@@ -358,8 +227,8 @@ class CPUAttentionBackendImpl(AttentionImpl):
             AttentionType.ENCODER_ONLY,
         ):
             logger.warning_once(
-                "CPU_ATTN 不支持 encoder 和 encoder_only 的 logits softcap，"
-                "输出可能略有偏差。"
+                "CPU_ATTN does not support logits softcap for"
+                " ENCODER and ENCODER_ONLY, outputs may be slightly off"
             )
         if logits_soft_cap is None:
             logits_soft_cap = 0
@@ -379,13 +248,14 @@ class CPUAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         if is_quantized_kv_cache(kv_cache_dtype):
-            raise NotImplementedError("FP8 KV cache 在 CPU_ATTN 中不支持。")
+            raise NotImplementedError("FP8 KV cache is unsupported in CPU_ATTN")
         self.attn_type = attn_type
 
         self.sinks = sinks
         if self.sinks is not None:
             assert self.sinks.shape[0] == num_heads, (
-                "Sinks 必须与层中的头数量相同。"
+                "Sinks must have the same number of heads as the number of "
+                "heads in the layer"
             )
 
     def forward(
@@ -400,40 +270,34 @@ class CPUAttentionBackendImpl(AttentionImpl):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """CPU 注意力后端前向传播。
+        """Forward pass for CPU attention backend.
 
         Args:
-            layer: 注意力层
-            query: 形状 = [num_tokens, num_heads, head_size]
-            key: 形状 = [num_tokens, num_kv_heads, head_size]
-            value: 形状 = [num_tokens, num_kv_heads, head_size]
-            kv_cache: 形状 = [2, num_blocks, num_kv_heads, block_size, head_size]
-            attn_metadata: 注意力元数据
-            output: 输出张量
-            output_scale: 输出缩放因子（不支持）
-            output_block_scale: 输出块缩放因子（不支持）
-
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, num_kv_heads, block_size, head_size]
+            attn_metadata: Metadata for attention.
         Returns:
-            形状 = [num_tokens, num_heads * head_size] 的输出张量
-
-        Raises:
-            NotImplementedError: 如果提供了 output_scale 或 output_block_scale
+            shape = [num_tokens, num_heads * head_size]
         """
-        assert output is not None, "必须提供输出张量。"
+        assert output is not None, "Output tensor must be provided."
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
-                "CPUAttentionBackendImpl 不支持融合输出量化。"
+                "fused output quantization is not yet supported"
+                " for CPUAttentionBackendImpl"
             )
 
-        # 用于预热
+        # For warming-up
         if attn_metadata is None:
             return output
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        # 以不同方式处理编码器注意力 - 不需要 KV 缓存
+        # Handle encoder attention differently - no KV cache needed
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
-            # 对于编码器注意力
+            # For encoder attention,
             return self._run_sdpa_forward(
                 query[:num_actual_tokens],
                 key[:num_actual_tokens],
@@ -443,12 +307,13 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 self.attn_type,
             )
 
-        # 对于解码器和交叉注意力，使用 KV 缓存，大小为
+        # For decoder and cross-attention, use KV cache, size are
         # [num_blocks, num_kv_heads, block_size, head_size]
         key_cache, value_cache = kv_cache.unbind(0)
 
-        # key 和 value 在交叉注意力的情况下可能为 None。
-        # 它们基于编码器的输出计算一次，然后缓存在 KV 缓存中。
+        # key and value may be None in the case of cross attention. They are
+        # calculated once based on the output from the encoder and then cached
+        # in KV cache.
         if (
             self.kv_sharing_target_layer_name is None
             and key is not None
@@ -464,7 +329,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             )
 
         if attn_metadata.use_sdpa_prefill:
-            assert self.sinks is None, "SDPA prefill 不支持 attention sink。"
+            assert self.sinks is None, "Attention sink is unsupported in SDPA prefill"
             num_decode_tokens = attn_metadata.num_decode_tokens
             self._run_sdpa_forward(
                 query[num_decode_tokens:num_actual_tokens],
@@ -505,19 +370,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
         attn_metadata: CPUAttentionMetadata,
         attn_type: str,
     ) -> torch.Tensor:
-        """运行 SDPA 前向传播。
-
-        Args:
-            query: Query 张量
-            key: Key 张量
-            value: Value 张量
-            output: 输出张量
-            attn_metadata: 注意力元数据
-            attn_type: 注意力类型
-
-        Returns:
-            输出张量
-        """
         attn_masks = attn_metadata.sdpa_attn_masks
         if attn_masks is None:
             if self.alibi_slopes is not None:
@@ -572,26 +424,17 @@ def _make_alibi_bias(
     dtype: torch.dtype,
     sdpa_start_loc: torch.Tensor,
 ) -> list[torch.Tensor]:
-    """生成 ALiBi 偏置掩码。
-
-    Args:
-        alibi_slopes: ALiBi 斜率
-        dtype: 数据类型
-        sdpa_start_loc: SDPA 起始位置张量
-
-    Returns:
-        ALiBi 偏置掩码列表
-    """
     attn_biases: list[torch.Tensor] = []
     seq_num = sdpa_start_loc.size(0) - 1
     sdpa_start_loc = sdpa_start_loc.numpy()  # type: ignore
     for i in range(seq_num):
         seq_len = sdpa_start_loc[i + 1] - sdpa_start_loc[i]
         bias = torch.arange(seq_len, dtype=dtype)  # type: ignore
-        # NOTE(zhuohan): HF 使用
+        # NOTE(zhuohan): HF uses
         #     `bias = bias[None, :].repeat(seq_len, 1)`
-        # 这里。我们发现两种偏置给出相同的结果，但
-        # 下面的偏置更准确地遵循原始 ALiBi 论文。
+        # here. We find that both biases give the same results, but
+        # the bias below more accurately follows the original ALiBi
+        # paper.
         bias = bias[None, :] - bias[:, None]
 
         num_heads = alibi_slopes.shape[0]
@@ -613,17 +456,6 @@ def _make_sliding_window_bias(
     right_window_size: int,
     dtype: torch.dtype,
 ) -> list[torch.Tensor]:
-    """生成滑动窗口偏置掩码。
-
-    Args:
-        sdpa_start_loc: SDPA 起始位置张量
-        left_window_size: 左窗口大小
-        right_window_size: 右窗口大小
-        dtype: 数据类型
-
-    Returns:
-        滑动窗口偏置掩码列表
-    """
     attn_biases: list[torch.Tensor] = []
     seq_num = sdpa_start_loc.size(0) - 1
     sdpa_start_loc = sdpa_start_loc.numpy()  # type: ignore
@@ -648,16 +480,6 @@ def _make_sliding_window_bias(
 def _get_attn_isa(
     dtype: torch.dtype, block_size: int, head_size: int | None = None
 ) -> str:
-    """获取注意力指令集架构。
-
-    Args:
-        dtype: 数据类型
-        block_size: 块大小
-        head_size: 头大小（可选）
-
-    Returns:
-        指令集架构名称（amx、neon、vxe、vec、vec16）
-    """
     if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
         return "vec16"
     supports_amx = torch.cpu._is_amx_tile_supported()
@@ -667,7 +489,7 @@ def _get_attn_isa(
         return "amx"
     elif block_size % 32 == 0:
         if supports_arm:
-            # 支持 ARM NEON FMLA 和 BFMMLA (bf16)，块大小 32
+            # support ARM NEON FMLA and BFMMLA (bf16) for block size 32
             return "neon"
         elif supports_vxe:
             return "vxe"

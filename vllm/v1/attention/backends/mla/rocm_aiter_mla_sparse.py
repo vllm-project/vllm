@@ -1,25 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ROCm Aiter MLA Sparse Attention 后端模块。
-
-本模块实现了基于 ROCm Aiter 的稀疏 MLA 后端，负责：
-- 实现 ROCMAiterMLASparseBackend 类
-- 实现 ROCMAiterMLASparseMetadataBuilder 用于构建注意力元数据
-- 实现 ROCMAiterMLASparseImpl 用于执行稀疏 MLA 前向传播
-- 支持 DeepSeek-V3.2 等使用 index_topk 的稀疏注意力模型
-- 使用 Triton kernel (fetch_id_to_ragged_kernel) 进行索引转换
-- 使用 rocm_aiter_ops.mla_decode_fwd 执行解码
-- 实现参考实现 reference_mla_sparse_prefill 用于验证
-
-主要类和函数：
-- ROCMAiterMLASparseBackend: 稀疏 MLA 后端类
-- ROCMAiterMLASparseMetadata: 稀疏注意力元数据
-- ROCMAiterMLASparseMetadataBuilder: 元数据构建器
-- ROCMAiterMLASparseImpl: 稀疏 MLA 实现类
-- fetch_id_to_ragged_kernel: Triton kernel 用于获取 ID 到 ragged 格式
-- fetch_id_to_ragged_triton: 封装函数
-- reference_mla_sparse_prefill: 参考实现
-"""
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar

@@ -1,20 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton 解码注意力操作模块。
 
-本模块实现了高效的解码注意力计算，支持：
-- 分页注意力（Page Size >= 1）
-- 分组查询注意力（GQA/MQA）
-- FP8 KV 缓存反量化
-- Logit 限幅（logit_cap）
-- 两阶段解码注意力计算
+# Adapted from
+# https://github.com/sgl-project/sglang/blob/9f635ea50de920aa507f486daafba26a5b837574/python/sglang/srt/layers/attention/triton_ops/decode_attention.py
+# which was originally adapted from
+# https://github.com/ModelTC/lightllm/blob/96353e868a840db4d103138caf15ed9dbea8c186/lightllm/models/deepseek2/triton_kernel/gqa_flash_decoding_stage1.py
+# https://github.com/ModelTC/lightllm/blob/96353e868a840db4d103138caf15ed9dbea8c186/lightllm/models/deepseek2/triton_kernel/gqa_flash_decoding_stage2.py
 
-第一阶段：计算每个 KV 分片的局部注意力输出和 LSE
-第二阶段：合并所有分片的输出，计算最终注意力结果
+# Changes:
+# - Add support for page size >= 1.
 
-本模块改编自：
-- SGLang: https://github.com/sgl-project/sglang
-- LightLLM: https://github.com/ModelTC/lightllm
+# Copyright 2025 vLLM Team
+# Copyright 2023-2024 SGLang Team
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+"""
+Memory-efficient attention for decoding.
+It supports page size >= 1.
 """
 
 import logging
@@ -40,16 +52,8 @@ if version.parse(triton.__version__) < version.parse("3.2.0"):
 
 @triton.jit
 def tanh(x):
-    """双曲正切激活函数。
-
-    Tanh 是缩放版的 sigmoid 函数。
-
-    Args:
-        x: 输入值
-
-    Returns:
-        tanh(x) 结果
-    """
+    # Tanh is just a scaled sigmoid
+    return 2 * tl.sigmoid(2 * x) - 1
 
 
 @triton.jit
@@ -83,41 +87,6 @@ def _fwd_kernel_stage1(
     Lk: tl.constexpr,
     Lv: tl.constexpr,
 ):
-    """解码注意力第一阶段 Triton kernel。
-
-    计算每个 KV 分片的局部注意力输出和 LSE 值。
-    支持分页 KV 缓存、FP8 反量化、logit 限幅。
-
-    Args:
-        Q: Query 张量指针
-        K_Buffer: Key 缓存指针
-        V_Buffer: Value 缓存指针
-        sm_scale: Softmax 缩放因子
-        Req_to_tokens: 请求到 token 的映射指针
-        B_Seqlen: 批次序列长度指针
-        Att_Out: 注意力输出指针
-        stride_req_to_tokens_b: Req_to_tokens 第 B 维步幅
-        stride_qbs: Q 第 0 维步幅
-        stride_qh: Q 第 H 维步幅
-        stride_buf_kbs: K 缓存第 0 维步幅
-        stride_buf_kh: K 缓存第 H 维步幅
-        stride_buf_vbs: V 缓存第 0 维步幅
-        stride_buf_vh: V 缓存第 H 维步幅
-        stride_mid_ob: 中间输出第 0 维步幅
-        stride_mid_oh: 中间输出第 H 维步幅
-        stride_mid_os: 中间输出第 S 维步幅
-        k_scale: K 缩放因子
-        v_scale: V 缩放因子
-        kv_group_num: KV 组数量
-        BLOCK_DMODEL: D 模型块大小
-        BLOCK_DV: D_V 块大小
-        BLOCK_N: N 维度块大小
-        NUM_KV_SPLITS: KV 分割数
-        PAGE_SIZE: 页大小
-        logit_cap: Logit 限幅值
-        Lk: Key 头维度
-        Lv: Value 头维度
-    """
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
     split_kv_id = tl.program_id(2)
@@ -237,24 +206,6 @@ def _decode_att_m_fwd(
     k_scale,
     v_scale,
 ):
-    """解码注意力第一阶段前向传播。
-
-    调用 _fwd_kernel_stage1 计算每个 KV 分片的局部注意力输出。
-
-    Args:
-        q: Query 张量
-        k_buffer: Key 缓存
-        v_buffer: Value 缓存
-        att_out: 注意力输出张量
-        Req_to_tokens: 请求到 token 的映射
-        B_Seqlen: 批次序列长度
-        num_kv_splits: KV 分割数
-        sm_scale: Softmax 缩放因子
-        page_size: 页大小
-        logit_cap: Logit 限幅值
-        k_scale: K 缩放因子
-        v_scale: V 缩放因子
-    """
     BLOCK = 64 if not is_hip_ else 8
 
     NUM_KV_SPLITS = num_kv_splits
@@ -341,44 +292,6 @@ def _fwd_grouped_kernel_stage1(
     Lk: tl.constexpr,
     Lv: tl.constexpr,
 ):
-    """分组查询解码注意力第一阶段 Triton kernel。
-
-    针对 GQA/MQA/MLA 场景优化的 kernel，批量处理多个 Query 头。
-    支持 RoPE 扩展维度（BLOCK_DPE）。
-
-    Args:
-        Q: Query 张量指针
-        K_Buffer: Key 缓存指针
-        V_Buffer: Value 缓存指针
-        sm_scale: Softmax 缩放因子
-        Req_to_tokens: 请求到 token 的映射指针
-        B_Seqlen: 批次序列长度指针
-        Att_Out: 注意力输出指针
-        stride_req_to_tokens_b: Req_to_tokens 第 B 维步幅
-        stride_qbs: Q 第 0 维步幅
-        stride_qh: Q 第 H 维步幅
-        stride_buf_kbs: K 缓存第 0 维步幅
-        stride_buf_kh: K 缓存第 H 维步幅
-        stride_buf_vbs: V 缓存第 0 维步幅
-        stride_buf_vh: V 缓存第 H 维步幅
-        stride_mid_ob: 中间输出第 0 维步幅
-        stride_mid_oh: 中间输出第 H 维步幅
-        stride_mid_os: 中间输出第 S 维步幅
-        k_scale: K 缩放因子
-        v_scale: V 缩放因子
-        kv_group_num: KV 组数量
-        q_head_num: Query 头数量
-        BLOCK_DMODEL: D 模型块大小
-        BLOCK_DPE: D 位置编码维度块大小
-        BLOCK_DV: D_V 块大小
-        BLOCK_N: N 维度块大小
-        BLOCK_H: H 维度块大小
-        NUM_KV_SPLITS: KV 分割数
-        PAGE_SIZE: 页大小
-        logit_cap: Logit 限幅值
-        Lk: Key 头维度
-        Lv: Value 头维度
-    """
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
     cur_kv_head = cur_head_id // tl.cdiv(kv_group_num, BLOCK_H)
@@ -529,24 +442,6 @@ def _decode_grouped_att_m_fwd(
     k_scale,
     v_scale,
 ):
-    """分组查询解码注意力第一阶段前向传播。
-
-    调用 _fwd_grouped_kernel_stage1 计算 GQA/MQA/MLA 的局部注意力输出。
-
-    Args:
-        q: Query 张量
-        k_buffer: Key 缓存
-        v_buffer: Value 缓存
-        att_out: 注意力输出张量
-        Req_to_tokens: 请求到 token 的映射
-        B_Seqlen: 批次序列长度
-        num_kv_splits: KV 分割数
-        sm_scale: Softmax 缩放因子
-        page_size: 页大小
-        logit_cap: Logit 限幅值
-        k_scale: K 缩放因子
-        v_scale: V 缩放因子
-    """
     BLOCK = 32
     Lk = k_buffer.shape[-1]
     Lv = v_buffer.shape[-1]
@@ -639,26 +534,6 @@ def _fwd_kernel_stage2(
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
 ):
-    """解码注意力第二阶段 Triton kernel。
-
-    合并所有 KV 分片的局部注意力输出，计算最终的注意力结果。
-    使用 LSE 加权合并以确保数值稳定性。
-
-    Args:
-        Mid_O: 中间输出张量指针（来自第一阶段）
-        o: 最终输出张量指针
-        lse: LSE 输出指针
-        B_Seqlen: 批次序列长度指针
-        stride_mid_ob: 中间输出第 0 维步幅
-        stride_mid_oh: 中间输出第 H 维步幅
-        stride_mid_os: 中间输出第 S 维步幅
-        stride_obs: 输出第 0 维步幅
-        stride_oh: 输出第 H 维步幅
-        stride_lse_bs: LSE 第 0 维步幅
-        NUM_KV_SPLITS: KV 分割数
-        BLOCK_DV: D_V 块大小
-        Lv: Value 头维度
-    """
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
 
@@ -715,19 +590,6 @@ def _decode_softmax_reducev_fwd(
     b_seq_len,
     num_kv_splits,
 ):
-    """解码注意力第二阶段前向传播 - Softmax 约减。
-
-    调用 _fwd_kernel_stage2 合并所有 KV 分片的输出。
-
-    Args:
-        logits:  logits 张量（来自第一阶段）
-        q: Query 张量
-        o: 输出张量
-        lse: LSE 输出张量
-        v_buffer: Value 缓存
-        b_seq_len: 批次序列长度
-        num_kv_splits: KV 分割数
-    """
     batch, head_num = q.shape[0], q.shape[1]
     Lv = v_buffer.shape[-1]
     BLOCK_DV = triton.next_power_of_2(Lv)
@@ -777,26 +639,6 @@ def decode_attention_fwd_normal(
     k_scale=None,
     v_scale=None,
 ):
-    """标准解码注意力前向传播（MHA）。
-
-    处理多头注意力（MHA）场景，kv_group_num=1。
-
-    Args:
-        q: Query 张量
-        k_buffer: Key 缓存
-        v_buffer: Value 缓存
-        o: 输出张量
-        lse: LSE 输出张量
-        req_to_token: 请求到 token 的映射
-        b_seq_len: 批次序列长度
-        attn_logits: 注意力 logits 张量
-        num_kv_splits: KV 分割数
-        sm_scale: Softmax 缩放因子
-        page_size: 页大小
-        logit_cap: Logit 限幅值（默认 0.0，表示不限幅）
-        k_scale: K 缩放因子（可选）
-        v_scale: V 缩放因子（可选）
-    """
     _decode_att_m_fwd(
         q,
         k_buffer,
@@ -832,26 +674,6 @@ def decode_attention_fwd_grouped(
     k_scale=None,
     v_scale=None,
 ):
-    """分组查询解码注意力前向传播（GQA/MQA/MLA）。
-
-    处理分组查询注意力（GQA/MQA/MLA）场景，kv_group_num>1。
-
-    Args:
-        q: Query 张量
-        k_buffer: Key 缓存
-        v_buffer: Value 缓存
-        o: 输出张量
-        lse: LSE 输出张量
-        req_to_token: 请求到 token 的映射
-        b_seq_len: 批次序列长度
-        attn_logits: 注意力 logits 张量
-        num_kv_splits: KV 分割数
-        sm_scale: Softmax 缩放因子
-        page_size: 页大小
-        logit_cap: Logit 限幅值（默认 0.0，表示不限幅）
-        k_scale: K 缩放因子（可选）
-        v_scale: V 缩放因子（可选）
-    """
     _decode_grouped_att_m_fwd(
         q,
         k_buffer,
@@ -887,26 +709,6 @@ def decode_attention_fwd(
     k_scale=None,
     v_scale=None,
 ):
-    """解码注意力前向传播主函数。
-
-    根据 kv_group_num 自动选择 MHA 或 GQA/MQA/MLA 实现。
-
-    Args:
-        q: Query 张量
-        k_buffer: Key 缓存
-        v_buffer: Value 缓存
-        o: 输出张量
-        lse: LSE 输出张量
-        req_to_token: 请求到 token 的映射
-        b_seq_len: 批次序列长度
-        attn_logits: 注意力 logits 张量
-        num_kv_splits: KV 分割数
-        sm_scale: Softmax 缩放因子
-        page_size: 页大小（默认 1）
-        logit_cap: Logit 限幅值（默认 0.0，表示不限幅）
-        k_scale: K 缩放因子（可选）
-        v_scale: V 缩放因子（可选）
-    """
     assert num_kv_splits == attn_logits.shape[2]
 
     if k_scale is None:
