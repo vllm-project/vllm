@@ -1661,6 +1661,16 @@ class Scheduler(SchedulerInterface):
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
+            else:
+                spec_token_end_index = (
+                    self.structured_output_manager.spec_token_reasoning_end_index(
+                        request, spec_token_ids
+                    )
+                )
+                if spec_token_end_index != -1:
+                    # The reasoning-end marker is emitted as the bonus token on the
+                    # next pass, so keep only pure reasoning draft tokens here.
+                    spec_token_ids = spec_token_ids[:spec_token_end_index]
             request.spec_token_ids = spec_token_ids
 
     def update_draft_token_ids_in_output(
@@ -1691,6 +1701,17 @@ class Scheduler(SchedulerInterface):
                 metadata = request.structured_output_request
                 assert metadata is not None and metadata.grammar is not None
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)
+            else:
+                spec_token_end_index = (
+                    self.structured_output_manager.spec_token_reasoning_end_index(
+                        request, spec_token_ids
+                    )
+                )
+                if spec_token_end_index != -1:
+                    spec_token_ids = spec_token_ids[:spec_token_end_index]
+            # Persist the real draft prefix for the next scheduling step before
+            # padding this step-local view with placeholder tokens.
+            request.spec_token_ids = spec_token_ids.copy()
             # Pad to original number of spec tokens.
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:

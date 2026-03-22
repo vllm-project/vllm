@@ -503,6 +503,45 @@ def test_stop_via_update_from_output():
     assert list(requests[0].output_token_ids) == [EOS_TOKEN_ID, 10, 11]
 
 
+def test_update_draft_token_ids_in_output():
+    scheduler = create_scheduler(skip_tokenizer_init=True, num_speculative_tokens=4)
+    request = create_requests(num_requests=1, req_ids=["req_0"])[0]
+    request.structured_output_request = Mock()
+    request.structured_output_request.grammar = Mock()
+    scheduler.requests[request.request_id] = request
+
+    scheduler.structured_output_manager.should_advance = Mock(return_value=False)
+    scheduler.structured_output_manager.spec_token_reasoning_end_index = Mock(
+        return_value=2
+    )
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={request.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_spec_decode_tokens={request.request_id: [-1, -1, -1, -1]},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    draft_token_ids = DraftTokenIds(
+        [request.request_id], [[10, 11, 12, 13, 14]]
+    )
+
+    scheduler.update_draft_token_ids_in_output(draft_token_ids, scheduler_output)
+
+    assert request.spec_token_ids == [10, 11]
+    assert scheduler_output.scheduled_spec_decode_tokens[request.request_id] == [
+        10,
+        11,
+        -1,
+        -1,
+    ]
+    assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
+
+
 def test_check_stop_min_tokens():
     """Test that requests don't stop when min_tokens requirement isn't met."""
     from vllm.v1.core.sched.utils import check_stop

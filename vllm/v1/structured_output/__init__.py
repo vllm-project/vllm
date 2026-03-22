@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import multiprocessing
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -330,11 +330,22 @@ class StructuredOutputManager:
         if self.reasoner.is_reasoning_end_streaming(
             all_token_ids, itertools.islice(all_token_ids, start, None)
         ):
-            # Reasoning just ended, so we shouldn't advance til
+            # Reasoning just ended, so we shouldn't advance till
             # next pass
             structured_req.reasoning_ended = True
 
         return False
+
+    def spec_token_reasoning_end_index(
+        self,
+        request: "Request",
+        spec_token_ids: Sequence[int],
+    ) -> int:
+        if self.reasoner is None or self.enable_in_reasoning or not spec_token_ids:
+            return -1
+        return self.reasoner.reasoning_end_delta_index(
+            request.all_token_ids, spec_token_ids
+        )
 
     def clear_backend(self) -> None:
         if self.backend is not None:

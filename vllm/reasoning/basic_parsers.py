@@ -72,6 +72,24 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 return True
         return False
 
+    def reasoning_end_index(self, input_ids: Sequence[int]) -> int:
+        end_token_id = self.end_token_id
+        return next(
+            (i for i, token_id in enumerate(input_ids) if token_id == end_token_id),
+            -1,
+        )
+
+    def reasoning_end_delta_index(
+        self,
+        previous_input_ids: Sequence[int],
+        delta_ids: Sequence[int],
+    ) -> int:
+        end_token_id = self.end_token_id
+        return next(
+            (i for i, token_id in enumerate(delta_ids) if token_id == end_token_id),
+            -1,
+        )
+
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:

@@ -153,3 +153,45 @@ def test_streaming_tool_section_ends_reasoning(kimi_k2_tokenizer):
     )
     assert isinstance(result, DeltaMessage)
     assert result.content == "<|tool_calls_section_begin|>"
+
+
+def test_reasoning_end_index_with_end_token(kimi_k2_tokenizer):
+    parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
+
+    think_id = parser._start_token_id
+    end_think_id = parser._end_token_id
+    regular_id = kimi_k2_tokenizer.encode("hello", add_special_tokens=False)[0]
+
+    assert parser.reasoning_end_index([think_id, regular_id, end_think_id]) == 2
+
+
+def test_reasoning_end_index_with_tool_section(kimi_k2_tokenizer):
+    parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
+
+    think_id = parser._start_token_id
+    tool_begin_id = parser._tool_section_start_token_id
+    regular_id = kimi_k2_tokenizer.encode("hello", add_special_tokens=False)[0]
+
+    assert parser.reasoning_end_index([think_id, regular_id, tool_begin_id]) == 2
+
+
+def test_reasoning_end_delta_index_with_end_token(kimi_k2_tokenizer):
+    parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
+
+    think_id = parser._start_token_id
+    end_think_id = parser._end_token_id
+    regular_id = kimi_k2_tokenizer.encode("hello", add_special_tokens=False)[0]
+
+    assert parser.reasoning_end_delta_index([think_id], [regular_id, end_think_id]) == 1
+
+
+def test_reasoning_end_delta_index_with_tool_section(kimi_k2_tokenizer):
+    parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
+
+    think_id = parser._start_token_id
+    tool_begin_id = parser._tool_section_start_token_id
+    regular_id = kimi_k2_tokenizer.encode("hello", add_special_tokens=False)[0]
+
+    assert (
+        parser.reasoning_end_delta_index([think_id], [regular_id, tool_begin_id]) == 1
+    )
