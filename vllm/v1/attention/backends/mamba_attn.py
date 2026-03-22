@@ -147,6 +147,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int32,
                 device=device,
             )
+        
+        self.decode_query_start_loc_d: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs + 1,),
+                dtype=torch.int32,
+                device=device,
+            )
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
@@ -534,7 +540,26 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
             if self.use_spec_decode and num_accepted_tokens is not None:
                 assert query_start_loc_d is not None
-                query_start_loc_d = query_start_loc_d[: padded_bs + 1]
+                self.decode_query_start_loc_d[: metadata.num_decodes + 1].copy_(
+                    query_start_loc_d[: metadata.num_decodes + 1],
+                    non_blocking=True,
+                )
+                # Pad remaining entries with 1-token-per-request pattern
+                if metadata.num_decodes < padded_bs:
+                    last_val = self.decode_query_start_loc_d[
+                        metadata.num_decodes
+                    ]
+                    self.decode_query_start_loc_d[
+                        metadata.num_decodes + 1 : padded_bs + 1
+                    ] = last_val + torch.arange(
+                        1,
+                        padded_bs - metadata.num_decodes + 1,
+                        device=query_start_loc_d.device,
+                        dtype=query_start_loc_d.dtype,
+                    )
+                query_start_loc_d = self.decode_query_start_loc_d[
+                    : padded_bs + 1
+                ]
                 self.decode_num_accepted_tokens[: metadata.num_decodes].copy_(
                     num_accepted_tokens, non_blocking=True
                 )
