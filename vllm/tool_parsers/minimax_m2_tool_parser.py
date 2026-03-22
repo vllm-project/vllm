@@ -252,6 +252,16 @@ class MinimaxM2ToolParser(ToolParser):
 
         function_name = self._extract_name(name_match.group(1))
 
+        # Validate function name against available tools
+        if tools:
+            valid_names = {
+                tool.function.name
+                for tool in tools
+                if hasattr(tool, "function")
+            }
+            if function_name not in valid_names:
+                return None
+
         # Get parameter configuration
         param_config = {}
         if tools:
