@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
+
 import numpy as np
 import torch
 
@@ -83,7 +85,7 @@ class RequestState:
         self,
         req_id: str,
         prompt_len: int,
-        all_token_ids: list[int],
+        all_token_ids: Sequence[int],
         num_computed_tokens: int,
     ) -> None:
         assert len(self.free_indices) > 0, "No free indices"

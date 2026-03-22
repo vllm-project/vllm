@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
+
 import torch
 
 from vllm.model_executor.layers.utils import apply_penalties
@@ -14,7 +16,7 @@ def apply_all_penalties(
     presence_penalties: torch.Tensor,
     frequency_penalties: torch.Tensor,
     repetition_penalties: torch.Tensor,
-    output_token_ids: list[list[int]],
+    output_token_ids: Sequence[Sequence[int]],
 ) -> torch.Tensor:
     """
     Applies presence, frequency and repetition penalties to the logits.
@@ -40,13 +42,13 @@ def apply_all_penalties(
 
 
 def _convert_to_tensors(
-    output_token_ids: list[list[int]], vocab_size: int, device: torch.device
+    output_token_ids: Sequence[Sequence[int]], vocab_size: int, device: torch.device
 ) -> torch.Tensor:
     """
     Convert the different list data structures to tensors.
     """
     output_tokens_tensor = make_tensor_with_pad(
-        output_token_ids,
+        [list(x) for x in output_token_ids],
         # Use the value of vocab_size as a pad since we don't have a
         # token_id of this value.
         pad=vocab_size,

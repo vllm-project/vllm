@@ -5,7 +5,7 @@ import contextlib
 import multiprocessing
 import time
 import weakref
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, MutableSequence, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from multiprocessing import connection
@@ -20,6 +20,7 @@ from typing import (
     overload,
 )
 
+import numpy as np
 import torch
 from torch.autograd.profiler import record_function
 
@@ -31,8 +32,6 @@ from vllm.utils.system_utils import kill_process_tree
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
-    import numpy as np
-
     from vllm.v1.engine.coordinator import DPCoordinator
     from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
 
@@ -41,8 +40,161 @@ logger = init_logger(__name__)
 T = TypeVar("T")
 
 
+class TokenArray(MutableSequence[int]):
+    def __init__(self, initial_capacity: int = 16):
+        self._data = np.empty(initial_capacity, dtype=np.int32)
+        self._size = 0
+
+    @classmethod
+    def from_list(cls, x: list[int]):
+        arr = cls(max(16, len(x)))
+        arr.extend(x)
+        return arr
+
+    def append(self, item: int):
+        if self._size == len(self._data):
+            new_capacity = max(1, len(self._data) * 2)
+            new_arr = np.empty(new_capacity, dtype=self._data.dtype)
+            new_arr[: self._size] = self._data[: self._size]
+            self._data = new_arr
+        self._data[self._size] = item
+        self._size += 1
+
+    def extend(self, items):
+        items_len = len(items)
+        if self._size + items_len > len(self._data):
+            new_capacity = max(len(self._data) * 2, self._size + items_len)
+            new_arr = np.empty(new_capacity, dtype=self._data.dtype)
+            new_arr[: self._size] = self._data[: self._size]
+            self._data = new_arr
+        self._data[self._size : self._size + items_len] = items
+        self._size += items_len
+
+    def to_list(self):
+        return self._data[: self._size].tolist()
+
+    @property
+    def numpy(self) -> np.ndarray:
+        return self._data[: self._size]
+
+    def __len__(self):
+        return self._size
+
+    @overload
+    def __delitem__(self, idx: int) -> None: ...
+
+    @overload
+    def __delitem__(self, s: slice) -> None: ...
+
+    def __delitem__(self, idx: int | slice):
+        if isinstance(idx, slice):
+            if idx.start is not None and idx.stop is None and idx.step is None:
+                self._size = min(self._size, idx.start)
+            else:
+                raise NotImplementedError()
+        else:
+            raise NotImplementedError()
+
+    @overload
+    def __getitem__(self, idx: int) -> int: ...
+
+    @overload
+    def __getitem__(self, s: slice) -> "TokenArray": ...
+
+    def __getitem__(self, idx: int | slice):
+        if isinstance(idx, slice):
+            data_slice = self._data[: self._size][idx]
+            arr = TokenArray(initial_capacity=len(data_slice))
+            arr.extend(data_slice)
+            return arr
+        if idx < 0:
+            idx += self._size
+        if idx >= self._size or idx < 0:
+            raise IndexError("Index out of bounds")
+        return int(self._data[idx])
+
+    @overload
+    def __setitem__(self, idx: int, value: int) -> None: ...
+
+    @overload
+    def __setitem__(self, s: slice, value: Iterable[int], /) -> None: ...
+
+    def __setitem__(self, idx: int | slice, value: int | Iterable[int]) -> None:
+        if isinstance(idx, slice) and isinstance(value, Iterable):
+            val_list = list(value)
+            start, stop, step = idx.indices(self._size)
+            if step == 1:
+                old_len = stop - start
+                new_len = len(val_list)
+                diff = new_len - old_len
+                if diff > 0:
+                    if self._size + diff > len(self._data):
+                        new_capacity = max(len(self._data) * 2, self._size + diff)
+                        new_arr = np.empty(new_capacity, dtype=self._data.dtype)
+                        new_arr[: self._size] = self._data[: self._size]
+                        self._data = new_arr
+                    self._data[stop + diff : self._size + diff] = self._data[
+                        stop : self._size
+                    ]
+                elif diff < 0:
+                    self._data[stop + diff : self._size + diff] = self._data[
+                        stop : self._size
+                    ]
+                self._data[start : start + new_len] = val_list
+                self._size += diff
+            else:
+                raise NotImplementedError(
+                    "Slice assignment with step != 1 is not supported"
+                )
+        elif isinstance(idx, int) and isinstance(value, int):
+            if idx < 0:
+                idx += self._size
+            if idx >= self._size or idx < 0:
+                raise IndexError("Index out of bounds")
+            self._data[idx] = value
+        else:
+            raise TypeError("Invalid argument types for __setitem__")
+
+    def insert(self, index: int, value: int) -> None:
+        if index < 0:
+            index += self._size
+        index = max(0, min(index, self._size))
+        if self._size == len(self._data):
+            new_capacity = max(1, len(self._data) * 2)
+            new_arr = np.empty(new_capacity, dtype=self._data.dtype)
+            new_arr[: self._size] = self._data[: self._size]
+            self._data = new_arr
+        self._data[index + 1 : self._size + 1] = self._data[index : self._size]
+        self._data[index] = value
+        self._size += 1
+
+    def clear(self):
+        self._size = 0
+
+    def copy(self):
+        arr = TokenArray(self._size)
+        arr.extend(self.numpy)
+        return arr
+
+    def __iter__(self):
+        for i in range(self._size):
+            yield int(self._data[i])
+
+    def __eq__(self, other):
+        if isinstance(other, list):
+            if self._size != len(other):
+                return False
+            return (self._data[: self._size] == other).all()
+        if isinstance(other, TokenArray):
+            return np.array_equal(self.numpy, other.numpy)
+        return False
+
+    def __repr__(self):
+        return f"TokenArray({self.to_list()})"
+
+
 class ConstantList(Generic[T], Sequence):
-    def __init__(self, x: list[T]) -> None:
+    def __init__(self, x: Sequence[T]) -> None:
         self._x = x
 
     def append(self, item):
@@ -70,9 +222,9 @@ class ConstantList(Generic[T], Sequence):
     def __getitem__(self, item: int) -> T: ...
 
     @overload
-    def __getitem__(self, s: slice, /) -> list[T]: ...
+    def __getitem__(self, s: slice, /) -> Sequence[T]: ...
 
-    def __getitem__(self, item: int | slice) -> T | list[T]:
+    def __getitem__(self, item: int | slice) -> T | Sequence[T]:
         return self._x[item]
 
     @overload
@@ -81,7 +233,7 @@ class ConstantList(Generic[T], Sequence):
     @overload
     def __setitem__(self, s: slice, value: T, /): ...
 
-    def __setitem__(self, item: int | slice, value: T | list[T]):
+    def __setitem__(self, item: int | slice, value: T | Sequence[T]):
         raise TypeError("Cannot set item in a constant list")
 
     def __delitem__(self, item):
@@ -100,7 +252,7 @@ class ConstantList(Generic[T], Sequence):
         return f"ConstantList({self._x})"
 
     def copy(self) -> list[T]:
-        return self._x.copy()
+        return list(self._x)
 
 
 class CpuGpuBuffer:

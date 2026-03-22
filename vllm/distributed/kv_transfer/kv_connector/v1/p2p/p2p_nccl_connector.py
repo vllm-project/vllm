@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -42,7 +43,7 @@ class ReqMeta:
 
     @staticmethod
     def make_meta(
-        request_id: str, token_ids: list[int], block_ids: list[int], block_size: int
+        request_id: str, token_ids: Sequence[int], block_ids: list[int], block_size: int
     ) -> "ReqMeta":
         block_ids_tensor = torch.tensor(block_ids)
         return ReqMeta(
@@ -62,7 +63,7 @@ class P2pNcclConnectorMetadata(KVConnectorMetadata):
     def add_request(
         self,
         request_id: str,
-        token_ids: list[int],
+        token_ids: Sequence[int],
         block_ids: list[int],
         block_size: int,
     ) -> None:
@@ -86,7 +87,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Any] = {}
         self.is_producer = self._kv_transfer_config.is_kv_producer
-        self.chunked_prefill: dict[str, tuple[list[int], list[int] | None]] = {}
+        self.chunked_prefill: dict[str, tuple[list[int], Sequence[int] | None]] = {}
 
         self._rank = get_world_group().rank if role == KVConnectorRole.WORKER else 0
         self._local_rank = (

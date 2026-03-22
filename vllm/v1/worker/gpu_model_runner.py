@@ -1214,7 +1214,7 @@ class GPUModelRunner(
             if not is_last_rank:
                 if not req_data.new_token_ids:
                     # Async scheduled PP: Sampled tokens propagated via GPU broadcast.
-                    new_token_ids: list[int] = []
+                    new_token_ids: Sequence[int] = []
                 else:
                     # Non-async scheduling with PP: The scheduler sends
                     # sampled token ids back because there's no direct communication
@@ -1265,7 +1265,10 @@ class GPUModelRunner(
                     # We must recover the output token ids for resumed requests in the
                     # async scheduling case, so that correct input_ids are obtained.
                     resumed_token_ids = req_data.all_token_ids[req_id]
-                    req_state.output_token_ids = resumed_token_ids[-num_output_tokens:]
+                    req_state.output_token_ids.clear()
+                    req_state.output_token_ids.extend(
+                        resumed_token_ids[-num_output_tokens:]
+                    )
 
                 reqs_to_add.append(req_state)
                 # Track resumed requests for ngram_gpu full tensor copy
@@ -1424,7 +1427,7 @@ class GPUModelRunner(
 
         req_state.mrope_positions, req_state.mrope_position_delta = (
             mrope_model.get_mrope_input_positions(
-                req_state.prompt_token_ids,
+                list(req_state.prompt_token_ids),
                 req_state.mm_features,
             )
         )
@@ -1438,7 +1441,7 @@ class GPUModelRunner(
         assert supports_xdrope(model), "XD-RoPE support is not implemented."
 
         req_state.xdrope_positions = xdrope_model.get_xdrope_input_positions(
-            req_state.prompt_token_ids,
+            list(req_state.prompt_token_ids),
             req_state.mm_features,
         )
 

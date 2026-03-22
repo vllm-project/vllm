@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -39,9 +40,10 @@ class ReqMeta:
     is_store: bool
     mm_hashes: list[str]
 
-    @staticmethod
+    @classmethod
     def make_meta(
-        token_ids: list[int],
+        cls,
+        token_ids: Sequence[int],
         block_ids: list[int],
         block_size: int,
         is_store: bool,
@@ -71,7 +73,7 @@ class ExampleConnectorMetadata(KVConnectorMetadata):
 
     def add_request(
         self,
-        token_ids: list[int],
+        token_ids: Sequence[int],
         block_ids: list[int],
         block_size: int,
         is_store: bool,
@@ -402,7 +404,7 @@ class ExampleConnector(KVConnectorBase_V1):
 
     def _found_match_for_prompt(
         self,
-        prompt_token_ids: list[int],
+        prompt_token_ids: Sequence[int],
         mm_hashes: list[str],
     ) -> bool:
         num_tokens_to_check = align_to_block_size(

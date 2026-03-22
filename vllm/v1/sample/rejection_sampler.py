@@ -262,7 +262,7 @@ class RejectionSampler(nn.Module):
             sampling_metadata.bad_words_token_ids or has_penalties
         )
 
-        output_token_ids = sampling_metadata.output_token_ids
+        output_token_ids: Sequence[Sequence[int]] = sampling_metadata.output_token_ids
         if any_penalties_or_bad_words:
             output_token_ids = self._combine_outputs_with_spec_tokens(
                 output_token_ids,
@@ -307,7 +307,7 @@ class RejectionSampler(nn.Module):
         sampling_metadata: SamplingMetadata,
         metadata: SpecDecodeMetadata,
         repeat_indices: torch.Tensor,
-        output_token_ids: list[list[int]],
+        output_token_ids: Sequence[Sequence[int]],
     ) -> torch.Tensor:
         if sampling_metadata.no_penalties:
             return logits
@@ -331,9 +331,9 @@ class RejectionSampler(nn.Module):
 
     @staticmethod
     def _combine_outputs_with_spec_tokens(
-        output_token_ids: list[list[int]],
+        output_token_ids: Sequence[Sequence[int]],
         spec_token_ids: list[list[int]] | None = None,
-    ) -> list[list[int]]:
+    ) -> Sequence[Sequence[int]]:
         if spec_token_ids is None:
             return output_token_ids
 

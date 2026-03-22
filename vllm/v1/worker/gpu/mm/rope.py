@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from typing import cast
 
 import torch
@@ -63,19 +64,19 @@ class RopeState:
         self,
         req_idx: int,
         model: nn.Module,
-        prefill_token_ids: list[int],
+        prefill_token_ids: Sequence[int],
         mm_features: list,
     ) -> None:
         if self.has_delta:
             mrope_model = cast(SupportsMRoPE, model)
             prefill_positions, delta = mrope_model.get_mrope_input_positions(
-                prefill_token_ids, mm_features
+                list(prefill_token_ids), mm_features
             )
             self.prefill_delta.np[req_idx] = delta
         else:
             xdrope_model = cast(SupportsXDRoPE, model)
             prefill_positions = xdrope_model.get_xdrope_input_positions(
-                prefill_token_ids, mm_features
+                list(prefill_token_ids), mm_features
             )
 
         for i in range(self.num_dims):

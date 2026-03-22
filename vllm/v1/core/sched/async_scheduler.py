@@ -32,7 +32,8 @@ class AsyncScheduler(Scheduler):
             request.num_output_placeholders += 1 + cur_num_spec_tokens
             # Add placeholders for the new draft/spec tokens.
             # We will update the actual spec token ids in the worker process.
-            request.spec_token_ids = self._spec_token_placeholders
+            request.spec_token_ids.clear()
+            request.spec_token_ids.extend(self._spec_token_placeholders)
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]
