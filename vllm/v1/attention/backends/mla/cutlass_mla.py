@@ -98,6 +98,38 @@ class SM100Workspace:
 
 g_sm100_workspace = SM100Workspace(128 * 1024 * 1024)  # 128MB
 
+
+class SM100DecodeOutBuffer:
+    """Shared decode output buffer for all CutlassMLAImpl instances.
+
+    The NaN fix (PR #37442) allocated a persistent _decode_out buffer per
+    attention layer. For DeepSeek-R1 (61 layers), this totals ~15 GiB of
+    GPU memory that is not accounted for during profiling, causing OOM.
+
+    This shared buffer reduces memory from ~15 GiB to ~256 MiB since all
+    layers write sequentially (no concurrent access in forward pass).
+    """
+
+    def __init__(self):
+        self._buffer: torch.Tensor | None = None
+        self._dtype: torch.dtype | None = None
+
+    def get(self, batch_size: int, dtype: torch.dtype, device: torch.device):
+        D_latent = 512
+        if (
+            self._buffer is None
+            or self._buffer.shape[0] < batch_size
+            or self._buffer.dtype != dtype
+            or self._buffer.device != device
+        ):
+            self._buffer = torch.zeros(
+                (batch_size, MAX_HEADS, D_latent), dtype=dtype, device=device
+            )
+        return self._buffer[:batch_size]
+
+
+g_sm100_decode_out = SM100DecodeOutBuffer()
+
 MAX_HEADS = 128
 
 
@@ -162,10 +194,9 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # Share workspace buffer across all executions
         self._workspace = g_sm100_workspace
 
-        # Pre-allocated output buffer, lazily sized on first call.
-        # Zero-init once to prevent NaN in padding slots (seq_lens=0)
-        # from contaminating downstream per-tensor reductions.
-        self._decode_out: torch.Tensor | None = None
+        # Use shared decode output buffer across all layers to reduce memory.
+        # Each layer writes sequentially, so sharing is safe.
+        self._decode_out_buffer = g_sm100_decode_out
 
     def _sm100_cutlass_mla_decode(
         self,
@@ -223,15 +254,8 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             if is_quantized_kv_cache(self.kv_cache_dtype)
             else q_nope.dtype
         )
-        # Reuse pre-allocated zero-init output buffer to avoid a memset
-        # kernel on every CUDA graph replay.
-        if (
-            self._decode_out is None
-            or self._decode_out.shape[0] < B_q
-            or self._decode_out.dtype != dtype
-        ):
-            self._decode_out = q_nope.new_zeros((B_q, MAX_HEADS, D_latent), dtype=dtype)
-        out = self._decode_out[:B_q]
+        # Use shared buffer to reduce memory footprint.
+        out = self._decode_out_buffer.get(B_q, dtype, q_nope.device)
         lse = (
             torch.empty((B_q, MAX_HEADS), dtype=torch.float32, device=q_nope.device)
             if self.need_to_return_lse_for_decode
