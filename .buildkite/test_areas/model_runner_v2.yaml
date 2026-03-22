@@ -87,13 +87,12 @@ steps:
     - vllm/v1/worker/gpu/
     - vllm/v1/worker/gpu_worker.py
     - tests/distributed/test_pipeline_parallel.py
-    #- tests/distributed/test_pp_cudagraph.py
+    - tests/distributed/test_pp_cudagraph.py
   commands:
     - set -x
     - export VLLM_USE_V2_MODEL_RUNNER=1
     - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray and not Jamba"
-    # TODO: Uncomment once https://github.com/vllm-project/vllm/pull/35162 is merged.
-    #- pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
+    - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
 
 - label: Model Runner V2 Spec Decode
   timeout_in_minutes: 30
