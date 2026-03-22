@@ -177,6 +177,32 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         return self.build(0, m, num_accepted_tokens=num_accepted_tokens)
 
+    def build_for_drafting(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        draft_index: int,
+    ) -> M:
+        """
+        Build attention metadata for the draft model's mamba layers.
+
+        During drafting, all requests are uniform single-token decodes.
+        We must pass num_accepted_tokens so that _compute_common_metadata
+        uses the correct decode_threshold (reorder_batch_threshold) and
+        properly initialises the spec-decode fields (query_start_loc_d,
+        num_accepted_tokens) required for CUDA graph capture.
+        """
+        num_accepted_tokens = None
+        if self.num_spec_tokens > 0:
+            num_accepted_tokens = torch.diff(
+                common_attn_metadata.query_start_loc
+            )
+        return self.build(
+            0,
+            common_attn_metadata,
+            fast_build=True,
+            num_accepted_tokens=num_accepted_tokens,
+        )
+
     def build(
         self,
         common_prefix_len: int,

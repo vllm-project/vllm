@@ -581,6 +581,17 @@ class SpecDecodeBaseProposer:
             self.token_arange_np[: batch_size + 1]
         ).clone()
 
+        # Propagate the updated decode-phase metadata to mamba CAMs.
+        # The mamba CAMs were created via .replace() and share seq_lens
+        # (in-place updates propagate), but scalar/tensor rebindings above
+        # do not propagate automatically.
+        for mamba_cam in mamba_cams.values():
+            mamba_cam.num_actual_tokens = common_attn_metadata.num_actual_tokens
+            mamba_cam.max_query_len = common_attn_metadata.max_query_len
+            mamba_cam.query_start_loc = common_attn_metadata.query_start_loc
+            mamba_cam.query_start_loc_cpu = (
+                common_attn_metadata.query_start_loc_cpu)
+
         # In padded drafter batch, we need to adjust the sequence lengths
         # to remove the "padding" (i.e. rejected tokens).
         # Only apply this adjustment when we have rejected tokens
@@ -590,6 +601,11 @@ class SpecDecodeBaseProposer:
             # Invalidate the CPU-side shadows to avoid H<>D sync.
             common_attn_metadata._seq_lens_cpu = None
             common_attn_metadata._num_computed_tokens_cpu = None
+            # seq_lens is shared (in-place -= propagates), but
+            # the CPU shadow invalidation must be explicit.
+            for mamba_cam in mamba_cams.values():
+                mamba_cam._seq_lens_cpu = None
+                mamba_cam._num_computed_tokens_cpu = None
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
