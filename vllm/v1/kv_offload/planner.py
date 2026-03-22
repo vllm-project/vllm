@@ -22,10 +22,24 @@ class HybridOffloadPlanner:
             raise ValueError("hash_block_size must be positive")
         if self.fixed_chunk_size <= 0:
             raise ValueError("fixed_chunk_size must be positive")
+        if self.fixed_chunk_size < self.hash_block_size:
+            raise ValueError(
+                "fixed_chunk_size must be greater than or equal to "
+                "hash_block_size"
+            )
         if not self.gpu_block_sizes:
             raise ValueError("gpu_block_sizes must be non-empty")
         if any(block_size <= 0 for block_size in self.gpu_block_sizes):
             raise ValueError("gpu_block_sizes must be positive")
+        if any(
+            block_size > self.fixed_chunk_size
+            and block_size % self.fixed_chunk_size != 0
+            for block_size in self.gpu_block_sizes
+        ):
+            raise ValueError(
+                "fixed_chunk_size must evenly divide every gpu_block_size "
+                "that it is meant to split"
+            )
 
     @property
     def offload_unit_sizes(self) -> tuple[int, ...]:

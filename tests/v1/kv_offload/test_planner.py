@@ -26,6 +26,28 @@ def test_fixed_chunk_rejects_non_positive_size():
         )
 
 
+def test_fixed_chunk_rejects_smaller_than_hash_block_size():
+    with pytest.raises(
+        ValueError, match="greater than or equal to hash_block_size"
+    ):
+        HybridOffloadPlanner(
+            hash_block_size=1056,
+            gpu_block_sizes=(65536, 1056),
+            fixed_chunk_size=1024,
+        )
+
+
+def test_fixed_chunk_requires_exact_split_of_larger_gpu_blocks():
+    with pytest.raises(
+        ValueError, match="must evenly divide every gpu_block_size"
+    ):
+        HybridOffloadPlanner(
+            hash_block_size=16,
+            gpu_block_sizes=(65536, 50000, 1056),
+            fixed_chunk_size=16384,
+        )
+
+
 def test_storeable_prefix_uses_common_fully_covered_units():
     planner = HybridOffloadPlanner(
         hash_block_size=16,
