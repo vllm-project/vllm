@@ -50,6 +50,21 @@ def apply_temperature(
 
 
 @triton.jit
+def tl_rand64(seed, offset, includes_zero: tl.constexpr):
+    lo, hi, _, _ = tl.randint4x(seed, offset)
+    lo = lo.to(tl.uint32, bitcast=True).to(tl.uint64)
+    hi = hi.to(tl.uint32, bitcast=True).to(tl.uint64)
+    r = (hi << 32) | lo
+
+    # 1 / 2**64
+    scale = 5.421010862427522170037e-20
+    u = r.to(tl.float64) * scale
+    if not includes_zero:
+        u = tl.maximum(u, 2.2250738585072014e-308)  # float64 tiny
+    return u
+
+
+@triton.jit
 def _gumbel_sample_kernel(
     local_argmax_ptr,
     local_argmax_stride,
@@ -104,11 +119,7 @@ def _gumbel_sample_kernel(
 
         # tl.rand returns fp32, so build a true fp64 uniform from 64 random
         # bits before applying the double-log transform.
-        lo, hi, _, _ = tl.randint4x(gumbel_seed, block)
-        lo = lo.to(tl.uint32, bitcast=True).to(tl.uint64)
-        hi = hi.to(tl.uint32, bitcast=True).to(tl.uint64)
-        u = tl.uint_to_uniform_float((hi << 32) | lo)
-        u = tl.maximum(u, 2.2250738585072014e-308)  # float64 tiny
+        u = tl_rand64(gumbel_seed, block, includes_zero=False)
         gumbel_noise = -tl.log(-tl.log(u))
 
         # Apply gumbel noise.
