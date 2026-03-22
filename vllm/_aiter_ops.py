@@ -1485,7 +1485,7 @@ class rocm_aiter_ops:
         bias: torch.Tensor | None = None,
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
-        return torch.ops.vllm._rocm_aiter_shuffled_per_token_w8a8_gemm(
+        return torch.ops.vllm._rocm_aiter_preshuffled_per_token_w8a8_gemm(
             A, B, As, Bs, bias, output_dtype
         )
 
