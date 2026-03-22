@@ -1042,11 +1042,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # because they are already copied to the CUDA graph input buffers.
             self.kv_connector.pre_forward(scheduler_output)
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, aux_hidden_states = model_output
-            else:
-                hidden_states = model_output
-                aux_hidden_states = None
         else:
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(
@@ -1066,11 +1061,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 model_output = self.model(**model_inputs)
-                if self.use_aux_hidden_state_outputs:
-                    hidden_states, aux_hidden_states = model_output
-                else:
-                    hidden_states = model_output
-                    aux_hidden_states = None
+
+        if self.is_last_pp_rank:
+            if self.use_aux_hidden_state_outputs:
+                assert isinstance(model_output, tuple)
+                hidden_states, aux_hidden_states = model_output
+            else:
+                assert isinstance(model_output, torch.Tensor)
+                hidden_states = model_output
+                aux_hidden_states = None
+            output_intermediate_tensors = None
+        else:
+            assert isinstance(model_output, IntermediateTensors)
+            hidden_states = None
+            aux_hidden_states = None
+            output_intermediate_tensors = model_output
 
         kv_connector_output = self.kv_connector.post_forward(scheduler_output)
         self.execute_model_state = ExecuteModelState(
@@ -1085,11 +1090,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
-            assert isinstance(hidden_states, IntermediateTensors)
-            hidden_states.kv_connector_output = kv_connector_output
-            return hidden_states
-        # Last rank (or no PP): hidden_states is a tensor for sampling.
-        assert isinstance(hidden_states, torch.Tensor)
+            assert output_intermediate_tensors is not None
+            output_intermediate_tensors.kv_connector_output = kv_connector_output
+            return output_intermediate_tensors
         return None
 
     @torch.inference_mode()
@@ -1273,7 +1276,7 @@ class ExecuteModelState(NamedTuple):
     input_batch: InputBatch
     attn_metadata: dict[str, Any] | None
     slot_mappings_by_layer: dict[str, torch.Tensor] | None
-    hidden_states: torch.Tensor | IntermediateTensors
+    hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
     kv_connector_output: KVConnectorOutput | None
     num_tokens_across_dp: torch.Tensor | None
