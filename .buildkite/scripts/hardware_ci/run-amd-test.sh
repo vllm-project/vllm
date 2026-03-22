@@ -326,8 +326,7 @@ apply_rocm_test_overrides() {
   if [[ $cmds == *" kernels/moe"* ]]; then
     cmds="${cmds} \
     --ignore=kernels/moe/test_moe.py \
-    --ignore=kernels/moe/test_cutlass_moe.py \
-    --ignore=kernels/moe/test_triton_moe_ptpc_fp8.py"
+    --ignore=kernels/moe/test_cutlass_moe.py"
   fi
 
   # --- Entrypoint ignores ---
@@ -337,10 +336,14 @@ apply_rocm_test_overrides() {
     --ignore=entrypoints/openai/completion/test_shutdown.py \
     --ignore=entrypoints/openai/test_completion.py \
     --ignore=entrypoints/openai/models/test_models.py \
-    --ignore=entrypoints/openai/test_lora_adapters.py \
     --ignore=entrypoints/openai/test_return_tokens_as_ids.py \
     --ignore=entrypoints/openai/chat_completion/test_root_path.py \
     --ignore=entrypoints/openai/completion/test_prompt_validation.py "}
+  fi
+
+  if [[ $cmds == *" entrypoints/serve"* ]]; then
+    cmds="${cmds} \
+    --ignore=entrypoints/serve/lora/test_lora_adapters.py"
   fi
 
   if [[ $cmds == *" entrypoints/llm "* ]]; then
