@@ -1,0 +1,149 @@
+[project]
+site_name = "vLLM"
+site_url = "https://docs.vllm.ai/en/latest/"
+repo_url = "https://github.com/vllm-project/vllm"
+repo_name = "vllm-project/vllm"
+edit_uri = "edit/main/docs/"
+
+# nav created using build script based on docs/.nav.yml
+nav = []
+
+extra_css = ["mkdocs/stylesheets/extra.css"]
+
+[[project.extra_javascript]]
+path = "mkdocs/javascript/reo.js"
+
+[[project.extra_javascript]]
+path = "mkdocs/javascript/run_llm_widget.js"
+
+[[project.extra_javascript]]
+path = "mkdocs/javascript/mathjax.js"
+
+[[project.extra_javascript]]
+path = "https://unpkg.com/mathjax@3.2.2/es5/tex-mml-chtml.js"
+
+[[project.extra_javascript]]
+path = "mkdocs/javascript/edit_and_feedback.js"
+
+[[project.extra_javascript]]
+path = "mkdocs/javascript/slack_and_forum.js"
+
+[project.extra]
+generator = false
+
+[project.theme]
+variant = "classic"
+language = "en"
+logo = "assets/logos/vllm-logo-only-light.ico"
+favicon = "assets/logos/vllm-logo-only-light.ico"
+custom_dir = "docs/mkdocs/overrides"
+features = [
+    "content.action.edit",
+    "content.code.copy",
+    "content.tabs.link",
+    "navigation.instant",
+    "navigation.instant.progress",
+    "navigation.tracking",
+    "navigation.tabs",
+    "navigation.tabs.sticky",
+    "navigation.sections",
+    "navigation.indexes",
+    "navigation.top",
+    "search.highlight",
+    "search.share",
+    "toc.follow",
+]
+
+[project.theme.font]
+text = "Roboto"
+code = "Roboto Mono"
+
+# Palette toggle for automatic mode
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "material/brightness-auto"
+toggle.name = "Switch to light mode"
+
+# Palette toggle for light mode
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "white"
+toggle.icon = "material/brightness-7"
+toggle.name = "Switch to dark mode"
+
+# Palette toggle for dark mode
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "black"
+toggle.icon = "material/brightness-2"
+toggle.name = "Switch to system preference"
+
+# Markdown extensions
+# Since we customize some extensions, ALL must be declared explicitly
+# (Zensical replaces the full default set when any extension is configured)
+
+# Python Markdown extensions (no options)
+[project.markdown_extensions.attr_list]
+[project.markdown_extensions.def_list]
+[project.markdown_extensions.md_in_html]
+[project.markdown_extensions.admonition]
+
+# Python Markdown extensions (with options)
+[project.markdown_extensions.toc]
+permalink = true
+
+# PyMdown extensions (no options)
+[project.markdown_extensions.pymdownx.details]
+[project.markdown_extensions.pymdownx.inlinehilite]
+[project.markdown_extensions.pymdownx.snippets]
+
+# PyMdown extensions (with options)
+[project.markdown_extensions.pymdownx.superfences]
+
+[project.markdown_extensions.pymdownx.tabbed]
+alternate_style = true
+
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+line_spans = "__span"
+pygments_lang_class = true
+
+[project.markdown_extensions.pymdownx.emoji]
+emoji_index = "zensical.extensions.emoji.twemoji"
+emoji_generator = "zensical.extensions.emoji.to_svg"
+
+# For math rendering
+[project.markdown_extensions.pymdownx.arithmatex]
+generic = true
+
+# Plugins
+# Note: awesome-nav, api-autonav, gen-files, meta, glightbox,
+# git-revision-date-localized, minify, and redirects are MkDocs plugins
+# not yet compatible with Zensical. API docs and nav are generated via
+# docs/scripts/zensical_gen_files.py as a pre-build step (see docs/Makefile).
+
+[project.plugins.mkdocstrings]
+default_handler = "python"
+
+[project.plugins.mkdocstrings.handlers.python]
+inventories = [
+    "https://docs.python.org/3/objects.inv",
+    "https://typing-extensions.readthedocs.io/en/latest/objects.inv",
+    "https://docs.aiohttp.org/en/stable/objects.inv",
+    "https://pillow.readthedocs.io/en/stable/objects.inv",
+    "https://numpy.org/doc/stable/objects.inv",
+    "https://pytorch.org/docs/stable/objects.inv",
+    "https://psutil.readthedocs.io/en/stable/objects.inv",
+]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+show_symbol_type_heading = true
+show_symbol_type_toc = true
+filters = ["!.*_pb2_grpc"]
+summary = true
+show_signature_annotations = true
+separate_signature = true
+show_overloads = true
+signature_crossrefs = true

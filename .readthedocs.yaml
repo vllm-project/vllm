@@ -1,6 +1,3 @@
-# Read the Docs configuration file
-# See https://docs.readthedocs.io/en/stable/config-file/v2.html for details
-
 version: 2
 
 build:
@@ -16,8 +13,11 @@ build:
     create_environment:
       - uv venv $READTHEDOCS_VIRTUALENV_PATH
     install:
-      - uv pip install --python $READTHEDOCS_VIRTUALENV_PATH/bin/python --no-cache-dir -r requirements/docs.txt 
-
-mkdocs:
-  configuration: mkdocs.yaml
-  fail_on_warning: true
+      - uv pip install --python $READTHEDOCS_VIRTUALENV_PATH/bin/python --no-cache-dir -r requirements/docs.txt
+    build:
+      html:
+        - python docs/scripts/zensical_gen_files.py
+        - zensical build
+    post_build:
+      - mkdir -p $READTHEDOCS_OUTPUT/html/
+      - cp --recursive site/* $READTHEDOCS_OUTPUT/html/
