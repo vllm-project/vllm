@@ -112,11 +112,7 @@ def warmup_kernels(
         worker_sample_tokens(grammar_output)
 
         # Step 2: Decode all requests with 1 + num_spec_steps tokens each.
-        spec_config = model_runner.speculative_config
-        if spec_config is not None:
-            num_spec_steps = spec_config.num_speculative_tokens
-        else:
-            num_spec_steps = 0
+        num_spec_steps = model_runner.num_speculative_steps
         cached_req_data = CachedRequestData.make_empty()
         cached_req_data.req_ids = list(req_ids)
         cached_req_data.num_computed_tokens = [prompt_len] * num_reqs
