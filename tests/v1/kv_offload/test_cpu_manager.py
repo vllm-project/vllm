@@ -593,3 +593,103 @@ def test_filter_reused_manager():
     assert prepare_store_output.block_hashes_to_store == []
 
     manager.complete_store(to_hashes([1]))
+
+def test_filter_reused_manager_invalid_args():
+    """
+    FilterReusedOffloadingManager should raise ValueError for
+    invalid constructor arguments.
+    """
+    from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
+
+    cpu_backend = CPUBackend(block_size=256, num_blocks=4)
+    lru_manager = LRUOffloadingManager(cpu_backend, enable_events=False)
+
+    with pytest.raises(ValueError, match="store_threshold must be >= 2"):
+        FilterReusedOffloadingManager(backing=lru_manager, store_threshold=1)
+
+    with pytest.raises(ValueError, match="max_tracker_size must be >= 1"):
+        FilterReusedOffloadingManager(
+            backing=lru_manager, store_threshold=2, max_tracker_size=0
+        )
+
+
+def test_filter_reused_manager_wraps_arc():
+    """
+    FilterReusedOffloadingManager should work correctly when wrapping
+    ARCOffloadingManager, not just LRUOffloadingManager.
+    """
+    from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
+
+    cpu_backend = CPUBackend(block_size=256, num_blocks=4)
+    arc_manager = ARCOffloadingManager(cpu_backend, enable_events=False)
+    manager = FilterReusedOffloadingManager(
+        backing=arc_manager, store_threshold=2
+    )
+
+    # first lookup: not eligible
+    manager.lookup(to_hashes([1, 2]))
+    output = manager.prepare_store(to_hashes([1, 2]))
+    assert output is not None
+    assert output.block_hashes_to_store == []
+
+    # second lookup: now eligible
+    manager.lookup(to_hashes([1, 2]))
+    output = manager.prepare_store(to_hashes([1, 2]))
+    assert output is not None
+    assert output.block_hashes_to_store == to_hashes([1, 2])
+
+
+def test_filter_reused_manager_delegates_complete_store():
+    """
+    complete_store should be correctly delegated to the backing manager,
+    making stored blocks loadable via lookup().
+    """
+    from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
+
+    cpu_backend = CPUBackend(block_size=256, num_blocks=4)
+    lru_manager = LRUOffloadingManager(cpu_backend, enable_events=False)
+    manager = FilterReusedOffloadingManager(
+        backing=lru_manager, store_threshold=2
+    )
+
+    # make block 1 eligible
+    manager.lookup(to_hashes([1]))
+    manager.lookup(to_hashes([1]))
+
+    manager.prepare_store(to_hashes([1]))
+
+    # before complete_store: not yet loadable
+    assert lru_manager.lookup(to_hashes([1])) == 0
+
+    manager.complete_store(to_hashes([1]))
+
+    # after complete_store: loadable
+    assert lru_manager.lookup(to_hashes([1])) == 1
+
+
+def test_filter_reused_manager_take_events_delegated():
+    """
+    take_events() should be delegated to the backing manager.
+    """
+    from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
+
+    cpu_backend = CPUBackend(block_size=256, num_blocks=4)
+    lru_manager = LRUOffloadingManager(cpu_backend, enable_events=True)
+    manager = FilterReusedOffloadingManager(
+        backing=lru_manager, store_threshold=2
+    )
+
+    # make block 1 eligible and store it
+    manager.lookup(to_hashes([1]))
+    manager.lookup(to_hashes([1]))
+    manager.prepare_store(to_hashes([1]))
+    manager.complete_store(to_hashes([1]))
+
+    # events should be visible through the decorator
+    events = list(manager.take_events())
+    assert len(events) == 1
+    assert not events[0].removed
+    assert set(events[0].block_hashes) == set(to_hashes([1]))
+
+    # events should be consumed
+    assert list(manager.take_events()) == []
