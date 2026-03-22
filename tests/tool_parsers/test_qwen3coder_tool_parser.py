@@ -163,6 +163,17 @@ def test_extract_tool_calls_no_tools(qwen3_tool_parser_parametrized):
     assert extracted_tool_calls.content == model_output
 
 
+def test_strip_param_delimiter_prefix_suffix_helpers():
+    assert Qwen3CoderToolParser._strip_param_delimiter_prefix("\nabc") == "abc"
+    assert Qwen3CoderToolParser._strip_param_delimiter_prefix("\r\nabc") == "abc"
+    assert Qwen3CoderToolParser._strip_param_delimiter_prefix("\n\nabc") == "\nabc"
+
+    assert Qwen3CoderToolParser._strip_param_delimiter_suffix("abc\n") == "abc"
+    assert Qwen3CoderToolParser._strip_param_delimiter_suffix("abc\r\n") == "abc"
+    assert Qwen3CoderToolParser._strip_param_delimiter_suffix("abc\r") == "abc"
+    assert Qwen3CoderToolParser._strip_param_delimiter_suffix("abc\n\n") == "abc\n"
+
+
 @pytest.mark.parametrize(
     ids=[
         "single_tool",

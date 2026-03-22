@@ -121,6 +121,26 @@ class Qwen3CoderToolParser(ToolParser):
             return ""
         return json.dumps(s, ensure_ascii=False)[1:-1]
 
+    @staticmethod
+    def _strip_param_delimiter_prefix(value: str) -> str:
+        """Strip the single delimiter newline right after a parameter tag."""
+        if value.startswith("\r\n"):
+            return value[2:]
+        if value.startswith("\n"):
+            return value[1:]
+        return value
+
+    @staticmethod
+    def _strip_param_delimiter_suffix(value: str) -> str:
+        """Strip the single delimiter newline right before a close tag."""
+        if value.endswith("\r\n"):
+            return value[:-2]
+        if value.endswith("\n"):
+            return value[:-1]
+        if value.endswith("\r"):
+            return value[:-1]
+        return value
+
     def _ensure_streaming_tool_state(self, tool_index: int) -> None:
         """Ensure per-tool arrays are allocated for the given index."""
         while len(self.streamed_args_for_tool) <= tool_index:
@@ -350,10 +370,8 @@ class Qwen3CoderToolParser(ToolParser):
             param_name = match_text[:idx]
             param_value = str(match_text[idx + 1 :])
             # Remove prefix and trailing \n
-            if param_value.startswith("\n"):
-                param_value = param_value[1:]
-            if param_value.endswith("\n"):
-                param_value = param_value[:-1]
+            param_value = self._strip_param_delimiter_prefix(param_value)
+            param_value = self._strip_param_delimiter_suffix(param_value)
 
             # Strip trailing </parameter> tag if present
             # (since we use structural boundaries)
@@ -646,8 +664,7 @@ class Qwen3CoderToolParser(ToolParser):
                 value_start_pos = param_tag_pos + len(param_tag)
                 value_text = tool_text[value_start_pos:]
                 # Strip leading newline (Qwen3 format puts \n after >)
-                if value_text.startswith("\n"):
-                    value_text = value_text[1:]
+                value_text = self._strip_param_delimiter_prefix(value_text)
 
                 # Check if parameter value is complete. Function/tool close can
                 # also terminate a parameter in malformed/fragmented streams.
@@ -668,8 +685,9 @@ class Qwen3CoderToolParser(ToolParser):
                     # Parameter complete - emit remaining content and
                     # close the JSON string quote
                     remaining_value = value_text[:val_end]
-                    if remaining_value.endswith("\n"):
-                        remaining_value = remaining_value[:-1]
+                    remaining_value = self._strip_param_delimiter_suffix(
+                        remaining_value
+                    )
                     new_content = remaining_value[len(self._value_buffer) :]
                     self._value_buffer = ""
                     self._streaming_string_value = False
@@ -709,7 +727,20 @@ class Qwen3CoderToolParser(ToolParser):
                     ):
                         for i in range(1, len(close_token)):
                             if current_value.endswith(close_token[:i]):
-                                safe_len = min(safe_len, len(current_value) - i)
+                                candidate_len = len(current_value) - i
+                                # Also hold back the delimiter newline that
+                                # commonly precedes closing tags.
+                                if (
+                                    candidate_len > 0
+                                    and current_value[candidate_len - 1] == "\n"
+                                ):
+                                    candidate_len -= 1
+                                if (
+                                    candidate_len > 0
+                                    and current_value[candidate_len - 1] == "\r"
+                                ):
+                                    candidate_len -= 1
+                                safe_len = min(safe_len, candidate_len)
                                 break
 
                     safe_value = current_value[: max(safe_len, 0)]
@@ -751,8 +782,7 @@ class Qwen3CoderToolParser(ToolParser):
                     # Find the parameter value start
                     value_start = param_start + name_end + 1
                     value_text = tool_text[value_start:]
-                    if value_text.startswith("\n"):
-                        value_text = value_text[1:]
+                    value_text = self._strip_param_delimiter_prefix(value_text)
 
                     if is_string:
                         # -----------------------------------------
@@ -799,8 +829,9 @@ class Qwen3CoderToolParser(ToolParser):
 
                         if param_end_idx != -1:
                             param_value = value_text[:param_end_idx]
-                            if param_value.endswith("\n"):
-                                param_value = param_value[:-1]
+                            param_value = self._strip_param_delimiter_suffix(
+                                param_value
+                            )
 
                             self.accumulated_params[self.current_param_name] = (
                                 param_value
