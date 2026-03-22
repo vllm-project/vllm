@@ -72,6 +72,23 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
 
         rocm_aiter_ops.refresh_env_variables()
 
+        # Filter here to reduce code duplication
+        requires_mla = "deepseek" in model_name.lower()
+        is_mla = "mla" in attn_backend.backend.name.lower()
+
+        if requires_mla != is_mla:
+            pytest.skip(
+                f"Incompatible model '{model_name}' and "
+                f"attention backend '{attn_backend.backend.name}'"
+            )
+
+        # TODO: remove this after finishing migration from envs to model kwargs
+        if model_name == "openai/gpt-oss-20b":
+            from .common import is_blackwell
+
+            if is_blackwell():
+                monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
+
         # Disable, compile cache to make sure custom passes run.
         # Otherwise, we can't verify fusion happened through the logs.
         monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")

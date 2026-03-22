@@ -122,7 +122,7 @@ class WorkerBase:
 
         return format_model_inspection(self.get_model())
 
-    def load_model(self) -> None:
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
         """Load model onto target device."""
         raise NotImplementedError
 
