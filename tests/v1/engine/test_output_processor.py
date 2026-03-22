@@ -11,6 +11,7 @@ from tests.v1.engine.utils import (
     NUM_SAMPLE_LOGPROBS_UNDER_TEST,
     STOP_STRINGS,
     DummyOutputProcessorTestVectors,
+    get_non_eos_special_token,
     MockEngineCore,
     generate_dummy_tracked_logprobs,
 )
@@ -624,9 +625,6 @@ def test_stop_token(
       (i.e. first control token causes stop but is not represented
       in output text.)
 
-    Note: some test details are tuned for meta-llama/Llama-3.2-1B,
-    another model should work only if the test is modified.
-
     Args:
         include_stop_str_in_output: stop token str appears in output text
         num_sample_logprobs: number of sample logprobs (`None` for no logprobs)
@@ -634,22 +632,17 @@ def test_stop_token(
         ignore_eos: if True, EOS stops are disabled
         dummy_test_vectors: dummy engine core outputs and other data structures
     """
-    model_id = dummy_test_vectors.tokenizer.name_or_path
-    if model_id != "meta-llama/Llama-3.2-1B":
-        raise AssertionError(
-            f"Test requires meta-llama/Llama-3.2-1B but {model_id} is in use."
-        )
+    tokenizer = dummy_test_vectors.tokenizer
     do_logprobs = num_sample_logprobs is not None
     # EOS under test; if False, stop_token_ids under test
     is_eos_test = stop_token_type == "eos_token_id"
     # EOS under test but ignore_eos enabled
     is_eos_ignore_test = is_eos_test and ignore_eos
-    eos_token_id = (
-        dummy_test_vectors.tokenizer.eos_token_id if is_eos_test else None
-    )  # '<|end_of_text|>'
-    stop_token_ids = [128009] if not is_eos_test else None  # '<|eot_id|>'
+    eos_token_id = tokenizer.eos_token_id if is_eos_test else None
+    stop_token_id, stop_token_text = get_non_eos_special_token(tokenizer)
+    stop_token_ids = [stop_token_id] if not is_eos_test else None
 
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    output_processor = OutputProcessor(tokenizer, log_stats=False)
     # Dummy engine core outputs, with control tokens suffixed to test stops
     suffix_token = [eos_token_id] if is_eos_test else stop_token_ids
     assert suffix_token is not None and isinstance(suffix_token[0], int)
@@ -731,7 +724,11 @@ def test_stop_token(
             gen_logprobs.extend(request_output.outputs[0].logprobs)
 
     # Validate generated text
-    control_token = "<|end_of_text|>" if is_eos_test else "<|eot_id|>"
+    control_token = (
+        tokenizer.decode([eos_token_id], skip_special_tokens=False)
+        if is_eos_test
+        else stop_token_text
+    )
     if is_eos_ignore_test:
         # Length-based stop; expect full string
         ref_str = generation_string + 2 * control_token
@@ -1360,12 +1357,10 @@ def test_tracked_logprobs_basic(
     """
     # Define tokens to track
     track_token_ids = [100, 200, 300]
-    num_generation_tokens = len(dummy_test_vectors.generation_tokens[0])
-
     # Generate dummy tracked logprobs for each request
     tracked_logprobs_raw = [
-        generate_dummy_tracked_logprobs(num_generation_tokens, track_token_ids)
-        for _ in range(len(dummy_test_vectors.generation_tokens))
+        generate_dummy_tracked_logprobs(len(generation_tokens), track_token_ids)
+        for generation_tokens in dummy_test_vectors.generation_tokens
     ]
 
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
@@ -1381,9 +1376,9 @@ def test_tracked_logprobs_basic(
     requests = [
         EngineCoreRequest(
             request_id=request_id_list[idx],
+            external_req_id=request_id_list[idx],
             prompt_token_ids=prompt_tokens,
             mm_features=None,
-            eos_token_id=None,
             arrival_time=0,
             lora_request=None,
             cache_salt=None,
@@ -1467,9 +1462,9 @@ def test_tracked_logprobs_none_when_not_requested(dummy_test_vectors):
     # Make request WITHOUT track_token_ids
     request = EngineCoreRequest(
         request_id="request-0",
+        external_req_id="request-0",
         prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
         mm_features=None,
-        eos_token_id=None,
         arrival_time=0,
         lora_request=None,
         cache_salt=None,
@@ -1518,9 +1513,9 @@ def test_tracked_logprobs_with_sample_logprobs(dummy_test_vectors):
     # Make request with both logprobs and track_token_ids
     request = EngineCoreRequest(
         request_id="request-0",
+        external_req_id="request-0",
         prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
         mm_features=None,
-        eos_token_id=None,
         arrival_time=0,
         lora_request=None,
         cache_salt=None,
@@ -1585,9 +1580,9 @@ def test_tracked_logprobs_single_token(dummy_test_vectors):
 
     request = EngineCoreRequest(
         request_id="request-0",
+        external_req_id="request-0",
         prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
         mm_features=None,
-        eos_token_id=None,
         arrival_time=0,
         lora_request=None,
         cache_salt=None,

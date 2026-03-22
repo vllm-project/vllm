@@ -20,8 +20,6 @@ NUM_SAMPLE_LOGPROBS_UNDER_TEST = 5
 # Number of prompt logprobs to request when testing prompt logprobs
 NUM_PROMPT_LOGPROBS_UNDER_TEST = 7
 
-TOKENIZER_NAME = "meta-llama/Llama-3.2-1B"
-
 FULL_STRINGS = [
     "My name is Robert from Neural Magic and I love working on vLLM so much!",
     "Red Hat is the best open source company by far across Linux, K8s, and AI.",
@@ -31,6 +29,24 @@ STOP_STRINGS = ["I love working on", "company by far", "brother in"]
 PROMPT_LEN = 5
 
 random.seed(42)
+
+
+def get_non_eos_special_token(
+    tokenizer: GeneralTokenizerType,
+) -> tuple[int, str]:
+    """Return a stable non-EOS special token for stop-token tests."""
+
+    excluded_ids = {tokenizer.eos_token_id, tokenizer.pad_token_id}
+    for token_id in tokenizer.all_special_ids:
+        if token_id is None or token_id in excluded_ids:
+            continue
+        token_text = tokenizer.decode([token_id], skip_special_tokens=False)
+        if token_text:
+            return token_id, token_text
+
+    raise AssertionError(
+        f"Tokenizer {tokenizer.name_or_path} has no usable non-EOS special token."
+    )
 
 
 def _create_random_top_logprob_test_vector(
