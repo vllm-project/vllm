@@ -138,13 +138,19 @@ def fi_chunk_gated_delta_rule(
     g = g.squeeze(0).contiguous()
     beta = beta.squeeze(0).contiguous()
     fi_state = initial_state.to(torch.float32)
-    fi_g = g.to(torch.float32)
     fi_beta = beta.to(torch.float32)
+    # When use_qk_l2norm_in_kernel=False, g is already in exp space
+    # (from fused_post_conv_prep with output_g_exp=True).
+    # When True, g is in log space and needs exp conversion.
+    if use_qk_l2norm_in_kernel:
+        fi_g = torch.exp(g.to(torch.float32))
+    else:
+        fi_g = g.to(torch.float32)
     result = chunk_gated_delta_rule_fi(
         q=q,
         k=k,
         v=v,
-        g=torch.exp(fi_g),
+        g=fi_g,
         beta=fi_beta,
         initial_state=fi_state,
         output_final_state=output_final_state,
@@ -204,6 +210,7 @@ class ChunkGatedDeltaRule(CustomOp):
         self._forward_method = (
             self.forward_cuda if use_flashinfer else self.forward_native
         )
+        self.uses_flashinfer = use_flashinfer
 
     def forward_cuda(
         self,
@@ -529,6 +536,22 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
+
+        # gdn_prefill_fused_post_conv: true | false (default: false)
+        # When true, fuses split + rearrange + contiguous×3 + l2norm×2 +
+        # gating into a single Triton kernel after causal_conv1d_fn.
+        # Eliminates ~100 MB/layer of HBM traffic and 7+ kernel launches.
+        self._gdn_prefill_fused_post_conv = str(
+            get_current_vllm_config().additional_config.get(
+                "gdn_prefill_fused_post_conv", "false"
+            )
+        ).strip().lower() in ("true", "1", "yes")
+        if self._gdn_prefill_fused_post_conv:
+            logger.info_once(
+                "Using fused post-conv1d prefill preparation "
+                "(gdn_prefill_fused_post_conv=true)",
+                scope="local",
+            )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -903,9 +926,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
+            # Conv1d (always use the fast existing kernel)
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
-            # - "cache_indices" updates the conv_state cache in positions
-            #   pointed to by "state_indices_tensor"
             mixed_qkv_non_spec = causal_conv1d_fn(
                 mixed_qkv_non_spec_T,
                 conv_weights,
@@ -917,6 +939,51 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 query_start_loc=non_spec_query_start_loc,
                 metadata=attn_metadata,
             ).transpose(0, 1)
+
+            if self._gdn_prefill_fused_post_conv:
+                # Fused post-conv: split+reshape+contiguous+l2norm+gating
+                # in one kernel, writes directly to target layout.
+                from vllm.model_executor.layers.fla.ops.fused_gdn_prefill_post_conv import (  # noqa: E501
+                    fused_post_conv_prep,
+                )
+
+                # FlashInfer expects g in exp space; Triton/FLA in log space
+                _is_flashinfer = getattr(
+                    self.chunk_gated_delta_rule, "uses_flashinfer", False
+                )
+                # Extract non-spec a, b
+                if spec_sequence_masks is not None:
+                    a_non_spec = a.index_select(0, non_spec_token_indx)
+                    b_non_spec = b.index_select(0, non_spec_token_indx)
+                else:
+                    a_non_spec = a[:num_actual_tokens]
+                    b_non_spec = b[:num_actual_tokens]
+
+                (
+                    query_non_spec,
+                    key_non_spec,
+                    value_non_spec,
+                    g_non_spec,
+                    beta_non_spec,
+                ) = fused_post_conv_prep(
+                    conv_output=mixed_qkv_non_spec,
+                    a=a_non_spec,
+                    b=b_non_spec,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    num_k_heads=self.num_k_heads // self.tp_size,
+                    head_k_dim=self.head_k_dim,
+                    head_v_dim=self.head_v_dim,
+                    apply_l2norm=True,
+                    output_g_exp=_is_flashinfer,
+                )
+                # Output is [L, H, K] — add batch dim for chunk API
+                query_non_spec = query_non_spec.unsqueeze(0)
+                key_non_spec = key_non_spec.unsqueeze(0)
+                value_non_spec = value_non_spec.unsqueeze(0)
+                g_non_spec = g_non_spec.unsqueeze(0)
+                beta_non_spec = beta_non_spec.unsqueeze(0)
+                mixed_qkv_non_spec = None  # not needed
         elif attn_metadata.num_decodes > 0:
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
@@ -933,11 +1000,18 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             mixed_qkv_non_spec = None
 
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
-        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
-            mixed_qkv_non_spec
-        )
 
-        if attn_metadata.num_prefills > 0:
+        # When fused post-conv prep was used, q/k/v/g/beta are already
+        # computed with l2norm applied — skip rearrange, gating, and l2norm.
+        _fused_prefill_done = (
+            self._gdn_prefill_fused_post_conv and attn_metadata.num_prefills > 0
+        )
+        if not _fused_prefill_done:
+            query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
+                mixed_qkv_non_spec
+            )
+
+        if attn_metadata.num_prefills > 0 and not _fused_prefill_done:
             g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
             if spec_sequence_masks is not None:
                 g_non_spec = g.index_select(1, non_spec_token_indx)
@@ -945,7 +1019,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             else:
                 g_non_spec = g
                 beta_non_spec = beta
-        else:
+        elif not _fused_prefill_done:
             g_non_spec = None
             beta_non_spec = None
 
@@ -979,6 +1053,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         if attn_metadata.num_prefills > 0:
             initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
             initial_state[~has_initial_state, ...] = 0
+            # When fused post-conv was used, l2norm is already applied
+            _skip_l2norm = _fused_prefill_done
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -991,7 +1067,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=non_spec_query_start_loc,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=not _skip_l2norm,
             )
             # Init cache
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
