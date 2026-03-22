@@ -141,11 +141,14 @@ class TestInitializeToolSessions:
         # Create minimal mocks for required dependencies
         engine_client = MagicMock()
 
+        vllm_config = MagicMock()
+        engine_client.vllm_config = vllm_config
+
         model_config = MagicMock()
         model_config.max_model_len = 100
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
-        engine_client.model_config = model_config
+        engine_client.vllm_config.model_config = model_config
 
         engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
@@ -230,11 +233,14 @@ class TestValidateGeneratorInput:
         # Create minimal mocks for required dependencies
         engine_client = MagicMock()
 
+        vllm_config = MagicMock()
+        engine_client.vllm_config = vllm_config
+
         model_config = MagicMock()
         model_config.max_model_len = 100
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
-        engine_client.model_config = model_config
+        engine_client.vllm_config.model_config = model_config
 
         engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
@@ -293,11 +299,15 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
 
     engine_client = MagicMock()
+
+    vllm_config = MagicMock()
+    engine_client.vllm_config = vllm_config
+
     model_config = MagicMock()
     model_config.hf_config.model_type = "test"
     model_config.hf_text_config = MagicMock()
     model_config.get_diff_sampling_param.return_value = {}
-    engine_client.model_config = model_config
+    engine_client.vllm_config.model_config = model_config
     engine_client.input_processor = MagicMock()
     engine_client.io_processor = MagicMock()
     engine_client.renderer = MagicMock()
@@ -595,12 +605,16 @@ def _make_simple_context_with_output(text, token_ids):
 def _make_serving_instance_with_reasoning():
     """Create an OpenAIServingResponses with a mocked reasoning parser."""
     engine_client = MagicMock()
+
+    vllm_config = MagicMock()
+    engine_client.vllm_config = vllm_config
+
     model_config = MagicMock()
     model_config.max_model_len = 100
     model_config.hf_config.model_type = "test"
     model_config.hf_text_config = MagicMock()
     model_config.get_diff_sampling_param.return_value = {}
-    engine_client.model_config = model_config
+    engine_client.vllm_config.model_config = model_config
     engine_client.input_processor = MagicMock()
     engine_client.io_processor = MagicMock()
     engine_client.renderer = MagicMock()

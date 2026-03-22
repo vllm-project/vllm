@@ -195,7 +195,7 @@ class OpenAIServing:
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
 
-        self.model_config = engine_client.model_config
+        self.model_config = engine_client.vllm_config.model_config
         self.renderer = engine_client.renderer
         self.io_processor = engine_client.io_processor
         self.input_processor = engine_client.input_processor

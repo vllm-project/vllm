@@ -92,7 +92,7 @@ class OpenAIServingModels:
         super().__init__()
 
         self.registry = OpenAIModelRegistry(
-            model_config=engine_client.model_config,
+            model_config=engine_client.vllm_config.model_config,
             base_model_paths=base_model_paths,
         )
 
@@ -110,7 +110,7 @@ class OpenAIServingModels:
             )
         self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
 
-        self.model_config = self.engine_client.model_config
+        self.model_config = self.engine_client.vllm_config.model_config
         self.renderer = self.engine_client.renderer
         self.io_processor = self.engine_client.io_processor
         self.input_processor = self.engine_client.input_processor

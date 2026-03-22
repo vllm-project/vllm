@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -42,7 +42,6 @@ class EngineClient(ABC):
     """Protocol class for Clients to Engine"""
 
     vllm_config: VllmConfig
-    model_config: ModelConfig
     renderer: BaseRenderer
     io_processor: IOProcessor | None
     input_processor: InputProcessor

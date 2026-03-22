@@ -361,7 +361,7 @@ async def init_app_state(
     await state.openai_serving_models.init_static_loras()
 
     state.openai_serving_render = OpenAIServingRender(
-        model_config=engine_client.model_config,
+        model_config=engine_client.vllm_config.model_config,
         renderer=engine_client.renderer,
         io_processor=engine_client.io_processor,
         model_registry=state.openai_serving_models.registry,
@@ -585,7 +585,7 @@ async def build_and_serve(
         uvicorn_kwargs["log_config"] = log_config
 
     supported_tasks = await engine_client.get_supported_tasks()
-    model_config = engine_client.model_config
+    model_config = engine_client.vllm_config.model_config
 
     logger.info("Supported tasks: %s", supported_tasks)
     app = build_app(args, supported_tasks, model_config)

@@ -81,7 +81,7 @@ def init_pooling_state(
     from vllm.entrypoints.pooling.score.serving import ServingScores
     from vllm.tasks import POOLING_TASKS
 
-    model_config = engine_client.model_config
+    model_config = engine_client.vllm_config.model_config
 
     resolved_chat_template = load_chat_template(args.chat_template)
 

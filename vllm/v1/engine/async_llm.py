@@ -111,10 +111,8 @@ class AsyncLLM(EngineClient):
         maybe_register_config_serialize_by_value()
 
         self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.observability_config = vllm_config.observability_config
 
-        tracing_endpoint = self.observability_config.otlp_traces_endpoint
+        tracing_endpoint = self.vllm_config.observability_config.otlp_traces_endpoint
         if tracing_endpoint is not None:
             init_tracer("vllm.llm_engine", tracing_endpoint)
 
@@ -136,7 +134,7 @@ class AsyncLLM(EngineClient):
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.renderer,
-            self.model_config.io_processor_plugin,
+            self.vllm_config.model_config.io_processor_plugin,
         )
 
         # Convert TokPrompt --> EngineCoreRequest.
@@ -365,7 +363,9 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
             )
-            prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
+            prompt_text, _, _ = extract_prompt_components(
+                self.vllm_config.model_config, prompt
+            )
 
         if reasoning_ended is not None:
             request.reasoning_ended = reasoning_ended
@@ -483,7 +483,7 @@ class AsyncLLM(EngineClient):
                             "prompt_embeds not supported for streaming inputs"
                         )
                     prompt_text, _, _ = extract_prompt_components(
-                        self.model_config, input_chunk.prompt
+                        self.vllm_config.model_config, input_chunk.prompt
                     )
                     await self._add_request(req, prompt_text, None, 0, queue)
             except (asyncio.CancelledError, GeneratorExit):
@@ -865,7 +865,7 @@ class AsyncLLM(EngineClient):
         return self.renderer.get_tokenizer()
 
     async def is_tracing_enabled(self) -> bool:
-        return self.observability_config.otlp_traces_endpoint is not None
+        return self.vllm_config.observability_config.otlp_traces_endpoint is not None
 
     async def do_log_stats(self) -> None:
         if self.logger_manager:
