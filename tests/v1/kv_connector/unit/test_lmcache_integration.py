@@ -227,3 +227,16 @@ def test_scheduler_output_interface():
 
     assumes(CachedRequestData, "req_ids", is_instance_of=list)
     assumes(CachedRequestData, "new_block_ids", is_instance_of=list)
+
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(), reason="Requires libcudart.so, not available on ROCm"
+)
+def test_get_kv_cache_layout():
+    """get_kv_cache_layout must exist and be callable."""
+    from vllm.v1.attention.backends.utils import get_kv_cache_layout
+
+    result = get_kv_cache_layout()
+    assert result is None or result in ("NHD", "HND"), (
+        f"get_kv_cache_layout() returned unexpected value: {result!r}"
+    )
