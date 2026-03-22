@@ -11,7 +11,7 @@
       "default": "nvidia/cuda:12.9.1-devel-ubuntu20.04"
     },
     "FINAL_BASE_IMAGE": {
-      "default": "nvidia/cuda:12.9.1-base-ubuntu22.04"
+      "default": "nvidia/cuda:12.9.1-base-ubuntu24.04"
     },
     "GET_PIP_URL": {
       "default": "https://bootstrap.pypa.io/get-pip.py"
@@ -71,7 +71,7 @@
       "default": "12.8"
     },
     "GDRCOPY_OS_VERSION": {
-      "default": "Ubuntu22_04"
+      "default": "Ubuntu24_04"
     },
     "BITSANDBYTES_VERSION_X86": {
       "default": "0.46.1"
