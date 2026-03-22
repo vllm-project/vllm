@@ -15,6 +15,7 @@ from torch._dynamo.utils import counters
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..utils import fork_new_process_for_each_test
 
@@ -71,7 +72,10 @@ def test_moe_startup(monkeypatch, vllm_runner, fresh_vllm_cache, mega_aot_artifa
         num_compiled_artifacts_saved=0,
     ):
         _run_vllm(vllm_runner)
-    if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
+    mega_aot_active = envs.VLLM_USE_MEGA_AOT_ARTIFACT and is_torch_equal_or_newer(
+        "2.10.0"
+    )
+    if mega_aot_active:
         # MEGA_AOT_ARTIFACT is enabled, so we expect no aot_autograd running on
         # subgraphs.
         assert counters["aot_autograd"]["total"] == 0
