@@ -48,6 +48,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
+    log_quant_method_call,
     QuantizationConfig,
     QuantizeMethodBase,
 )
@@ -180,6 +181,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         return False
 
+    @log_quant_method_call
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
@@ -2188,6 +2190,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         return None
 
+    @log_quant_method_call
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
