@@ -452,7 +452,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if self.block_quant:
             maybe_post_process_fp8_weight_block(layer)
-        
+
         self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
