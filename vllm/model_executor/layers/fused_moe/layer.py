@@ -506,8 +506,7 @@ class FusedMoE(CustomOp):
                 _riy_profile = vllm_config.parallel_config.riy_expert_profile or ""
             except Exception:
                 pass
-        _is_drafter = "mtp" in prefix.lower() or "drafter" in prefix.lower()
-        if _riy_profile and _os.path.exists(_riy_profile) and _layer_idx >= 0 and not _is_drafter:
+        if _riy_profile and _os.path.exists(_riy_profile) and _layer_idx >= 0:
             from vllm.model_executor.layers.fused_moe.riy import (
                 build_riy_prune_map,
             )
@@ -551,8 +550,9 @@ class FusedMoE(CustomOp):
             self.router.prune_logit_mask = self._prune_logit_mask_buf
 
         # Wire RIY stats as registered buffers (graph-compatible).
+        # Only when VLLM_RIY_MONITOR=1 — stats + HTTP have ~5% overhead.
         self._riy_layer_idx = _layer_idx
-        if _layer_idx >= 0:
+        if _layer_idx >= 0 and _os.environ.get("VLLM_RIY_MONITOR", "0") == "1":
             _riy = get_riy_state()
             if _riy.enabled:
                 # Get total layers from model config

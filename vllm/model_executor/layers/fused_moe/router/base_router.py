@@ -6,10 +6,14 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+import os as _os_riy
+
 from vllm.model_executor.layers.fused_moe.riy import (
     apply_riy_mask,
     get_riy_state,
 )
+
+_riy_monitor_enabled = _os_riy.environ.get('VLLM_RIY_MONITOR', '0') == '1'
 
 
 def _is_capturing() -> bool:
@@ -317,8 +321,8 @@ class BaseRouter(FusedMoERouter):
             _cf_f = self.riy_collecting_flag.float().expand(_w.shape[0])
             self.riy_weight_view.scatter_add_(0, _ids, _w * _cf_f)
 
-        # Step 3c: RIY — mask + HTTP server (Python-level, skipped during capture)
-        if not _is_capturing():
+        # Step 3c: RIY — mask + HTTP server (only with VLLM_RIY_MONITOR=1)
+        if not _is_capturing() and _riy_monitor_enabled:
             riy = get_riy_state()
             if riy.enabled and self.layer_idx >= 0:
                 riy.on_forward()
