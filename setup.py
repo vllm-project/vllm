@@ -987,11 +987,11 @@ setup(
         "instanttensor": ["instanttensor >= 0.1.5"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
-            "av",
-            "resampy",
+            "librosa",
             "scipy",
             "soundfile",
             "mistral_common[audio]",
+            "av",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         "flashinfer": [],  # Kept for backwards compatibility

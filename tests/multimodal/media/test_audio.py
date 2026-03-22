@@ -10,8 +10,6 @@ import pytest
 
 from vllm.multimodal.media import AudioMediaIO
 
-from ...conftest import AudioTestAssets
-
 pytestmark = pytest.mark.cpu_test
 
 ASSETS_DIR = Path(__file__).parent.parent / "assets"
@@ -24,32 +22,40 @@ def dummy_audio():
 
 
 @pytest.fixture
-def dummy_audio_bytes(audio_assets: AudioTestAssets):
-    with open(audio_assets[0].get_local_path(), "rb") as f:
-        return f.read()
+def dummy_audio_bytes():
+    return b"FAKEAUDIOBYTES"
 
 
 def test_audio_media_io_load_bytes(dummy_audio_bytes):
     audio_io = AudioMediaIO()
-    out = audio_io.load_bytes(dummy_audio_bytes)
-    assert isinstance(out[0], np.ndarray)
-    assert out[1] == 16000
+    with patch("librosa.load") as mock_load:
+        mock_load.return_value = (np.array([0.1, 0.2]), 16000)
+        out = audio_io.load_bytes(dummy_audio_bytes)
+        mock_load.assert_called_once()
+        assert isinstance(out[0], np.ndarray)
+        assert out[1] == 16000
 
 
 def test_audio_media_io_load_base64(dummy_audio_bytes):
     audio_io = AudioMediaIO()
     encoded = base64.b64encode(dummy_audio_bytes).decode("utf-8")
-    out = audio_io.load_base64("audio/wav", encoded)
-    assert isinstance(out[0], np.ndarray)
-    assert out[1] == 16000
+    with patch.object(AudioMediaIO, "load_bytes") as mock_load_bytes:
+        mock_load_bytes.return_value = (np.array([0.1, 0.2]), 16000)
+        out = audio_io.load_base64("audio/wav", encoded)
+        mock_load_bytes.assert_called_once()
+        assert isinstance(out[0], np.ndarray)
+        assert out[1] == 16000
 
 
-def test_audio_media_io_load_file(audio_assets: AudioTestAssets):
+def test_audio_media_io_load_file():
     audio_io = AudioMediaIO()
-    path = audio_assets[0].get_local_path()
-    out = audio_io.load_file(path)
-    assert isinstance(out[0], np.ndarray)
-    assert out[1] == 16000
+    path = Path("/fake/path.wav")
+    with patch("librosa.load") as mock_load:
+        mock_load.return_value = (np.array([0.1, 0.2]), 16000)
+        out = audio_io.load_file(path)
+        mock_load.assert_called_once_with(path, sr=None)
+        assert isinstance(out[0], np.ndarray)
+        assert out[1] == 16000
 
 
 def test_audio_media_io_encode_base64(dummy_audio):

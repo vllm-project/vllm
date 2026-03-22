@@ -8,9 +8,14 @@ from urllib.parse import urljoin
 
 import numpy.typing as npt
 
-from vllm.multimodal.media.audio import load_audio
+from vllm.utils.import_utils import PlaceholderModule
 
 from .base import VLLM_S3_BUCKET_URL, get_vllm_public_assets
+
+try:
+    import librosa
+except ImportError:
+    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
 ASSET_DIR = "multimodal_asset"
 
@@ -28,7 +33,7 @@ class AudioAsset:
     @property
     def audio_and_sample_rate(self) -> tuple[npt.NDArray, float]:
         audio_path = get_vllm_public_assets(filename=self.filename, s3_prefix=ASSET_DIR)
-        return load_audio(audio_path, sr=None)
+        return librosa.load(audio_path, sr=None)
 
     def get_local_path(self) -> Path:
         return get_vllm_public_assets(filename=self.filename, s3_prefix=ASSET_DIR)

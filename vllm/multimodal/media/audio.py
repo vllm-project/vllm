@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
 from io import BytesIO
 from pathlib import Path
 
@@ -15,80 +14,58 @@ from vllm.utils.serial_utils import tensor2base64
 from .base import MediaIO
 
 try:
-    import av
+    import librosa
 except ImportError:
-    av = PlaceholderModule("av")  # type: ignore[assignment]
+    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
 try:
     import soundfile
 except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
-
 try:
-    import resampy
+    import av
 except ImportError:
-    resampy = PlaceholderModule("resampy")  # type: ignore[assignment]
+    av = PlaceholderModule("av")  # type: ignore[assignment]
 
 
-# Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`, soundfile
-# being librosa's main backend. Used to validate if an audio loading error is due to a
-# server error vs a client error (invalid audio file).
-# 1 = unrecognised format      (file is not a supported audio container)
-# 3 = malformed file           (corrupt or structurally invalid audio)
-# 4 = unsupported encoding     (codec not supported by this libsndfile build)
-_BAD_SF_CODES = {1, 3, 4}
-
-
-def load_audio_pyav(
-    path: BytesIO | Path | str,
-    *,
-    sr: float | None = 22050,
-    mono: bool = True,
+def extract_audio_from_video_bytes(
+    data: bytes,
 ) -> tuple[npt.NDArray, float]:
-    """Load an audio file using PyAV (FFmpeg), returning float32 mono waveform.
+    """Extract the audio track from raw video bytes using PyAV.
 
-    Decodes the audio stream at its native sample rate. Channel reduction to
-    mono is performed by averaging across channels.  Resampling to a
-    model-specific rate is left to the downstream :class:`AudioResampler`.
+    PyAV wraps FFmpeg's C libraries in-process — no subprocess is
+    spawned, which is critical to avoid crashing CUDA-active vLLM
+    worker processes.
+
+    The returned waveform is at the native sample rate of the video's
+    audio stream.  Resampling to a model-specific rate is left to the
+    downstream :class:`AudioResampler` in the parsing pipeline.
 
     Args:
-        path: A :class:`~io.BytesIO` buffer, a filesystem
-            :class:`~pathlib.Path`, or a string path.
+        data: Raw video file bytes (e.g. from an mp4 file).
 
     Returns:
-        ``(waveform, sample_rate)`` where *waveform* is a 1-D float32
-        NumPy array and *sample_rate* is the native sample rate in Hz.
+        A tuple of ``(waveform, sample_rate)`` suitable for use as an
+        :class:`AudioItem`.
     """
-    native_sr = None
+    if data is None or len(data) == 0:
+        raise ValueError(
+            "Cannot extract audio: video bytes are missing or empty. "
+            "Ensure video was loaded with keep_video_bytes=True for "
+            "audio-in-video extraction."
+        )
     try:
-        with av.open(path) as container:
+        with av.open(BytesIO(data)) as container:
             if not container.streams.audio:
-                raise ValueError("No audio stream found.")
+                raise ValueError("No audio stream found in the video.")
             stream = container.streams.audio[0]
-            stream.thread_type = "AUTO"
             native_sr = stream.rate
-            sr = sr or native_sr
 
             chunks: list[npt.NDArray] = []
-            needs_resampling = not math.isclose(
-                float(sr),
-                float(native_sr),
-                rel_tol=0.0,
-                abs_tol=1e-6,
-            )
-            resampler = (
-                av.AudioResampler(format="fltp", layout="mono", rate=sr)
-                if needs_resampling
-                else None
-            )
-            for frame in container.decode(stream):
-                if needs_resampling:
-                    assert resampler is not None
-                    for out_frame in resampler.resample(frame):
-                        chunks.append(out_frame.to_ndarray())
-                else:
-                    chunks.append(frame.to_ndarray())
+            for frame in container.decode(audio=0):
+                arr = frame.to_ndarray()
+                chunks.append(arr.mean(axis=0) if arr.ndim > 1 else arr)
     except ValueError:
         raise
     except Exception as e:
@@ -100,54 +77,37 @@ def load_audio_pyav(
     if not chunks:
         raise ValueError("No audio found in the video.")
 
-    audio = np.concatenate(chunks, axis=-1).astype(np.float32)
-    if mono and audio.ndim > 1:
-        audio = np.mean(audio, axis=0)
-
-    return audio, sr
+    audio = np.concatenate(chunks).astype(np.float32)
+    return audio, float(native_sr)
 
 
-def load_audio_soundfile(
-    path: BytesIO | Path | str,
-    *,
-    sr: float | None = 22050,
-    mono: bool = True,
-) -> tuple[np.ndarray, int]:
-    """Load audio via soundfile"""
-    with soundfile.SoundFile(path) as f:
-        native_sr = f.samplerate
-        y = f.read(dtype="float32", always_2d=False).T
+def is_video(data: bytes) -> bool:
+    """Check if the fetched bytes are video"""
+    if len(data) < 12:
+        return False
 
-    if mono and y.ndim > 1:
-        y = np.mean(y, axis=tuple(range(y.ndim - 1)))
+    box_type = data[4:8]
+    major_brand = data[8:12]
 
-    if sr is not None and sr != native_sr:
-        y = resampy.resample(y, sr_orig=native_sr, sr_new=sr)
-        return y, int(sr)
-    return y, native_sr
+    MP4_BRANDS = {
+        b"mp41",
+        b"mp42",  # MP4
+        b"isom",  # ISO Base Media
+        b"iso2",
+        b"iso4",
+        b"iso5",
+        b"iso6",
+        b"M4V ",
+        b"M4A ",  # Apple
+        b"avc1",  # H.264
+        b"dash",  # DASH
+        b"mmp4",
+        b"MSNV",
+    }
 
-
-def load_audio(
-    path: BytesIO | Path | str,
-    *,
-    sr: float | None = 22050,
-    mono: bool = True,
-):
-    try:
-        return load_audio_soundfile(path, sr=sr, mono=mono)
-    except soundfile.LibsndfileError as exc:
-        # Only fall back for known format-detection failures.
-        # Re-raise anything else (e.g. corrupt but recognised format).
-        if exc.code not in _BAD_SF_CODES:
-            raise
-        # soundfile may have advanced the BytesIO seek position before failing;
-        # reset it so PyAV can read from the beginning.
-        if isinstance(path, BytesIO):
-            path.seek(0)
-        try:
-            return load_audio_pyav(path, sr=sr, mono=mono)
-        except Exception as pyav_exc:
-            raise ValueError("Invalid or unsupported audio file.") from pyav_exc
+    is_avi = data[:4] == b"RIFF" and major_brand == b"AVI "
+    is_mp4 = box_type == b"ftyp" and major_brand in MP4_BRANDS
+    return is_mp4 or is_avi
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
@@ -168,7 +128,9 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         self.kwargs = kwargs
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
-        return load_audio(BytesIO(data), sr=None)
+        if is_video(data):
+            return extract_audio_from_video_bytes(data)
+        return librosa.load(BytesIO(data), sr=None)
 
     def load_base64(
         self,
@@ -178,7 +140,7 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         return self.load_bytes(pybase64.b64decode(data))
 
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, float]:
-        return load_audio(filepath, sr=None)
+        return librosa.load(filepath, sr=None)
 
     def encode_base64(
         self,

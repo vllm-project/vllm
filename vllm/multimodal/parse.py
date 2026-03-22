@@ -497,7 +497,7 @@ class MultiModalDataParser:
         *,
         target_sr: float | None = None,
         target_channels: int | None = None,
-        audio_resample_method: Literal["pyav", "scipy"] = "pyav",
+        audio_resample_method: Literal["librosa", "scipy"] = "librosa",
         video_needs_metadata: bool = False,
         expected_hidden_size: int | None = None,
     ) -> None:
