@@ -61,6 +61,34 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
 PYTHON_TAG_FUNCTION_OUTPUT = (
     "<|python_start|>[get_weather(city='LA', metric='C')]<|python_end|>"
 )
+# Test case for nested list parameters (GitHub issue #30722)
+NESTED_LIST_FUNCTION_OUTPUT = (
+    '[enterprise_search(query="Benefits enrollment", '
+    'rephrased_queries=["How do I enroll in benefits?", '
+    '"What is the benefits enrollment process?"])]'
+)
+NESTED_LIST_FUNCTION_CALL = FunctionCall(
+    name="enterprise_search",
+    arguments='{"query": "Benefits enrollment", '
+    '"rephrased_queries": ["How do I enroll in benefits?", '
+    '"What is the benefits enrollment process?"]}',
+)
+# Test case with nested list containing mixed types
+NESTED_LIST_MIXED_OUTPUT = (
+    "[process_data(items=[1, 'text', True, None, {'key': 'value'}])]"
+)
+NESTED_LIST_MIXED_CALL = FunctionCall(
+    name="process_data",
+    arguments='{"items": [1, "text", true, null, {"key": "value"}]}',
+)
+# Test case with deeply nested structures
+DEEPLY_NESTED_OUTPUT = (
+    "[analyze(data={'users': [{'name': 'John', 'tags': ['admin', 'user']}]})]"
+)
+DEEPLY_NESTED_CALL = FunctionCall(
+    name="analyze",
+    arguments='{"data": {"users": [{"name": "John", "tags": ["admin", "user"]}]}}',
+)
 
 
 @pytest.mark.parametrize("streaming", [True, False])
@@ -199,6 +227,43 @@ TEST_CASES = [
             FunctionCall(name="register_user", arguments='{"name": "Doe", "age": 9}'),
         ],
         id="parallel_calls_nonstreaming",
+    ),
+    # Test cases for nested list parameters (GitHub issue #30722)
+    pytest.param(
+        True,
+        NESTED_LIST_FUNCTION_OUTPUT,
+        [NESTED_LIST_FUNCTION_CALL],
+        id="nested_list_streaming",
+    ),
+    pytest.param(
+        False,
+        NESTED_LIST_FUNCTION_OUTPUT,
+        [NESTED_LIST_FUNCTION_CALL],
+        id="nested_list_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        NESTED_LIST_MIXED_OUTPUT,
+        [NESTED_LIST_MIXED_CALL],
+        id="nested_list_mixed_streaming",
+    ),
+    pytest.param(
+        False,
+        NESTED_LIST_MIXED_OUTPUT,
+        [NESTED_LIST_MIXED_CALL],
+        id="nested_list_mixed_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        DEEPLY_NESTED_OUTPUT,
+        [DEEPLY_NESTED_CALL],
+        id="deeply_nested_streaming",
+    ),
+    pytest.param(
+        False,
+        DEEPLY_NESTED_OUTPUT,
+        [DEEPLY_NESTED_CALL],
+        id="deeply_nested_nonstreaming",
     ),
 ]
 
