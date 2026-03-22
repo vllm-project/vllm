@@ -22,10 +22,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 import torch
-from transformers import AudioFlamingo3Config, PretrainedConfig
-from transformers.models.audioflamingo3.modeling_audioflamingo3 import (
-    AudioFlamingo3ForConditionalGeneration as HFAudioFlamingo3ForConditionalGeneration,
-)
+from transformers import PretrainedConfig
 
 from tests.models.registry import HF_EXAMPLE_MODELS
 
@@ -146,6 +143,13 @@ def test_audio_token_count_matches_hf_processor_math():
 
 
 def test_audio_feature_pipeline_matches_hf_small_config():
+    from transformers.models.audioflamingo3 import (
+        modeling_audioflamingo3 as hf_audioflamingo3_modeling,
+    )
+    from transformers.models.audioflamingo3.configuration_audioflamingo3 import (
+        AudioFlamingo3Config,
+    )
+
     from vllm.model_executor.models.audioflamingo3 import (
         AudioFlamingo3Encoder,
         AudioFlamingo3MultiModalProjector,
@@ -185,7 +189,9 @@ def test_audio_feature_pipeline_matches_hf_small_config():
         audio_config=audio_config,
         audio_token_id=0,
     )
-    hf_model = HFAudioFlamingo3ForConditionalGeneration(config).eval()
+    hf_model = hf_audioflamingo3_modeling.AudioFlamingo3ForConditionalGeneration(
+        config
+    ).eval()
 
     vllm_encoder = AudioFlamingo3Encoder(config.audio_config).eval()
     vllm_encoder.load_state_dict(hf_model.audio_tower.state_dict())

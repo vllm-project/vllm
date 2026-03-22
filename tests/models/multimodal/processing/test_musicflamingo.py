@@ -22,10 +22,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 import torch
-from transformers import MusicFlamingoConfig, PretrainedConfig
-from transformers.models.musicflamingo.modeling_musicflamingo import (
-    MusicFlamingoForConditionalGeneration as HFMusicFlamingoForConditionalGeneration,
-)
+from transformers import PretrainedConfig
 
 from tests.models.registry import HF_EXAMPLE_MODELS
 
@@ -126,6 +123,13 @@ def test_musicflamingo_dummy_text_uses_plain_audio_tokens(mock_ctx):
 
 
 def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
+    from transformers.models.musicflamingo import (
+        modeling_musicflamingo as hf_musicflamingo_modeling,
+    )
+    from transformers.models.musicflamingo.configuration_musicflamingo import (
+        MusicFlamingoConfig,
+    )
+
     from vllm.model_executor.models.audioflamingo3 import (
         _build_audio_encoder_attention_mask,
         _flatten_valid_audio_embeddings,
@@ -171,7 +175,9 @@ def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
         head_dim=8,
         rope_parameters={"rope_type": "default", "rope_theta": 2048},
     )
-    hf_model = HFMusicFlamingoForConditionalGeneration(config).eval()
+    hf_model = hf_musicflamingo_modeling.MusicFlamingoForConditionalGeneration(
+        config
+    ).eval()
 
     vllm_encoder = MusicFlamingoEncoder(config.audio_config).eval()
     vllm_encoder.load_state_dict(hf_model.audio_tower.state_dict())
