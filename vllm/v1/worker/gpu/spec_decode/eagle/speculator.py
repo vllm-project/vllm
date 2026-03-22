@@ -5,16 +5,18 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     build_slot_mappings_by_layer,
+    init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import sync_cudagraph_and_dp_padding
@@ -23,7 +25,6 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
-from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 
@@ -79,9 +80,21 @@ class EagleSpeculator:
         self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
             self.draft_model_config
         )
-        self.inputs_embeds = torch.zeros(
-            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
-        )
+        if self.supports_mm_inputs:
+            self.inputs_embeds = torch.zeros(
+                self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
+            )
+
+        cache_draft_logits = self.speculative_config.rejection_sample_method != "strict"
+        self.draft_logits: torch.Tensor | None = None
+        if cache_draft_logits:
+            self.draft_logits = torch.zeros(
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                self.vocab_size,
+                dtype=torch.float32,
+                device=device,
+            )
 
         # currently we don't  support PIECEWISE for Eagle.
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
@@ -95,18 +108,35 @@ class EagleSpeculator:
         )
 
     def load_model(self, target_model: nn.Module) -> None:
+        target_attn_layer_names = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        ).keys()
+
         self.model = load_eagle_model(target_model, self.vllm_config)
+
+        all_attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        ).keys()
+        self.draft_attn_layer_names = set(all_attn_layers) - set(
+            target_attn_layer_names
+        )
 
     def set_attn(
         self,
         model_state: ModelState,
         kv_cache_config: KVCacheConfig,
-        attn_groups: list[list[AttentionGroup]],
         block_tables: BlockTables,
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
-        self.attn_groups = attn_groups
+        _, self.attn_groups = init_attn_backend(
+            kv_cache_config,
+            self.vllm_config,
+            self.device,
+            active_layer_names=self.draft_attn_layer_names,
+        )
         self.block_tables = block_tables
 
     @torch.inference_mode()
@@ -164,7 +194,6 @@ class EagleSpeculator:
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        draft_logits_out: torch.Tensor | None = None,
     ) -> None:
         pos = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -191,8 +220,8 @@ class EagleSpeculator:
                 self.seeds,
                 pos + 1,
                 apply_temperature=True,
-                processed_logits_out=draft_logits_out[:, step]
-                if draft_logits_out is not None
+                processed_logits_out=self.draft_logits[:, step]
+                if self.draft_logits is not None
                 else None,
             )
             self.draft_tokens[:num_reqs, step] = draft_tokens
@@ -247,8 +276,6 @@ class EagleSpeculator:
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        # [max_num_reqs, num_speculative_steps, vocab_size]
-        draft_logits_out: torch.Tensor | None,
         num_tokens_across_dp: torch.Tensor | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
@@ -316,8 +343,8 @@ class EagleSpeculator:
             self.seeds,
             pos + 1,
             apply_temperature=True,
-            processed_logits_out=draft_logits_out[:, 0]
-            if draft_logits_out is not None
+            processed_logits_out=self.draft_logits[:, 0]
+            if self.draft_logits is not None
             else None,
         )
 
@@ -402,7 +429,6 @@ class EagleSpeculator:
             slot_mappings_updated,
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=batch_desc.cg_mode,
-            draft_logits_out=draft_logits_out,
         )
         return self.draft_tokens[:num_reqs]
 

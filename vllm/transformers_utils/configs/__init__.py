@@ -33,6 +33,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "HunYuanVLConfig": "vllm.transformers_utils.configs.hunyuan_vl",
     "HunYuanVLTextConfig": "vllm.transformers_utils.configs.hunyuan_vl",
     "HunYuanVLVisionConfig": "vllm.transformers_utils.configs.hunyuan_vl",
+    "HyperCLOVAXConfig": "vllm.transformers_utils.configs.hyperclovax",
     "IsaacConfig": "vllm.transformers_utils.configs.isaac",
     # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
     # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
@@ -54,7 +55,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "OvisConfig": "vllm.transformers_utils.configs.ovis",
     "PixelShuffleSiglip2VisionConfig": "vllm.transformers_utils.configs.isaac",
     "RadioConfig": "vllm.transformers_utils.configs.radio",
-    "SpeculatorsConfig": "vllm.transformers_utils.configs.speculators.base",
+    "SpeculatorsConfig": "vllm.transformers_utils.configs.speculators",
     "UltravoxConfig": "vllm.transformers_utils.configs.ultravox",
     "Step3VLConfig": "vllm.transformers_utils.configs.step3_vl",
     "Step3VisionEncoderConfig": "vllm.transformers_utils.configs.step3_vl",
@@ -91,6 +92,7 @@ __all__ = [
     "HunYuanVLConfig",
     "HunYuanVLTextConfig",
     "HunYuanVLVisionConfig",
+    "HyperCLOVAXConfig",
     "IsaacConfig",
     "RWConfig",
     "JAISConfig",

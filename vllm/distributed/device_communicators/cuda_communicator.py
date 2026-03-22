@@ -149,12 +149,25 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = NixlEPAll2AllManager(
                     self.cpu_group, tcp_store_group
                 )
-            elif self.all2all_backend == "flashinfer_all2allv":
-                from .all2all import FlashInferAllToAllManager
+            elif (
+                self.all2all_backend == "flashinfer_all2allv"
+                or self.all2all_backend == "flashinfer_nvlink_two_sided"
+            ):
+                if self.all2all_backend == "flashinfer_all2allv":
+                    logger.warning_once(
+                        "'flashinfer_all2allv' is deprecated and has been renamed to"
+                        "'flashinfer_nvlink_two_sided'. It will be removed in a future"
+                        "release."
+                    )
+                from .all2all import FlashInferNVLinkTwoSidedManager
 
-                self.all2all_manager = FlashInferAllToAllManager(
+                self.all2all_manager = FlashInferNVLinkTwoSidedManager(
                     self.cpu_group, tcp_store_group
                 )
+            elif self.all2all_backend == "flashinfer_nvlink_one_sided":
+                from .all2all import FlashInferNVLinkOneSidedManager
+
+                self.all2all_manager = FlashInferNVLinkOneSidedManager(self.cpu_group)
             else:
                 raise ValueError(f"Unknown all2all backend: {self.all2all_backend}")
 
@@ -325,6 +338,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
     def destroy(self):
         if self.pynccl_comm is not None:
+            self.pynccl_comm.destroy()
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None

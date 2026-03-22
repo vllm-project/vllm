@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import socket
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, overload
 
@@ -45,7 +46,9 @@ All2AllBackend = Literal[
     "mori",
     "nixl_ep",
     "allgather_reducescatter",
-    "flashinfer_all2allv",
+    "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
+    "flashinfer_nvlink_two_sided",
+    "flashinfer_nvlink_one_sided",
 ]
 
 
@@ -136,6 +139,13 @@ class ParallelConfig:
     """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    enable_ep_weight_filter: bool = False
+    """Skip non-local expert weights during model loading when expert
+    parallelism is active.  Each rank only reads its own expert shard from
+    disk, which can drastically reduce storage I/O for MoE models with
+    per-expert weight tensors (e.g. DeepSeek, Mixtral, Kimi-K2.5).  Has no
+    effect on 3D fused-expert checkpoints (e.g. GPT-OSS) or non-MoE
+    models."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
@@ -152,13 +162,13 @@ class ParallelConfig:
     all2all_backend: All2AllBackend = "allgather_reducescatter"
     """All2All backend for MoE expert parallel communication. Available options:
 
-    - "naive": Naive all2all implementation using broadcasts\n
     - "allgather_reducescatter": All2all based on allgather and reducescatter\n
     - "deepep_high_throughput": Use deepep high-throughput kernels\n
     - "deepep_low_latency": Use deepep low-latency kernels\n
     - "mori": Use mori kernels\n
     - "nixl_ep": Use nixl-ep kernels\n
-    - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
+    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
+    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
 
     max_parallel_loading_workers: int | None = None
     """Maximum number of parallel loading workers when loading model
@@ -256,33 +266,9 @@ class ParallelConfig:
     Set to be private as it's not intended to be configured by users.
     """
 
-    _stateless_dp_group_port_list: list[list[int]] = Field(default_factory=list)
-    """List of open ports for stateless DP groups when enable_elastic_ep is True.
-    Set to be private as it's not intended to be configured by users.
-    It is a list of list[int], with each inner list contains a set of 3 ports
-    to be used for setting up the stateless CPU/device/TCPStore groups
-    in StatelessGroupCoordinator. The number of inner lists is equal to
-    the number of DP groups, 
-    i.e., len(self._stateless_dp_group_port_list) == world_size_across_dp // dp_size,
-    and len(self._stateless_dp_group_port_list[i]) == 3 for all i.
-    """
-
-    _stateless_ep_group_port_list: list[list[int]] = Field(default_factory=list)
-    """List of open ports for stateless EP groups when enable_elastic_ep is True.
-    Set to be private as it's not intended to be configured by users.
-    len(self._stateless_ep_group_port_list) == world_size_across_dp // ep_size,
-    """
-
-    _stateless_eplb_group_port_list: list[list[int]] = Field(default_factory=list)
-    """List of open ports for stateless EPLB groups when enable_elastic_ep is True.
-    Same topology as EP but separate NCCL communicator to avoid deadlocks.
-    """
-
-    _stateless_world_group_port_list: list[list[int]] = Field(default_factory=list)
-    """List of open ports for stateless world group when enable_elastic_ep is True.
-    Set to be private as it's not intended to be configured by users.
-    len(self._stateless_world_group_port_list) == 1,
-    """
+    _coord_store_port: int = 0
+    """Port of the coordination TCPStore. Can be set by the API server; workers
+    connect as clients to exchange self-picked group ports at runtime."""
 
     decode_context_parallel_size: int = 1
     """Number of decode context parallel groups, because the world size does
@@ -357,10 +343,11 @@ class ParallelConfig:
                 f"but found: {self._api_process_rank}"
             )
 
-        if self.all2all_backend == "pplx":
+        if self.all2all_backend in ["pplx", "naive"]:
             logger.warning(
-                "The 'pplx' all2all backend has been removed. "
-                "Falling back to 'allgather_reducescatter'."
+                "The '%s' all2all backend has been removed. "
+                "Falling back to 'allgather_reducescatter'.",
+                self.all2all_backend,
             )
             self.all2all_backend = "allgather_reducescatter"
 
@@ -455,65 +442,32 @@ class ParallelConfig:
 
         return answer
 
-    def allocate_elastic_ep_ports(self) -> None:
-        """Allocate all ports for elastic EP (stateless groups + DP master).
+    def _pick_stateless_dp_port(self) -> tuple[int, socket.socket | None]:
+        """Return ``(port, listen_socket)`` for DP group init.
 
-        Must be called AFTER ray.init() so that ports claimed by Ray's
-        idle worker pool are already in use and won't be returned by
-        get_open_ports_list().
+        With a coord store, rank 0 binds a socket and publishes the port;
+        others read it.  Without one, pops a pre-allocated port and
+        returns ``listen_socket=None``.
         """
-        if not self.enable_elastic_ep:
-            return
-        if self._stateless_world_group_port_list:
-            return
+        if not self._coord_store_port:
+            return self.get_next_dp_init_port(), None
 
-        num_world_groups = 1
-        dp_size = self.data_parallel_size
-        ep_size = self.data_parallel_size * self.world_size_across_dp
-        num_dp_groups = max(1, self.world_size_across_dp // dp_size)
-        num_ep_groups = max(1, self.world_size_across_dp // ep_size)
-        num_eplb_groups = num_ep_groups
-        total_stateless_ports = (
-            num_world_groups + num_dp_groups + num_ep_groups + num_eplb_groups
-        ) * 3
-        num_dp_master_ports = 5
+        from vllm.distributed.utils import get_cached_tcp_store_client
 
-        all_ports = get_open_ports_list(total_stateless_ports + num_dp_master_ports)
+        store = get_cached_tcp_store_client(
+            self.data_parallel_master_ip, self._coord_store_port
+        )
 
-        self._data_parallel_master_port_list = all_ports[-num_dp_master_ports:]
-        self.data_parallel_master_port = self._data_parallel_master_port_list.pop()
-        all_ports = all_ports[:-num_dp_master_ports]
-
-        self._stateless_world_group_port_list = [
-            all_ports[i : i + 3] for i in range(0, num_world_groups * 3, 3)
-        ]
-        start_idx = num_world_groups * 3
-        self._stateless_dp_group_port_list = [
-            all_ports[i : i + 3]
-            for i in range(start_idx, start_idx + num_dp_groups * 3, 3)
-        ]
-        start_idx += num_dp_groups * 3
-        self._stateless_ep_group_port_list = [
-            all_ports[i : i + 3]
-            for i in range(start_idx, start_idx + num_ep_groups * 3, 3)
-        ]
-        start_idx += num_ep_groups * 3
-        self._stateless_eplb_group_port_list = [
-            all_ports[i : i + 3]
-            for i in range(start_idx, start_idx + num_eplb_groups * 3, 3)
-        ]
-
-    def get_next_stateless_world_group_port(self) -> list[int]:
-        return self._stateless_world_group_port_list.pop()
-
-    def get_next_stateless_dp_group_port(self) -> list[int]:
-        return self._stateless_dp_group_port_list.pop()
-
-    def get_next_stateless_ep_group_port(self) -> list[int]:
-        return self._stateless_ep_group_port_list.pop()
-
-    def get_next_stateless_eplb_group_port(self) -> list[int]:
-        return self._stateless_eplb_group_port_list.pop()
+        key = "dp_master_port"
+        if self.data_parallel_rank == 0:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind((self.data_parallel_master_ip, 0))
+            s.listen()
+            port = s.getsockname()[1]
+            store.set(key, str(port).encode())
+            return port, s
+        else:
+            return int(store.get(key).decode()), None
 
     @overload
     def stateless_init_dp_group(
@@ -543,14 +497,16 @@ class ParallelConfig:
         last_exc: Exception | None = None
         for _ in range(max_retries):
             try:
+                port, listen_socket = self._pick_stateless_dp_port()
                 # use gloo since the engine process might not have cuda device
                 return stateless_init_torch_distributed_process_group(
                     self.data_parallel_master_ip,
-                    self.get_next_dp_init_port(),
+                    port,
                     self.data_parallel_rank,
                     self.data_parallel_size,
                     backend="gloo",
                     return_store=return_store,
+                    listen_socket=listen_socket,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
@@ -578,7 +534,6 @@ class ParallelConfig:
             self.all2all_backend
             in (
                 "allgather_reducescatter",
-                "naive",
                 "deepep_high_throughput",
                 "deepep_low_latency",
                 "mori",
@@ -808,7 +763,7 @@ class ParallelConfig:
             )
 
         if (
-            self.all2all_backend in ("allgather_reducescatter", "naive")
+            self.all2all_backend in ("allgather_reducescatter")
             and self.eplb_config.use_async
         ):
             logger.warning(

@@ -224,6 +224,12 @@ class AnthropicServingMessages(OpenAIServingChat):
             content_parts.append({"type": "image_url", "image_url": {"url": image_url}})
         elif block.type == "thinking" and block.thinking is not None:
             reasoning_parts.append(block.thinking)
+        elif block.type == "redacted_thinking":
+            # Redacted thinking blocks contain safety-filtered reasoning.
+            # We skip them as the content is opaque (base64 'data' field),
+            # but accepting the block prevents a validation error when the
+            # client echoes back the full assistant message.
+            pass
         elif block.type == "tool_use":
             cls._convert_tool_use_block(block, tool_calls)
         elif block.type == "tool_result":
@@ -325,6 +331,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
+            kv_transfer_params=anthropic_request.kv_transfer_params,
         )
 
     @classmethod
@@ -435,6 +442,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 input_tokens=generator.usage.prompt_tokens,
                 output_tokens=generator.usage.completion_tokens,
             ),
+            kv_transfer_params=generator.kv_transfer_params,
         )
         choice = generator.choices[0]
         if choice.finish_reason == "stop":
@@ -570,7 +578,6 @@ class AnthropicServingMessages(OpenAIServingChat):
                             exclude_unset=True, exclude_none=True
                         )
                         yield wrap_data_with_event(data, "message_stop")
-                        yield "data: [DONE]\n\n"
                     else:
                         origin_chunk = ChatCompletionStreamResponse.model_validate_json(
                             data_str
@@ -767,7 +774,6 @@ class AnthropicServingMessages(OpenAIServingChat):
                     )
                     data = error_response.model_dump_json(exclude_unset=True)
                     yield wrap_data_with_event(data, "error")
-                    yield "data: [DONE]\n\n"
 
         except Exception as e:
             logger.exception("Error in message stream converter.")
@@ -777,7 +783,6 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
             data = error_response.model_dump_json(exclude_unset=True)
             yield wrap_data_with_event(data, "error")
-            yield "data: [DONE]\n\n"
 
     async def count_tokens(
         self,
