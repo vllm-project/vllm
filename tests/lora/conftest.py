@@ -295,8 +295,13 @@ def whisper_lora_files():
 
 
 @pytest.fixture(scope="session")
-def qwen35_dense_model_lora_files():
+def qwen35_text_lora_files():
     return snapshot_download(repo_id="jeeejeee/qwen35-4b-text-only-sql-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen35_vl_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen35-4b-all-linear-pokemon-lora")
 
 
 @pytest.fixture
