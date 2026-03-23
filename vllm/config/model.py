@@ -25,7 +25,7 @@ from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.tasks import ScoreType
+from vllm.tasks import ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
     get_config,
@@ -1407,6 +1407,31 @@ class ModelConfig:
             )
 
         return diff_sampling_param
+
+    def get_pooling_task(
+        self, supported_tasks: tuple[SupportedTask, ...]
+    ) -> SupportedTask | None:
+        if self.pooler_config is None:
+            return None
+
+        if self.pooler_config.pooling_task is not None:
+            if self.pooler_config.pooling_task in supported_tasks:
+                return self.pooler_config.pooling_task
+            else:
+                raise RuntimeError()
+
+        priority: list[SupportedTask] = [
+            "embed&token_classify",
+            "embed",
+            "classify",
+            "token_embed",
+            "token_classify",
+            "plugin",
+        ]
+        for task in priority:
+            if task in supported_tasks:
+                return task
+        return None
 
     @cached_property
     def is_encoder_decoder(self) -> bool:
