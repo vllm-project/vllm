@@ -3,11 +3,7 @@
 import time
 from typing import Any, TypeAlias
 
-from pydantic import (
-    BaseModel,
-    Field,
-    field_validator,
-)
+from pydantic import BaseModel, Field
 
 from vllm import PoolingParams
 from vllm.config import ModelConfig
@@ -25,35 +21,13 @@ from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 
-# Exact number of token IDs required in label_token_ids for generative scoring
-REQUIRED_LABEL_TOKEN_IDS = 2
-
-
 class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
     # --8<-- [start:score-extra-params]
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
-    label_token_ids: list[int] | None = Field(
-        default=None,
-        description=(
-            "List of token IDs to compute probabilities for when using "
-            f"CausalLM models. Required for generative scoring. "
-            f"Must contain exactly {REQUIRED_LABEL_TOKEN_IDS} token IDs."
-        ),
-    )
     # --8<-- [end:score-extra-params]
-
-    @field_validator('label_token_ids')
-    @classmethod
-    def validate_label_token_ids(cls, v: list[int] | None) -> list[int] | None:
-        if v is not None and len(v) != REQUIRED_LABEL_TOKEN_IDS:
-            raise ValueError(
-                f"label_token_ids must contain exactly {REQUIRED_LABEL_TOKEN_IDS} "
-                f"token IDs for generative scoring, but got {len(v)}"
-            )
-        return v
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}

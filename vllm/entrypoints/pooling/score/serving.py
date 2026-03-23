@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import time
-from collections import OrderedDict
 from collections.abc import AsyncGenerator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -26,10 +25,6 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreRequest,
     ScoreResponse,
     ScoreResponseData,
-)
-from vllm.entrypoints.pooling.score.generative_scores import (
-    GenerativeScoreRequest,
-    OpenAIServingGenerativeScores,
 )
 from vllm.entrypoints.pooling.score.utils import (
     ScoreData,
@@ -64,7 +59,6 @@ class ServingScores(OpenAIServing):
         request_logger: RequestLogger | None,
         score_template: str | None = None,
         log_error_stack: bool = False,
-        generative_scores_handler: OpenAIServingGenerativeScores | None = None,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -72,7 +66,6 @@ class ServingScores(OpenAIServing):
             request_logger=request_logger,
         )
         self.score_template = score_template
-        self.generative_scores_handler = generative_scores_handler
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
@@ -517,119 +510,6 @@ class ServingScores(OpenAIServing):
             trace_headers=trace_headers,
         )
 
-    async def _generative_score(
-        self,
-        request: ScoreRequest,
-        raw_request: Request | None = None,
-    ) -> ScoreResponse | ErrorResponse:
-        """
-        Handle scoring for CausalLM models using the generative scores API.
-        
-        Converts the score request to generative score format, calls the
-        generative scores handler, and converts the response back to
-        the standard score response format.
-        """
-        if self.generative_scores_handler is None:
-            return self.create_error_response(
-                "Generative scores handler not initialized. "
-                "This is required for CausalLM models."
-            )
-
-        # Extract data from request
-        data_1 = request.data_1
-        data_2 = request.data_2
-
-        # Normalize data_1 and data_2 to lists
-        if isinstance(data_1, str):
-            data_1 = [data_1]
-        elif isinstance(data_1, dict):
-            data_1 = data_1.get("content", [])
-
-        if isinstance(data_2, str):
-            data_2 = [data_2]
-        elif isinstance(data_2, dict):
-            data_2 = data_2.get("content", [])
-
-        # Validate input lens
-        _validate_score_input_lens(data_1, data_2)
-
-        request_id = f"score-{self._base_request_id(raw_request)}"
-        created_time = int(time.time())
-
-        # Group documents by query to maximize batching.
-        # create_generative_score already handles multiple items per query
-        # in parallel via merge_async_iterators, so we batch all documents
-        # sharing the same query into a single call.
-        #
-        # Common case: 1 query, N documents -> 1 batched call (not N calls)
-        # N:N case: group by unique query -> 1 call per unique query
-        if len(data_1) == 1:
-            # Fast path: single query, all documents batched in one call
-            query_groups = [
-                (data_1[0], list(data_2), list(range(len(data_2))))
-            ]
-        else:
-            # N:N case: group documents by identical query text
-            groups = OrderedDict()
-            for idx, (q, d) in enumerate(zip(data_1, data_2)):
-                key = q if isinstance(q, str) else str(q)
-                if key not in groups:
-                    groups[key] = ([], [])
-                groups[key][0].append(d)
-                groups[key][1].append(idx)
-            query_groups = [
-                (q, items, indices)
-                for q, (items, indices) in groups.items()
-            ]
-
-        all_results = [None] * len(data_2) if len(data_1) == 1 else [None] * len(data_1)  # type: ignore[list-item]
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
-        first_token_id = str(request.label_token_ids[0])
-
-        for query, items, indices in query_groups:
-            gen_request = GenerativeScoreRequest(
-                model=request.model,
-                query=query,
-                items=items,
-                label_token_ids=request.label_token_ids,
-                apply_softmax=True,  # Always use softmax for normalized probabilities
-                item_first=False,
-                add_special_tokens=True,
-                priority=request.priority,
-            )
-
-            gen_response = await self.generative_scores_handler.create_generative_score(
-                gen_request, raw_request
-            )
-
-            if isinstance(gen_response, ErrorResponse):
-                return gen_response
-
-            # Map results back to their original indices
-            for result in gen_response.results:
-                original_idx = indices[result.index]
-                score = result.token_probs.get(first_token_id, 0.0)
-                all_results[original_idx] = ScoreResponseData(
-                    index=original_idx,
-                    score=score,
-                )
-
-            total_prompt_tokens += gen_response.usage.prompt_tokens
-            total_completion_tokens += (gen_response.usage.completion_tokens or 0)
-
-        return ScoreResponse(
-            id=request_id,
-            created=created_time,
-            model=self.models.model_name(),
-            data=[r for r in all_results if r is not None],
-            usage=UsageInfo(
-                prompt_tokens=total_prompt_tokens,
-                total_tokens=total_prompt_tokens + total_completion_tokens,
-                completion_tokens=total_completion_tokens,
-            ),
-        )
-
     async def create_score(
         self,
         request: ScoreRequest,
@@ -643,16 +523,6 @@ class ServingScores(OpenAIServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-
-        # Check if model is CausalLM and route accordingly
-        if self.model_config.is_causal_lm:
-            # For CausalLM models, require label_token_ids
-            if request.label_token_ids is None:
-                return self.create_error_response(
-                    "label_token_ids is required for CausalLM models. "
-                    "Please provide a list of token IDs to compute probabilities for."
-                )
-            return await self._generative_score(request, raw_request)
 
         request_id = f"score-{self._base_request_id(raw_request)}"
         created_time = int(time.time())

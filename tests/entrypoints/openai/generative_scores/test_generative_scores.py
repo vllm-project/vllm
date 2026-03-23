@@ -19,7 +19,7 @@ import pytest
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.pooling.score.generative_scores import (
+from vllm.entrypoints.openai.generative_scores.serving import (
     GenerativeScoreItemResult,
     GenerativeScoreRequest,
     GenerativeScoreResponse,
@@ -203,19 +203,19 @@ class TestProbabilityComputation:
     def test_score_formula(self):
         """Test the score formula: P(token[0]) / (P(token[0]) + P(token[1]))."""
         serving = OpenAIServingGenerativeScores.__new__(OpenAIServingGenerativeScores)
-        
+
         # With logprobs -0.5 and -2.0, softmax gives higher prob to first token
         logprobs = {9454: -0.5, 2753: -2.0}
         probs = serving._compute_probabilities(logprobs, apply_softmax=True)
-        
+
         # Score = P(9454) / (P(9454) + P(2753)) = P(9454) since they sum to 1
         score = probs[9454]
-        
+
         # Manual calculation
         exp_0 = math.exp(-0.5)
         exp_1 = math.exp(-2.0)
         expected_score = exp_0 / (exp_0 + exp_1)
-        
+
         assert abs(score - expected_score) < 1e-9
         assert score > 0.5  # First token has higher logprob, so higher probability
 

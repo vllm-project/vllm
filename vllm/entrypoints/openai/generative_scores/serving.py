@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Generative Scores implementation for CausalLM models.
+"""Generative Scores implementation for generative models.
 
 This module implements generative scoring functionality that computes the
 probability of specified token IDs appearing as the next token after a
-given query+item prompt. This is used internally by the score endpoint
-when the model architecture is a CausalLM.
+given query+item prompt. This works on any generative model that produces
+logits (task="generate").
 """
 
 import asyncio
@@ -49,8 +49,6 @@ logger = init_logger(__name__)
 
 class GenerativeScoreRequest(OpenAIBaseModel):
     """Request for computing generative scores.
-
-    This is used internally when routing score requests to CausalLM models.
 
     Attributes:
         model: The model to use for scoring. Optional, follows existing patterns.
@@ -148,14 +146,14 @@ class GenerativeScoreResponse(OpenAIBaseModel):
 class OpenAIServingGenerativeScores(OpenAIServing):
     """Serving class for generative scores computation.
 
-    This class handles computing the probability of specified token IDs 
+    This class handles computing the probability of specified token IDs
     appearing as the next token after concatenating query and item prompts.
 
     The key operation is:
     1. For each item, build a prompt: query + item (or item + query if item_first)
     2. Run a forward pass to get the next token distribution
     3. Extract probabilities for the specified label_token_ids
-    4. Normalize either over the full vocab (apply_softmax=False) or 
+    4. Normalize either over the full vocab (apply_softmax=False) or
        over just the label_token_ids (apply_softmax=True)
     """
 
@@ -182,7 +180,7 @@ class OpenAIServingGenerativeScores(OpenAIServing):
         """Create generative scores for the given request.
 
         Args:
-            request: The GenerativeScoreRequest containing query, items, and 
+            request: The GenerativeScoreRequest containing query, items, and
                 label_token_ids.
             raw_request: The raw FastAPI request object.
 
@@ -480,7 +478,7 @@ class OpenAIServingGenerativeScores(OpenAIServing):
             }
         else:
             # Return true model probabilities
-            # Since logprobs are already log(softmax(logits)), 
+            # Since logprobs are already log(softmax(logits)),
             # we just need to exp() them
             return {
                 token_id: math.exp(logprob)
