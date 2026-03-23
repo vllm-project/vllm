@@ -305,6 +305,11 @@ def _flashinfer_fp8_blockscale_gemm_impl(
         )
         return output
 
+    from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
+    if vllm_is_batch_invariant():
+        return run_deepgemm(input, weight, weight_scale)
+
     condition = input.shape[0] < 32
 
     # PyTorch's torch.compile cannot handle input-dependent control flow in standard
