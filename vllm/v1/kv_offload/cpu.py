@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
-from typing import Literal, cast
 
 import torch
 
@@ -74,7 +73,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             self._manager = CPUOffloadingManager(
                 backend=backend,
-                cache_policy=cast(Literal["lru", "arc"], self.eviction_policy),
+                cache_policy=self.eviction_policy,  # type: ignore[arg-type]
                 enable_events=enable_events,
             )
 
