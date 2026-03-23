@@ -1119,33 +1119,15 @@ class OpenAIServingChat(OpenAIServing):
                                     delta_message.tool_calls[0].function.arguments
                                 )
 
-                            # get the expected call based on partial JSON
-                            # parsing which "autocompletes" the JSON.
-                            # Tool parsers (e.g. Qwen3Coder) store
-                            # arguments as a JSON string in
-                            # prev_tool_call_arr. Calling json.dumps()
-                            # on an already-serialized string would
-                            # double-serialize it (e.g. '{"k":1}' becomes
-                            # '"{\\"k\\":1}"'), which then causes the
-                            # replace() below to fail and append the
-                            # entire double-serialized string as a
-                            # spurious final delta.
-                            args = tool_parser.prev_tool_call_arr[index].get(
-                                "arguments", {}
+                            remaining_call = self._compute_remaining_tool_args(
+                                expected_args=tool_parser.prev_tool_call_arr[
+                                    index
+                                ].get("arguments", {}),
+                                streamed_args=tool_parser.streamed_args_for_tool[
+                                    index
+                                ],
+                                latest_delta_len=latest_delta_len,
                             )
-                            if isinstance(args, str):
-                                expected_call = args
-                            else:
-                                expected_call = json.dumps(args, ensure_ascii=False)
-
-                            # get what we've streamed so far for arguments
-                            # for the current tool
-                            actual_call = tool_parser.streamed_args_for_tool[index]
-                            if latest_delta_len > 0:
-                                actual_call = actual_call[:-latest_delta_len]
-
-                            # check to see if there's anything left to stream
-                            remaining_call = expected_call.replace(actual_call, "", 1)
                             # set that as a delta message
                             delta_message = self._create_remaining_args_delta(
                                 delta_message, remaining_call, index
@@ -1808,3 +1790,91 @@ class OpenAIServingChat(OpenAIServing):
                 )
             ]
         )
+
+    @staticmethod
+    def _compact_json_fragment(fragment: str) -> str:
+        """Strip insignificant JSON whitespace while preserving string content."""
+        compact_chars: list[str] = []
+        in_string = False
+        escaped = False
+
+        for ch in fragment:
+            if in_string:
+                compact_chars.append(ch)
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch in " \t\r\n":
+                continue
+
+            compact_chars.append(ch)
+            if ch == '"':
+                in_string = True
+
+        return "".join(compact_chars)
+
+    @classmethod
+    def _compute_remaining_tool_args(
+        cls,
+        expected_args: Any,
+        streamed_args: str,
+        latest_delta_len: int,
+    ) -> str:
+        """
+        Compute the unstreamed suffix for the finish chunk.
+
+        GLM parsers can emit prefixes whose whitespace differs from
+        ``json.dumps`` output, including mixed styles within the same object.
+        Try exact prefix matches first, then fall back to comparing
+        whitespace-minified prefixes against compact JSON.
+        """
+        actual_call = (
+            streamed_args[:-latest_delta_len]
+            if latest_delta_len > 0
+            else streamed_args
+        )
+
+        expected_call_candidates: list[str] = []
+        parsed_expected_args: Any = expected_args
+
+        if isinstance(expected_args, str):
+            expected_call_candidates.append(expected_args)
+            try:
+                parsed_expected_args = json.loads(expected_args)
+            except json.JSONDecodeError:
+                parsed_expected_args = expected_args
+        else:
+            expected_call_candidates.append(
+                json.dumps(expected_args, ensure_ascii=False)
+            )
+
+        expected_compact = ""
+        if not isinstance(parsed_expected_args, str):
+            expected_compact = json.dumps(
+                parsed_expected_args,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if expected_compact not in expected_call_candidates:
+                expected_call_candidates.append(expected_compact)
+
+        for expected_call in expected_call_candidates:
+            if expected_call.startswith(actual_call):
+                return expected_call[len(actual_call) :]
+
+        if expected_compact:
+            actual_compact = cls._compact_json_fragment(actual_call)
+            if expected_compact.startswith(actual_compact):
+                return expected_compact[len(actual_compact) :]
+
+        if actual_call:
+            logger.debug(
+                "Unable to align streamed tool args with expected suffix; "
+                "skip finish backfill.",
+            )
+        return ""

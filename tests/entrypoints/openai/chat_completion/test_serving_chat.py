@@ -1930,3 +1930,73 @@ class TestCreateRemainingArgsDelta:
         assert tc.type == "function"
         assert tc.function.name is None
         assert tc.function.arguments == '{"data": "value"}'
+
+
+class TestComputeRemainingToolArgs:
+    def test_handles_compact_prefix(self):
+        remaining = OpenAIServingChat._compute_remaining_tool_args(
+            expected_args={"a": 1},
+            streamed_args='{"a":1}',
+            latest_delta_len=1,
+        )
+
+        assert remaining == "}"
+
+    def test_handles_stringified_expected_args(self):
+        remaining = OpenAIServingChat._compute_remaining_tool_args(
+            expected_args='{"a":1}',
+            streamed_args='{"a":1}',
+            latest_delta_len=1,
+        )
+
+        assert remaining == "}"
+
+    def test_handles_glm_mixed_whitespace_prefix(self):
+        expected_args = {
+            "todos": [
+                {
+                    "content": "A",
+                    "activeForm": "B",
+                    "status": "in_progress",
+                }
+            ]
+        }
+
+        remaining = OpenAIServingChat._compute_remaining_tool_args(
+            expected_args=expected_args,
+            streamed_args=(
+                '{"todos":[{"content": "A", "activeForm": "B", '
+                '"status": "in_progress"}]}'
+            ),
+            latest_delta_len=1,
+        )
+
+        assert remaining == "}"
+
+    def test_backfills_missing_suffix_for_glm_partial_prefix(self):
+        expected_args = {
+            "todos": [
+                {
+                    "content": "A",
+                    "activeForm": "B",
+                    "status": "in_progress",
+                }
+            ]
+        }
+
+        remaining = OpenAIServingChat._compute_remaining_tool_args(
+            expected_args=expected_args,
+            streamed_args='{"todos":[{"content": "A"',
+            latest_delta_len=0,
+        )
+
+        assert remaining == ',"activeForm":"B","status":"in_progress"}]}'
+
+    def test_returns_empty_for_non_matching_prefix(self):
+        remaining = OpenAIServingChat._compute_remaining_tool_args(
+            expected_args={"a": 1},
+            streamed_args="not-json",
+            latest_delta_len=0,
+        )
+
+        assert remaining == ""
