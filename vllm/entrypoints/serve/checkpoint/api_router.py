@@ -22,6 +22,14 @@ router = APIRouter()
 @router.post("/suspend")
 async def suspend(raw_request: Request):
     mode = raw_request.query_params.get("mode", "abort")
+    if mode not in ("abort", "wait", "keep"):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": f"Invalid suspend mode '{mode}'. "
+                "Must be one of 'abort', 'wait', 'keep'."
+            },
+        )
     logger.info("Suspending engine with mode: %s", mode)
     await engine_client(raw_request).suspend(mode)
     return Response(status_code=200)
