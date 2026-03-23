@@ -3,6 +3,7 @@
 import contextlib
 import copy
 import os
+from collections.abc import Mapping
 from collections.abc import Callable
 from contextlib import ExitStack
 from typing import Any, Literal
@@ -21,6 +22,35 @@ from vllm.utils.hashing import safe_hash
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
+
+
+def _patch_standalone_compile_fake_tensor_mode(
+    standalone_compile: Callable[..., Any],
+    fake_tensor_mode: Any,
+) -> Any:
+    """Patch the FakeTensorMode lookup used by torch standalone_compile.
+
+    `torch._inductor.standalone_compile` can be imported either as the wrapper
+    function exposed from `torch._inductor.__init__` or as the function defined
+    inside `torch._inductor.standalone_compile`. On some Python/PyTorch
+    combinations, patching `torch._inductor.standalone_compile.FakeTensorMode`
+    resolves against the wrapper function instead of the module, which raises:
+
+        AttributeError: <function standalone_compile ...> does not have the
+        attribute 'FakeTensorMode'
+
+    Patch the function's globals instead, since that is where the runtime name
+    lookup for `FakeTensorMode(...)` actually happens.
+    """
+
+    globals_dict = getattr(standalone_compile, "__globals__", None)
+    if not isinstance(globals_dict, Mapping):
+        return contextlib.nullcontext()
+
+    return patch.dict(
+        globals_dict,
+        {"FakeTensorMode": lambda *a, **kw: fake_tensor_mode},
+    )
 
 
 class CompilerInterface:
@@ -373,16 +403,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
                 break
 
         if input_fake_mode is not None:
-            # Use patch.object on the actual module from sys.modules
-            # because in Python <=3.10 the string-based patch() resolves
-            # torch._inductor.standalone_compile to the wrapper function
-            # (defined in __init__.py) instead of the module.
-            import sys
-
-            fake_mode_ctx: Any = patch.object(
-                sys.modules["torch._inductor.standalone_compile"],
-                "FakeTensorMode",
-                lambda *a, **kw: input_fake_mode,
+            fake_mode_ctx: Any = _patch_standalone_compile_fake_tensor_mode(
+                standalone_compile,
+                input_fake_mode,
             )
         else:
             fake_mode_ctx = contextlib.nullcontext()
