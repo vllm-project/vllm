@@ -39,7 +39,7 @@ def fused_concat_and_cache_mla_rope_impl(
 ) -> None:
     forward_context = get_forward_context()
     attn_layer = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    kv_cache = attn_layer.kv_cache[0]
     slot_mapping = forward_context.slot_mapping
     assert isinstance(slot_mapping, dict), (
         f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
