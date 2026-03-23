@@ -158,7 +158,6 @@ async def transfer_run_periodically(
                 # subsequent iterations of this loop until the main thread has consumed
                 # it. Record is called by the main thread after move_from_buffer().
                 consumed_event = torch.cuda.Event()
-                cuda_stream.wait_event(consumed_event)
 
                 model_state.pending_result = AsyncEPLBLayerResult(
                     layer_idx=layer_idx,
@@ -170,6 +169,10 @@ async def transfer_run_periodically(
                     recv_metadata=recv_metadata,
                     consumed_event=consumed_event,
                 )
+
+                while model_state.pending_result is not None:
+                    await asyncio.sleep(0)
+                cuda_stream.wait_event(consumed_event)
                 layer_idx += 1
 
         state.rearrange_event.clear()

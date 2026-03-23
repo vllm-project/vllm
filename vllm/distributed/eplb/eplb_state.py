@@ -560,11 +560,8 @@ class EplbState:
                     eplb_model_state.pending_result is not None
                     and self._all_ranks_result_ready(eplb_model_state)
                 ):
-                    result = eplb_model_state.pending_result
-                    eplb_model_state.pending_result = None
                     self.move_to_workspace(
                         model_state=eplb_model_state,
-                        result=result,
                         ep_group=ep_group,
                     )
 
@@ -835,9 +832,10 @@ class EplbState:
     def move_to_workspace(
         self,
         model_state: EplbModelState,
-        result: AsyncEPLBLayerResult,
         ep_group: ProcessGroup,
     ) -> None:
+        result = model_state.pending_result
+        assert result is not None
         move_from_buffer(
             expert_weights=model_state.model.expert_weights[result.layer_idx],
             expert_weights_buffers=model_state.expert_buffer,
@@ -847,8 +845,10 @@ class EplbState:
             new_indices=result.new_physical_to_logical_map[result.layer_idx].numpy(),
             ep_rank=ep_group.rank(),
         )
+
         # Unblock the async worker
         result.consumed_event.record()
+        model_state.pending_result = None
 
         self._update_layer_mapping_from_new(model_state, result)
         logger.debug(
