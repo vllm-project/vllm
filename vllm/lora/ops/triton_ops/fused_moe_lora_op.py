@@ -354,7 +354,7 @@ def _fused_moe_lora_kernel(
         cur_k_offset = k * (BLOCK_SIZE_K * SPLIT_K)
         k_remaining = K - cur_k_offset
         # pre-fetch lora weight
-        if USE_TMA and b_desc is not None:
+        if b_desc is not None:
             b = (
                 b_desc.load([lora_id, expert_id, offs_bn, offs_bk + cur_k_offset])
                 .reshape(BLOCK_SIZE_N, BLOCK_SIZE_K)
@@ -369,7 +369,7 @@ def _fused_moe_lora_kernel(
                 b = tl.load(b_ptrs, mask=b_mask, other=0.0)
             b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
 
-        if USE_TMA and a_desc is not None:
+        if a_desc is not None:
             a = a_desc.load([offs_am, offs_ak + cur_k_offset])
         else:
             a = tl.load(
