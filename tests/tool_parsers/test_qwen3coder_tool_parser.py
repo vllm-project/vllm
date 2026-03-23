@@ -516,9 +516,7 @@ some text
 </tool_call>"""
 
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted = qwen3_tool_parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted = qwen3_tool_parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted.tool_calls[0].function.arguments)
     assert args["anyof_int"] == 5
@@ -616,13 +614,11 @@ true
                     if tool_call.function.name:
                         tool_states[idx]["name"] = tool_call.function.name
                     if tool_call.function.arguments is not None:
-                        tool_states[idx]["arguments"] += (
-                            tool_call.function.arguments
-                        )
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
 
     assert len(tool_states) == 1
     assert tool_states[0]["name"] == "search_web"
-
+    assert tool_states[0]["arguments"] is not None
     args = json.loads(tool_states[0]["arguments"])
     assert args["query"] == "vllm tool parser"
     assert isinstance(args["query"], str)

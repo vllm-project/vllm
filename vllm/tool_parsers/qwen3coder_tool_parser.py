@@ -140,9 +140,13 @@ class Qwen3CoderToolParser(ToolParser):
         """
         if isinstance(type_value, list):
             return next(
-                (str(t).strip().lower() for t in type_value
-                 if t is not None and str(t).lower() != "null"),
-                None)
+                (
+                    str(t).strip().lower()
+                    for t in type_value
+                    if t is not None and str(t).lower() != "null"
+                ),
+                None,
+            )
         if type_value is not None and str(type_value).lower() != "null":
             return str(type_value).strip().lower()
         return None
