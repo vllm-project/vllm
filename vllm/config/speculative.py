@@ -47,6 +47,7 @@ MTPModelTypes = Literal[
     "step3p5_mtp",
 ]
 EagleModelTypes = Literal["eagle", "eagle3", "extract_hidden_states", MTPModelTypes]
+NgramGPUTypes = Literal["ngram_gpu"]
 SpeculativeMethod = Literal[
     "ngram",
     "medusa",
@@ -54,7 +55,9 @@ SpeculativeMethod = Literal[
     "draft_model",
     "suffix",
     EagleModelTypes,
+    NgramGPUTypes,
 ]
+RejectionSampleMethod = Literal["strict", "probabilistic"]
 
 
 @config
@@ -64,7 +67,7 @@ class SpeculativeConfig:
     enforce_eager: bool | None = None
     """Override the default enforce_eager from model_config"""
     # General speculative decoding control
-    num_speculative_tokens: int = Field(default=None, gt=0)
+    num_speculative_tokens: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
     model: str | None = None
@@ -86,7 +89,7 @@ class SpeculativeConfig:
     warn users when they mistakenly provide the wrong argument."""
 
     # Draft model configuration
-    quantization: me_quant.QuantizationMethods | None = None
+    quantization: me_quant.QuantizationMethods | str | None = None
     """Quantization method that was used to quantize the draft model weights.
     If `None`, we assume the model weights are not quantized. Note that it only
     takes effect when using the draft model-based speculative method."""
@@ -168,6 +171,12 @@ class SpeculativeConfig:
     draft_load_config: LoadConfig | None = None
     """Load config for the draft model. If not specified, will use the load
     config from the target model."""
+
+    rejection_sample_method: RejectionSampleMethod = "strict"
+    """Whether to use strict (target and draft sampled tokens match exactly)
+    or probabilistic rejection sampling. Both respect the target model
+    distribution, but the latter yields a higher acceptance rate at the cost
+    of more memory to cache draft logits."""
 
     def compute_hash(self) -> str:
         """
@@ -271,7 +280,7 @@ class SpeculativeConfig:
             )
 
         if (
-            hf_config.model_type == "nemotron_h"
+            hf_config.model_type in {"nemotron_h", "nemotron_h_puzzle"}
             and hasattr(hf_config, "num_nextn_predict_layers")
             and hf_config.num_nextn_predict_layers > 0
         ):
@@ -364,6 +373,8 @@ class SpeculativeConfig:
                     self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
+            elif self.method == "ngram_gpu":
+                self.model = "ngram_gpu"
             elif self.method == "suffix":
                 self.model = "suffix"
             elif self.method == "extract_hidden_states":
@@ -374,8 +385,9 @@ class SpeculativeConfig:
                 )
 
         if self.method in ("ngram", "[ngram]"):
-            # Unified to "ngram" internally
             self.method = "ngram"
+
+        if self.method in ("ngram", "ngram_gpu"):
             # Set default values if not provided
             if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
                 # TODO(woosuk): Tune these values. They are arbitrarily chosen.
@@ -508,8 +520,10 @@ class SpeculativeConfig:
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):
-                    from vllm.transformers_utils.configs import SpeculatorsConfig
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
+                    from vllm.transformers_utils.configs.speculators import (
+                        SpeculatorsConfig,
+                    )
 
                     if isinstance(
                         self.draft_model_config.hf_config,
@@ -774,6 +788,10 @@ class SpeculativeConfig:
             "hunyuan_v1_dense",
             "afmoe",
             "nemotron_h",
+            "deepseek_v2",
+            "deepseek_v3",
+            "kimi_k2",
+            "kimi_k25",
         ]
         if (
             self.method in ("eagle3", "extract_hidden_states")
@@ -831,6 +849,9 @@ class SpeculativeConfig:
 
     def uses_extract_hidden_states(self) -> bool:
         return self.method == "extract_hidden_states"
+
+    def use_ngram_gpu(self) -> bool:
+        return self.method == "ngram_gpu"
 
     def __repr__(self) -> str:
         method = self.method

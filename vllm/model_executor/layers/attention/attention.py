@@ -221,11 +221,9 @@ class Attention(nn.Module, AttentionLayerBase):
         vllm_config = get_current_vllm_config()
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
-            block_size = cache_config.block_size
             calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
-            block_size = 16
             calculate_kv_scales = False
 
         # llm-compressor mdls need to set cache_dtype to "fp8" manually.
@@ -275,7 +273,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size,
                 dtype,
                 kv_cache_dtype,
-                block_size,
                 use_mla=False,
                 has_sink=self.has_sink,
                 use_mm_prefix=self.use_mm_prefix,
@@ -592,7 +589,7 @@ def get_attention_context(
         - attn_metadata: Attention metadata for this specific layer, or None if
             no metadata available
         - attn_layer: The attention layer instance (Attention or MLAAttention)
-        - kv_cache: The KV cache tensor for current virtual engine
+        - kv_cache: The KV cache tensor for current forward pass
         - slot_mapping: The slot mapping for this specific layer
 
         Note: attn_metadata may be None, but attn_layer and kv_cache are always
@@ -603,7 +600,7 @@ def get_attention_context(
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    kv_cache = attn_layer.kv_cache[0]
     slot_mapping = forward_context.slot_mapping
     assert isinstance(slot_mapping, dict), (
         f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "

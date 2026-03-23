@@ -3,12 +3,12 @@
 """Benchmark offline inference throughput."""
 
 import argparse
-import dataclasses
 import json
 import os
 import random
 import time
 import warnings
+from dataclasses import fields
 from typing import Any
 
 import torch
@@ -38,6 +38,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.async_utils import merge_async_iterators
@@ -52,7 +53,7 @@ def run_vllm(
 ) -> tuple[float, list[RequestOutput] | None]:
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
     assert all(
         llm.llm_engine.model_config.max_model_len
         >= (request.prompt_len + request.expected_output_len)
@@ -140,7 +141,7 @@ def run_vllm_chat(
     """
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
 
     assert all(
         llm.llm_engine.model_config.max_model_len
@@ -180,7 +181,6 @@ async def run_vllm_async(
     n: int,
     engine_args: AsyncEngineArgs,
     do_profile: bool,
-    disable_frontend_multiprocessing: bool = False,
     disable_detokenize: bool = False,
 ) -> float:
     from vllm import SamplingParams
@@ -190,7 +190,6 @@ async def run_vllm_async(
 
     async with build_async_engine_client_from_engine_args(
         engine_args,
-        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
     ) as llm:
         model_config = llm.model_config
         assert all(
@@ -256,17 +255,21 @@ def run_hf(
     max_batch_size: int,
     trust_remote_code: bool,
     disable_detokenize: bool = False,
+    dtype: torch.dtype | None = torch.float16,
+    enable_torch_compile: bool = False,
 ) -> float:
     assert isinstance(tokenizer, PreTrainedTokenizerBase), (
         "the hf backend only supports HF tokenizers"
     )
     llm = AutoModelForCausalLM.from_pretrained(
-        model, dtype=torch.float16, trust_remote_code=trust_remote_code
+        model, dtype=dtype, trust_remote_code=trust_remote_code
     )
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
         tokenizer.pad_token = tokenizer.eos_token
-    llm = llm.cuda()
+    llm = llm.to(current_platform.device_type)
+    if enable_torch_compile:
+        llm = torch.compile(llm)
 
     pbar = tqdm(total=len(requests))
     start = time.perf_counter()
@@ -295,7 +298,7 @@ def run_hf(
         # Generate the sequences.
         input_ids = tokenizer(batch, return_tensors="pt", padding=True).input_ids
         llm_outputs = llm.generate(
-            input_ids=input_ids.cuda(),
+            input_ids=input_ids.to(current_platform.device_type),
             do_sample=True,
             num_return_sequences=n,
             temperature=1.0,
@@ -345,6 +348,7 @@ def get_requests(args, tokenizer):
         "tokenizer": tokenizer,
         "lora_path": args.lora_path,
         "max_loras": args.max_loras,
+        "lora_assignment": getattr(args, "lora_assignment", "random"),
         "num_requests": args.num_prompts,
     }
 
@@ -734,6 +738,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Maximum batch size for HF backend.",
     )
     parser.add_argument(
+        "--hf-enable-torch-compile",
+        action="store_true",
+        default=False,
+        help="Enable Torch compile for HF backend.",
+    )
+    parser.add_argument(
         "--output-json",
         type=str,
         default=None,
@@ -744,12 +754,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         action="store_true",
         default=False,
         help="Use vLLM async engine rather than LLM class.",
-    )
-    parser.add_argument(
-        "--disable-frontend-multiprocessing",
-        action="store_true",
-        default=False,
-        help="Disable decoupled async engine frontend.",
     )
     parser.add_argument(
         "--disable-detokenize",
@@ -766,6 +770,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="Path to the lora adapters to use. This can be an absolute path, "
         "a relative path, or a Hugging Face model identifier.",
+    )
+    parser.add_argument(
+        "--lora-assignment",
+        type=str,
+        default="random",
+        choices=["random", "round-robin"],
+        help="Strategy for assigning LoRA adapters to requests. "
+        "'random' (default) selects a LoRA at random for each request. "
+        "'round-robin' cycles through LoRAs deterministically.",
     )
     parser.add_argument(
         "--prefix-len",
@@ -859,7 +872,6 @@ def main(args: argparse.Namespace):
                     requests,
                     args.n,
                     AsyncEngineArgs.from_cli_args(args),
-                    disable_frontend_multiprocessing=args.disable_frontend_multiprocessing,
                     disable_detokenize=args.disable_detokenize,
                     do_profile=args.profile,
                 )
@@ -884,6 +896,8 @@ def main(args: argparse.Namespace):
             args.hf_max_batch_size,
             args.trust_remote_code,
             args.disable_detokenize,
+            dtype=args.dtype,
+            enable_torch_compile=args.hf_enable_torch_compile,
         )
     elif args.backend == "vllm-chat":
         elapsed_time, request_outputs = run_vllm_chat(
