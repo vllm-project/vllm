@@ -36,11 +36,12 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            truncation_side=self.truncation_side,
             do_lower_case=encoder_config.get("do_lower_case", False),
             max_total_tokens_param="max_model_len",
         )
 
-    def to_pooling_params(self, task: PoolingTask = "score"):
+    def to_pooling_params(self, task: PoolingTask = "classify"):
         return PoolingParams(
             task=task,
             use_activation=self.use_activation,
@@ -111,11 +112,12 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            truncation_side=self.truncation_side,
             do_lower_case=encoder_config.get("do_lower_case", False),
             max_total_tokens_param="max_model_len",
         )
 
-    def to_pooling_params(self, task: PoolingTask = "score"):
+    def to_pooling_params(self, task: PoolingTask = "classify"):
         return PoolingParams(
             task=task,
             use_activation=self.use_activation,
