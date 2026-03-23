@@ -7,9 +7,11 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
-from vllm.v1.kv_cache_interface import (
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CanonicalKVCaches,
+    SupportsHMA,
+)
+from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
