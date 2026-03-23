@@ -82,6 +82,11 @@ class OffloadingConnectorScheduler:
         planner = self._get_hybrid_planner()
         return planner.chunk_count_for_tokens(tokens)
 
+    def _logical_chunk_idx(self, chunk_idx: int) -> int:
+        if not self.hybrid_offload_enabled:
+            return chunk_idx
+        return chunk_idx + self._get_hybrid_planner().first_hashable_chunk_idx
+
     def _get_hybrid_planner(self):
         planner = self.hybrid_planner
         if planner is None:
@@ -150,8 +155,14 @@ class OffloadingConnectorScheduler:
             )
             sub_blocks_per_gpu_block = gpu_block_size // unit_size
 
-            start_unit_idx = (start_chunk_idx * self.offloaded_block_size) // unit_size
-            end_unit_idx = (end_chunk_idx * self.offloaded_block_size) // unit_size
+            logical_start_chunk_idx = self._logical_chunk_idx(start_chunk_idx)
+            logical_end_chunk_idx = self._logical_chunk_idx(end_chunk_idx)
+            start_unit_idx = (
+                logical_start_chunk_idx * self.offloaded_block_size
+            ) // unit_size
+            end_unit_idx = (
+                logical_end_chunk_idx * self.offloaded_block_size
+            ) // unit_size
             assert end_unit_idx >= start_unit_idx
 
             group_entry_count = 0
@@ -206,7 +217,7 @@ class OffloadingConnectorScheduler:
 
     def _get_num_offloaded_blocks(self, request: Request) -> int:
         if self.hybrid_offload_enabled:
-            return request.num_tokens // self.offloaded_block_size
+            return self._chunk_count_for_tokens(request.num_tokens)
 
         assert self.hash_block_size_factor is not None
         return len(request.block_hashes) // self.hash_block_size_factor

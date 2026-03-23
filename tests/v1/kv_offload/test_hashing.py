@@ -48,3 +48,16 @@ def test_hybrid_chunk_block_hash_list_uses_per_group_granularity():
 
     assert len(hash_list) == 4
     assert hash_list[0] != hash_list[1]
+
+
+def test_hybrid_chunk_block_hash_list_skips_leading_unhashable_chunks():
+    request = make_request(100000, block_size=1056)
+    hash_list = HybridChunkBlockHashList(
+        request,
+        group_block_sizes=(50000, 16384, 1056),
+        logical_chunk_size=16384,
+        hash_function=sha256,
+    )
+
+    assert hash_list.first_hashable_chunk_idx == 3
+    assert len(hash_list) == 3

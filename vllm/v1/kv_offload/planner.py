@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+import math
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class HybridOffloadPlanner:
             raise ValueError("gpu_block_sizes must be non-empty")
         if any(block_size <= 0 for block_size in self.gpu_block_sizes):
             raise ValueError("gpu_block_sizes must be positive")
+
     @property
     def offload_unit_sizes(self) -> tuple[int, ...]:
         units: list[int] = []
@@ -57,6 +59,13 @@ class HybridOffloadPlanner:
         return any(self.requires_partial_group_offload)
 
     @property
+    def first_hashable_chunk_idx(self) -> int:
+        return max(
+            math.ceil(unit_size / self.fixed_chunk_size)
+            for unit_size in self.offload_unit_sizes
+        ) - 1
+
+    @property
     def group_hash_factors(self) -> tuple[int | None, ...]:
         return tuple(
             (
@@ -72,13 +81,17 @@ class HybridOffloadPlanner:
     ) -> tuple[int, ...]:
         if chunk_count < 0:
             raise ValueError("chunk_count must be non-negative")
-        logical_tokens = chunk_count * self.fixed_chunk_size
+        logical_tokens = (
+            chunk_count + self.first_hashable_chunk_idx
+        ) * self.fixed_chunk_size
         return tuple(
             (logical_tokens // unit_size) * unit_size
             for unit_size in self.offload_unit_sizes
         )
 
     def chunk_prefix_tokens(self, chunk_count: int) -> int:
+        if chunk_count <= 0:
+            return 0
         return self.loadable_prefix_tokens(
             self.group_covered_tokens_for_chunk_count(chunk_count)
         )
@@ -88,7 +101,10 @@ class HybridOffloadPlanner:
             raise ValueError("tokens must be non-negative")
 
         low = 0
-        high = tokens // self.fixed_chunk_size + 1
+        high = max(
+            0,
+            tokens // self.fixed_chunk_size + 1 - self.first_hashable_chunk_idx,
+        )
         while low < high:
             mid = (low + high + 1) // 2
             if self.chunk_prefix_tokens(mid) <= tokens:

@@ -46,6 +46,9 @@ def test_fixed_chunk_leaves_indivisible_large_groups_unsplit():
 
     assert planner.offload_unit_sizes == (16384, 50000, 1056)
     assert planner.requires_partial_group_offload == (True, False, False)
+    assert planner.first_hashable_chunk_idx == 3
+    assert planner.chunk_count_for_tokens(16_384) == 0
+    assert planner.chunk_count_for_tokens(50_000) == 1
 
 
 def test_storeable_prefix_uses_common_fully_covered_units():

@@ -104,13 +104,21 @@ class HybridChunkBlockHashList:
         self.group_block_sizes = group_block_sizes
         self.logical_chunk_size = logical_chunk_size
         self.hash_function = hash_function
+        self.first_hashable_chunk_idx = max(
+            (block_size + logical_chunk_size - 1) // logical_chunk_size
+            for block_size in group_block_sizes
+        ) - 1
         self.group_hashes = tuple(
             RequestBlockHashList(request, block_size, hash_function)
             for block_size in group_block_sizes
         )
 
     def __len__(self) -> int:
-        return self.request.num_tokens // self.logical_chunk_size
+        return max(
+            0,
+            self.request.num_tokens // self.logical_chunk_size
+            - self.first_hashable_chunk_idx,
+        )
 
     @overload
     def __getitem__(self, idx: int) -> BlockHash: ...
@@ -133,10 +141,11 @@ class HybridChunkBlockHashList:
             yield self._get_value_at(i)
 
     def _get_value_at(self, idx: int) -> BlockHash:
-        chunk_end = (idx + 1) * self.logical_chunk_size
+        chunk_end = (
+            idx + 1 + self.first_hashable_chunk_idx
+        ) * self.logical_chunk_size
         component_hashes: list[BlockHash] = []
         for block_size, group_hashes in zip(self.group_block_sizes, self.group_hashes):
             num_full_blocks = chunk_end // block_size
-            assert num_full_blocks > 0
             component_hashes.append(group_hashes[num_full_blocks - 1])
         return BlockHash(self.hash_function(tuple(component_hashes)))
