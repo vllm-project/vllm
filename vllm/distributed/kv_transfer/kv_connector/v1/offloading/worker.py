@@ -318,7 +318,7 @@ class OffloadingConnectorWorker:
             self._jobs[job_id] = (req_id, False)
             assert req_id not in self._load_job
             self._load_job[req_id] = job_id
-            logger.info(
+            logger.debug(
                 "offloading worker submit load req_id=%s job_id=%s",
                 req_id,
                 job_id,
@@ -331,7 +331,7 @@ class OffloadingConnectorWorker:
             job_id = self._generate_job_id()
             self._jobs[job_id] = (req_id, True)
             self._store_jobs[req_id].add(job_id)
-            logger.info(
+            logger.debug(
                 "offloading worker queue store req_id=%s job_id=%s",
                 req_id,
                 job_id,
@@ -356,7 +356,7 @@ class OffloadingConnectorWorker:
         for transfer_result in self.worker.get_finished():
             # we currently do not support job failures
             job_id = transfer_result.job_id
-            logger.info(
+            logger.debug(
                 "offloading worker finished job_id=%s success=%s transfer_type=%s transfer_size=%s",
                 job_id,
                 transfer_result.success,
@@ -389,7 +389,7 @@ class OffloadingConnectorWorker:
                 req_job = self._load_job[req_id]
                 assert job_id == req_job
                 del self._load_job[req_id]
-                logger.info(
+                logger.debug(
                     "offloading worker finished load req_id=%s job_id=%s",
                     req_id,
                     job_id,
@@ -401,7 +401,7 @@ class OffloadingConnectorWorker:
             if pending_req_jobs:
                 self._finished_reqs_waiting_for_store.add(req_id)
             elif pending_req_jobs is not None:
-                logger.info("offloading worker finished sending req_id=%s", req_id)
+                logger.debug("offloading worker finished sending req_id=%s", req_id)
                 finished_sending.add(req_id)
                 del self._store_jobs[req_id]
 

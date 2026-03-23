@@ -83,9 +83,6 @@ class OffloadingConnectorScheduler:
         # group-level hashes instead of recomputing them from scratch each step.
         self._hybrid_hash_lists: dict[ReqId, HybridChunkBlockHashList] = {}
 
-    def _ensure_transfer_supported(self) -> None:
-        return
-
     def _chunk_prefix_tokens(self, chunk_count: int) -> int:
         if not self.hybrid_offload_enabled:
             return chunk_count * self.offloaded_block_size
@@ -329,7 +326,6 @@ class OffloadingConnectorScheduler:
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
-        self._ensure_transfer_supported()
         self._requests[request.request_id] = request
         self._request_block_ids[request.request_id] = self._empty_block_groups()
 
@@ -381,7 +377,6 @@ class OffloadingConnectorScheduler:
             self._blocks_being_loaded.update(req_blocks_being_loaded)
 
     def _get_reqs_to_store(self, scheduler_output: SchedulerOutput):
-        self._ensure_transfer_supported()
         reqs_to_store: dict[ReqId, TransferSpec] = {}
         # iterate over both new and cached requests
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
