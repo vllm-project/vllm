@@ -14,10 +14,10 @@ Run:
 """
 
 import argparse
-import dataclasses
 import json
 import time
 from collections import defaultdict
+from dataclasses import fields
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -225,7 +225,7 @@ def benchmark_multimodal_processor(
         args.seed = 0
 
     engine_args = EngineArgs.from_cli_args(args)
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
 
     tokenizer = llm.get_tokenizer()
     requests = get_requests(args, tokenizer)

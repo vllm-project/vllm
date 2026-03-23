@@ -10,16 +10,12 @@
 # --------------------------------------------------------
 import torch
 from PIL import Image
-from transformers import PretrainedConfig
 
-from vllm.multimodal.processing import PromptUpdateDetails
-from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import (
-    IMG_CONTEXT,
-    IMG_END,
-    IMG_START,
-    BaseInternVLProcessor,
+    InternVLImageProcessor,
+    InternVLProcessor,
     build_transform,
     find_closest_aspect_ratio,
     get_internvl_target_ratios,
@@ -217,44 +213,25 @@ def image_to_pixel_values_h2ovl(
     return pixel_values
 
 
-class H2OVLProcessor(BaseInternVLProcessor):
+class H2OVLImageProcessor(InternVLImageProcessor):
     def __init__(
         self,
-        config: PretrainedConfig,
-        tokenizer: TokenizerLike,
-        *,
-        min_dynamic_patch: int | None = None,
-        max_dynamic_patch: int | None = None,
-        dynamic_image_size: bool | None = None,
-        use_msac: bool | None = None,
+        image_size: int,
+        min_dynamic_patch: int,
+        max_dynamic_patch: int,
+        dynamic_image_size: bool,
+        use_thumbnail: bool,
+        use_msac: bool,
     ) -> None:
         super().__init__(
-            config,
-            tokenizer,
+            image_size=image_size,
             min_dynamic_patch=min_dynamic_patch,
             max_dynamic_patch=max_dynamic_patch,
             dynamic_image_size=dynamic_image_size,
+            use_thumbnail=use_thumbnail,
         )
 
-        if use_msac is None:
-            use_msac = config.use_msac
-        assert isinstance(use_msac, bool)
-
         self.use_msac = use_msac
-
-    @property
-    def image_token_id(self) -> int:
-        return self.tokenizer.get_vocab()[IMG_CONTEXT]
-
-    def get_image_repl(
-        self,
-        feature_size: int,
-        num_patches: int | None,
-    ) -> PromptUpdateDetails[str]:
-        repl_features = IMG_CONTEXT * feature_size
-        repl_full = IMG_START + repl_features + IMG_END
-
-        return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
     def resolve_min_max_num(
         self,
@@ -264,18 +241,14 @@ class H2OVLProcessor(BaseInternVLProcessor):
         dynamic_image_size: bool | None = None,
         use_thumbnail: bool | None = None,
     ) -> tuple[int, int]:
-        min_dynamic_patch = (
-            self.min_dynamic_patch if min_dynamic_patch is None else min_dynamic_patch
-        )
-        max_dynamic_patch = (
-            self.max_dynamic_patch if max_dynamic_patch is None else max_dynamic_patch
-        )
-        dynamic_image_size = (
-            self.dynamic_image_size
-            if dynamic_image_size is None
-            else dynamic_image_size
-        )
-        use_thumbnail = self.use_thumbnail if use_thumbnail is None else use_thumbnail
+        if min_dynamic_patch is None:
+            min_dynamic_patch = self.min_dynamic_patch
+        if max_dynamic_patch is None:
+            max_dynamic_patch = self.max_dynamic_patch
+        if dynamic_image_size is None:
+            dynamic_image_size = self.dynamic_image_size
+        if use_thumbnail is None:
+            use_thumbnail = self.use_thumbnail
 
         return resolve_h2ovl_min_max_num(
             min_dynamic_patch=min_dynamic_patch,
@@ -283,83 +256,6 @@ class H2OVLProcessor(BaseInternVLProcessor):
             dynamic_image_size=dynamic_image_size,
             use_thumbnail=use_thumbnail,
         )
-
-    def resolve_target_ratios(
-        self,
-        *,
-        min_dynamic_patch: int | None = None,
-        max_dynamic_patch: int | None = None,
-        dynamic_image_size: bool | None = None,
-        use_thumbnail: bool | None = None,
-        prior_aspect_ratio: tuple[int, int] | None = None,
-        override_min_num: int | None = None,
-    ) -> list[tuple[int, int]]:
-        min_num, max_num = self.resolve_min_max_num(
-            min_dynamic_patch=min_dynamic_patch,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-            use_thumbnail=use_thumbnail,
-        )
-        if override_min_num is not None:
-            min_num = override_min_num
-
-        return get_h2ovl_target_ratios(
-            min_num,
-            max_num,
-            prior_aspect_ratio=prior_aspect_ratio,
-        )
-
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        use_msac: bool | None = None,
-    ) -> int:
-        use_msac = self.use_msac if use_msac is None else use_msac
-
-        use_thumbnail = self.use_thumbnail
-
-        if use_msac:
-            target_ratios_1 = self.resolve_target_ratios(
-                use_thumbnail=False,  # Applied in calculate_targets
-                override_min_num=1,
-            )
-            num_patches_1, _, _, aspect_ratio_1 = calculate_h2ovl_targets(
-                orig_width=image_width,
-                orig_height=image_height,
-                image_size=self.image_size,
-                target_ratios=target_ratios_1,
-                use_thumbnail=True,
-            )
-
-            target_ratios_2 = self.resolve_target_ratios(
-                use_thumbnail=False,  # Applied in calculate_targets
-                prior_aspect_ratio=aspect_ratio_1,
-                override_min_num=3,
-            )
-            num_patches_2, _, _, _ = calculate_h2ovl_targets(
-                orig_width=image_width,
-                orig_height=image_height,
-                image_size=self.image_size,
-                target_ratios=target_ratios_2,
-                use_thumbnail=True,
-            )
-
-            num_patches = num_patches_1 + num_patches_2 - 1
-        else:
-            target_ratios = self.resolve_target_ratios(
-                use_thumbnail=False,  # Applied in calculate_targets
-            )
-            num_patches, _, _, _ = calculate_h2ovl_targets(
-                orig_width=image_width,
-                orig_height=image_height,
-                image_size=self.image_size,
-                target_ratios=target_ratios,
-                use_thumbnail=use_thumbnail,
-            )
-
-        return num_patches * self.num_image_token
 
     def _images_to_pixel_values_lst(
         self,
@@ -388,3 +284,104 @@ class H2OVLProcessor(BaseInternVLProcessor):
             )
             for image in images
         ]
+
+
+class H2OVLProcessor(InternVLProcessor):
+    def __init__(
+        self,
+        image_processor: H2OVLImageProcessor,
+        tokenizer: HfTokenizer,
+        *,
+        image_seq_length: int,
+        start_image_token: str = "<img>",
+        end_image_token: str = "</img>",
+        ctx_image_token: str = "<IMG_CONTEXT>",
+    ) -> None:
+        super().__init__(
+            image_processor=image_processor,
+            tokenizer=tokenizer,
+            image_seq_length=image_seq_length,
+            start_image_token=start_image_token,
+            end_image_token=end_image_token,
+            ctx_image_token=ctx_image_token,
+        )
+
+        self.image_processor: H2OVLImageProcessor
+
+    def resolve_target_ratios(
+        self,
+        *,
+        min_dynamic_patch: int | None = None,
+        max_dynamic_patch: int | None = None,
+        dynamic_image_size: bool | None = None,
+        use_thumbnail: bool | None = None,
+        prior_aspect_ratio: tuple[int, int] | None = None,
+        override_min_num: int | None = None,
+    ) -> list[tuple[int, int]]:
+        min_num, max_num = self.image_processor.resolve_min_max_num(
+            min_dynamic_patch=min_dynamic_patch,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+            use_thumbnail=use_thumbnail,
+        )
+        if override_min_num is not None:
+            min_num = override_min_num
+
+        return get_h2ovl_target_ratios(
+            min_num,
+            max_num,
+            prior_aspect_ratio=prior_aspect_ratio,
+        )
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        use_msac: bool | None = None,
+    ) -> int:
+        image_processor = self.image_processor
+        use_msac = image_processor.use_msac if use_msac is None else use_msac
+
+        use_thumbnail = image_processor.use_thumbnail
+
+        if use_msac:
+            target_ratios_1 = self.resolve_target_ratios(
+                use_thumbnail=False,  # Applied in calculate_targets
+                override_min_num=1,
+            )
+            num_patches_1, _, _, aspect_ratio_1 = calculate_h2ovl_targets(
+                orig_width=image_width,
+                orig_height=image_height,
+                image_size=image_processor.image_size,
+                target_ratios=target_ratios_1,
+                use_thumbnail=True,
+            )
+
+            target_ratios_2 = self.resolve_target_ratios(
+                use_thumbnail=False,  # Applied in calculate_targets
+                prior_aspect_ratio=aspect_ratio_1,
+                override_min_num=3,
+            )
+            num_patches_2, _, _, _ = calculate_h2ovl_targets(
+                orig_width=image_width,
+                orig_height=image_height,
+                image_size=image_processor.image_size,
+                target_ratios=target_ratios_2,
+                use_thumbnail=True,
+            )
+
+            num_patches = num_patches_1 + num_patches_2 - 1
+        else:
+            target_ratios = self.resolve_target_ratios(
+                use_thumbnail=False,  # Applied in calculate_targets
+            )
+            num_patches, _, _, _ = calculate_h2ovl_targets(
+                orig_width=image_width,
+                orig_height=image_height,
+                image_size=image_processor.image_size,
+                target_ratios=target_ratios,
+                use_thumbnail=use_thumbnail,
+            )
+
+        return num_patches * self.image_seq_length
