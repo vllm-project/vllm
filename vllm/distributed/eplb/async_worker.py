@@ -14,7 +14,7 @@ from torch.distributed import ProcessGroup
 from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
 
-from .eplb_utils import EventWrapper
+from .eplb_utils import EPLBEvent
 from .rebalance_execute import AsyncEPLBLayerResult, transfer_layer
 
 if TYPE_CHECKING:
@@ -158,7 +158,7 @@ async def transfer_run_periodically(
                 # This event guarantees that expert_buffer will not be overwritten by
                 # subsequent iterations of this loop until the main thread has consumed
                 # it. Record is called by the main thread after move_from_buffer().
-                consumed_event = EventWrapper()
+                consumed_event = EPLBEvent()
 
                 model_state.pending_result = AsyncEPLBLayerResult(
                     layer_idx=layer_idx,

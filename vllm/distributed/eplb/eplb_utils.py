@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-class EventWrapper:
+class EPLBEvent:
     """
     A CUDA event with a CPU-side flag that guards against calling
     event.wait() before event.record() has been called (which would
