@@ -1573,38 +1573,6 @@ class SpecDecodeBaseProposer:
             use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
         return use_aux_hidden_state
 
-    def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
-        """
-        Validate that draft attention layers belong to one KVCacheGroup
-        and draft mamba layers belong to separate groups.  Hybrid draft
-        models (e.g. Jamba) may have both types.
-        """
-        layer_to_gid: dict[str, int] = {}
-        gid_to_spec = {}
-        for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            gid_to_spec[gid] = kv_cache_group.kv_cache_spec
-            for layer_name in kv_cache_group.layer_names:
-                layer_to_gid[layer_name] = gid
-
-        # Classify draft layers into attention vs mamba groups.
-        attn_gids: set[int] = set()
-        mamba_gids: set[int] = set()
-        for layer_name in self._draft_attn_layer_names:
-            gid = layer_to_gid[layer_name]
-            spec = gid_to_spec[gid]
-            if isinstance(spec, MambaSpec) or (
-                isinstance(spec, UniformTypeKVCacheSpecs)
-                and any(isinstance(s, MambaSpec) for s in spec.kv_cache_specs.values())
-            ):
-                mamba_gids.add(gid)
-            else:
-                attn_gids.add(gid)
-
-        assert len(attn_gids) == 1, (
-            "All draft attention layers should belong to the same "
-            f"kv cache group, but found groups: {attn_gids}"
-        )
-
     def initialize_attn_backend(
         self,
         kv_cache_config: KVCacheConfig,
@@ -1620,18 +1588,16 @@ class SpecDecodeBaseProposer:
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
 
-        self.validate_same_kv_cache_group(kv_cache_config)
-
-        # Build a mapping: layer_name -> (gid, is_mamba)
+        # Map each layer to its KV cache group and detect mamba groups.
         layer_gid: dict[str, int] = {}
-        gid_is_mamba: dict[int, bool] = {}
+        mamba_gids: set[int] = set()
         for gid, group in enumerate(kv_cache_config.kv_cache_groups):
             spec = group.kv_cache_spec
-            is_mamba = isinstance(spec, MambaSpec) or (
+            if isinstance(spec, MambaSpec) or (
                 isinstance(spec, UniformTypeKVCacheSpecs)
                 and any(isinstance(s, MambaSpec) for s in spec.kv_cache_specs.values())
-            )
-            gid_is_mamba[gid] = is_mamba
+            ):
+                mamba_gids.add(gid)
             for layer_name in group.layer_names:
                 layer_gid[layer_name] = gid
 
@@ -1639,11 +1605,15 @@ class SpecDecodeBaseProposer:
         self._mamba_kv_cache_gids = []
         for layer_name in self._draft_attn_layer_names:
             gid = layer_gid.get(layer_name, -1)
-            if gid >= 0 and gid_is_mamba.get(gid, False):
+            if gid >= 0 and gid in mamba_gids:
                 if gid not in self._mamba_kv_cache_gids:
                     self._mamba_kv_cache_gids.append(gid)
             elif self.kv_cache_gid < 0 and gid >= 0:
                 self.kv_cache_gid = gid
+
+        assert self.kv_cache_gid >= 0 or not self._draft_attn_layer_names, (
+            "Draft attention layers must belong to a kv cache group"
+        )
 
         # Build AttentionGroups per KV cache group containing draft layers.
         attention_groups: dict[str, AttentionGroup] = {}
