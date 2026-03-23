@@ -165,6 +165,9 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+    # Model-specific tensor metadata for this request, consumed by
+    # the output processor.
+    model_extra_output: dict[str, torch.Tensor] | None = None
 
     @property
     def finished(self) -> bool:

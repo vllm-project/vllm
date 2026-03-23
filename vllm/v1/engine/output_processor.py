@@ -644,6 +644,12 @@ class OutputProcessor:
                 kv_transfer_params,
                 routed_experts,
             ):
+                self._apply_model_output_overrides(
+                    request_output=request_output,
+                    model_extra_output=engine_core_output.model_extra_output,
+                    finish_reason=finish_reason,
+                )
+
                 if req_state.streaming_input:
                     request_output.finished = False
 
@@ -680,6 +686,24 @@ class OutputProcessor:
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
+
+    def _apply_model_output_overrides(
+        self,
+        *,
+        request_output: RequestOutput | PoolingRequestOutput,
+        model_extra_output: dict[str, torch.Tensor] | None,
+        finish_reason: FinishReason | None,
+    ) -> None:
+        if (
+            finish_reason is None
+            or not isinstance(request_output, RequestOutput)
+            or not request_output.outputs
+            or not model_extra_output
+        ):
+            return
+
+        for comp_output in request_output.outputs:
+            comp_output.model_extra_output = model_extra_output
 
     def _finish_request(self, req_state: RequestState) -> None:
         req_id = req_state.request_id

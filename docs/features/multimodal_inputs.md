@@ -215,6 +215,100 @@ When loading RGBA images (images with transparency), vLLM converts them to RGB f
     - This setting only affects RGBA images with transparency; RGB images are unchanged
     - If not specified, the default white background `(255, 255, 255)` is used for backward compatibility
 
+#### Moondream3 Prompt Recipes { #moondream3-prompt-recipes }
+
+`Moondream3ForCausalLM` supports four task-specific prompt formats:
+
+- `query`: ask a question about the image.
+- `caption`: generate a caption for the image.
+- `detect`: return boxes for an object.
+- `point`: return points for an object.
+
+```python
+import json
+
+from vllm import LLM, SamplingParams
+from vllm.assets.image import ImageAsset
+
+llm = LLM(
+    model="moondream/moondream3-preview",
+    tokenizer="moondream/starmie-v1",
+    trust_remote_code=True,
+    max_model_len=2048,
+    limit_mm_per_prompt={"image": 1},
+    io_processor_plugin=(
+        "vllm.plugins.io_processors.moondream3."
+        "Moondream3DetectPointIOProcessor"
+    ),
+)
+
+image = ImageAsset("stop_sign").pil_image
+
+
+def make_query_prompt(question: str) -> str:
+    return (
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>"
+        f"{question}<|md_reserved_2|>"
+    )
+
+
+def make_detect_prompt(obj: str) -> str:
+    return (
+        "<|endoftext|><image><|md_reserved_0|>detect<|md_reserved_1|>"
+        f" {obj}<|md_reserved_2|>"
+    )
+
+
+def make_point_prompt(obj: str) -> str:
+    return (
+        "<|endoftext|><image><|md_reserved_0|>point<|md_reserved_1|>"
+        f" {obj}<|md_reserved_2|>"
+    )
+
+
+def make_caption_prompt() -> str:
+    return (
+        "<|endoftext|><image><|md_reserved_0|>"
+        "describe<|md_reserved_1|>normal<|md_reserved_2|>"
+    )
+
+
+query_out = llm.generate(
+    {
+        "prompt": make_query_prompt("What is shown in this image?"),
+        "multi_modal_data": {"image": image},
+    },
+    SamplingParams(max_tokens=64, temperature=0),
+)[0].outputs[0].text
+
+caption_out = llm.generate(
+    {
+        "prompt": make_caption_prompt(),
+        "multi_modal_data": {"image": image},
+    },
+    SamplingParams(max_tokens=100, temperature=0),
+)[0].outputs[0].text
+
+detect_out = llm.generate(
+    {"data": {"task": "detect", "object": "sign", "image": image}},
+    SamplingParams(max_tokens=500, temperature=0),
+)[0].outputs[0].text
+
+point_out = llm.generate(
+    {"data": {"task": "point", "object": "sign", "image": image}},
+    SamplingParams(max_tokens=500, temperature=0),
+)[0].outputs[0].text
+
+print("query:", query_out)
+print("caption:", caption_out)
+print("detect:", json.loads(detect_out))
+print("point:", json.loads(point_out))
+```
+
+!!! note
+    `detect` and `point` use the Moondream3 generation IOProcessor plugin.
+    Query and caption still use the standard multimodal prompt path.
+
 ### Video Inputs
 
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary

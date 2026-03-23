@@ -253,6 +253,10 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # Per-request model-specific extra outputs:
+    # req_id -> model-defined tensor metadata forwarded to the output processor.
+    model_extra_output: dict[str, dict[str, torch.Tensor]] | None = None
+
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):

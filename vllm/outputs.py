@@ -42,6 +42,7 @@ class CompletionOutput:
     token_ids: GenericSequence[int]
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
+    model_extra_output: dict[str, torch.Tensor] | None = None
     routed_experts: np.ndarray | None = None  # [seq_len,layer_num,topk]
     finish_reason: str | None = None
     stop_reason: int | str | None = None
@@ -162,6 +163,9 @@ class RequestOutput:
                             completion.logprobs.extend(next_completion.logprobs)  # type: ignore[arg-type]
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
+                        )
+                        completion.model_extra_output = (
+                            next_completion.model_extra_output
                         )
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason

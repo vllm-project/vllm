@@ -7,7 +7,7 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -21,7 +21,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
-from vllm.inputs import ProcessorInputs, PromptType
+from vllm.inputs import DataPrompt, ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -29,7 +29,7 @@ from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
-from vllm.renderers.inputs.preprocess import extract_prompt_components
+from vllm.renderers.inputs.preprocess import extract_prompt_components, prompt_to_seq
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -530,6 +530,7 @@ class AsyncLLM(EngineClient):
         self,
         prompt: EngineCoreRequest
         | PromptType
+        | DataPrompt
         | ProcessorInputs
         | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
@@ -559,7 +560,25 @@ class AsyncLLM(EngineClient):
         """
 
         q: RequestOutputCollector | None = None
+        use_io_processor = False
         try:
+            if isinstance(prompt, dict) and "data" in prompt:
+                if self.io_processor is None:
+                    raise ValueError(
+                        "No IOProcessor plugin installed, but "
+                        "`AsyncLLM.generate()` received a prompt with a "
+                        "`data` field."
+                    )
+                (
+                    prompt,
+                    sampling_params,
+                ) = await self._prepare_generate_io_processor_input(
+                    cast(DataPrompt, prompt),
+                    sampling_params,
+                    request_id,
+                )
+                use_io_processor = True
+
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -586,6 +605,12 @@ class AsyncLLM(EngineClient):
                 assert isinstance(out, RequestOutput)
                 finished = out.finished
                 if out is not STREAM_FINISHED:
+                    if use_io_processor:
+                        assert self.io_processor is not None
+                        out = await self.io_processor.post_process_generate_async(
+                            out,
+                            request_id=request_id,
+                        )
                     yield out
 
         # If the request is disconnected by the client, generate()
@@ -636,6 +661,38 @@ class AsyncLLM(EngineClient):
         finally:
             if q is not None:
                 q.close()
+
+    async def _prepare_generate_io_processor_input(
+        self,
+        prompt: DataPrompt,
+        sampling_params: SamplingParams,
+        request_id: str,
+    ) -> tuple[PromptType, SamplingParams]:
+        assert self.io_processor is not None
+
+        prompt_data = prompt.get("data")
+        if prompt_data is None:
+            raise ValueError(
+                "The `data` field of an IOProcessor prompt cannot be None."
+            )
+
+        validated_prompt = self.io_processor.parse_data(prompt_data)
+        engine_prompt = await self.io_processor.pre_process_async(
+            prompt=validated_prompt,
+            request_id=request_id,
+        )
+        engine_prompts = prompt_to_seq(engine_prompt)
+        if len(engine_prompts) != 1:
+            raise ValueError(
+                "Generation IOProcessor plugins must map each logical request "
+                "to exactly one engine prompt."
+            )
+
+        processed_params = self.io_processor.merge_sampling_params_for_prompt(
+            validated_prompt,
+            sampling_params.clone(),
+        )
+        return engine_prompts[0], processed_params
 
     def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""

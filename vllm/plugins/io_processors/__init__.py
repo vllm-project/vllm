@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 import logging
 
 from vllm.config import VllmConfig
@@ -53,19 +54,26 @@ def get_io_processor(
         except Exception:
             logger.warning("Failed to load plugin %s.", name, exc_info=True)
 
-    num_available_plugins = len(loadable_plugins.keys())
-    if num_available_plugins == 0:
-        raise ValueError(
-            f"No IOProcessor plugins installed but one is required ({model_plugin})."
+    activated_plugin_cls = loadable_plugins.get(model_plugin)
+    if activated_plugin_cls is None:
+        try:
+            activated_plugin_typ = resolve_obj_by_qualname(model_plugin)
+        except Exception as exc:
+            raise ValueError(
+                f"The requested IO Processor plugin {model_plugin!r} was not "
+                "found in installed entry points and could not be resolved as "
+                "a fully-qualified class name. "
+                f"Available plugins: {list(loadable_plugins.keys())}"
+            ) from exc
+    else:
+        activated_plugin_typ = resolve_obj_by_qualname(activated_plugin_cls)
+
+    # for backward compatibility, the plugin does not have a renderer argument
+    if "renderer" not in inspect.signature(activated_plugin_typ.__init__).parameters:
+        logger.warning(
+            "The renderer argument will be required in v0.18, "
+            "please update your IOProcessor plugin: %s",
+            activated_plugin_cls or model_plugin,
         )
-
-    if model_plugin not in loadable_plugins:
-        raise ValueError(
-            f"The model requires the '{model_plugin}' IO Processor plugin "
-            "but it is not installed. "
-            f"Available plugins: {list(loadable_plugins.keys())}"
-        )
-
-    activated_plugin_cls = resolve_obj_by_qualname(loadable_plugins[model_plugin])
-
-    return activated_plugin_cls(vllm_config, renderer)
+        return activated_plugin_typ(vllm_config)
+    return activated_plugin_typ(vllm_config, renderer)
