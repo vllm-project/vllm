@@ -232,6 +232,28 @@ void unmap_and_release(unsigned long long device, ssize_t size,
     }
   }
 
+  // ROCm workaround: hipMemRelease does not return physical VRAM to the
+  // free pool while the virtual-address reservation is still held.
+  // Cycling cuMemAddressFree → cuMemAddressReserve (at the same address)
+  // forces the driver to actually release the physical pages while keeping
+  // the same VA available for a later create_and_map.
+  if (first_error == no_error) {
+    first_error = cuMemAddressFree(d_mem, size);
+    if (first_error == no_error) {
+      CUdeviceptr d_mem_new = 0;
+      first_error = cuMemAddressReserve(&d_mem_new, size, 0, d_mem, 0);
+      if (first_error == no_error && d_mem_new != d_mem) {
+        cuMemAddressFree(d_mem_new, size);
+        snprintf(error_msg, sizeof(error_msg),
+                 "ROCm: VA re-reserve got %p instead of %p", (void*)d_mem_new,
+                 (void*)d_mem);
+        error_code = CUresult(1);
+        std::cerr << error_msg << std::endl;
+        return;
+      }
+    }
+  }
+
   if (first_error != no_error) {
     CUDA_CHECK(first_error);
   }
