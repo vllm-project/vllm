@@ -5,15 +5,23 @@ import argparse
 import asyncio
 import ipaddress
 import itertools
+import logging
 import os
 import urllib
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
+
+# Configure logging
+logging.basicConfig(
+    level=getattr(logging, os.getenv("MOONCAKE_CONNECTOR_LOGGING_LEVEL", "INFO").upper()),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 def maybe_wrap_ipv6_address(address: str) -> str:
@@ -62,6 +70,78 @@ async def get_prefiller_info(prefill_clients: list, ready: asyncio.Event):
     ready.set()
     print("All prefiller instances are ready.")
 
+def get_client_signatures(clients):
+    """Get signatures for sorted clients including engine_id information for comparison"""
+    signatures = [
+        (client["url"], tuple(sorted(client.get("dp_engine_id", {}).items())))
+        for client in clients
+    ]
+    return sorted(signatures)
+
+async def health_monitor_loop(app):
+    """
+    Health monitoring loop that periodically checks all prefill clients and updates engine_id
+    """
+    # Get configuration parameters
+    health_check_interval = global_args.health_check_interval
+    logger.info(f"Starting prefill client health monitor (interval: {health_check_interval}s)")
+
+    await app.state.ready.wait()
+    while True:
+        try:
+            await asyncio.sleep(health_check_interval)
+            logger.debug("Running health checks and engine_id updates for all prefill clients")
+            last_healthy_clients = [client for client in app.state.prefill_clients if client.get("healthy", True) and client.get("dp_engine_id")]
+
+            # 1. Check health status of all clients
+            for prefill_client in app.state.prefill_clients:
+                try:
+                    # Prefill nodes may go offline, so we don't continuously loop and wait
+                    # Failed nodes will be recovered in the next check cycle
+
+                    # Check /health endpoint
+                    response = await prefill_client["client"].get("/health")
+                    response.raise_for_status()
+
+                    # Check /query endpoint for engine_id updates
+                    response = await prefill_client["client"].get(
+                        prefill_client["bootstrap_addr"] + "/query"
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+
+                    # Update prefill client health status and engine_id information
+                    for dp_rank, dp_entry in data.items():
+                        prefill_client["dp_engine_id"][int(dp_rank)] = dp_entry["engine_id"]
+                    prefill_client["dp_size"] = len(data)
+                    prefill_client["healthy"] = True
+
+                except Exception as e:
+                    # Health check failed (either /health or /query endpoint), mark as unhealthy
+                    prefill_client["healthy"] = False
+                    logger.warning("Health check failed for %s: %s", prefill_client["url"], e)
+                    continue
+
+            # 2. Recreate iterator with healthy clients if needed
+            healthy_clients = [client for client in app.state.prefill_clients if client.get("healthy", True) and client.get("dp_engine_id")]
+
+            # Compare client signatures including engine_id information
+            last_signatures = get_client_signatures(last_healthy_clients)
+            current_signatures = get_client_signatures(healthy_clients)
+
+            if current_signatures != last_signatures:
+                logger.debug("Detected changes in healthy prefill clients or engine_ids, updating iterator")
+                async with app.state.iterator_lock:
+                    if len(healthy_clients) == 0:
+                        logger.warning("No healthy prefill clients available!")
+                        app.state.ready.clear()  # Mark service as not ready if no healthy clients
+                        continue
+                    app.state.prefill_iterator = prefiller_cycle(healthy_clients)
+                    app.state.ready.set()
+                    
+
+        except Exception as e:
+            logger.error(f"Error in health monitor loop: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -90,6 +170,8 @@ async def lifespan(app: FastAPI):
                 "url": url,
                 "bootstrap_addr": make_http_path(hostname, bootstrap_port or 8998),
                 "dp_engine_id": {},
+                "healthy": True,
+                "dp_size": 0,
             }
         )
 
@@ -113,6 +195,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(get_prefiller_info(app.state.prefill_clients, app.state.ready))
 
     # Initialize round-robin iterators
+    if global_args.enable_health_check:
+        app.state.iterator_lock = asyncio.Lock()
     app.state.prefill_iterator = prefiller_cycle(app.state.prefill_clients)
     app.state.decode_iterator = itertools.cycle(range(len(app.state.decode_clients)))
 
@@ -121,9 +205,23 @@ async def lifespan(app: FastAPI):
         f"and {len(app.state.decode_clients)} decode clients."
     )
 
+    # Start health monitoring task (if enabled)
+    health_monitor_task = None
+    if global_args.enable_health_check:
+        health_monitor_task = asyncio.create_task(health_monitor_loop(app))
+        logger.info("Started prefill client health monitor task")
+    else:
+        logger.info("Health check monitoring is disabled")
     yield
 
-    # Shutdown: Close all clients
+    # Shutdown: Cancel health monitor and close all clients
+    if health_monitor_task:
+        health_monitor_task.cancel()
+        try:
+            await health_monitor_task
+        except asyncio.CancelledError:
+            logger.info("Health monitor task cancelled successfully")
+
     for client_info in app.state.prefill_clients:
         await client_info["client"].aclose()
 
@@ -166,6 +264,21 @@ def parse_args():
         dest="decode_raw",
         metavar=("URL",),
         help="Decode server URL. Can be specified multiple times.",
+    )
+
+    # Health check configuration
+    parser.add_argument(
+        "--health-check-interval",
+        type=int,
+        default=int(os.environ.get("VLLM_HEALTH_CHECK_INTERVAL", "30")),
+        help="Health check interval in seconds (default: 30, can be overridden by VLLM_HEALTH_CHECK_INTERVAL env var)",
+    )
+
+    parser.add_argument(
+        "--enable-health-check",
+        action="store_true",
+        default=os.environ.get("VLLM_ENABLE_HEALTH_CHECK", "false").lower() == "true",
+        help="Enable health check monitoring (can be set by VLLM_ENABLE_HEALTH_CHECK=true env var)",
     )
 
     args = parser.parse_args()
@@ -227,9 +340,10 @@ def _parse_decode_urls(decode_list):
     return [url[0] for url in decode_list]
 
 
-def get_next_client(app, service_type: str):
+async def get_next_client(app, service_type: str):
     """
     Get the next client in round-robin fashion.
+    Only returns healthy clients for prefill services.
 
     Args:
         app: The FastAPI app instance
@@ -239,7 +353,9 @@ def get_next_client(app, service_type: str):
         The next client to use
     """
     if service_type == "prefill":
-        return next(app.state.prefill_iterator)
+        # Use async lock protection if health check is enabled
+        async with app.state.iterator_lock if global_args.enable_health_check else nullcontext():
+            return next(app.state.prefill_iterator)
     elif service_type == "decode":
         client_idx = next(app.state.decode_iterator)
         return app.state.decode_clients[client_idx]
@@ -321,7 +437,7 @@ async def _handle_completions(api: str, request: Request):
         request_id = str(uuid.uuid4())
 
         # Get the next prefill client in round-robin fashion
-        prefill_client_info, prefill_dp_rank = get_next_client(request.app, "prefill")
+        prefill_client_info, prefill_dp_rank = await get_next_client(request.app, "prefill")
 
         # Send request to prefill service
         asyncio.create_task(
@@ -330,7 +446,7 @@ async def _handle_completions(api: str, request: Request):
             )
         )
 
-        decode_client_info = get_next_client(request.app, "decode")
+        decode_client_info = await get_next_client(request.app, "decode")
 
         # Stream response from decode service
         async def generate_stream():
@@ -366,6 +482,29 @@ async def handle_completions(request: Request):
 async def handle_chat_completions(request: Request):
     return await _handle_completions("/v1/chat/completions", request)
 
+@app.get("/health/prefill")
+async def prefill_clients_health():
+    """Return detailed health status of all prefill clients"""
+    clients_status = []
+    async with app.state.iterator_lock if global_args.enable_health_check else nullcontext():
+        for client in app.state.prefill_clients:
+            status = {
+                "url": client["url"],
+                "bootstrap_addr": client["bootstrap_addr"],
+                "healthy": client["healthy"],
+                "dp_size": client["dp_size"]
+            }
+            clients_status.append(status)
+
+    total_clients = len(clients_status)
+    healthy_clients = sum(1 for client in clients_status if client["healthy"])
+
+    return {
+        "total_clients": total_clients,
+        "healthy_clients": healthy_clients,
+        "unhealthy_clients": total_clients - healthy_clients,
+        "clients": clients_status
+    }
 
 if __name__ == "__main__":
     global global_args
