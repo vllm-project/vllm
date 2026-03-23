@@ -244,6 +244,15 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
         input_2d = x.view(-1, x.shape[-1])
         return input_2d.shape[0] < 32
 
+    def apply_weights(self, layer, x, bias=None, **kwargs):
+        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
+        # if bacth_invariant run deepgemm only.
+        if vllm_is_batch_invariant():
+            return self.fallback.apply_weights(layer, x, bias, **kwargs)
+
+        return super().apply_weights(layer, x, bias, **kwargs)
+
 
 def _flashinfer_fp8_blockscale_gemm_impl(
     input: torch.Tensor,
