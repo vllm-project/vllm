@@ -430,7 +430,7 @@ hello world
     assert args["obj_param"] == {"key": "value"}
 
 
-def test_extract_tool_calls_anyof_type_conversion(qwen3_tool_parser_parametrized):
+def test_extract_tool_calls_anyof_type_conversion(qwen3_tool_parser):
     """Test type conversion for anyOf/oneOf nullable schemas (Pydantic v2).
 
     Pydantic v2 emits anyOf for Optional[T] fields, e.g.:
@@ -501,7 +501,7 @@ hello
 </tool_call>"""
 
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted = qwen3_tool_parser_parametrized.extract_tool_calls(
+    extracted = qwen3_tool_parser.extract_tool_calls(
         model_output, request=request
     )
 
