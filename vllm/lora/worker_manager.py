@@ -148,8 +148,9 @@ class WorkerLoRAManager:
 
             # Warn about adapter modules that will be ignored.
             target_modules = self.lora_config.target_modules
+            expected_lora_modules_lst = list(expected_lora_modules)
             for module_name in lora.loras:
-                if not is_supported_lora_module(module_name, supported_lora_modules):
+                if not is_supported_lora_module(module_name, expected_lora_modules_lst):
                     logger.warning_once(
                         "LoRA module '%s' in adapter '%s' is not in the "
                         "model's supported LoRA target modules [%s]. "
@@ -157,7 +158,7 @@ class WorkerLoRAManager:
                         "cause abnormal model behavior.",
                         module_name,
                         lora_request.lora_path,
-                        ", ".join(sorted(supported_lora_modules)),
+                        ", ".join(sorted(expected_lora_modules_lst)),
                     )
                 elif not is_in_target_modules(module_name, target_modules):
                     logger.warning_once(
