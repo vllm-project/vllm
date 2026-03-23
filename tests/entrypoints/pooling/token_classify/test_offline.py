@@ -65,14 +65,12 @@ def test_score_api(llm: LLM):
         llm.score("ping", "pong", use_tqdm=False)
 
 
-@pytest.mark.parametrize("task", ["classify", "embed", "token_embed", "plugin"])
+@pytest.mark.parametrize("task", ["classify", "embed", "token_embed"])
 def test_unsupported_tasks(llm: LLM, task: PoolingTask):
     if task == "classify":
         err_msg = "Try switching the model's pooling_task via.+"
-    elif task in ["embed", "token_embed"]:
+    else:
         err_msg = "Embedding API is not supported by this model.+"
-    else:  # task == "plugin"
-        err_msg = f"Unsupported task: '{task}' Supported tasks.+"
 
     with pytest.raises(ValueError, match=err_msg):
         llm.encode(prompt, pooling_task=task, use_tqdm=False)

@@ -27,7 +27,7 @@ class PoolingCompletionRequest(
     EmbedRequestMixin,
     ClassifyRequestMixin,
 ):
-    task: PoolingTask | None = None
+    task: PoolingTask
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
@@ -53,7 +53,7 @@ class PoolingCompletionRequest(
 class PoolingChatRequest(
     PoolingBasicRequestMixin, ChatRequestMixin, EmbedRequestMixin, ClassifyRequestMixin
 ):
-    task: PoolingTask | None = None
+    task: PoolingTask
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}

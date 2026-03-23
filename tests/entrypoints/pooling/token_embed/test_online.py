@@ -87,4 +87,10 @@ async def test_pooling_not_supported(
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
-    assert response.json()["error"]["message"].startswith(f"Unsupported task: {task!r}")
+
+    if task == "embed":
+        err_msg = "Try switching the model's pooling_task via"
+    else:
+        err_msg = f"Unsupported task: {task!r}"
+
+    assert response.json()["error"]["message"].startswith(err_msg)

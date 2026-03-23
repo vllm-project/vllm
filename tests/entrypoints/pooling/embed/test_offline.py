@@ -97,16 +97,12 @@ def test_pooling_params(llm: LLM):
     )
 
 
-@pytest.mark.parametrize(
-    "task", ["token_embed", "classify", "token_classify", "plugin"]
-)
+@pytest.mark.parametrize("task", ["token_embed", "classify", "token_classify"])
 def test_unsupported_tasks(llm: LLM, task: PoolingTask):
     if task == "token_embed":
         err_msg = "Try switching the model's pooling_task via.+"
-    elif task in ["classify", "token_classify"]:
+    else:
         err_msg = "Classification API is not supported by this model.+"
-    else:  # task == "plugin"
-        err_msg = f"Unsupported task: '{task}' Supported tasks.+"
 
     with pytest.raises(ValueError, match=err_msg):
         llm.encode(prompt, pooling_task=task, use_tqdm=False)
