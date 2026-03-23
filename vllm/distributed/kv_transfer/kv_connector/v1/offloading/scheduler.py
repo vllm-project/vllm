@@ -82,11 +82,6 @@ class OffloadingConnectorScheduler:
         planner = self._get_hybrid_planner()
         return planner.chunk_count_for_tokens(tokens)
 
-    def _logical_chunk_idx(self, chunk_idx: int) -> int:
-        if not self.hybrid_offload_enabled:
-            return chunk_idx
-        return chunk_idx + self._get_hybrid_planner().first_hashable_chunk_idx
-
     def _get_hybrid_planner(self):
         planner = self.hybrid_planner
         if planner is None:
@@ -146,6 +141,14 @@ class OffloadingConnectorScheduler:
         flat_block_counts: list[int] = []
         group_sizes: list[int] = []
         block_indices: list[int] = []
+        planner = self._get_hybrid_planner()
+        if start_chunk_idx == 0:
+            group_start_tokens = tuple(0 for _ in range(self.num_kv_groups))
+        else:
+            group_start_tokens = planner.group_covered_tokens_for_chunk_count(
+                start_chunk_idx
+            )
+        group_end_tokens = planner.group_covered_tokens_for_chunk_count(end_chunk_idx)
 
         for group_index, group_block_ids in enumerate(block_groups):
             unit_size = self.group_hash_block_sizes[group_index]
@@ -155,14 +158,8 @@ class OffloadingConnectorScheduler:
             )
             sub_blocks_per_gpu_block = gpu_block_size // unit_size
 
-            logical_start_chunk_idx = self._logical_chunk_idx(start_chunk_idx)
-            logical_end_chunk_idx = self._logical_chunk_idx(end_chunk_idx)
-            start_unit_idx = (
-                logical_start_chunk_idx * self.offloaded_block_size
-            ) // unit_size
-            end_unit_idx = (
-                logical_end_chunk_idx * self.offloaded_block_size
-            ) // unit_size
+            start_unit_idx = group_start_tokens[group_index] // unit_size
+            end_unit_idx = group_end_tokens[group_index] // unit_size
             assert end_unit_idx >= start_unit_idx
 
             group_entry_count = 0

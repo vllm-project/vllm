@@ -826,6 +826,31 @@ def test_scheduler_builds_partial_group_load_spec_for_second_hybrid_chunk():
     assert spec.block_counts.tolist() == [1] * 17
 
 
+def test_scheduler_builds_first_unsplit_hybrid_chunk_from_group_start():
+    connector = OffloadingConnector(
+        create_hybrid_vllm_config(hybrid_chunk_size=16896, block_size=1056),
+        KVConnectorRole.SCHEDULER,
+        create_hybrid_kv_cache_config(num_mamba_groups=1),
+    )
+    scheduler = connector.connector_scheduler
+    assert scheduler is not None
+
+    spec = scheduler._build_gpu_transfer_spec_from_chunk_range(
+        ([100], list(range(200, 264))),
+        start_chunk_idx=0,
+        end_chunk_idx=1,
+        include_block_indices=True,
+    )
+
+    assert spec.group_sizes == (1, 64)
+    assert spec.block_indices == (0, 0)
+    assert spec.block_ids.tolist() == [100, *range(200, 264)]
+    assert spec.block_offsets is not None
+    assert spec.block_counts is not None
+    assert spec.block_offsets.tolist() == [0] * 65
+    assert spec.block_counts.tolist() == [1] * 65
+
+
 def test_offloading_spec_allows_engine_hash_size_1056_with_hybrid_chunk():
     spec = MockOffloadingSpec(
         create_hybrid_vllm_config(hybrid_chunk_size=16384, block_size=1056),
