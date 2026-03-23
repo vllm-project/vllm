@@ -54,7 +54,8 @@ fn request_latency_histogram() -> Histogram {
     Histogram::new(REQUEST_LATENCY_BUCKETS.iter().copied())
 }
 
-fn request_count_histogram() -> Histogram {
+fn request_token_count_histogram() -> Histogram {
+    // TODO: determine max value based on `max_model_len`.
     Histogram::new(build_1_2_5_buckets(131_072))
 }
 
@@ -167,7 +168,7 @@ impl RequestMetrics {
         );
 
         let request_prompt_tokens =
-            Family::new_with_constructor(request_count_histogram as fn() -> Histogram);
+            Family::new_with_constructor(request_token_count_histogram as fn() -> Histogram);
         registry.register(
             "vllm:request_prompt_tokens",
             "Number of prefill tokens processed.",
@@ -175,7 +176,7 @@ impl RequestMetrics {
         );
 
         let request_generation_tokens =
-            Family::new_with_constructor(request_count_histogram as fn() -> Histogram);
+            Family::new_with_constructor(request_token_count_histogram as fn() -> Histogram);
         registry.register(
             "vllm:request_generation_tokens",
             "Number of generation tokens processed.",
@@ -183,7 +184,7 @@ impl RequestMetrics {
         );
 
         let request_max_num_generation_tokens =
-            Family::new_with_constructor(request_count_histogram as fn() -> Histogram);
+            Family::new_with_constructor(request_token_count_histogram as fn() -> Histogram);
         registry.register(
             "vllm:request_max_num_generation_tokens",
             "Histogram of maximum number of requested generation tokens.",
@@ -191,7 +192,7 @@ impl RequestMetrics {
         );
 
         let request_params_max_tokens =
-            Family::new_with_constructor(request_count_histogram as fn() -> Histogram);
+            Family::new_with_constructor(request_token_count_histogram as fn() -> Histogram);
         registry.register(
             "vllm:request_params_max_tokens",
             "Histogram of the max_tokens request parameter.",
@@ -207,7 +208,7 @@ impl RequestMetrics {
         );
 
         let request_prefill_kv_computed_tokens =
-            Family::new_with_constructor(request_count_histogram as fn() -> Histogram);
+            Family::new_with_constructor(request_token_count_histogram as fn() -> Histogram);
         registry.register(
             "vllm:request_prefill_kv_computed_tokens",
             "Histogram of new KV tokens computed during prefill (excluding cached tokens).",
