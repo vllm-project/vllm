@@ -900,7 +900,7 @@ class InputBatch:
         pooling_states = self.get_pooling_states()
 
         return PoolingMetadata(
-            prompt_lens=torch.from_numpy(self.num_prompt_tokens[: self.num_reqs]),
+            prompt_lens=self.num_prompt_tokens_cpu_tensor[: self.num_reqs].clone(),
             prompt_token_ids=self.sampling_metadata.prompt_token_ids,
             pooling_params=pooling_params,
             pooling_states=pooling_states,
