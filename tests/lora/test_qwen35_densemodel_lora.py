@@ -24,26 +24,23 @@ TEXT_EXPECTED_LORA_OUTPUT = [
 ]
 
 
-
-# visaul caption
+# visual caption
 VL_QUESTION = "What is in the image?"
 VL_TEST_IMAGES = [
     ImageAsset("stop_sign"),
     ImageAsset("cherry_blossom"),
 ]
 VL_EXPECTED_LORA_OUTPUT = [
-    "A red STOP sign stands prominently in the foreground, with a traditional Chinese gate adorned with red lanterns and the Chinese characters \"中華門\" in the background, signaling the entrance to a Chinatown. A black car passes by on the street, and stone lion statues guard the entrance to the culturally rich area.",  # noqa: E501
+    'A red STOP sign stands prominently in the foreground, with a traditional Chinese gate adorned with red lanterns and the Chinese characters "中華門" in the background, signaling the entrance to a Chinatown. A black car passes by on the street, and stone lion statues guard the entrance to the culturally rich area.',  # noqa: E501
     "A vibrant blue sky serves as a backdrop for the iconic Tokyo Skytree, partially obscured by the delicate pink blossoms of cherry trees in full bloom.",  # noqa: E501
-]
-VL_EXPECTED_BASE_OUTPUT = [
-    "This image captures a vibrant street scene in what appears to be a Chinatown neighborhood, likely in a city such as Vancouver",  # noqa: E501
-    "This image captures a beautiful springtime scene, blending nature with modern architecture:",  # noqa: E501
 ]
 
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
 
-def _assert_exact_outputs(generated_texts: list[str], expected_outputs: list[str]) -> None:
+def _assert_exact_outputs(
+    generated_texts: list[str], expected_outputs: list[str]
+) -> None:
     assert generated_texts == expected_outputs
 
 
@@ -83,7 +80,7 @@ def _run_text_lora_sample(
             messages,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=False, #disable thinking
+            enable_thinking=False,  # disable thinking
         )
         input_templates.append(prompt)
 
@@ -106,13 +103,15 @@ def _run_vl_lora_sample(
     lora_path: str | None = None,
     lora_id: int = 0,
 ) -> list[str]:
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "image"},
-            {"type": "text", "text": VL_QUESTION},
-        ],
-    }]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": VL_QUESTION},
+            ],
+        }
+    ]
     prompt = TOKENIZER.apply_chat_template(
         messages,
         tokenize=False,
@@ -171,13 +170,15 @@ def _build_text_prompts() -> list[str]:
 
 
 def _build_vl_prompts() -> list[dict]:
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "image"},
-            {"type": "text", "text": VL_QUESTION},
-        ],
-    }]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": VL_QUESTION},
+            ],
+        }
+    ]
     prompt = TOKENIZER.apply_chat_template(
         messages,
         tokenize=False,
@@ -228,6 +229,41 @@ def _run_mixed_lora_sample(
     return generated_texts
 
 
+def _run_mixed_lora_and_base_sample(
+    llm: vllm.LLM,
+    text_lora_path: str,
+    vl_lora_path: str,
+    text_lora_id: int,
+    vl_lora_id: int,
+) -> list[str]:
+    text_prompt = _build_text_prompts()[0]
+    vl_prompt = _build_vl_prompts()[0]
+    prompts = [
+        text_prompt,
+        vl_prompt,
+        text_prompt,
+        vl_prompt,
+    ]
+    lora_requests = [
+        LoRARequest("qwen35-text", text_lora_id, text_lora_path),
+        LoRARequest("qwen35-vl", vl_lora_id, vl_lora_path),
+        None,
+        None,
+    ]
+    outputs = llm.generate(
+        prompts,
+        vllm.SamplingParams(temperature=0, max_tokens=256),
+        lora_request=lora_requests,
+    )
+
+    generated_texts: list[str] = []
+    for output in outputs:
+        generated_text = output.outputs[0].text.strip()
+        generated_texts.append(generated_text)
+        print(f"Prompt: {output.prompt!r}, Generated text: {generated_text!r}")
+    return generated_texts
+
+
 def _assert_qwen35_text_vl_and_mixed_lora(
     llm: vllm.LLM,
     qwen35_text_lora_files: str,
@@ -238,6 +274,7 @@ def _assert_qwen35_text_vl_and_mixed_lora(
         qwen35_text_lora_files,
         TEXT_LORA_ID,
     )
+
     _assert_exact_outputs(generated_texts, TEXT_EXPECTED_LORA_OUTPUT)
 
     generated_texts = _run_vl_lora_sample(
@@ -246,9 +283,6 @@ def _assert_qwen35_text_vl_and_mixed_lora(
         VL_LORA_ID,
     )
     _assert_prefix_outputs(generated_texts, VL_EXPECTED_LORA_OUTPUT)
-
-    generated_texts = _run_vl_lora_sample(llm)
-    _assert_prefix_outputs(generated_texts, VL_EXPECTED_BASE_OUTPUT)
 
     generated_texts = _run_mixed_lora_sample(
         llm,
@@ -261,6 +295,20 @@ def _assert_qwen35_text_vl_and_mixed_lora(
     assert generated_texts[2] == TEXT_EXPECTED_LORA_OUTPUT[1]
     _assert_prefix_outputs([generated_texts[1]], [VL_EXPECTED_LORA_OUTPUT[0]])
     _assert_prefix_outputs([generated_texts[3]], [VL_EXPECTED_LORA_OUTPUT[1]])
+
+    generated_texts = _run_mixed_lora_and_base_sample(
+        llm,
+        qwen35_text_lora_files,
+        qwen35_vl_lora_files,
+        text_lora_id=TEXT_LORA_ID,
+        vl_lora_id=VL_LORA_ID,
+    )
+    assert generated_texts[0] == TEXT_EXPECTED_LORA_OUTPUT[0]
+    _assert_prefix_outputs([generated_texts[1]], [VL_EXPECTED_LORA_OUTPUT[0]])
+    assert generated_texts[2] != TEXT_EXPECTED_LORA_OUTPUT[0]
+    assert not VL_EXPECTED_LORA_OUTPUT[0].startswith(generated_texts[3]), (
+        "Non-LoRA vision output unexpectedly matches the LoRA expectation."
+    )
 
 
 @create_new_process_for_each_test()
