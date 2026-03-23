@@ -211,7 +211,7 @@ pub(crate) async fn run_output_dispatcher_loop(
 
                 if let Some(scheduler_stats) = batch.scheduler_stats.as_ref() {
                     record_scheduler_stats(
-                        &METRICS,
+                        &METRICS.scheduler,
                         inner.model_name(),
                         batch.engine_index,
                         scheduler_stats,

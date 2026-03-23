@@ -1,10 +1,10 @@
-use vllm_metrics::{EngineLabels, EnginePositionLabels, Metrics};
+use vllm_metrics::{EngineLabels, EnginePositionLabels, SchedulerMetrics};
 
 use crate::protocol::stats::SchedulerStats;
 
 /// Record the scheduler-stats-backed metrics for one engine at one point in time.
 pub(crate) fn record_scheduler_stats(
-    metrics: &Metrics,
+    metrics: &SchedulerMetrics,
     model_name: impl Into<String>,
     engine: u32,
     stats: &SchedulerStats,

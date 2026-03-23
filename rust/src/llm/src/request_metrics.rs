@@ -3,7 +3,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use vllm_engine_core_client::protocol::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreOutput, FinishReason,
 };
-use vllm_metrics::{EngineLabels, FinishReasonLabels, METRICS};
+use vllm_metrics::{EngineLabels, FinishReasonLabels, METRICS, RequestMetrics};
+
+fn metrics() -> &'static RequestMetrics {
+    &METRICS.request
+}
 
 /// Request-scoped metrics state tracked across streamed engine-core updates.
 ///
@@ -121,53 +125,53 @@ impl RequestMetricsTracker {
         };
 
         record_request_success(&self.model_name, self.last_seen_engine_index, finish_reason);
-        METRICS
+        metrics()
             .request_prompt_tokens
             .get_or_create(&labels)
             .observe(self.prompt_len as f64);
-        METRICS
+        metrics()
             .request_generation_tokens
             .get_or_create(&labels)
             .observe(self.num_generation_tokens as f64);
-        METRICS
+        metrics()
             .request_max_num_generation_tokens
             .get_or_create(&labels)
             .observe(self.num_generation_tokens as f64);
         if let Some(max_tokens_param) = self.max_tokens_param {
-            METRICS
+            metrics()
                 .request_params_max_tokens
                 .get_or_create(&labels)
                 .observe(max_tokens_param as f64);
         }
-        METRICS
+        metrics()
             .request_params_n
             .get_or_create(&labels)
             .observe(self.n_param as f64);
-        METRICS
+        metrics()
             .request_prefill_kv_computed_tokens
             .get_or_create(&labels)
             .observe(prefill_kv_computed_tokens as f64);
-        METRICS
+        metrics()
             .e2e_request_latency_seconds
             .get_or_create(&labels)
             .observe(e2e_latency_seconds);
-        METRICS
+        metrics()
             .request_queue_time_seconds
             .get_or_create(&labels)
             .observe(queue_time_seconds);
-        METRICS
+        metrics()
             .request_prefill_time_seconds
             .get_or_create(&labels)
             .observe(prefill_time_seconds);
-        METRICS
+        metrics()
             .request_decode_time_seconds
             .get_or_create(&labels)
             .observe(decode_time_seconds);
-        METRICS
+        metrics()
             .request_inference_time_seconds
             .get_or_create(&labels)
             .observe(inference_time_seconds);
-        METRICS
+        metrics()
             .request_time_per_output_token_seconds
             .get_or_create(&labels)
             .observe(time_per_output_token_seconds);
@@ -198,21 +202,21 @@ fn engine_labels(model_name: &str, engine: u32) -> EngineLabels {
 }
 
 fn observe_time_to_first_token_seconds(model_name: &str, engine: u32, seconds: f64) {
-    METRICS
+    metrics()
         .time_to_first_token_seconds
         .get_or_create(&engine_labels(model_name, engine))
         .observe(seconds);
 }
 
 fn observe_inter_token_latency_seconds(model_name: &str, engine: u32, seconds: f64) {
-    METRICS
+    metrics()
         .inter_token_latency_seconds
         .get_or_create(&engine_labels(model_name, engine))
         .observe(seconds);
 }
 
 fn record_request_success(model_name: &str, engine: u32, finish_reason: FinishReason) {
-    METRICS
+    metrics()
         .request_success
         .get_or_create(&FinishReasonLabels {
             model_name: model_name.to_string(),
