@@ -9,7 +9,6 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
-from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.cpu_manager import CPUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
@@ -67,12 +66,10 @@ class CPUOffloadingSpec(OffloadingSpec):
             assert len(self.gpu_block_size) == 1
             gpu_block_size = self.gpu_block_size[0]
             offloaded_block_size = gpu_block_size * self.block_size_factor
-            backend = CPUBackend(
-                block_size=offloaded_block_size, num_blocks=self.num_blocks
-            )
 
             self._manager = CPUOffloadingManager(
-                backend=backend,
+                block_size=offloaded_block_size,
+                num_blocks=self.num_blocks,
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
                 enable_events=enable_events,
             )

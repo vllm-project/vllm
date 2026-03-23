@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Iterable
@@ -12,7 +13,33 @@ from vllm.v1.kv_offload.abstract import (
     OffloadingManager,
     PrepareStoreOutput,
 )
-from vllm.v1.kv_offload.backend import Backend, BlockStatus
+from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
+
+
+class BlockStatus(ctypes.Structure):
+    """
+    Offloading status for a single block of KV data.
+    Holds the following information:
+
+    ref_cnt - the current number of transfers using this block as a source.
+        A value of -1 indicates the block is not yet ready to be read.
+    block_id - index of the physical CPU buffer slot.
+    """
+
+    _fields_ = [("ref_cnt", ctypes.c_int32), ("block_id", ctypes.c_int64)]
+
+    def __init__(self, block_id: int):
+        super().__init__()
+        # initialize block as "not ready" (ref_cnt = -1)
+        self.ref_cnt = -1
+        self.block_id = block_id
+
+    @property
+    def is_ready(self) -> bool:
+        """
+        Returns whether the block is ready to be read.
+        """
+        return self.ref_cnt >= 0
 
 
 class CachePolicy(ABC):
@@ -257,18 +284,23 @@ class CPUOffloadingManager(OffloadingManager):
     An OffloadingManager with a pluggable CachePolicy (LRU or ARC).
 
     The manager owns all shared logic: ref-counting, event emission,
-    backend allocation/freeing, and the prepare_store/complete_store skeletons.
+    block pool management, and the prepare_store/complete_store skeletons.
     Policy-specific block organization and eviction decisions are delegated
     to the CachePolicy implementation.
     """
 
     def __init__(
         self,
-        backend: Backend,
+        block_size: int,
+        num_blocks: int,
         cache_policy: Literal["lru", "arc"] = "lru",
         enable_events: bool = False,
     ):
-        self.backend: Backend = backend
+        self.block_size: int = block_size
+        self.medium: str = CPULoadStoreSpec.medium()
+        self._num_blocks: int = num_blocks
+        self._num_allocated_blocks: int = 0
+        self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
         policy_cls = _CACHE_POLICIES.get(cache_policy)
         if policy_cls is None:
@@ -276,8 +308,42 @@ class CPUOffloadingManager(OffloadingManager):
                 f"Unknown cache policy: {cache_policy!r}. "
                 f"Supported: {list(_CACHE_POLICIES)}"
             )
-        cache_capacity = backend.get_num_free_blocks()
-        self._policy: CachePolicy = policy_cls(cache_capacity=cache_capacity)
+        self._policy: CachePolicy = policy_cls(cache_capacity=num_blocks)
+
+    # --- block pool ---
+
+    def _get_num_free_blocks(self) -> int:
+        return len(self._free_list) + self._num_blocks - self._num_allocated_blocks
+
+    def _allocate_blocks(self, block_hashes: list[BlockHash]) -> list[BlockStatus]:
+        num_fresh = min(
+            len(block_hashes), self._num_blocks - self._num_allocated_blocks
+        )
+        num_reused = len(block_hashes) - num_fresh
+        assert len(self._free_list) >= num_reused
+
+        # allocate fresh blocks
+        blocks: list[BlockStatus] = []
+        for _ in range(num_fresh):
+            blocks.append(BlockStatus(self._num_allocated_blocks))
+            self._num_allocated_blocks += 1
+
+        # allocate reused blocks
+        for _ in range(num_reused):
+            blocks.append(BlockStatus(self._free_list.pop()))
+        return blocks
+
+    def _free_block(self, block: BlockStatus) -> None:
+        self._free_list.append(block.block_id)
+
+    def _get_load_store_spec(
+        self,
+        block_hashes: Iterable[BlockHash],
+        blocks: Iterable[BlockStatus],
+    ) -> CPULoadStoreSpec:
+        return CPULoadStoreSpec([block.block_id for block in blocks])
+
+    # --- OffloadingManager interface ---
 
     def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
         hit_count = 0
@@ -296,7 +362,7 @@ class CPUOffloadingManager(OffloadingManager):
             assert block.is_ready, f"Block {block_hash!r} is not ready for reading"
             block.ref_cnt += 1
             blocks.append(block)
-        return self.backend.get_load_store_spec(block_hashes, blocks)
+        return self._get_load_store_spec(block_hashes, blocks)
 
     def touch(self, block_hashes: Iterable[BlockHash]) -> None:
         self._policy.touch(block_hashes)
@@ -321,13 +387,11 @@ class CPUOffloadingManager(OffloadingManager):
         if not block_hashes_to_store:
             return PrepareStoreOutput(
                 block_hashes_to_store=[],
-                store_spec=self.backend.get_load_store_spec([], []),
+                store_spec=self._get_load_store_spec([], []),
                 block_hashes_evicted=[],
             )
 
-        num_blocks_to_evict = (
-            len(block_hashes_to_store) - self.backend.get_num_free_blocks()
-        )
+        num_blocks_to_evict = len(block_hashes_to_store) - self._get_num_free_blocks()
 
         to_evict: list[BlockHash] = []
         if num_blocks_to_evict > 0:
@@ -338,29 +402,29 @@ class CPUOffloadingManager(OffloadingManager):
             if evicted is None:
                 return None
             for block_hash, block in evicted:
-                self.backend.free(block)
+                self._free_block(block)
                 to_evict.append(block_hash)
 
         if to_evict and self.events is not None:
             self.events.append(
                 OffloadingEvent(
                     block_hashes=to_evict,
-                    block_size=self.backend.block_size,
-                    medium=self.backend.medium,
+                    block_size=self.block_size,
+                    medium=self.medium,
                     removed=True,
                 )
             )
 
-        blocks = self.backend.allocate_blocks(block_hashes_to_store)
+        blocks = self._allocate_blocks(block_hashes_to_store)
         assert len(blocks) == len(block_hashes_to_store), (
-            "Backend did not allocate the expected number of blocks"
+            "Block pool did not allocate the expected number of blocks"
         )
 
         for block_hash, block in zip(block_hashes_to_store, blocks):
             self._policy.insert(block_hash, block)
 
         # build store specs for allocated blocks
-        store_spec = self.backend.get_load_store_spec(block_hashes_to_store, blocks)
+        store_spec = self._get_load_store_spec(block_hashes_to_store, blocks)
 
         return PrepareStoreOutput(
             block_hashes_to_store=block_hashes_to_store,
@@ -384,14 +448,14 @@ class CPUOffloadingManager(OffloadingManager):
                 block = self._policy.get(block_hash)
                 if block is not None and not block.is_ready:
                     self._policy.remove(block_hash)
-                    self.backend.free(block)
+                    self._free_block(block)
 
         if stored_block_hashes and self.events is not None:
             self.events.append(
                 OffloadingEvent(
                     block_hashes=stored_block_hashes,
-                    block_size=self.backend.block_size,
-                    medium=self.backend.medium,
+                    block_size=self.block_size,
+                    medium=self.medium,
                     removed=False,
                 )
             )

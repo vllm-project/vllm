@@ -12,7 +12,6 @@ from vllm.v1.kv_offload.abstract import (
     OffloadingEvent,
     PrepareStoreOutput,
 )
-from vllm.v1.kv_offload.backends.cpu import CPUBackend
 from vllm.v1.kv_offload.cpu_manager import ARCCachePolicy, CPUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 
@@ -95,9 +94,11 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
         - After complete_store([2, 3, 4, 5]), block 2 must still be present.
     """
     block_size = 256
-    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     manager = CPUOffloadingManager(
-        cpu_backend, cache_policy=eviction_policy, enable_events=True
+        block_size=block_size,
+        num_blocks=4,
+        cache_policy=eviction_policy,
+        enable_events=True,
     )
 
     # store [1, 2] and complete
@@ -130,13 +131,12 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
 
 def test_cpu_manager():
     """
-    Tests CPUOffloadingManager with lru policy and a CPUBackend.
+    Tests CPUOffloadingManager with lru policy.
     """
     # initialize a CPU backend with a capacity of 4 blocks
     block_size = 256
-    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     cpu_manager = CPUOffloadingManager(
-        cpu_backend, cache_policy="lru", enable_events=True
+        block_size=block_size, num_blocks=4, cache_policy="lru", enable_events=True
     )
 
     # prepare store [1, 2]
@@ -244,13 +244,12 @@ def test_cpu_manager():
 
 def test_arc_manager_basic():
     """
-    Tests CPUOffloadingManager with arc policy and a CPUBackend.
+    Tests CPUOffloadingManager with arc policy.
     Verifies that ARC handles store, load, and lookup operations correctly.
     """
     block_size = 256
-    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, cache_policy="arc", enable_events=True
+        block_size=block_size, num_blocks=4, cache_policy="arc", enable_events=True
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -294,9 +293,8 @@ def test_arc_manager_t1_to_t2_promotion():
     This is a key feature of ARC's adaptive behavior.
     """
     block_size = 256
-    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, cache_policy="arc", enable_events=False
+        block_size=block_size, num_blocks=4, cache_policy="arc", enable_events=False
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -323,9 +321,8 @@ def test_arc_manager_eviction_with_load():
     Verifies that blocks being loaded (ref_cnt > 0) cannot be evicted.
     """
     block_size = 256
-    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, cache_policy="arc", enable_events=True
+        block_size=block_size, num_blocks=4, cache_policy="arc", enable_events=True
     )
 
     # prepare and complete store [1, 2, 3, 4]
@@ -366,9 +363,8 @@ def test_arc_manager_adaptive_target():
     When a block in B2 is accessed, target_t1_size decreases.
     """
     block_size = 256
-    cpu_backend = CPUBackend(block_size=block_size, num_blocks=2)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, cache_policy="arc", enable_events=False
+        block_size=block_size, num_blocks=2, cache_policy="arc", enable_events=False
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -400,9 +396,8 @@ def test_arc_manager_t1_t2_eviction_policy():
     If |T1| >= target_t1_size, evict from T1, otherwise from T2.
     """
     block_size = 256
-    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, cache_policy="arc", enable_events=False
+        block_size=block_size, num_blocks=4, cache_policy="arc", enable_events=False
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -441,9 +436,8 @@ def test_arc_manager_ghost_list_bounds():
     They should be capped at cache_capacity.
     """
     block_size = 256
-    cpu_backend = CPUBackend(block_size=block_size, num_blocks=2)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, cache_policy="arc", enable_events=False
+        block_size=block_size, num_blocks=2, cache_policy="arc", enable_events=False
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -468,9 +462,8 @@ def test_arc_manager_touch_ordering():
     Similar to LRU test but verifies T1/T2 ordering.
     """
     block_size = 256
-    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, cache_policy="arc", enable_events=True
+        block_size=block_size, num_blocks=4, cache_policy="arc", enable_events=True
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -508,9 +501,8 @@ def test_arc_manager_failed_store():
     Similar to LRU test but for ARC.
     """
     block_size = 256
-    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, cache_policy="arc", enable_events=True
+        block_size=block_size, num_blocks=4, cache_policy="arc", enable_events=True
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -544,9 +536,8 @@ def test_arc_manager_full_scenario():
     Similar to the full LRU test but adapted for ARC behavior.
     """
     block_size = 256
-    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, cache_policy="arc", enable_events=True
+        block_size=block_size, num_blocks=4, cache_policy="arc", enable_events=True
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -584,12 +575,11 @@ def test_arc_manager_full_scenario():
 
 def test_filter_reused_manager():
     """
-    Tests FilterReusedOffloadingManager with a CPUBackend.
+    Tests FilterReusedOffloadingManager with a CPUOffloadingManager.
     """
     block_size = 256
-    cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     lru_manager = CPUOffloadingManager(
-        cpu_backend, cache_policy="lru", enable_events=True
+        block_size=block_size, num_blocks=4, cache_policy="lru", enable_events=True
     )
 
     from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
