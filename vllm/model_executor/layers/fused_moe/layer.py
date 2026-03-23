@@ -576,6 +576,9 @@ class FusedMoE(CustomOp):
             quant_config,
             self.moe_config,
         )
+        self.quant_method = (
+            quant_method  # only for weight loading. how to get around this?
+        )
 
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(
@@ -677,13 +680,6 @@ class FusedMoE(CustomOp):
     # This is called after all weight loading and post-processing, so it
     # should be safe to swap out the quant_method.
     def maybe_init_modular_kernel(self) -> None:
-        print(
-            f"GOT HERE {self.runner.quant_method} "
-            "{self.runner.quant_method.moe_kernel} "
-            "{self.runner.quant_method.supports_internal_mk} "
-            "{self.runner.quant_method.is_monolithic}"
-        )
-
         # NOTE(rob): WIP refactor. For quant methods that own the MK
         # we create the MK during process_weights_after_loading.
         if (
@@ -1436,6 +1432,8 @@ class FusedMoE(CustomOp):
             )
 
         weights = list(self.named_parameters())
+        # This doesn't work
+        # weights = weights + list(self.runner.quant_method.named_parameters())
         weights = [(name, _maybe_make_contiguous(name, p)) for name, p in weights]
 
         # `w13_input_scale` and `w2_input_scale` are global per-tensor

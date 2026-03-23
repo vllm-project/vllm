@@ -832,9 +832,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        print("XXXXXXXXXXXXXXXXXXXXXXXXXX")
         if self.moe_quant_config:
-            print("YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY")
             assert self.experts_cls is not None
             self.moe_kernel = make_fp8_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
@@ -846,11 +844,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        print("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
-
-        print("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
 
         # Allow for accessing weights and scales in standard way.
         w13 = layer.w13_weight
