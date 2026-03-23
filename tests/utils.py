@@ -1497,7 +1497,7 @@ def multi_gpu_marks(*, num_gpus: int):
     """Get a collection of pytest marks to apply for `@multi_gpu_test`."""
     test_selector = pytest.mark.distributed(num_gpus=num_gpus)
     test_skipif = pytest.mark.skipif(
-        cuda_device_count_stateless() < num_gpus,
+        torch.accelerator.device_count() < num_gpus,
         reason=f"Need at least {num_gpus} GPUs to run the test.",
     )
 
@@ -1529,7 +1529,7 @@ def gpu_tier_mark(*, min_gpus: int = 1, max_gpus: int | None = None):
         @gpu_tier_mark(max_gpus=1)          # only on single-GPU
         @gpu_tier_mark(min_gpus=2, max_gpus=4)  # 2-4 GPUs only
     """
-    gpu_count = cuda_device_count_stateless()
+    gpu_count = torch.accelerator.device_count()
     marks = []
 
     if min_gpus > 1:
