@@ -52,6 +52,7 @@ class Fp8BlockScaledMMLinearKernel(
             num_token_padding=self.get_output_padding(),
             use_ue8m0=False,
         )
+        self.use_triton = False
 
     @classmethod
     def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
@@ -63,40 +64,6 @@ class Fp8BlockScaledMMLinearKernel(
             )
 
         return True, None
-
-    @classmethod
-    @abstractmethod
-    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
-        """
-        Returns fallback kernel implementations when this kernel cannot handle
-        the computation or is not supported.
-
-        This method enables static and dynamic kernel dispatching:
-
-        1. **Static dispatching** (at initialization):
-           - Called during kernel init to select the best fallback kernel
-           - First supported kernel from the list is instantiated and stored
-           - Example: CudaFp8BlockScaledMMKernel tries [Cutlass, Triton]
-             and selects first passing is_supported() (see cuda.py:62-64)
-
-        2. **Dynamic dispatching** (at runtime):
-           - Pre-selected fallback used when runtime conditions aren't met
-           - Example: CudaFp8BlockScaledMMKernel tries FlashInfer/DeepGEMM,
-             then falls back to default_fallback_kernel (cuda.py:110)
-
-        Fallback chains form a priority hierarchy:
-        - CudaFp8BlockScaledMMKernel → [Cutlass, Triton]
-        - CutlassFp8BlockScaledMMKernel → [Triton]
-        - TritonFp8BlockScaledMMKernel → [itself] (last resort)
-        - AiterFp8BlockScaledMMKernel → [Triton]
-        - FlashInferFp8DeepGEMMDynamicBlockScaledKernel → [DeepGemm,
-          Cutlass, Triton]
-
-        Returns:
-            List of kernel classes in priority order. System iterates and
-            uses first kernel passing is_supported().
-        """
-        raise NotImplementedError
 
     def _get_layer_params(self, layer: torch.nn.Module, **kwargs) -> FP8BlockParams:
         return FP8BlockParams.from_layer(layer)
@@ -146,7 +113,9 @@ class Fp8BlockScaledMMLinearKernel(
         output_shape = [*x.shape[:-1], weight.shape[0]]
         out_dtype = input_2d.dtype if maybe_out_dtype is None else maybe_out_dtype
 
-        q_input, input_scale = self.quant_fp8(input_2d, input_scale, scale_up)
+        q_input, input_scale = self.quant_fp8(
+            input_2d, input_scale, scale_up, use_triton=self.use_triton
+        )
 
         output = self.apply_block_scaled_mm(
             A=q_input,

@@ -36,6 +36,7 @@ from typing_extensions import ParamSpec
 
 import vllm.envs as envs
 from tests.models.utils import TextTextLogprobs
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -1810,6 +1811,7 @@ class TestFP8Layer(torch.nn.Module):
         weight_shape: tuple[int, int],
         activation_quant_key: QuantKey,
         weight_quant_key: QuantKey,
+        input_dtype: torch.dtype | None = None,
         out_dtype: torch.dtype | None = None,
         transpose_weights: bool = False,
         device: torch.device | None = None,
@@ -1849,10 +1851,17 @@ class TestFP8Layer(torch.nn.Module):
             self.input_scale_ub = None
 
         out_dtype = torch.get_default_dtype() if out_dtype is None else out_dtype
+        input_dtype = (
+            get_current_vllm_config().model_config.dtype
+            if input_dtype is None
+            else input_dtype
+        )
 
         self.kernel = init_fp8_linear_kernel(
             activation_quant_key=activation_quant_key,
             weight_quant_key=weight_quant_key,
+            weight_shape=weight_shape,
+            input_dtype=input_dtype,
             out_dtype=out_dtype,
             force_kernel=force_kernel,
         )

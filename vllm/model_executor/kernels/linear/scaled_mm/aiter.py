@@ -117,6 +117,15 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
 
 
 class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig):
+        super().__init__(config)
+        n, k = config.weight_shape
+
+        self.use_triton = (
+            not current_platform.is_fp8_fnuz()
+            and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
+        )
+
     @classmethod
     def is_supported(cls, compute_capability=None):
         return (
@@ -140,61 +149,6 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             )
         return True, None
 
-    @classmethod
-    def ordered_fallback_kernels(cls):
-        # TODO This import is to avoid circular import
-        # this import can be global
-        # after all scaled MM kernels inherit from base
-        from .triton import TritonFp8BlockScaledMMKernel
-
-        return [TritonFp8BlockScaledMMKernel]
-
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        params = self._get_layer_params(layer)
-        weight = params.weight
-        weight_scale = (
-            params.weight_scale
-            if params.weight_scale_inv is None
-            else params.weight_scale_inv
-        )
-        input_scale = params.input_scale
-        scale_up = params.input_scale_ub
-
-        n, k = weight.shape
-
-        # View input as 2D matrix for fp8 methods
-        input_2d = x.view(-1, x.shape[-1])
-        output_shape = [*x.shape[:-1], weight.shape[0]]
-        output_dtype = x.dtype
-
-        use_triton = (
-            not current_platform.is_fp8_fnuz()
-            and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
-        )
-
-        q_input, input_scale = self.quant_fp8(
-            input_2d, input_scale, scale_up, use_triton=use_triton
-        )
-
-        output = self.apply_block_scaled_mm(
-            A=q_input,
-            B=weight,
-            out_dtype=output_dtype,
-            As=input_scale,
-            Bs=weight_scale,
-            use_triton=use_triton,
-        )
-
-        if bias is not None:
-            output = output + bias
-        return output.to(dtype=output_dtype).view(*output_shape)
-
     def apply_block_scaled_mm(
         self,
         A: torch.Tensor,
@@ -204,9 +158,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         Bs: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        use_triton = kwargs.get("use_triton", False)
-
-        if use_triton:
+        if self.use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
         else:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_a8w8_blockscale

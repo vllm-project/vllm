@@ -42,13 +42,6 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         )
 
     @classmethod
-    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
-        from .cutlass import CutlassFp8BlockScaledMMKernel
-        from .triton import TritonFp8BlockScaledMMKernel
-
-        return [CutlassFp8BlockScaledMMKernel, TritonFp8BlockScaledMMKernel]
-
-    @classmethod
     def is_supported(cls, compute_capability=None):
         if not current_platform.is_cuda():
             return False, "DeepGEMM is only supported on cuda platform"
@@ -71,7 +64,10 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "Supports only dynamic per token group activation "
                 "quantization with group_shape=(1,128).",
             )
-
+        if not should_use_deepgemm_for_fp8_linear(
+            config.out_dtype, config.weight_shape
+        ):
+            return False, "The provided metadata is not supported."
         return True, None
 
     def process_weights_after_loading(self, layer):
@@ -79,9 +75,7 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         params = self._get_layer_params(layer)
         assert layer.weight_block_size is not None
 
-        if self.is_deep_gemm_supported and should_use_deepgemm_for_fp8_linear(
-            layer.orig_dtype, params.weight
-        ):
+        if self.is_deep_gemm_supported:
             weight_scale_invs = params.weight_scale_inv
             scale_attr = (
                 params.WEIGHT_SCALE_INV

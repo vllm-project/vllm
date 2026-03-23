@@ -10,7 +10,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -274,6 +274,7 @@ class Fp8LinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
         self.out_dtype = torch.get_default_dtype()
+        self.input_dtype = get_current_vllm_config()
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
@@ -288,7 +289,6 @@ class Fp8LinearMethod(LinearMethodBase):
         if vllm_is_batch_invariant():
             self.use_marlin = False
 
-        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
         self.use_deep_gemm = is_deep_gemm_supported()
 
         self.weight_block_size = self.quant_config.weight_block_size
@@ -299,29 +299,22 @@ class Fp8LinearMethod(LinearMethodBase):
             assert not self.act_q_static
             assert self.weight_block_size is not None
 
-            activation_quant_key = create_fp8_quant_key(
+            self.activation_quant_key = create_fp8_quant_key(
                 static=self.act_q_static,
                 group_shape=GroupShape(1, self.weight_block_size[0]),
             )
-            weight_quant_key = create_fp8_quant_key(
+            self.weight_quant_key = create_fp8_quant_key(
                 static=True, group_shape=GroupShape(*self.weight_block_size)
             )
         else:
-            weight_quant_key = kFp8StaticTensorSym
+            self.weight_quant_key = kFp8StaticTensorSym
             # Use per-token quantization for better perf if dynamic and cutlass
             if self.act_q_static:
-                activation_quant_key = kFp8StaticTensorSym
+                self.activation_quant_key = kFp8StaticTensorSym
             elif cutlass_fp8_supported():
-                activation_quant_key = kFp8DynamicTokenSym
+                self.activation_quant_key = kFp8DynamicTokenSym
             else:
-                activation_quant_key = kFp8DynamicTensorSym
-
-        self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=activation_quant_key,
-            weight_quant_key=weight_quant_key,
-            out_dtype=self.out_dtype,
-            module_name=self.__class__.__name__,
-        )
+                self.activation_quant_key = kFp8DynamicTensorSym
 
     def create_weights(
         self,
@@ -386,6 +379,15 @@ class Fp8LinearMethod(LinearMethodBase):
             scale = create_fp8_input_scale(output_partition_sizes, weight_loader)
             set_weight_attrs(scale, {"scale_type": "input_scale"})
             layer.register_parameter("input_scale", scale)
+
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=self.activation_quant_key,
+            weight_quant_key=self.weight_quant_key,
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__,
+        )
 
     def process_weights_after_loading(self, layer: Module) -> None:
         size_k_first = True

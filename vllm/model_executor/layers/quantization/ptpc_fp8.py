@@ -93,11 +93,33 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
             "PTPCFp8LinearMethod is only supported on ROCm."
         )
         super().__init__(quant_config=quant_config)
+
+    def create_weights(
+        self,
+        layer,
+        input_size_per_partition,
+        output_partition_sizes,
+        input_size,
+        output_size,
+        params_dtype,
+        **extra_weight_attrs,
+    ):
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
         # Force weight quantization
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=kFp8DynamicTokenSym,
             weight_quant_key=kFp8DynamicTokenSym,
-            out_dtype=torch.get_default_dtype(),
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
         )
 

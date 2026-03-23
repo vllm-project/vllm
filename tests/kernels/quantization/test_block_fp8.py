@@ -202,7 +202,7 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
 
     # only aligned sizes are supported by deepgemm
     if not should_use_deepgemm_for_fp8_linear(
-        output_dtype=out_dtype, weight=B_fp32, supports_deep_gemm=True
+        output_dtype=out_dtype, weight_shape=B_fp32.shape, supports_deep_gemm=True
     ):
         pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}")
 

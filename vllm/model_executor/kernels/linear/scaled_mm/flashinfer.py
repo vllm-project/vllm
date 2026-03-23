@@ -18,6 +18,7 @@ from vllm.utils.flashinfer import (
     flashinfer_scaled_fp8_mm,
     has_flashinfer,
     is_flashinfer_fp8_blockscale_gemm_supported,
+    should_use_flashinfer_for_blockscale_fp8_gemm,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -25,7 +26,6 @@ from ..base import DynamicMMLinearKernel, FP8Params
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,
 )
-from .cutlass import CutlassFp8BlockScaledMMKernel
 from .deep_gemm import DeepGemmFp8BlockScaledMMKernel
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
@@ -78,6 +78,8 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
 
 class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    IS_SUPPORTED: bool = is_flashinfer_fp8_blockscale_gemm_supported()
+
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
@@ -108,27 +110,27 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "Supports only dynamic per token group activation "
                 "quantization with group_shape=(1,128).",
             )
+
+        if not should_use_flashinfer_for_blockscale_fp8_gemm(
+            cls.IS_SUPPORTED,
+            config.out_dtype,
+            config.input_dtype,
+            config.weight_quant_key.dtype,
+            config.weight_shape,
+        ):
+            return (
+                False,
+                "The provided metadata is not supported.",
+            )
+
         return True, None
-
-    @classmethod
-    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
-        # TODO This import is to avoid circular import
-        # this import can be global
-        # after all scaled MM kernels inherit from base
-        from .triton import TritonFp8BlockScaledMMKernel
-
-        return [
-            DeepGemmFp8BlockScaledMMKernel,
-            CutlassFp8BlockScaledMMKernel,
-            TritonFp8BlockScaledMMKernel,
-        ]
 
     @classmethod
     def is_supported(cls, compute_capability=None):
         if not current_platform.is_cuda():
             return False, "only cuda devices are supported."
 
-        if not is_flashinfer_fp8_blockscale_gemm_supported():
+        if not cls.IS_SUPPORTED:
             return False, "FlashInfer block-scale FP8 GEMM is not available."
 
         return True, None

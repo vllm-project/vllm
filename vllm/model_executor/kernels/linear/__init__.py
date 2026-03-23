@@ -20,6 +20,8 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.base import (
+    DynamicMMLinearKernel,
+    MMLinearKernel,
     MMLinearLayerConfig,
 )
 from vllm.model_executor.kernels.linear.mixed_precision import (
@@ -68,9 +70,6 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUInt8ScaledMMLinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.cuda import (
-    CudaFp8BlockScaledMMKernel,
-)
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
     CutlassFp8BlockScaledMMKernel,
     CutlassFP8ScaledMMLinearKernel,
@@ -80,6 +79,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
     DeepGemmFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+    FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
     FlashInferFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
@@ -138,10 +138,11 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
 
 # in priority/performance order (when available)
 _POSSIBLE_FP8_BLOCK_KERNELS: dict[
-    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel]]
+    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | DynamicMMLinearKernel]]
 ] = {
     PlatformEnum.CUDA: [
-        CudaFp8BlockScaledMMKernel,
+        FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+        DeepGemmFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
     ],
@@ -174,7 +175,9 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     ],
 }
 
-_KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel)
+# TODO make all kernels inherit from MMLinearKernel
+# then bound _KernelT only to MMLinearKernel
+_KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel | MMLinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
 
 
@@ -265,6 +268,8 @@ def choose_scaled_mm_linear_kernel(
 def init_fp8_linear_kernel(
     activation_quant_key: QuantKey,
     weight_quant_key: QuantKey,
+    weight_shape: tuple[int, int],
+    input_dtype: torch.dtype,
     out_dtype: torch.dtype,
     force_kernel: type[_KernelT] | None = None,
     module_name: str | None = None,
@@ -272,6 +277,8 @@ def init_fp8_linear_kernel(
     scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
+        weight_shape=weight_shape,
+        input_dtype=input_dtype,
         out_dtype=out_dtype,
     )
 
