@@ -61,7 +61,7 @@ def run_rebalance_experts(
     model_state: "EplbModelState",
     eplb_state: "EplbState",
     physical_to_logical_map_cpu: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """Compute new expert mappings for one rebalancing cycle.
 
     Returns: new_physical_to_logical_map
@@ -77,11 +77,7 @@ def run_rebalance_experts(
     # Move the global expert load window to CPU for computation.
     global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
     # Compute new expert mappings for the model
-    (
-        new_physical_to_logical_map,
-        new_logical_to_physical_map,
-        new_logical_replica_count,
-    ) = eplb_state.policy.rebalance_experts(
+    new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
         global_expert_load_window,
         eplb_stats.num_replicas,
         eplb_stats.num_groups,
@@ -91,20 +87,7 @@ def run_rebalance_experts(
     )
     assert new_physical_to_logical_map.device == torch.device("cpu")
 
-    max_slots = model_state.logical_to_physical_map.shape[-1]
-    new_logical_to_physical_map = torch.nn.functional.pad(
-        new_logical_to_physical_map,
-        (0, max(0, max_slots - new_logical_to_physical_map.shape[-1])),
-        value=-1,
-    ).to(model_state.logical_to_physical_map.device)
-    new_logical_replica_count = new_logical_replica_count.to(
-        model_state.logical_replica_count.device
-    )
-    return (
-        new_physical_to_logical_map,
-        new_logical_to_physical_map,
-        new_logical_replica_count,
-    )
+    return new_physical_to_logical_map
 
 
 async def transfer_run_periodically(
@@ -126,11 +109,9 @@ async def transfer_run_periodically(
             with model_state.map_lock:
                 physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
 
-            (
-                new_physical_to_logical_map,
-                new_logical_to_physical_map,
-                new_logical_replica_count,
-            ) = run_rebalance_experts(model_state, state, physical_to_logical_map_cpu)
+            new_physical_to_logical_map = run_rebalance_experts(
+                model_state, state, physical_to_logical_map_cpu
+            )
             logger.info(
                 "Async worker computed new indices for model %s",
                 model_state.model_name,
@@ -163,8 +144,6 @@ async def transfer_run_periodically(
                 model_state.pending_result = AsyncEPLBLayerResult(
                     layer_idx=layer_idx,
                     new_physical_to_logical_map=new_physical_to_logical_map,
-                    new_logical_to_physical_map=new_logical_to_physical_map,
-                    new_logical_replica_count=new_logical_replica_count,
                     is_unchanged=is_unchanged,
                     is_received_locally=is_received_locally,
                     recv_metadata=recv_metadata,

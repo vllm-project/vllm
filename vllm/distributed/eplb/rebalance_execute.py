@@ -58,16 +58,6 @@ class AsyncEPLBLayerResult:
     New physical→logical mapping for all layers, on CPU.
     Shape: (num_moe_layers, num_physical_experts)
     """
-    new_logical_to_physical_map: torch.Tensor
-    """
-    New logical→physical mapping for all layers, on GPU.
-    Shape: (num_moe_layers, num_logical_experts, max_slots)
-    """
-    new_logical_replica_count: torch.Tensor
-    """
-    New replica count for all layers, on GPU.
-    Shape: (num_moe_layers, num_logical_experts)
-    """
     is_unchanged: np.ndarray
     """Per-physical-expert flag: weight was not moved during transfer."""
     is_received_locally: np.ndarray

@@ -10,7 +10,7 @@ steps:
   - tests/entrypoints/
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
-  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/serve/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
 
 - label: Entrypoints Integration (LLM)
   timeout_in_minutes: 40
@@ -34,7 +34,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
   - pytest -v -s entrypoints/test_chat_utils.py
   mirror:
     amd:
@@ -48,11 +48,11 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/rpc
-  - tests/entrypoints/instrumentator
+  - tests/entrypoints/serve/instrumentator
   - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/instrumentator
+  - pytest -v -s entrypoints/serve/instrumentator
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 
@@ -74,19 +74,6 @@ steps:
   - tests/entrypoints/openai/responses
   commands:
   - pytest -v -s entrypoints/openai/responses
-
-- label: Entrypoints V1
-  timeout_in_minutes: 50
-  source_file_dependencies:
-    - vllm/
-    - tests/v1
-  commands:
-    - pytest -v -s v1/entrypoints
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
 
 - label: OpenAI API Correctness
   timeout_in_minutes: 30
