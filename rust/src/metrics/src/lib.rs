@@ -30,17 +30,17 @@ pub struct EnginePositionLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct FinishReasonLabels {
+pub struct FinishedReasonLabels {
     pub model_name: String,
     pub engine: u32,
-    pub finish_reason: &'static str,
+    pub finished_reason: &'static str,
 }
 
 pub(crate) type U64Counter = Counter<u64, AtomicU64>;
 pub(crate) type U64Gauge = Gauge<u64, AtomicU64>;
 pub(crate) type F64Gauge = Gauge<f64, AtomicU64>;
 pub(crate) type HistogramFamily = Family<EngineLabels, Histogram, fn() -> Histogram>;
-pub(crate) type FinishReasonCounterFamily = Family<FinishReasonLabels, U64Counter>;
+pub(crate) type FinishedReasonCounterFamily = Family<FinishedReasonLabels, U64Counter>;
 
 /// Shared Prometheus registry for frontend metrics.
 ///

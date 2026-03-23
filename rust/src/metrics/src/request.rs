@@ -2,7 +2,7 @@ use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 
-use crate::{FinishReasonCounterFamily, HistogramFamily};
+use crate::{FinishedReasonCounterFamily, HistogramFamily};
 
 const TTFT_BUCKETS: [f64; 22] = [
     0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
@@ -63,7 +63,7 @@ fn request_params_n_histogram() -> Histogram {
 
 /// Request-lifecycle Prometheus families exported from the `llm` layer.
 pub struct RequestMetrics {
-    pub request_success: FinishReasonCounterFamily,
+    pub request_success: FinishedReasonCounterFamily,
     pub request_prompt_tokens: HistogramFamily,
     pub request_generation_tokens: HistogramFamily,
     pub request_max_num_generation_tokens: HistogramFamily,

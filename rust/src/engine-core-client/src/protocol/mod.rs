@@ -106,7 +106,7 @@ pub enum EngineCoreEventType {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L121-L130>
-#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EngineCoreEvent {
     pub r#type: EngineCoreEventType,
     pub timestamp: f64,

@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use vllm_engine_core_client::protocol::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreOutput, FinishReason,
 };
-use vllm_metrics::{EngineLabels, FinishReasonLabels, METRICS, RequestMetrics};
+use vllm_metrics::{EngineLabels, FinishedReasonLabels, METRICS, RequestMetrics};
 
 fn metrics() -> &'static RequestMetrics {
     &METRICS.request
@@ -218,10 +218,10 @@ fn observe_inter_token_latency_seconds(model_name: &str, engine: u32, seconds: f
 fn record_request_success(model_name: &str, engine: u32, finish_reason: FinishReason) {
     metrics()
         .request_success
-        .get_or_create(&FinishReasonLabels {
+        .get_or_create(&FinishedReasonLabels {
             model_name: model_name.to_string(),
             engine,
-            finish_reason: finish_reason.as_str(),
+            finished_reason: finish_reason.as_str(),
         })
         .inc();
 }
