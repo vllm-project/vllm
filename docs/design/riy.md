@@ -85,14 +85,16 @@ level without modifying the checkpoint or model structure.
 ### Collect statistics and build a profile
 
 ```bash
-# Start vLLM with any MoE model
-vllm serve Qwen/Qwen3.5-397B-A17B --port 8011
+# Start vLLM with VLLM_RIY_MONITOR=1 (enables stats + HTTP server)
+# Stats collection starts automatically on first forward pass
+VLLM_RIY_MONITOR=1 vllm serve Qwen/Qwen3.5-397B-A17B --port 8011
 
-# Start collecting
-curl -X POST http://localhost:8011/riy/stats/start
+# Or start/stop collection manually via API:
+curl -X POST http://localhost:8019/riy/stats/start
+curl -X POST http://localhost:8019/riy/stats/stop
 
 # Reset counters (clean start, no warm-up carry-over)
-curl -X POST http://localhost:8011/riy/stats/reset
+curl -X POST http://localhost:8019/riy/stats/reset
 
 # Run your workload...
 

@@ -102,6 +102,7 @@ being crushed to zero by a few dominant ones.
 | Key | Action |
 |-----|--------|
 | `p` | **Prune** — enter target percentage (0-100%), computes mask from current stats, applies live to vLLM, shows estimated VRAM savings |
+| `c` | **Clear** — remove live mask (keeps profile mask from `--riy-expert-profile`) |
 | `e` | **Export** — save current mask as `riy_filter.<timestamp>.json` |
 | `r` | **Reset** — zero all stats counters |
 | `s` | **Save** — dump raw stats to `riy_stats_export.json` |
