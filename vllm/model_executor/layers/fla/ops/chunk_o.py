@@ -145,7 +145,7 @@ def chunk_fwd_o(
     h: torch.Tensor,
     g: torch.Tensor | None = None,  # cumsum of log decay
     scale: float | None = None,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
 ) -> torch.Tensor:
     B, T, Hg, K, V = *q.shape, v.shape[-1]
