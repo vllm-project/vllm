@@ -1,4 +1,4 @@
-model_name: "Qwen/Qwen3.5-0.8B"
+model_name: "Qwen/Qwen3.5-27B-FP8
 accuracy_threshold: 0.375
 num_questions: 1319
 num_fewshot: 5
