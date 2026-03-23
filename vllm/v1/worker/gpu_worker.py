@@ -496,6 +496,16 @@ class Worker(WorkerBase):
         tp_rank = get_tp_group().rank_in_group
         return {tp_rank: metadata}
 
+    # NOTE: New API only for SimpleCPUOffloadConnector for now.
+    def drain_kv_connector_transfers(self) -> set[str] | None:
+        """Flush deferred transfers, synchronize events, return completions."""
+        if not has_kv_transfer_group():
+            return None
+        connector = get_kv_transfer_group()
+        if hasattr(connector, "drain_pending_transfers"):
+            return connector.drain_pending_transfers()
+        return None
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 

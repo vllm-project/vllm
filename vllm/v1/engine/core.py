@@ -70,7 +70,7 @@ from vllm.v1.engine.utils import (
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
@@ -418,6 +418,10 @@ class EngineCore:
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
 
+    def has_work(self) -> bool:
+        """Returns True if the engine should be stepped."""
+        return self.scheduler.has_requests()
+
     def step_with_batch_queue(
         self,
     ) -> tuple[dict[int, EngineCoreOutputs] | None, bool]:
@@ -574,9 +578,26 @@ class EngineCore:
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
+        # Drain any in-flight connector transfers
+        self._drain_connector_transfers()
         return self.scheduler.reset_prefix_cache(
             reset_running_requests, reset_connector
         )
+
+    def _drain_connector_transfers(self) -> None:
+        """Flush worker-side connector transfers and process completions."""
+        connector = self.scheduler.connector
+        if (
+            connector is None
+            or not hasattr(connector, "has_pending_transfers")
+            or not connector.has_pending_transfers()
+        ):
+            return
+        results: list = self.collective_rpc("drain_kv_connector_transfers")
+        for finished_sending in results:
+            if finished_sending:
+                output = KVConnectorOutput(finished_sending=finished_sending)
+                connector.update_connector_output(output)
 
     def reset_encoder_cache(self) -> None:
         """Reset the encoder cache to invalidate all cached encoder outputs.
@@ -1123,11 +1144,7 @@ class EngineCoreProc(EngineCore):
 
     def has_work(self) -> bool:
         """Returns true if the engine should be stepped."""
-        return (
-            self.engines_running
-            or self.scheduler.has_requests()
-            or bool(self.batch_queue)
-        )
+        return self.engines_running or bool(self.batch_queue) or super().has_work()
 
     def is_running(self) -> bool:
         """Returns true if shutdown has not been requested."""
@@ -1255,8 +1272,9 @@ class EngineCoreProc(EngineCore):
                 return
             output = UtilityOutput(call_id)
             # Lazily look-up utility method so that failure will be handled/returned.
-            get_result = lambda: (method := getattr(self, method_name)) and method(
-                *self._convert_msgspec_args(method, args)
+            get_result = lambda: (
+                (method := getattr(self, method_name))
+                and method(*self._convert_msgspec_args(method, args))
             )
             enqueue_output = lambda out: self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=out))

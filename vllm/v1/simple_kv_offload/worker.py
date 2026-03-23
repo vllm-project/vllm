@@ -26,7 +26,7 @@ class SimpleCPUOffloadWorker:
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig | None",
         cpu_capacity_bytes: int,
-        copy_backend: str = "kernel",
+        copy_backend: str = "dma",
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -269,7 +269,21 @@ class SimpleCPUOffloadWorker:
 
     def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
         """Sync all in-flight transfers before preempted blocks are reused."""
-        # Flush deferred store so its event can be awaited below.
+        self._flush_and_sync_all()
+
+    def drain_pending_transfers(self) -> set[str]:
+        """Flush deferred stores, synchronize events, return completions.
+
+        Returns ``finished_sending`` with ``__store_done_<idx>`` sentinels for
+        every pending store event so the scheduler can process the completions.
+        """
+        pending = set(self._pending_store_event_indices)
+        self._flush_and_sync_all()
+        self._pending_store_event_indices -= pending
+        return {f"__store_done_{idx}" for idx in pending}
+
+    def _flush_and_sync_all(self) -> None:
+        """Flush deferred stores and synchronize all in-flight events."""
         if self._deferred_store is not None:
             src, dst, event_idx = self._deferred_store
             self._deferred_store = None
