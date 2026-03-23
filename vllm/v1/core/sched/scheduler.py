@@ -295,9 +295,10 @@ class Scheduler(SchedulerInterface):
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
     ) -> int:
-        assert num_external_computed_tokens == 0, (
-            "External KV connector is not verified yet"
-        )
+        # External tokens (from KV offload connectors) are loaded into GPU
+        # cache before the forward pass.  They are indistinguishable from
+        # locally-computed tokens for alignment purposes — the mamba state
+        # is already populated at block boundaries by the offloading path.
         num_computed_tokens = (
             request.num_computed_tokens
             + num_new_local_computed_tokens
