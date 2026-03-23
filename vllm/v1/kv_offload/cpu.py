@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
+from typing import Literal, cast
 
 import torch
 
@@ -9,9 +10,8 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
-from vllm.v1.kv_offload.arc_manager import ARCOffloadingManager
 from vllm.v1.kv_offload.backends.cpu import CPUBackend
-from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
+from vllm.v1.kv_offload.cpu_manager import CPUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
 from vllm.v1.kv_offload.spec import OffloadingSpec
@@ -72,19 +72,11 @@ class CPUOffloadingSpec(OffloadingSpec):
                 block_size=offloaded_block_size, num_blocks=self.num_blocks
             )
 
-            if self.eviction_policy == "lru":
-                self._manager = LRUOffloadingManager(
-                    backend=backend, enable_events=enable_events
-                )
-            elif self.eviction_policy == "arc":
-                self._manager = ARCOffloadingManager(
-                    backend=backend, enable_events=enable_events
-                )
-            else:
-                raise ValueError(
-                    f"Unknown eviction policy: {self.eviction_policy}. "
-                    f"Supported policies: lru, arc"
-                )
+            self._manager = CPUOffloadingManager(
+                backend=backend,
+                eviction_policy=cast(Literal["lru", "arc"], self.eviction_policy),
+                enable_events=enable_events,
+            )
 
             # store_threshold: how many times a block must appear in lookup()
             # before it is eligible for CPU offloading.  Values < 2 disable
