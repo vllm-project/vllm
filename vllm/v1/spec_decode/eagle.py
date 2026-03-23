@@ -1573,7 +1573,8 @@ class SpecDecodeBaseProposer:
             use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
         return use_aux_hidden_state
 
-    def _is_mamba_kv_cache_group(self, kv_cache_spec) -> bool:
+    @staticmethod
+    def _is_mamba_spec(kv_cache_spec) -> bool:
         """Check if a KV cache spec contains mamba layers."""
         return isinstance(kv_cache_spec, MambaSpec) or (
             isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
@@ -1582,26 +1583,37 @@ class SpecDecodeBaseProposer:
             )
         )
 
+    def _is_hybrid_draft_model(self, kv_cache_config: KVCacheConfig) -> bool:
+        """Check if the draft model has layers in multiple KV cache groups
+        (e.g. Jamba with both attention and mamba layers)."""
+        gids = set()
+        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+            if self._draft_attn_layer_names & set(group.layer_names):
+                gids.add(gid)
+        return len(gids) > 1
+
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Validate that all drafting layers belong to the same KVCacheGroup.
-        Hybrid draft models (e.g. Jamba) may have additional mamba groups;
-        only the non-mamba layers are required to share a single group.
+        Need this assumption to ensure all drafting layers can use the
+        same AttentionMetadata.
+        May extend to multiple AttentionMetadata in the future.
         """
         kv_cache_groups: dict[str, int] = {}
-        mamba_gids: set[int] = set()
-        for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            if self._is_mamba_kv_cache_group(kv_cache_group.kv_cache_spec):
-                mamba_gids.add(gid)
+        for id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             for layer_name in kv_cache_group.layer_names:
-                kv_cache_groups[layer_name] = gid
-        attn_gids = (
-            set(kv_cache_groups[name] for name in self._draft_attn_layer_names)
-            - mamba_gids
-        )
-        assert len(attn_gids) <= 1, (
-            "All draft attention layers should belong to the same kv cache group"
-        )
+                kv_cache_groups[layer_name] = id
+        assert (
+            len(
+                set(
+                    [
+                        kv_cache_groups[layer_name]
+                        for layer_name in self._draft_attn_layer_names
+                    ]
+                )
+            )
+            == 1
+        ), "All drafting layers should belong to the same kv cache group"
 
     def initialize_attn_backend(
         self,
@@ -1612,22 +1624,87 @@ class SpecDecodeBaseProposer:
         Initialize AttentionGroups for draft layers using kv_cache_config.
         Called from the model runner's initialize_metadata_builders.
         """
+        if self._is_hybrid_draft_model(kv_cache_config):
+            return self._initialize_hybrid_attn_backend(
+                kv_cache_config, kernel_block_sizes
+            )
+
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
 
-        # Find which kv_cache_groups the draft layers belong to.
+        # Find which kv_cache_group the draft layers belong to
         self.validate_same_kv_cache_group(kv_cache_config)
+        kv_cache_spec = None
+        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+            if self._draft_attn_layer_names & set(group.layer_names):
+                self.kv_cache_gid = gid
+                kv_cache_spec = group.kv_cache_spec
+                break
+
+        attention_groups: dict[str, AttentionGroup] = {}
+        if kv_cache_spec is not None:
+            for layer_name in self._draft_attn_layer_names:
+                attn_backend = all_attn_layers[layer_name].get_attn_backend()
+                backend_key = attn_backend.full_cls_name()
+                if backend_key not in attention_groups:
+                    layer_kv_cache_spec = kv_cache_spec
+                    if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
+                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[
+                            layer_name
+                        ]
+
+                    kernel_block_size = (
+                        kernel_block_sizes[self.kv_cache_gid]
+                        if kernel_block_sizes is not None
+                        and self.kv_cache_gid < len(kernel_block_sizes)
+                        else None
+                    )
+                    attn_group = AttentionGroup(
+                        backend=attn_backend,
+                        layer_names=[layer_name],
+                        kv_cache_spec=layer_kv_cache_spec,
+                        kv_cache_group_id=self.kv_cache_gid,
+                    )
+                    attn_group.create_metadata_builders(
+                        self.vllm_config,
+                        self.device,
+                        kernel_block_size=kernel_block_size,
+                    )
+                    attention_groups[backend_key] = attn_group
+                else:
+                    attention_groups[backend_key].layer_names.append(layer_name)
+
+        self.draft_attn_groups = list(attention_groups.values())
+        self.block_size = (
+            self.draft_attn_groups[0].get_metadata_builder().kv_cache_spec.block_size
+        )
+        logger.debug("Using block size %d for drafting layers", self.block_size)
+
+    def _initialize_hybrid_attn_backend(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int] | None = None,
+    ) -> None:
+        """Initialize AttentionGroups for hybrid draft models that have
+        layers in multiple KV cache groups (e.g. attention + mamba)."""
+        all_attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+
+        # Classify draft layers into attention vs mamba groups.
         self._mamba_kv_cache_gids = []
         for gid, group in enumerate(kv_cache_config.kv_cache_groups):
             if not (self._draft_attn_layer_names & set(group.layer_names)):
                 continue
-            if self._is_mamba_kv_cache_group(group.kv_cache_spec):
+            if self._is_mamba_spec(group.kv_cache_spec):
                 self._mamba_kv_cache_gids.append(gid)
             elif self.kv_cache_gid < 0:
                 self.kv_cache_gid = gid
 
+        # Build an AttentionGroup per (gid, backend) pair.
         attention_groups: dict[str, AttentionGroup] = {}
         for gid, group in enumerate(kv_cache_config.kv_cache_groups):
             draft_layers = [
