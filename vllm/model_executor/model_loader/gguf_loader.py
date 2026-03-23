@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from collections.abc import Generator
+from typing import TYPE_CHECKING
 
 import gguf
 import regex as re
@@ -26,6 +27,9 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.transformers_utils.gguf_utils import detect_gguf_multimodal
 from vllm.utils.torch_utils import set_default_torch_dtype
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.gguf import GGUFConfig
 
 logger = init_logger(__name__)
 
@@ -354,7 +358,9 @@ class GGUFModelLoader(BaseModelLoader):
             "GGUF unquantized modules: %s",
             unquant_names,
         )
-        vllm_config.quant_config.unquantized_modules.extend(unquant_names)
+        if not isinstance(quant_config := vllm_config.quant_config, GGUFConfig):
+            raise ValueError("Expected quant_config to be an instance of GGUFConfig")
+        quant_config.unquantized_modules.extend(unquant_names)
 
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
