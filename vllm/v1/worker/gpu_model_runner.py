@@ -130,6 +130,7 @@ from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    CanonicalKVCaches,
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -492,6 +493,7 @@ class GPUModelRunner(
         # Initialize in initialize_kv_cache_tensors
         self.cross_layers_kv_cache: torch.Tensor | None = None
         self.cross_layers_attn_backend: type[AttentionBackend] | None = None
+        self.canonical_kv_caches: CanonicalKVCaches | None = None
         # indexes: [kv_cache_group_id][attn_group]
         self.attn_groups: list[list[AttentionGroup]] = []
         # self.kv_cache_config: KVCacheConfig
@@ -6475,6 +6477,16 @@ class GPUModelRunner(
             )
             self.cross_layers_kv_cache = cross_layers_kv_cache
             self.cross_layers_attn_backend = attn_backend
+        elif self.use_canonical_kv_caches(
+            kv_cache_config, self.attn_groups, cache_dtype
+        ):
+            kv_caches, self.canonical_kv_caches = self.allocate_canonical_kv_caches(
+                kv_cache_config,
+                self.attn_groups,
+                cache_dtype,
+                self.device,
+                kernel_block_sizes,
+            )
         else:
             # Fallback to the general case
             # Initialize the memory buffer for KV cache
@@ -6580,6 +6592,16 @@ class GPUModelRunner(
             else:
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
+
+            from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+                WorkerConnectorInitializationData,
+            )
+
+            kv_transfer_group.initialize_worker_connector(
+                WorkerConnectorInitializationData(
+                    canonical_kv_caches=self.canonical_kv_caches,
+                )
+            )
 
     def _get_attention_kv_cache_gid(self) -> int:
         """Find the KV cache group index for attention layers."""
