@@ -5159,6 +5159,12 @@ class GPUModelRunner(
                 self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
                 self.query_start_loc.copy_to_gpu()
 
+                # Sync block table CPU->GPU so cleared rows from
+                # remove_request() are visible to the attention metadata
+                # builder. Without this, stale block IDs from finished
+                # requests can corrupt Mamba state.
+                self.input_batch.block_table.commit_block_table(num_reqs_padded)
+
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
                 attn_metadata, _ = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
