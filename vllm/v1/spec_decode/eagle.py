@@ -121,7 +121,6 @@ class SpecDecodeBaseProposer:
         # For hybrid draft models (e.g. Jamba) that have both attention and
         # mamba layers in separate KV cache groups.
         self._mamba_kv_cache_gids: list[int] = []
-        self._draft_attn_only_layer_names: set[str] = set()
         self.eagle3_use_aux_hidden_state: bool = (
             self._get_eagle3_use_aux_hidden_state_from_config()
         )
@@ -358,16 +357,14 @@ class SpecDecodeBaseProposer:
 
         Hybrid draft models may have layers in different KV cache groups,
         each with its own block table.  For non-primary groups, build a
-        CAM with the correct block_table_tensor.
+        CAM with the correct block_table_tensor on the fly.
         """
         gid = attn_group.kv_cache_group_id
         if gid not in self._mamba_kv_cache_gids:
             return common_attn_metadata
-
         block_table = self.runner.input_batch.block_table[gid].get_device_tensor(
             common_attn_metadata.batch_size()
         )
-
         return common_attn_metadata.replace(
             block_table_tensor=block_table,
         )
@@ -388,9 +385,7 @@ class SpecDecodeBaseProposer:
                 self._slot_mapping_buffer[num_actual:num_tokens].fill_(PADDING_SLOT_ID)
 
         view = self._slot_mapping_buffer[:num_tokens]
-        # Only attention layers use slot_mapping; mamba layers do not.
-        layer_names = self._draft_attn_only_layer_names or self._draft_attn_layer_names
-        return {name: view for name in layer_names}
+        return {name: view for name in self._draft_attn_layer_names}
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
         """Initialize cudagraph dispatcher keys for eagle.
@@ -461,7 +456,9 @@ class SpecDecodeBaseProposer:
 
         per_layer_attn_metadata: dict[str, object] = {}
         for attn_group in self.draft_attn_groups:
-            group_cam = self._get_common_attn_metadata_for_group(attn_group, common_attn_metadata)
+            group_cam = self._get_common_attn_metadata_for_group(
+                attn_group, common_attn_metadata
+            )
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
                 common_attn_metadata=group_cam, draft_index=0
             )
@@ -631,7 +628,9 @@ class SpecDecodeBaseProposer:
 
             # Rebuild attention metadata
             for attn_group in self.draft_attn_groups:
-                group_cam = self._get_common_attn_metadata_for_group(attn_group, common_attn_metadata)
+                group_cam = self._get_common_attn_metadata_for_group(
+                    attn_group, common_attn_metadata
+                )
                 attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
                     common_attn_metadata=group_cam,
                     draft_index=token_index + 1,
@@ -1637,17 +1636,14 @@ class SpecDecodeBaseProposer:
                 layer_gid[layer_name] = gid
 
         # Classify draft layers and find the primary attention group.
-        self._draft_attn_only_layer_names = set()
         self._mamba_kv_cache_gids = []
         for layer_name in self._draft_attn_layer_names:
             gid = layer_gid.get(layer_name, -1)
             if gid >= 0 and gid_is_mamba.get(gid, False):
                 if gid not in self._mamba_kv_cache_gids:
                     self._mamba_kv_cache_gids.append(gid)
-            else:
-                self._draft_attn_only_layer_names.add(layer_name)
-                if self.kv_cache_gid < 0 and gid >= 0:
-                    self.kv_cache_gid = gid
+            elif self.kv_cache_gid < 0 and gid >= 0:
+                self.kv_cache_gid = gid
 
         # Build AttentionGroups per KV cache group containing draft layers.
         attention_groups: dict[str, AttentionGroup] = {}
