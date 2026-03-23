@@ -89,7 +89,7 @@ class EncoderCudaGraphManager:
             self.max_batch_size = (
                 user_max_vision_items
                 if user_max_vision_items > 0
-                else max_budget // min_budget
+                else min(max_budget // min_budget, min_budget)
             )
 
         assert multimodal_config is not None
