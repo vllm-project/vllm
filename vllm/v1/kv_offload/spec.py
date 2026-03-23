@@ -93,6 +93,14 @@ class OffloadingSpec(ABC):
         self.hash_function = get_hash_fn_by_name(
             vllm_config.cache_config.prefix_caching_hash_algo
         )
+        # TODO: Block hashes are computed from token IDs and a chain seed
+        # (NONE_HASH), but do NOT incorporate model weights or config.
+        # If model weights change (e.g. same model name, different revision
+        # or fine-tune), stored KV cache files will still hash-match but
+        # contain stale/wrong KV values — silent correctness corruption.
+        # Fix: incorporate a model fingerprint (weights checksum, revision
+        # hash, or tokenizer vocab hash) into the hash seed so that
+        # weight changes invalidate the cache automatically.
         # gpu block size per group
         self.gpu_block_size: tuple[int, ...] = tuple(
             kv_cache_group.kv_cache_spec.block_size
@@ -106,13 +114,58 @@ class OffloadingSpec(ABC):
 
         hybrid_chunk_size = self.extra_config.get("hybrid_chunk_size")
         if hybrid_chunk_size is not None:
+            chunk_size_int = int(hybrid_chunk_size)
+            # Warn about gpu_block_sizes that are not divisible by chunk_size,
+            # as these groups cannot be split and will raise
+            # first_hashable_chunk_idx, potentially making offloading
+            # impossible for practical context lengths.
+            for i, gbs in enumerate(self.gpu_block_size):
+                if gbs > chunk_size_int and gbs % chunk_size_int != 0:
+                    logger.warning(
+                        "KV group %d has gpu_block_size=%d which is not "
+                        "divisible by hybrid_chunk_size=%d. This group "
+                        "cannot be split into chunks and will require "
+                        "%d tokens before any offloading can occur. "
+                        "Consider setting max_model_len to a multiple "
+                        "of hybrid_chunk_size.",
+                        i, gbs, chunk_size_int,
+                        gbs,
+                    )
             self.hybrid_planner = HybridOffloadPlanner(
                 hash_block_size=self.hash_block_size,
                 gpu_block_sizes=self.gpu_block_size,
-                fixed_chunk_size=int(hybrid_chunk_size),
+                fixed_chunk_size=chunk_size_int,
             )
             self.hybrid_offload_enabled = True
             self.group_hash_block_size = self.hybrid_planner.offload_unit_sizes
+            max_model_len = vllm_config.model_config.max_model_len
+            if (self.hybrid_planner.first_hashable_chunk_idx
+                    * chunk_size_int >= max_model_len):
+                logger.error(
+                    "Hybrid offloading is effectively disabled: "
+                    "first_hashable_chunk_idx=%d requires %d tokens "
+                    "but max_model_len=%d. No chunks can ever be "
+                    "stored. Set max_model_len to a multiple of "
+                    "hybrid_chunk_size=%d (e.g. %d).",
+                    self.hybrid_planner.first_hashable_chunk_idx,
+                    self.hybrid_planner.first_hashable_chunk_idx
+                    * chunk_size_int,
+                    max_model_len,
+                    chunk_size_int,
+                    (max_model_len // chunk_size_int) * chunk_size_int,
+                )
+            else:
+                logger.info(
+                    "Hybrid offloading enabled: chunk_size=%d, "
+                    "offload_unit_sizes=%s, "
+                    "first_hashable_chunk_idx=%d, "
+                    "min_tokens_for_offload=%d",
+                    chunk_size_int,
+                    self.hybrid_planner.offload_unit_sizes,
+                    self.hybrid_planner.first_hashable_chunk_idx,
+                    (self.hybrid_planner.first_hashable_chunk_idx + 1)
+                    * chunk_size_int,
+                )
         else:
             for block_size in self.gpu_block_size:
                 assert block_size % self.hash_block_size == 0

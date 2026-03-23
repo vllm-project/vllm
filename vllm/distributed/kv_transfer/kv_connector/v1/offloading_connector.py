@@ -95,11 +95,22 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
-    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
+    def handle_preemptions(
+        self,
+        preempted_req_ids_or_metadata: set[str] | KVConnectorMetadata,
+    ):
         assert self.connector_worker is not None
-        self.connector_worker.handle_preemptions(
-            self._coerce_metadata(kv_connector_metadata)
-        )
+        # Stock vLLM passes preempted_req_ids (set[str]) directly.
+        # Our branch's EngineCore may also pass KVConnectorMetadata.
+        if isinstance(preempted_req_ids_or_metadata, (set, list)):
+            metadata = OffloadingConnectorMetadata(
+                reqs_to_load={},
+                reqs_to_store={},
+                reqs_to_flush=set(preempted_req_ids_or_metadata),
+            )
+        else:
+            metadata = self._coerce_metadata(preempted_req_ids_or_metadata)
+        self.connector_worker.handle_preemptions(metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
