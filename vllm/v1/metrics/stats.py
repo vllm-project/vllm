@@ -169,6 +169,10 @@ class SchedulerStats:
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
 
+    # Throughput when first request in batch completes: total_tokens / elapsed_time.
+    # Set by scheduler when first request finishes; used to evaluate acceleration.
+    first_completion_throughput: dict[int, float] | None = None
+
     waiting_lora_adapters: dict[str, int] = field(default_factory=dict)
     running_lora_adapters: dict[str, int] = field(default_factory=dict)
 
@@ -190,6 +194,11 @@ class RequestStateStats:
 
     # first token latency
     first_token_latency: float = 0.0
+
+    # Per-request throughput (tokens/s) and e2e latency when request finishes.
+    # Set by output_processor when the request completes.
+    throughput: float = 0.0
+    e2e_latency: float = 0.0
 
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False

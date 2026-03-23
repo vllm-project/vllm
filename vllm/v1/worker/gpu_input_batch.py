@@ -49,6 +49,10 @@ class CachedRequestState:
     # Used when both async_scheduling and spec_decode are enabled.
     prev_num_draft_len: int = 0
 
+    # Wall-clock time when this request was first seen by the worker (for
+    # per-request throughput logging).
+    arrival_time: float = 0.0
+
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds

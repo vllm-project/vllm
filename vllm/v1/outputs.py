@@ -181,6 +181,9 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
 
+    # When True, skip this step's spec decoding stats (e.g. mixed should_stop)
+    skip_spec_decoding_stats: bool = False
+
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):

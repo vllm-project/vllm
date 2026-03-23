@@ -49,6 +49,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import report_usage_stats
+from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
@@ -427,6 +428,10 @@ class Worker(WorkerBase):
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
+            # Pre-capture should_stop CUDA graphs to avoid first-request latency
+            if (hasattr(self.model_runner, "drafter")
+                    and isinstance(self.model_runner.drafter, EagleProposer)):
+                self.model_runner.drafter.pre_capture_stop_graphs()
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"

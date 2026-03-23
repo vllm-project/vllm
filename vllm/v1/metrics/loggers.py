@@ -1207,6 +1207,7 @@ class StatLoggerManager:
             self.stat_loggers.append(
                 PrometheusStatLogger(vllm_config, self.engine_indexes)
             )
+        self.last_first_completion_throughput: float | None = None
 
     def record(
         self,
@@ -1217,6 +1218,15 @@ class StatLoggerManager:
     ):
         if engine_idx is None:
             engine_idx = 0
+        if (
+            scheduler_stats is not None
+            and scheduler_stats.first_completion_throughput
+        ):
+            # Use client_index 0 (typical); fallback to first value.
+            d = scheduler_stats.first_completion_throughput
+            self.last_first_completion_throughput = d.get(0) or (
+                next(iter(d.values())) if d else None
+            )
         for logger in self.stat_loggers:
             logger.record(
                 scheduler_stats,
@@ -1224,6 +1234,10 @@ class StatLoggerManager:
                 mm_cache_stats=mm_cache_stats,
                 engine_idx=engine_idx,
             )
+
+    def get_first_completion_throughput(self) -> float | None:
+        """Throughput (tok/s) when first request in batch completed."""
+        return self.last_first_completion_throughput
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         for logger in self.stat_loggers:

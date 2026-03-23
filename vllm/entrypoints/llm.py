@@ -1549,6 +1549,14 @@ class LLM:
         """
         return self.llm_engine.get_metrics()
 
+    def get_first_completion_throughput(self) -> float | None:
+        """Throughput (tok/s) when first request in batch completed.
+
+        Call after generate() to get the first-completion throughput,
+        which avoids long-tail dilution for acceleration evaluation.
+        """
+        return self.llm_engine.get_first_completion_throughput()
+
     def _validate_and_add_requests(
         self,
         prompts: PromptType | Sequence[PromptType] | DataPrompt,

@@ -489,7 +489,19 @@ class OutputProcessor:
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
-            # 4) Create and handle RequestOutput objects.
+            # 4) Set per-request throughput in metrics for external access.
+            if (
+                finish_reason is not None
+                and req_state.stats is not None
+                and iteration_stats is not None
+            ):
+                e2e = iteration_stats.iteration_timestamp - req_state.stats.arrival_time
+                req_state.stats.e2e_latency = e2e
+                req_state.stats.throughput = (
+                    req_state.stats.num_generation_tokens / e2e if e2e > 0 else 0
+                )
+
+            # 5) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
                 new_token_ids,
                 pooling_output,

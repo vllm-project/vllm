@@ -79,6 +79,9 @@ class Scheduler(SchedulerInterface):
             defaultdict(set) if include_finished_set else None
         )
         self.prev_step_scheduled_req_ids: set[str] = set()
+        # First-completion throughput: when first request in batch finishes.
+        self._first_completion_done: dict[int, bool] = defaultdict(lambda: True)
+        self._first_completion_throughput: dict[int, float] = {}
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -1033,11 +1036,13 @@ class Scheduler(SchedulerInterface):
                 # the scheduled spec tokens count and so is similarly adjusted.
                 if request.num_output_placeholders > 0:
                     request.num_output_placeholders -= num_rejected
-                spec_decoding_stats = self.make_spec_decoding_stats(
-                    spec_decoding_stats,
-                    num_draft_tokens=num_draft_tokens,
-                    num_accepted_tokens=num_accepted,
-                )
+                # Skip spec decoding stats when mixed should_stop occurred
+                if not model_runner_output.skip_spec_decoding_stats:
+                    spec_decoding_stats = self.make_spec_decoding_stats(
+                        spec_decoding_stats,
+                        num_draft_tokens=num_draft_tokens,
+                        num_accepted_tokens=num_accepted,
+                    )
 
             stopped = False
             new_logprobs = None
@@ -1241,6 +1246,8 @@ class Scheduler(SchedulerInterface):
     def add_request(self, request: Request) -> None:
         self.waiting.add_request(request)
         self.requests[request.request_id] = request
+        # Reset first-completion tracking for new batch.
+        self._first_completion_done[request.client_index] = False
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
 
@@ -1291,6 +1298,26 @@ class Scheduler(SchedulerInterface):
     def _free_request(self, request: Request) -> dict[str, Any] | None:
         assert request.is_finished()
 
+        # First-completion throughput: when first request in batch finishes.
+        ci = request.client_index
+        if not self._first_completion_done.get(ci, True):
+            same_client = [r for r in self.requests.values() if r.client_index == ci]
+            if same_client:
+                total_tokens = sum(r.num_output_tokens for r in same_client)
+                batch_start = min(r.arrival_time for r in same_client)
+                elapsed = time.time() - batch_start
+                if elapsed > 0 and total_tokens > 0:
+                    self._first_completion_throughput[ci] = total_tokens / elapsed
+                    logger.info(
+                        "First-completion throughput: client_index=%d total_tokens=%d "
+                        "elapsed=%.4fs throughput=%.2f tok/s",
+                        ci,
+                        total_tokens,
+                        elapsed,
+                        self._first_completion_throughput[ci],
+                    )
+            self._first_completion_done[ci] = True
+
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
@@ -1327,6 +1354,14 @@ class Scheduler(SchedulerInterface):
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
         connector_prefix_cache_stats = self._make_connector_prefix_cache_stats()
+        # Pass first-completion throughput once, then clear.
+        first_completion = (
+            dict(self._first_completion_throughput)
+            if self._first_completion_throughput
+            else None
+        )
+        if first_completion:
+            self._first_completion_throughput.clear()
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
@@ -1335,6 +1370,7 @@ class Scheduler(SchedulerInterface):
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
             kv_connector_stats=kv_connector_stats.data if kv_connector_stats else None,
+            first_completion_throughput=first_completion,
         )
 
     def make_spec_decoding_stats(

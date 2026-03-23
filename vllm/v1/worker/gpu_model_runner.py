@@ -3,7 +3,9 @@
 
 import gc
 import itertools
+import os
 import time
+import time as _time  # automtp time
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -164,6 +166,37 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 logger = init_logger(__name__)
+
+# automtp time: Spec-decode top-level timing (VLLM_SD_TIMING=1)
+_SD_TIMING = os.environ.get("VLLM_SD_TIMING", "0") == "1"  # automtp time
+_SD_TIMING_INTERVAL = int(os.environ.get("VLLM_SD_TIMING_INTERVAL", "20"))  # automtp time
+_SD_TIMING_ACCUM: dict[str, float] = {}  # automtp time
+_SD_TIMING_COUNT = 0  # automtp time
+
+
+def _sd_timing_log(phase: str, t0: float) -> float:  # automtp time
+    t1 = _time.perf_counter()
+    _SD_TIMING_ACCUM[phase] = _SD_TIMING_ACCUM.get(phase, 0.0) + (t1 - t0)
+    return t1
+
+
+def _sd_timing_report():  # automtp time
+    global _SD_TIMING_COUNT
+    _SD_TIMING_COUNT += 1
+    if _SD_TIMING_COUNT % _SD_TIMING_INTERVAL != 0:
+        return
+    if not _SD_TIMING_ACCUM:
+        return
+    lines = []
+    for k, v in sorted(_SD_TIMING_ACCUM.items()):
+        avg_ms = v * 1e3 / _SD_TIMING_INTERVAL
+        lines.append(f"  {k}: {avg_ms:.3f}ms/step")
+    logger.info(
+        f"[sd-timing @step {_SD_TIMING_COUNT}] interval={_SD_TIMING_INTERVAL}\n"
+        + "\n".join(lines)
+    )
+    _SD_TIMING_ACCUM.clear()
+
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
@@ -678,6 +711,22 @@ class GPUModelRunner(
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+        # # Log per-request throughput before removing finished requests.
+        # for req_id in scheduler_output.finished_req_ids:
+        #     req_state = self.requests.get(req_id)
+        #     if req_state is not None and req_state.arrival_time > 0:
+        #         num_gen = len(req_state.output_token_ids)
+        #         if num_gen > 0:
+        #             e2e = time.time() - req_state.arrival_time
+        #             throughput = num_gen / e2e if e2e > 0 else 0
+        #             logger.info(
+        #                 "Per-request throughput: req_id=%s tokens=%d e2e=%.4fs "
+        #                 "throughput=%.2f tok/s",
+        #                 req_id,
+        #                 num_gen,
+        #                 e2e,
+        #                 throughput,
+        #             )
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
@@ -746,6 +795,7 @@ class GPUModelRunner(
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                arrival_time=time.time(),
             )
             self.requests[req_id] = req_state
 
@@ -1054,6 +1104,14 @@ class GPUModelRunner(
         total_num_spec_tokens = 0
         scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
 
+        # Use actual column count from the draft tensor (may be <
+        # num_spec_tokens after should_stop early exit).
+        _draft_cols = (
+            self._draft_token_ids.shape[1]
+            if isinstance(self._draft_token_ids, torch.Tensor)
+            else self.num_spec_tokens
+        )
+
         for req_id, cur_index in self.input_batch.req_id_to_index.items():
             if (prev_index := prev_req_id_to_index.get(req_id)) is not None:
                 prev_common_req_indices.append(prev_index)
@@ -1069,7 +1127,7 @@ class GPUModelRunner(
                 spec_flattened_indices.extend(
                     range(flattened_index - draft_len + 1, flattened_index + 1)
                 )
-                start = prev_index * self.num_spec_tokens
+                start = prev_index * _draft_cols
                 # prev_draft_token_indices is used to find which draft_tokens_id
                 # should be copied to input_ids
                 # example: prev draft_tokens_id [[1,2], [3,4], [5, 6]]
@@ -2743,6 +2801,13 @@ class GPUModelRunner(
                 elif num_tokens_across_dp is not None:
                     num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
                 else:
+                    # NOTE: AUTOMTP - spec decode always uses actual token count,
+                    # no CUDA graph padding, so target verify processes fewer
+                    # tokens when should_stop truncates.
+                    # if use_spec_decode:
+                    #     num_input_tokens = (
+                    #         scheduler_output.total_num_scheduled_tokens)
+                    # else:
                     num_input_tokens = self._get_num_input_tokens(
                         scheduler_output.total_num_scheduled_tokens
                     )
@@ -2796,6 +2861,23 @@ class GPUModelRunner(
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
+            if _SD_TIMING:  # automtp time
+                # _use_spec_dbg = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+                # if _use_spec_dbg:
+                #     _n_reqs = len(scheduler_output.scheduled_spec_decode_tokens)
+                #     _draft_lens = [len(v) for v in scheduler_output.scheduled_spec_decode_tokens.values()]
+                    # logger.info(
+                    #     "[sd-debug] verify: total_scheduled=%d, "
+                    #     "num_input(padded)=%d, cudagraph=%s, "
+                    #     "num_reqs=%d, draft_lens=%s",
+                    #     scheduler_output.total_num_scheduled_tokens,
+                    #     num_input_tokens,
+                    #     cudagraph_runtime_mode,
+                    #     _n_reqs,
+                    #     _draft_lens[:8],
+                    # )
+                _sd_t = _time.perf_counter()
+
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -2803,6 +2885,12 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+
+            if _SD_TIMING:  # automtp time
+                torch.cuda.synchronize()
+                _use_spec = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+                _phase = "target_model_verify" if _use_spec else "target_model_compute"
+                _sd_timing_log(_phase, _sd_t)
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -2925,6 +3013,8 @@ class GPUModelRunner(
             sampled_token_ids: torch.Tensor | list[np.ndarray],
         ) -> None:
             assert spec_decode_common_attn_metadata is not None
+            if _SD_TIMING:  # automtp time
+                _sd_t = _time.perf_counter()
             with record_function_or_nullcontext("gpu_model_runner: draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,
@@ -2936,6 +3026,10 @@ class GPUModelRunner(
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
                 )
+            if _SD_TIMING:  # automtp time
+                torch.cuda.synchronize()
+                _sd_timing_log("propose_draft_tokens", _sd_t)
+                _sd_timing_report()
 
         use_padded_batch_for_eagle = (
             self.speculative_config
@@ -3008,6 +3102,7 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
+            skip_spec_stats = False
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
@@ -3020,6 +3115,7 @@ class GPUModelRunner(
                 if self.supports_mm_inputs
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
+                skip_spec_decoding_stats=skip_spec_stats,
             )
 
         if not self.use_async_scheduling:
@@ -3052,6 +3148,9 @@ class GPUModelRunner(
             return None
         req_ids = self.input_batch.req_ids
         if isinstance(self._draft_token_ids, torch.Tensor):
+            # propose() now returns uniformly-shaped tensors (no per-row -1
+            # masking).  All rows have the same number of draft tokens,
+            # preserving uniform_decode for the next target model step.
             draft_token_ids = self._draft_token_ids.tolist()
         else:
             draft_token_ids = self._draft_token_ids
@@ -4559,6 +4658,15 @@ class GPUModelRunner(
                 self.uniform_decode_query_len, self.parallel_config.tensor_parallel_size
             )
             self.cudagraph_batch_sizes = self.compilation_config.cudagraph_capture_sizes
+
+            # NOTE: AUTOMTP 修复cudagraph_batch_sizes的索引错误
+            # Sync EagleProposer's cached cudagraph_batch_sizes to avoid IndexError
+            # when pad_for_cudagraph is called with num_tokens that exceed the
+            # adjusted bs_to_padded_graph_size range.
+            if hasattr(self, "drafter") and isinstance(self.drafter, EagleProposer):
+                self.drafter.cudagraph_batch_sizes = (
+                    self.compilation_config.cudagraph_capture_sizes
+                )
 
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.

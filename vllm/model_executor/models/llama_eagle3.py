@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Iterable
 
 import torch
@@ -32,6 +33,7 @@ from .utils import (
     maybe_prefix,
     process_eagle_weight,
 )
+from .adapter import AutoMTPStopHeadMid, AutoMTPStopHeadDeep
 
 logger = init_logger(__name__)
 
@@ -288,6 +290,8 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
             requires_grad=False,
         )
+        # Adapter placeholder; structure to be defined by user.
+        self.adapter: nn.Module | None = nn.Module()
 
     def embed_input_ids(
         self,
@@ -337,23 +341,106 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         # combine multiple auxiliary hidden states returned by eagle3
         return self.model.fc(hidden_states)
 
+    def should_stop(
+        self,
+        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
+    ) -> torch.Tensor:
+        # Disable stop head: VLLM_EAGLE_DISABLE_STOP=1 to always return all False
+        if os.environ.get("VLLM_EAGLE_DISABLE_STOP", "0") == "1" or self.adapter is None:
+            if hidden_states.dim() == 1:
+                return torch.tensor(False, device=hidden_states.device)
+            return torch.zeros(
+                hidden_states.shape[0], dtype=torch.bool, device=hidden_states.device
+            )
+
+        threshold = 0.5
+        probs = torch.nn.functional.softmax(logits, dim=-1)
+        entropy = torch.special.entr(probs).sum(dim=-1, keepdim=True)
+        return self._should_stop_from_entropy(hidden_states, entropy, threshold)
+
+    def _should_stop_from_entropy(
+        self,
+        hidden_states: torch.Tensor,
+        entropy: torch.Tensor,
+        threshold: float = 0.5,
+    ) -> torch.Tensor:
+        """Stop mask from precomputed entropy (avoids logits copy in async path)."""
+        hidden_with_entropy = torch.cat([hidden_states, entropy], dim=-1)
+        stop_logits = self.adapter(hidden_with_entropy)
+        stop_prob = torch.sigmoid(stop_logits).squeeze(-1)
+        return stop_prob >= threshold
+
+    def _should_stop_from_entropy_async(
+        self,
+        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """NOTE: AutoMTP sequence batching - Async-safe variant of should_stop.
+
+        Identical computation to should_stop() but omits the .item() call that
+        sets _should_stop_was_mixed.  The .item() forces a CPU-GPU sync on the
+        worker thread's CUDA stream, which serialises the worker with the main
+        stream for no benefit during inference.
+        """
+        if self.adapter is None:
+            if hidden_states.dim() == 1:
+                return torch.tensor(False, device=hidden_states.device)
+            return torch.zeros(
+                hidden_states.shape[0], dtype=torch.bool,
+                device=hidden_states.device,
+            )
+
+        if os.environ.get("VLLM_EAGLE_DISABLE_STOP", "0") == "1":
+            if hidden_states.dim() == 1:
+                return torch.tensor(False, device=hidden_states.device)
+            return torch.zeros(
+                hidden_states.shape[0], dtype=torch.bool,
+                device=hidden_states.device,
+            )
+
+        probs = torch.nn.functional.softmax(logits, dim=-1)
+        entropy = torch.special.entr(probs).sum(dim=-1, keepdim=True)
+        hidden_with_entropy = torch.cat([hidden_states, entropy], dim=-1)
+        stop_logits = self.adapter(hidden_with_entropy)
+        stop_prob = torch.sigmoid(stop_logits).squeeze(-1)
+        return stop_prob >= 0.5
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
+        has_adapter_weights = False
         for name, loaded_weight in weights:
             if "t2d" in name:
                 continue
             if "d2t" in name:
                 name = name.replace("d2t", "draft_id_to_target_id")
                 includes_draft_id_mapping = True
-            elif "lm_head" not in name:
+            if 'draft_id_to_target_id' in name:
+                includes_draft_id_mapping = True
+            elif "lm_head" not in name and "adapter" not in name:
                 name = "model." + name
             if "embed_tokens" in name:
                 includes_embed_tokens = True
+            if 'adapter' in name:
+                has_adapter_weights = True
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
 
+        if not has_adapter_weights:
+            self.adapter = None
+        else:
+            self.adapter = AutoMTPStopHeadMid(
+                hidden_size=self.config.hidden_size,
+            )
+            device = next(self.lm_head.parameters()).device
+            self.adapter = self.adapter.to(device)
+
+            # to bf16
+            # self.adapter.to(torch.bfloat16)
+
+    
         skip_substrs = []
         if not includes_draft_id_mapping:
             skip_substrs.append("draft_id_to_target_id")
@@ -365,3 +452,6 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             skip_substrs=skip_substrs,
         )
         loader.load_weights(model_weights.items())
+        # if self.adapter is not None:
+        #     self.adapter = torch.compile(self.adapter, mode="max-autotune")
+

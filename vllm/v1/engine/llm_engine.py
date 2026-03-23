@@ -342,6 +342,12 @@ class LLMEngine:
         assert self.log_stats, "Stat logging disabled"
         return get_metrics_snapshot()
 
+    def get_first_completion_throughput(self) -> float | None:
+        """Throughput (tok/s) when first request in batch completed."""
+        if self.logger_manager is None:
+            return None
+        return self.logger_manager.get_first_completion_throughput()
+
     @property
     def tokenizer(self) -> AnyTokenizer | None:
         return self.processor.tokenizer
