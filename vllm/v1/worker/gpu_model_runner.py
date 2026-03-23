@@ -6583,15 +6583,9 @@ class GPUModelRunner(
         if has_kv_transfer_group():
             kv_transfer_group = get_kv_transfer_group()
             if self.canonical_kv_caches is not None:
-                from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-                    WorkerConnectorInitializationData,
-                )
-
-                kv_transfer_group.initialize_worker_connector(
-                    WorkerConnectorInitializationData(
-                        canonical_kv_caches=self.canonical_kv_caches,
-                    )
-                )
+                # canonical path: kv_caches already registered via
+                # initialize_worker_connector below
+                pass
             elif self.cross_layers_kv_cache is not None:
                 assert self.cross_layers_attn_backend is not None
                 kv_transfer_group.register_cross_layers_kv_cache(
@@ -6599,6 +6593,16 @@ class GPUModelRunner(
                 )
             else:
                 kv_transfer_group.register_kv_caches(kv_caches)
+
+            from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+                WorkerConnectorInitializationData,
+            )
+
+            kv_transfer_group.initialize_worker_connector(
+                WorkerConnectorInitializationData(
+                    canonical_kv_caches=self.canonical_kv_caches,
+                )
+            )
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
     def _get_attention_kv_cache_gid(self) -> int:
