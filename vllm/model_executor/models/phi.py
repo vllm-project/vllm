@@ -107,6 +107,11 @@ class PhiAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
+        self.qk_layernorm = getattr(config, "qk_layernorm", False)
+        if self.qk_layernorm:
+            self.q_layernorm = nn.LayerNorm(self.head_size)
+            self.k_layernorm = nn.LayerNorm(self.head_size)
+
         scaling = self.head_size**-0.5
 
         max_position_embeddings = getattr(config, "max_position_embeddings", 2048)
@@ -131,6 +136,14 @@ class PhiAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
+        if self.qk_layernorm:
+            # Reshape to [seq_length, num_heads, head_dim] for per-head
+            # LayerNorm, then merge back to [seq_length, hidden_size].
+            seq_len = q.shape[0]
+            q = self.q_layernorm(q.view(seq_len, self.num_heads, self.head_size))
+            k = self.k_layernorm(k.view(seq_len, self.num_heads, self.head_size))
+            q = q.view(seq_len, self.num_heads * self.head_size)
+            k = k.view(seq_len, self.num_heads * self.head_size)
         q, k = self.rotary_emb(position_ids, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.dense(attn_output)
