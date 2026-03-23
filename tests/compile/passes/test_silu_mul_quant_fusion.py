@@ -55,7 +55,11 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
     quant_key = kFp8StaticTensorSym
 
     def __init__(
-        self, hidden_size: int, force_kernel: FP8ScaledMMLinearKernel, **kwargs
+        self,
+        hidden_size: int,
+        force_kernel: FP8ScaledMMLinearKernel,
+        dtype: torch.dtype,
+        **kwargs,
     ):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
@@ -65,6 +69,7 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
             activation_quant_key=self.quant_key,
             weight_quant_key=self.quant_key,
             force_kernel=force_kernel,
+            input_dtype=dtype,
         )
 
         self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
@@ -136,7 +141,7 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
 class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
     act_quant_key = kFp8Dynamic128Sym
 
-    def __init__(self, hidden_size: int, **kwargs):
+    def __init__(self, hidden_size: int, dtype: torch.dtype, **kwargs):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
         self.weight_quant_key = create_fp8_quant_key(
@@ -147,6 +152,7 @@ class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
             weight_shape=(hidden_size, hidden_size),
             weight_quant_key=self.weight_quant_key,
             activation_quant_key=self.act_quant_key,
+            input_dtype=dtype,
         )
         self.w = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
 
@@ -264,7 +270,9 @@ def test_fusion_silu_and_mul_quant(
 
         passes = [NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)]
         backend = TestBackend(*passes)
-        model = model_class(hidden_size=hidden_size, force_kernel=force_kernel, x=x)
+        model = model_class(
+            hidden_size=hidden_size, force_kernel=force_kernel, x=x, dtype=dtype
+        )
 
         # First dimension dynamic
         torch._dynamo.mark_dynamic(x, 0)
