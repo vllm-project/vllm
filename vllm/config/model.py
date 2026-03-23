@@ -1420,6 +1420,11 @@ class ModelConfig:
             else:
                 raise RuntimeError()
 
+        if "token_classify" in supported_tasks:
+            for architecture in self.architectures:
+                if "ForTokenClassification" in architecture:
+                    return "token_classify"
+
         priority: list[SupportedTask] = [
             "embed&token_classify",
             "embed",

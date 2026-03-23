@@ -5,6 +5,7 @@ import torch
 from transformers import AutoModel
 
 from tests.models.utils import check_embeddings_close
+from vllm.config import PoolerConfig
 
 
 @pytest.mark.parametrize(
@@ -17,6 +18,7 @@ def test_embed_models(hf_runner, vllm_runner, example_prompts, model: str, dtype
     with vllm_runner(
         model,
         runner="pooling",
+        pooler_config=PoolerConfig(pooling_task="token_embed"),
         max_model_len=None,
     ) as vllm_model:
         vllm_outputs = vllm_model.token_embed(example_prompts)
