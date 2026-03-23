@@ -28,6 +28,7 @@ try:
     from amdsmi import (
         AmdSmiException,
         amdsmi_get_gpu_asic_info,
+        amdsmi_get_gpu_device_uuid,
         amdsmi_get_processor_handles,
         amdsmi_init,
         amdsmi_shut_down,
@@ -377,7 +378,6 @@ class RocmPlatform(Platform):
         "fbgemm_fp8",
         "gguf",
         "quark",
-        "ptpc_fp8",
         "mxfp4",
         "petit_nvfp4",
         "torchao",
@@ -607,6 +607,20 @@ class RocmPlatform(Platform):
         if device_name in _ROCM_DEVICE_ID_NAME_MAP:
             return _ROCM_DEVICE_ID_NAME_MAP[device_name]
         return asic_info["market_name"]
+
+    @classmethod
+    @with_amdsmi_context
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        try:
+            device = amdsmi_get_processor_handles()[device_id]
+        except AmdSmiException as error:
+            logger.error("amdsmi device query failed ", exc_info=error)
+            return ""
+        try:
+            device_uuid = amdsmi_get_gpu_device_uuid(device)
+        except AmdSmiException as error:
+            logger.error("amdsmi device uuid query failed ", exc_info=error)
+        return device_uuid
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
