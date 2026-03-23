@@ -4,6 +4,7 @@
 import json
 
 import pytest
+from transformers import AutoTokenizer
 
 from tests.tool_parsers.utils import (
     run_tool_extraction,
@@ -12,6 +13,14 @@ from tests.tool_parsers.utils import (
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
+
+
+@pytest.fixture(scope="function")
+def default_tokenizer() -> TokenizerLike:
+    """Override module-scoped default_tokenizer because gigachat tests
+    mutate the tokenizer via ``add_tokens``."""
+    return AutoTokenizer.from_pretrained("gpt2")
+
 
 MSG_SEP_TOKEN = "<|message_sep|>\n\n"
 ROLE_SEP_TOKEN = "<|role_sep|>\n"
