@@ -539,6 +539,93 @@ some text
     assert isinstance(args["ref_param"], dict)
 
 
+def test_extract_tool_calls_anyof_type_conversion_streaming(
+    qwen3_tool_parser, qwen3_tokenizer
+):
+    """Test streaming e2e for anyOf/oneOf nullable schemas (Pydantic v2).
+
+    Verifies that the full streaming pipeline — tokenize, incrementally
+    decode, extract_tool_calls_streaming — correctly resolves types from
+    anyOf schemas and produces valid JSON with properly typed values.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "search_web",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "count": {
+                            "anyOf": [
+                                {"type": "integer"},
+                                {"type": "null"},
+                            ],
+                            "default": 5,
+                        },
+                        "verbose": {
+                            "anyOf": [
+                                {"type": "boolean"},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = """<tool_call>
+<function=search_web>
+<parameter=query>
+vllm tool parser
+</parameter>
+<parameter=count>
+10
+</parameter>
+<parameter=verbose>
+true
+</parameter>
+</function>
+</tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    tool_states = {}
+    for delta_message in stream_delta_message_generator(
+        qwen3_tool_parser, qwen3_tokenizer, model_output, request
+    ):
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+                if idx not in tool_states:
+                    tool_states[idx] = {"name": None, "arguments": ""}
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += (
+                            tool_call.function.arguments
+                        )
+
+    assert len(tool_states) == 1
+    assert tool_states[0]["name"] == "search_web"
+
+    args = json.loads(tool_states[0]["arguments"])
+    assert args["query"] == "vllm tool parser"
+    assert isinstance(args["query"], str)
+    assert args["count"] == 10
+    assert isinstance(args["count"], int)
+    assert args["verbose"] is True
+    assert isinstance(args["verbose"], bool)
+
+
 @pytest.mark.parametrize(
     ids=[
         "no_tools",
