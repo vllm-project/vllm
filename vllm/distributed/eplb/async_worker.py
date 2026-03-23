@@ -62,14 +62,11 @@ def run_rebalance_experts(
     eplb_state: "EplbState",
     physical_to_logical_map_cpu: torch.Tensor,
 ) -> torch.Tensor:
-    """Compute new expert mappings for one rebalancing cycle.
-
-    Returns: new_physical_to_logical_map
-    """
     assert model_state.eplb_stats is not None
     eplb_stats = model_state.eplb_stats
 
-    # Wait for global_expert_load_window tensor to be ready.
+    # Wait for the main thread's all-reduce and clone to complete before
+    # accessing the global_expert_load_window tensor.
     assert model_state.window_ready_event is not None
     model_state.window_ready_event.wait()
     model_state.window_ready_event = None
