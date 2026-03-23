@@ -431,10 +431,12 @@ class SpecDecodeBaseProposer:
         assert self.runner is not None
 
         per_layer_attn_metadata: dict[str, object] = {}
+        draft_attn_metadata_per_group: list[object] = []
         for attn_group in self.draft_attn_groups:
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
                 common_attn_metadata=common_attn_metadata, draft_index=0
             )
+            draft_attn_metadata_per_group.append(attn_metadata)
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
 
@@ -512,8 +514,7 @@ class SpecDecodeBaseProposer:
         draft_token_ids = self._greedy_sample(sample_hidden_states)
 
         if self.allowed_attn_types is not None:
-            for attn_group in self.draft_attn_groups:
-                group_md = per_layer_attn_metadata[attn_group.layer_names[0]]
+            for group_md in draft_attn_metadata_per_group:
                 if not isinstance(group_md, self.allowed_attn_types):
                     raise ValueError(
                         f"Unsupported attention metadata type for speculative "
