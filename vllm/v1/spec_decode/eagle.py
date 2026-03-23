@@ -215,6 +215,9 @@ class SpecDecodeBaseProposer:
         # Determine allowed attention backends once during initialization.
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
+            from vllm.v1.attention.backends.mla.indexer import (
+                DeepseekV32IndexerMetadata,
+            )
             from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
                 ROCMAiterMLASparseMetadata,
             )
@@ -224,6 +227,7 @@ class SpecDecodeBaseProposer:
                 TritonAttentionMetadata,
                 RocmAttentionMetadata,
                 ROCMAiterMLASparseMetadata,
+                DeepseekV32IndexerMetadata,
             ]
             # ROCM_AITER_FA is an optional backend
             # We check is_enabled() here to avoid importing the backend module during
@@ -507,15 +511,16 @@ class SpecDecodeBaseProposer:
 
         draft_token_ids = self._greedy_sample(sample_hidden_states)
 
-        if self.allowed_attn_types is not None and not isinstance(
-            attn_metadata, self.allowed_attn_types
-        ):
-            raise ValueError(
-                f"Unsupported attention metadata type for speculative "
-                "decoding with num_speculative_tokens > 1: "
-                f"{type(attn_metadata)}. Supported types are: "
-                f"{self.allowed_attn_types}"
-            )
+        if self.allowed_attn_types is not None:
+            for attn_group in self.draft_attn_groups:
+                group_md = per_layer_attn_metadata[attn_group.layer_names[0]]
+                if not isinstance(group_md, self.allowed_attn_types):
+                    raise ValueError(
+                        f"Unsupported attention metadata type for speculative "
+                        "decoding with num_speculative_tokens > 1: "
+                        f"{type(group_md)}. Supported types are: "
+                        f"{self.allowed_attn_types}"
+                    )
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
