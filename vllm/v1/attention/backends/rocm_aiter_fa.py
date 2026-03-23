@@ -157,13 +157,13 @@ if current_platform.is_rocm():
         total_tokens: int,
     ):
         assert kv_cache_layout in ["NHD", "SHUFFLE"], (
-            "kv_cache_layout only support NHD, SHUFFLE"
+            "kv_cache_layout only supports NHD, SHUFFLE"
         )
         head_dim = key.shape[2]
         x = 16 // key_cache.element_size()
         # assert dequant is True, "Currently, we only support "\
         # "gather cache with dequant"
-        # For k cache layout: [num_blocks, num_heads, page_size, head_dim]
+        # For k cache layout: [num_blocks, page_size, num_heads, head_dim]
         assert head_dim == key_cache.shape[3], (
             "We assume your kv cache layout is [num_blocks, "
             "page_size, num_heads, head_dim], but got otherwise"
@@ -736,6 +736,7 @@ class AiterFlashAttentionBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
         "fp8",
         "fp8_e4m3",
@@ -831,7 +832,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
             raise NotImplementedError(
-                "Encoder self-attention is not implemented for FlashAttentionImpl"
+                "Encoder self-attention is not implemented for AiterFlashAttentionImpl"
             )
 
     def extend_for_sliding_window(
@@ -1046,7 +1047,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
-                "fused output quantization is not yet supported for FlashAttentionImpl"
+                "fused output quantization is not yet supported "
+                "for AiterFlashAttentionImpl"
             )
 
         if attn_metadata is None:

@@ -228,7 +228,7 @@ class ModelArchConfigConvertorBase:
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
         ):
-            return self.hf_text_config.kv_lora_rank is not None
+            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
         elif self.hf_text_config.model_type == "eagle":
             # if the model is an EAGLE module, check for the
             # underlying architecture
@@ -241,7 +241,7 @@ class ModelArchConfigConvertorBase:
                     "deepseek_v32",
                     "deepseek_mtp",
                 )
-                and self.hf_text_config.kv_lora_rank is not None
+                and getattr(self.hf_text_config, "kv_lora_rank", None) is not None
             )
         return False
 
@@ -298,6 +298,28 @@ class ModelArchConfigConvertorBase:
         )
 
         return model_arch_config
+
+
+class CohereAsrModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_total_num_attention_heads(self) -> int:
+        return self.hf_text_config.transf_decoder["config_dict"]["num_attention_heads"]
+
+    def get_head_size(self) -> int:
+        hidden_size = self.hf_text_config.transf_decoder["config_dict"]["hidden_size"]
+        num_attention_heads = self.hf_text_config.transf_decoder["config_dict"][
+            "num_attention_heads"
+        ]
+        return hidden_size // num_attention_heads
+
+    def get_total_num_kv_heads(self) -> int:
+        enc_num_kv_heads = self.hf_text_config.encoder["n_heads"]
+        dec_num_kv_heads = self.hf_text_config.transf_decoder["config_dict"][
+            "num_attention_heads"
+        ]
+        assert enc_num_kv_heads == dec_num_kv_heads, (
+            "Encoder and decoder must have the same number of kv heads"
+        )
+        return enc_num_kv_heads
 
 
 class MambaModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -425,6 +447,7 @@ class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
+    "cohere_asr": CohereAsrModelArchConfigConvertor,
     "mamba": MambaModelArchConfigConvertor,
     "falcon_mamba": MambaModelArchConfigConvertor,
     "timm_wrapper": TerratorchModelArchConfigConvertor,
