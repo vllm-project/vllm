@@ -45,7 +45,8 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if vllm_is_batch_invariant():
             return False, "FP8 Marlin not supported for batch invariant execution."
         if (
-            current_platform.has_device_capability(89)
+            compute_capability is not None
+            and compute_capability >= 89
             and not envs.VLLM_TEST_FORCE_FP8_MARLIN
         ):
             return (
