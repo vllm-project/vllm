@@ -243,15 +243,15 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 }
 
 
-@config(config=ConfigDict(arbitrary_types_allowed=True))
-class VllmConfig:
+@config(config=ConfigDict(arbitrary_types_allowed=True))  # type: ignore[arg-type,misc]
+class VllmConfig:  # type: ignore[misc]
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
     """
 
     # TODO: use default_factory once default constructing ModelConfig doesn't
     # try to download a model
-    model_config: ModelConfig = Field(default=None)
+    model_config: ModelConfig = Field(default=None)  # type: ignore[assignment]
     """Model configuration."""
     cache_config: CacheConfig = Field(default_factory=CacheConfig)
     """Cache configuration."""
@@ -883,7 +883,7 @@ class VllmConfig:
 
                     tp_size = self.parallel_config.tensor_parallel_size
                     hidden_size = self.model_config.get_hidden_size()
-                    element_size = self.model_config.dtype.itemsize
+                    element_size = self.model_config.dtype.itemsize  # type: ignore[union-attr]
                     pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
                         hidden_size, tp_size, element_size
                     )
@@ -1061,7 +1061,7 @@ class VllmConfig:
 
             is_fullgraph = (
                 self.compilation_config.use_inductor_graph_partition
-                or len(self.compilation_config.splitting_ops) == 0
+                or len(self.compilation_config.splitting_ops or []) == 0
             )
             if self.parallel_config.pipeline_parallel_size > 1 or not is_fullgraph:
                 if "-rms_norm" not in self.compilation_config.custom_ops:
@@ -1216,7 +1216,7 @@ class VllmConfig:
                 )
             self.compilation_config.debug_dump_path = env_path
 
-        def has_blocked_weights():
+        def has_blocked_weights():  # type: ignore[no-redef]
             if self.quant_config is not None:
                 if hasattr(self.quant_config, "weight_block_size"):
                     return self.quant_config.weight_block_size is not None
@@ -1474,7 +1474,7 @@ class VllmConfig:
             if max_size is not None:
                 max_token_num = max_size // (
                     self.model_config.get_hidden_size()
-                    * self.model_config.dtype.itemsize
+                    * self.model_config.dtype.itemsize  # type: ignore[union-attr]
                 )
                 if compile_range_end is not None and max_token_num < compile_range_end:
                     computed_compile_ranges_endpoints.append(max_token_num)
@@ -1497,7 +1497,7 @@ class VllmConfig:
 
                 tp_size = self.parallel_config.tensor_parallel_size
                 hidden_size = self.model_config.get_hidden_size()
-                element_size = self.model_config.dtype.itemsize
+                element_size = self.model_config.dtype.itemsize  # type: ignore[union-attr]
                 pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
                     hidden_size, tp_size, element_size
                 )
