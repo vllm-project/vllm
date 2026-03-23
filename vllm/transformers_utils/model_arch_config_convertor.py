@@ -128,7 +128,7 @@ class ModelArchConfigConvertorBase:
         hf_config: PretrainedConfig,
         model_id: str,
         revision: str | None,
-        config_format: ConfigFormat,
+        config_format: str | ConfigFormat,
     ):
         # NOTE: getattr(config, "dtype", torch.float32) is not correct
         # because config.dtype can be None.

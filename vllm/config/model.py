@@ -102,8 +102,8 @@ AttnTypeStr = Literal[
 ]
 
 
-@config(config=ConfigDict(arbitrary_types_allowed=True))  # type: ignore[arg-type,misc]
-class ModelConfig:  # type: ignore[misc]
+@config(config=ConfigDict(arbitrary_types_allowed=True))
+class ModelConfig:
     """Configuration for the model."""
 
     model: str = "Qwen/Qwen3-0.6B"
@@ -121,7 +121,7 @@ class ModelConfig:  # type: ignore[misc]
     """Convert the model using adapters defined in
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
-    tokenizer: str = Field(default=None)  # type: ignore[assignment]
+    tokenizer: str = None  # type: ignore[assignment]
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode | str = "auto"
@@ -582,7 +582,7 @@ class ModelConfig:  # type: ignore[misc]
             self.dtype,
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
-            config_format=self.config_format,  # type: ignore[arg-type]
+            config_format=self.config_format,
         )
 
         self.original_max_model_len = self.max_model_len
@@ -732,7 +732,7 @@ class ModelConfig:  # type: ignore[misc]
 
     @property
     def architectures(self) -> list[str]:
-        return self.model_arch_config.architectures  # type: ignore[return-value]
+        return self.model_arch_config.architectures
 
     @property
     def architecture(self) -> str:
@@ -1906,7 +1906,7 @@ def _get_and_verify_dtype(
     *,
     is_pooling_model: bool,
     revision: str | None = None,
-    config_format: ConfigFormat = "hf",
+    config_format: str | ConfigFormat = "hf",
 ) -> torch.dtype:
     config_dtype = ModelArchConfigConvertorBase.get_torch_dtype(
         config, model_id, revision=revision, config_format=config_format
