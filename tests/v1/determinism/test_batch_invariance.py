@@ -15,7 +15,7 @@ from utils import (
     skip_unsupported,
 )
 
-import vllm.model_executor.layers.batch_invariant as batch_invariant
+import vllm.envs as envs
 from vllm import LLM, SamplingParams
 
 IS_DEVICE_CAPABILITY_BELOW_90 = is_device_capability_below_90()
@@ -173,11 +173,9 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
 
     # For batch invariance, disable custom all-reduce to ensure deterministic
     # all-reduce operations (custom all-reduce may not be deterministic)
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_is_batch_invariant,
-    )
+    import vllm.envs as envs
 
-    disable_custom_ar = vllm_is_batch_invariant()
+    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
 
     if disable_custom_ar:
         print(f"\n{'=' * 80}")
@@ -454,7 +452,7 @@ def test_logprobs_without_batch_invariance_should_fail(
     """
     # CRITICAL: Disable batch invariance for this test
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
-    monkeypatch.setattr(batch_invariant, "VLLM_BATCH_INVARIANT", False)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
@@ -674,11 +672,9 @@ def test_decode_logprobs_match_prefill_logprobs(
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_is_batch_invariant,
-    )
+    import vllm.envs as envs
 
-    disable_custom_ar = vllm_is_batch_invariant()
+    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
 
     if disable_custom_ar:
         print(f"\n{'=' * 80}")
