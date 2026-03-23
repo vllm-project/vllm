@@ -61,6 +61,13 @@ class XPUwNa16LinearKernel(MPLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
+        # Default names since marlin requires empty parameters for these,
+        # TODO: remove this requirement from marlin (allow optional tensors)
+        if self.w_gidx_name is None:
+            self.w_gidx_name = "g_idx"
+        if self.w_zp_name is None:
+            self.w_zp_name = "w_zp"
+
         need_transpose = False
         qweight_shape = getattr(layer, self.w_q_name).shape
         scale_shape = getattr(layer, self.w_s_name).shape
@@ -109,14 +116,15 @@ class XPUwNa16LinearKernel(MPLinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])
+        w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
         out = torch.ops._xpu_C.int4_gemm_w4a16(
             reshaped_x,
-            getattr(layer, self.w_q_name).t(),
+            w_q.t(),
             bias if bias is not None else None,
-            getattr(layer, self.w_s_name),
-            getattr(layer, self.w_zp_name),
+            w_s,
+            w_zp,
             self.config.group_size,
-            getattr(layer, self.w_gidx_name),
+            w_gidx,
         )
         return out
 
