@@ -7,7 +7,6 @@ import json
 import time
 from typing import Annotated, Any, ClassVar, Literal
 
-import torch
 from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
@@ -38,6 +37,7 @@ from vllm.logprobs import Logprob
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import (
     BeamSearchParams,
+    RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
@@ -47,7 +47,8 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
-_LONG_INFO = torch.iinfo(torch.long)
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
 
 
 class ChatMessage(OpenAIBaseModel):
@@ -164,7 +165,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     n: int | None = 1
     presence_penalty: float | None = 0.0
     response_format: AnyResponseFormat | None = None
-    seed: int | None = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
+    seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
@@ -178,7 +179,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | ChatCompletionNamedToolChoiceParam
         | None
     ) = "none"
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -197,9 +198,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_LONG_INFO.max)] | None = (
-        None
-    )
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_INT64_MAX)] | None = None
     prompt_logprobs: int | None = None
     allowed_token_ids: list[int] | None = None
     bad_words: list[str] = Field(default_factory=list)
@@ -267,6 +266,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
@@ -277,6 +283,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
+        ge=_INT64_MIN,
+        le=_INT64_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -336,6 +344,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    repetition_detection: RepetitionDetectionParams | None = Field(
+        default=None,
+        description="Parameters for detecting repetitive N-gram patterns "
+        "in output tokens. If such repetition is detected, generation will "
+        "be ended early. LLMs can sometimes generate repetitive, unhelpful "
+        "token patterns, stopping only when they hit the maximum output length "
+        "(e.g. 'abcdabcdabcd...' or '\\emoji \\emoji \\emoji ...'). This feature "
+        "can detect such behavior and terminate early, saving time and tokens.",
+    )
+
     # --8<-- [end:chat-completion-extra-params]
 
     def build_chat_params(
@@ -355,6 +373,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     reasoning_effort=self.reasoning_effort,
                 ),
             ),
+            media_io_kwargs=self.media_io_kwargs,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -490,7 +509,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
@@ -500,7 +518,36 @@ class ChatCompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
+            repetition_detection=self.repetition_detection,
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_response_format(cls, data):
+        response_format = data.get("response_format")
+        if response_format is None:
+            return data
+
+        rf_type = (
+            response_format.get("type")
+            if isinstance(response_format, dict)
+            else getattr(response_format, "type", None)
+        )
+
+        if rf_type == "json_schema":
+            json_schema = (
+                response_format.get("json_schema")
+                if isinstance(response_format, dict)
+                else getattr(response_format, "json_schema", None)
+            )
+            if json_schema is None:
+                raise VLLMValidationError(
+                    "When response_format type is 'json_schema', the "
+                    "'json_schema' field must be provided.",
+                    parameter="response_format",
+                )
+
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -730,4 +777,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                                     part_type,
                                 )
 
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def set_include_reasoning_for_none_effort(cls, data: Any) -> Any:
+        if data.get("reasoning_effort") == "none":
+            data["include_reasoning"] = False
         return data

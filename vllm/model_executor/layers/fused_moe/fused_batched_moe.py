@@ -489,11 +489,11 @@ def invoke_moe_batched_triton_kernel(
     )
 
 
-class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
     A reference prepare/finalize class that reorganizes the tokens into
     expert batched format, i.e. E x max_num_tokens x K.  This is the format
-    that the PPLX dispatch/combine kernels use.
+    that the batched dispatch/combine kernels use.
     """
 
     def __init__(
@@ -645,10 +645,10 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
 
 
-class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
     """
     A reference MoE expert class that operates on expert batched format,
-    i.e. E x max_num_tokens x K.  This is the format that the pplx
+    i.e. E x max_num_tokens x K.  This is the format that the batched
     dispatch/combine kernels use.
     """
 
@@ -711,9 +711,6 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "NaiveBatchedExperts is not yet used by an Oracle. "
             "This method should not be called."
         )
-
-    def supports_chunking(self) -> bool:
-        return False
 
     def supports_expert_map(self) -> bool:
         return False
@@ -877,10 +874,10 @@ def batched_moe_kernel_quantize_input(
         return A_q, A_q_scale
 
 
-class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     """
     A Triton based MoE expert class that operates on expert batched format,
-    i.e. E x max_num_tokens x K.  This is the format that the pplx
+    i.e. E x max_num_tokens x K.  This is the format that the batched
     dispatch/combine kernels use.
     """
 
@@ -912,7 +909,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -956,9 +953,6 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
-
-    def supports_chunking(self) -> bool:
-        return False
 
     def supports_expert_map(self) -> bool:
         return False
@@ -1023,6 +1017,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             torch.float16,
             torch.bfloat16,
             torch.float8_e4m3fn,
+            torch.float8_e4m3fnuz,
         ]
         assert expert_tokens_meta is not None
 
@@ -1052,7 +1047,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             compute_type = tl.float16
         elif hidden_states.dtype == torch.float32:
             compute_type = tl.float32
-        elif hidden_states.dtype == torch.float8_e4m3fn:
+        elif hidden_states.dtype == current_platform.fp8_dtype():
             compute_type = tl.bfloat16
         else:
             raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
