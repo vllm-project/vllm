@@ -774,33 +774,6 @@ def test_apc_multiple_prompts_partial_cached_outputs(
         )
 
 
-# we have to use a real large model to get reasonable results
-# the model can't be a hybrid model as we need block_size 16
-@pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
-def test_apc_common_prefix_same_batch(
-    model: str,
-    monkeypatch,
-) -> None:
-    # Required to put the two requests in the same batch
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    llm = LLM(
-        model=model,
-        enforce_eager=True,
-        block_size=16,
-        mamba_block_size=16,
-        enable_prefix_caching=True,
-        seed=42,
-    )
-    prompts = [
-        "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
-        "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
-    ]
-    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=20)
-    outputs = llm.generate(prompts, sampling_params)
-    for output in outputs:
-        assert "two" in output.outputs[0].text
-
-
 # Test that outputs match whether prefix caching is enabled or not for mamba.
 @pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
 def test_same_mamba_output_apc_on_vs_off(
@@ -851,3 +824,30 @@ def test_same_mamba_output_apc_on_vs_off(
         name_0="vllm_no_apc",
         name_1="vllm_with_apc",
     )
+
+
+# we have to use a real large model to get reasonable results
+# the model can't be a hybrid model as we need block_size 16
+@pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
+def test_apc_common_prefix_same_batch(
+    model: str,
+    monkeypatch,
+) -> None:
+    # Required to put the two requests in the same batch
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    llm = LLM(
+        model=model,
+        enforce_eager=True,
+        block_size=16,
+        mamba_block_size=16,
+        enable_prefix_caching=True,
+        seed=42,
+    )
+    prompts = [
+        "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
+        "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
+    ]
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=20)
+    outputs = llm.generate(prompts, sampling_params)
+    for output in outputs:
+        assert "two" in output.outputs[0].text
