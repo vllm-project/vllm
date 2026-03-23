@@ -164,6 +164,15 @@ class EngineCoreClient(ABC):
     def is_sleeping(self) -> bool:
         raise NotImplementedError
 
+    def suspend(self, mode: PauseMode = "abort") -> None:
+        raise NotImplementedError
+
+    def resume(self) -> None:
+        raise NotImplementedError
+
+    def is_checkpoint_suspended(self) -> bool:
+        raise NotImplementedError
+
     def execute_dummy_batch(self) -> None:
         raise NotImplementedError
 
@@ -239,6 +248,15 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def is_sleeping_async(self) -> bool:
+        raise NotImplementedError
+
+    async def suspend_async(self, mode: PauseMode = "abort") -> None:
+        raise NotImplementedError
+
+    async def resume_async(self) -> None:
+        raise NotImplementedError
+
+    async def is_checkpoint_suspended_async(self) -> bool:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
@@ -330,6 +348,18 @@ class InprocClient(EngineCoreClient):
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
+
+    def suspend(self, mode: PauseMode = "abort") -> None:
+        if mode == "wait":
+            raise ValueError("'wait' pause mode is not supported in inproc-engine mode")
+        result = self.engine_core.suspend(mode)
+        assert result is None
+
+    def resume(self) -> None:
+        self.engine_core.resume()
+
+    def is_checkpoint_suspended(self) -> bool:
+        return self.engine_core.is_checkpoint_suspended()
 
     def execute_dummy_batch(self) -> None:
         self.engine_core.execute_dummy_batch()
@@ -853,6 +883,15 @@ class SyncMPClient(MPClient):
     def is_sleeping(self) -> bool:
         return self.call_utility("is_sleeping")
 
+    def suspend(self, mode: PauseMode = "abort") -> None:
+        self.call_utility("suspend", mode)
+
+    def resume(self) -> None:
+        self.call_utility("resume")
+
+    def is_checkpoint_suspended(self) -> bool:
+        return self.call_utility("is_checkpoint_suspended")
+
     def execute_dummy_batch(self) -> None:
         self.call_utility("execute_dummy_batch")
 
@@ -1088,6 +1127,15 @@ class AsyncMPClient(MPClient):
 
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_async("is_sleeping")
+
+    async def suspend_async(self, mode: PauseMode = "abort") -> None:
+        await self.call_utility_async("suspend", mode)
+
+    async def resume_async(self) -> None:
+        await self.call_utility_async("resume")
+
+    async def is_checkpoint_suspended_async(self) -> bool:
+        return await self.call_utility_async("is_checkpoint_suspended")
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
