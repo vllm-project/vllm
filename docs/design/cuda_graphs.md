@@ -359,6 +359,50 @@ The manager tracks hit/miss statistics and logs them periodically. A "hit" means
 
 ### About the Performance
 
-See the following links for examples:
+The following benchmarks were run on Blackwell GPUs (GB200) using `vllm bench mm-processor`. See [#35963](https://github.com/vllm-project/vllm/pull/35963) for full details.
 
-* [35963](https://github.com/vllm-project/vllm/pull/35963)
+#### Single GPU (1x GB200)
+
+Model: `Qwen/Qwen3-VL-30B-A3B-Instruct`, dataset: `lmarena-ai/VisionArena-Chat` (3000 prompts, 300 warmup), `max_model_len=32768`.
+
+| Backend | Mean latency improvement | P99 latency improvement |
+| :------ | :----------------------- | :---------------------- |
+| FLASH_ATTN | +11.8% (5.13→4.52ms) | +31.6% (9.16→6.26ms) |
+| FLASHINFER | +19.6% (5.42→4.36ms) | +40.3% (10.87→6.49ms) |
+
+To reproduce:
+
+```bash
+vllm bench mm-processor \
+  --model Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --dataset-name hf --dataset-path lmarena-ai/VisionArena-Chat \
+  --num-prompts 3000 --num-warmups 300 \
+  --max-model-len 32768 --seed 42 \
+  --mm-encoder-attn-backend FLASH_ATTN \
+  --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096, 4864], "encoder_cudagraph_max_images_per_batch": 8}'
+```
+
+#### Multi-GPU (4x GB200, TP=4, DP=4)
+
+Model: `Qwen/Qwen3-VL-32B-Instruct`, dataset: `random-mm` (1000 prompts, 200 warmup, 20 images/request at 336x336), `max_model_len=8192`.
+
+| Backend | Mean latency improvement | P99 latency improvement |
+| :------ | :----------------------- | :---------------------- |
+| FLASH_ATTN | +18.4% (28.39→23.16ms) | +14.0% (238.78→205.28ms) |
+| FLASHINFER | +44.4% (23.24→12.91ms) | +84.9% (172.41→26.05ms) |
+
+To reproduce:
+
+```bash
+vllm bench mm-processor \
+  --model Qwen/Qwen3-VL-32B-Instruct \
+  --dataset-name random-mm \
+  --random-mm-base-items-per-request 20 \
+  --random-mm-num-mm-items-range-ratio 0.0 \
+  --random-mm-bucket-config '{"(336,336,1)": 1.0}' \
+  --num-prompts 1000 --num-warmups 200 \
+  --max-model-len 8192 --seed 42 \
+  --mm-encoder-attn-backend FLASHINFER \
+  --tensor-parallel-size 4 --mm-encoder-tp-mode data \
+  --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096, 4864], "encoder_cudagraph_max_images_per_batch": 8}'
+```
