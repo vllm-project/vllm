@@ -246,6 +246,7 @@ def emit_function_call_delta_events(
     events: list[StreamingResponsesResponse] = []
     if state.is_first_function_call_delta is False:
         state.is_first_function_call_delta = True
+        state.sent_output_item_added = True
         state.current_item_id = f"fc_{random_uuid()}"
         state.current_call_id = f"call_{random_uuid()}"
         tool_call_item = ResponseFunctionToolCall(
