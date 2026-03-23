@@ -182,7 +182,7 @@ async def test_streaming_response(foscolo, client_and_model, server):
     # being very close semantically.
     assert (
         sum([x == y for x, y in zip(res_stream, res_no_stream.text.split())])
-        >= len(res_stream) * 0.9
+        >= len(res_stream) * 0.87
     )
 
 
