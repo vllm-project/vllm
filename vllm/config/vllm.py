@@ -1129,9 +1129,6 @@ class VllmConfig:  # type: ignore[misc]
                 self.model_config.disable_cascade_attn = True
                 logger.warning_once("Disabling cascade attention when DBO is enabled.")
 
-        if not self.instance_id:
-            self.instance_id = random_uuid()[:5]
-
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
         #   disables it
