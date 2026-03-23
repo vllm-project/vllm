@@ -91,12 +91,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
+        assert isinstance(kv_cache_spec, MambaSpec)
         self.speculative_config = vllm_config.speculative_config
         self.compilation_config = vllm_config.compilation_config
-        self.num_spec_tokens: int = vllm_config.num_speculative_tokens
+        self.num_spec_tokens: int = kv_cache_spec.num_speculative_blocks
         self.use_spec_decode = self.num_spec_tokens > 0
-
-        assert isinstance(kv_cache_spec, MambaSpec)
         scheduler_config = vllm_config.scheduler_config
         self.decode_cudagraph_max_bs: int = scheduler_config.max_num_seqs
         if self.compilation_config.max_cudagraph_capture_size is not None:
@@ -166,18 +165,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         """
         m = common_attn_metadata
 
-        assert (
-            m.max_query_len <= 1 + self.num_spec_tokens
-            and m.num_reqs <= self.decode_cudagraph_max_bs
-        ), (
+        assert m.num_reqs <= self.decode_cudagraph_max_bs, (
             "Mamba only supports decode-only full CUDAGraph capture. "
             "Make sure all cudagraph capture sizes <= max_num_seq."
         )
 
-        assert m.max_query_len == 1 + self.num_spec_tokens  # decode-only
-
         num_accepted_tokens = None
-        if self.num_spec_tokens > 0:
+        if self.num_spec_tokens > 0 and m.max_query_len > 1:
             num_accepted_tokens = torch.diff(m.query_start_loc)
 
         return self.build(0, m, num_accepted_tokens=num_accepted_tokens)

@@ -50,13 +50,15 @@ class MambaBase(AttentionLayerBase):
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,
             mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
-            num_speculative_blocks=(
-                vllm_config.speculative_config.num_speculative_tokens
-                if vllm_config.speculative_config
-                else 0
-            ),
+            num_speculative_blocks=self.num_speculative_tokens,
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         """Get the attention backend class for this Mamba layer."""
         return get_mamba_attn_backend(self.mamba_type)
+
+    @property
+    def num_speculative_tokens(self) -> int:
+        """Number of speculative token 0 for draft models that are mamba based,
+          N for target models with spec decode."""
+        return getattr(self, "num_spec", 0)
