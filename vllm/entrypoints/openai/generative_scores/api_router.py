@@ -33,7 +33,7 @@ def generative_scores(request: Request) -> OpenAIServingGenerativeScores | None:
 
 
 @router.post(
-    "/generative_scores",
+    "/generative_score",
     dependencies=[Depends(validate_json_request)],
     responses={
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
@@ -42,21 +42,21 @@ def generative_scores(request: Request) -> OpenAIServingGenerativeScores | None:
 )
 @with_cancellation
 @load_aware_call
-async def create_generative_score(request: Request):
-    handler = generative_scores(request)
+async def create_generative_score(raw_request: Request):
+    handler = generative_scores(raw_request)
     if handler is None:
         raise NotImplementedError(
             "The model does not support the Generative Scores API"
         )
 
-    raw_body = await request.json()
+    raw_body = await raw_request.json()
 
     from vllm.entrypoints.openai.generative_scores.serving import (
         GenerativeScoreRequest,
     )
 
     gen_request = GenerativeScoreRequest(**raw_body)
-    result = await handler.create_generative_score(gen_request, request)
+    result = await handler.create_generative_score(gen_request, raw_request)
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(
@@ -86,5 +86,4 @@ async def init_generative_scores_state(
         engine_client,
         state.openai_serving_models,
         request_logger=request_logger,
-        log_error_stack=args.log_error_stack,
     )

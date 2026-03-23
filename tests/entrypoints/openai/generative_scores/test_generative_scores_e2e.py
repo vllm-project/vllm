@@ -33,7 +33,7 @@ class TestGenerativeScoresAPI:
     async def test_basic_score_and_response_structure(self, server: RemoteOpenAIServer):
         """Test basic generative score request and verify response structure."""
         response = requests.post(
-            server.url_for("generative_scores"),
+            server.url_for("generative_score"),
             json={
                 "model": MODEL_NAME,
                 "query": "Is Paris the capital of France? Answer Yes or No: ",
@@ -45,18 +45,17 @@ class TestGenerativeScoresAPI:
         data = response.json()
 
         # Verify response structure
-        assert data["id"].startswith("genscore-")
-        assert data["object"] == "generative_score"
+        assert data["id"].startswith("generative-score-")
+        assert data["object"] == "list"
         assert "model" in data
         assert "usage" in data
-        assert len(data["results"]) == 2
+        assert len(data["data"]) == 2
 
         # Verify each result
-        for i, result in enumerate(data["results"]):
+        for i, result in enumerate(data["data"]):
             assert result["index"] == i
-            assert "token_probs" in result
-            for prob in result["token_probs"].values():
-                assert 0.0 <= prob <= 1.0
+            assert result["object"] == "score"
+            assert 0.0 <= result["score"] <= 1.0
 
         # Verify usage tracking
         usage = data["usage"]
@@ -68,7 +67,7 @@ class TestGenerativeScoresAPI:
     async def test_multiple_items(self, server: RemoteOpenAIServer):
         """Test generative score request with multiple items."""
         response = requests.post(
-            server.url_for("generative_scores"),
+            server.url_for("generative_score"),
             json={
                 "model": MODEL_NAME,
                 "query": "Is this city a capital? ",
@@ -78,13 +77,13 @@ class TestGenerativeScoresAPI:
         )
         assert response.status_code == 200
         data = response.json()
-        assert len(data["results"]) == 5
+        assert len(data["data"]) == 5
 
     @pytest.mark.asyncio
     async def test_validation_missing_label_token_ids(self, server: RemoteOpenAIServer):
         """Test that missing label_token_ids returns a validation error."""
         response = requests.post(
-            server.url_for("generative_scores"),
+            server.url_for("generative_score"),
             json={
                 "model": MODEL_NAME,
                 "query": "Test query",
@@ -98,7 +97,7 @@ class TestGenerativeScoresAPI:
     async def test_validation_empty_items(self, server: RemoteOpenAIServer):
         """Test that empty items returns an error."""
         response = requests.post(
-            server.url_for("generative_scores"),
+            server.url_for("generative_score"),
             json={
                 "model": MODEL_NAME,
                 "query": "Test query",
@@ -119,7 +118,7 @@ class TestGenerativeScoresAPI:
     async def test_validation_errors(self, server: RemoteOpenAIServer, label_token_ids, expected_status):
         """Test validation errors for various invalid inputs."""
         response = requests.post(
-            server.url_for("generative_scores"),
+            server.url_for("generative_score"),
             json={
                 "model": MODEL_NAME,
                 "query": "Test query",
@@ -139,14 +138,13 @@ class TestGenerativeScoresAPI:
             "label_token_ids": [100, 200],
         }
 
-        r1 = requests.post(server.url_for("generative_scores"), json=request_body)
-        r2 = requests.post(server.url_for("generative_scores"), json=request_body)
+        r1 = requests.post(server.url_for("generative_score"), json=request_body)
+        r2 = requests.post(server.url_for("generative_score"), json=request_body)
 
         assert r1.status_code == 200 and r2.status_code == 200
-        r1_probs = r1.json()["results"][0]["token_probs"]
-        r2_probs = r2.json()["results"][0]["token_probs"]
-        for key in r1_probs:
-            assert abs(r1_probs[key] - r2_probs[key]) < 1e-6
+        r1_score = r1.json()["data"][0]["score"]
+        r2_score = r2.json()["data"][0]["score"]
+        assert abs(r1_score - r2_score) < 1e-6
 
 
 if __name__ == "__main__":

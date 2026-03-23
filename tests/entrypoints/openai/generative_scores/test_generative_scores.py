@@ -151,17 +151,18 @@ class TestProtocolModels:
         # Test response structure
         response = GenerativeScoreResponse(
             model="test-model",
-            results=[
-                GenerativeScoreItemResult(index=0, token_probs={"9454": 0.7, "2753": 0.3}),
-                GenerativeScoreItemResult(index=1, token_probs={"9454": 0.4, "2753": 0.6}),
+            data=[
+                GenerativeScoreItemResult(index=0, score=0.7),
+                GenerativeScoreItemResult(index=1, score=0.4),
             ],
             usage={"prompt_tokens": 10, "total_tokens": 12, "completion_tokens": 2},
         )
-        assert response.object == "generative_score"
+        assert response.object == "list"
         assert response.model == "test-model"
-        assert len(response.results) == 2
-        assert response.results[0].token_probs["9454"] == 0.7
-        assert response.results[1].token_probs["2753"] == 0.6
+        assert len(response.data) == 2
+        assert response.data[0].score == 0.7
+        assert response.data[0].object == "score"
+        assert response.data[1].score == 0.4
         assert response.usage.prompt_tokens == 10
 
 
@@ -228,10 +229,9 @@ class TestValidation:
         "request_kwargs,expected_error",
         [
             ({"query": "q", "items": ["i"], "label_token_ids": [999999, 999998]}, "out of vocabulary"),
-            ({"query": "q", "items": ["i"], "label_token_ids": [100]}, "at least one token"),
             ({"query": "q", "items": [], "label_token_ids": [100, 200]}, "at least one item"),
         ],
-        ids=["invalid_token_id", "single_token", "empty_items"],
+        ids=["invalid_token_id", "empty_items"],
     )
     async def test_validation_errors(self, request_kwargs, expected_error):
         """Test that invalid inputs return appropriate errors."""
@@ -299,10 +299,9 @@ class TestGeneration:
         result = await serving.create_generative_score(request, None)
 
         assert isinstance(result, GenerativeScoreResponse)
-        assert len(result.results) == 2
-        for item_result in result.results:
-            for prob in item_result.token_probs.values():
-                assert 0.0 <= prob <= 1.0
+        assert len(result.data) == 2
+        for item_result in result.data:
+            assert 0.0 <= item_result.score <= 1.0
 
 
 if __name__ == "__main__":

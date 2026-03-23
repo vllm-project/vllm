@@ -109,13 +109,13 @@ class GenerativeScoreItemResult(OpenAIBaseModel):
 
     Attributes:
         index: The index of this item in the input items list.
-        token_probs: Dictionary mapping token IDs (as strings) to their probabilities.
+        object: Type of object, always "score".
+        score: The probability score for the first label token.
     """
 
     index: int
-    token_probs: dict[str, float] = Field(
-        description="Mapping of token ID (as string) to probability."
-    )
+    object: Literal["score"] = "score"
+    score: float
 
 
 class GenerativeScoreResponse(OpenAIBaseModel):
@@ -123,18 +123,18 @@ class GenerativeScoreResponse(OpenAIBaseModel):
 
     Attributes:
         id: Unique identifier for this response.
-        object: Type of object, always "generative_score".
+        object: Type of object, always "list".
         created: Unix timestamp of when the response was created.
         model: The model used for scoring.
-        results: List of scoring results, one per input item.
+        data: List of scoring results, one per input item.
         usage: Token usage information.
     """
 
     id: str = Field(default="")
-    object: Literal["generative_score"] = "generative_score"
+    object: Literal["list"] = "list"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
-    results: list[GenerativeScoreItemResult]
+    data: list[GenerativeScoreItemResult]
     usage: UsageInfo
 
 
@@ -163,13 +163,11 @@ class OpenAIServingGenerativeScores(OpenAIServing):
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
-        log_error_stack: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
-            log_error_stack=log_error_stack,
         )
 
     async def create_generative_score(
@@ -233,7 +231,7 @@ class OpenAIServingGenerativeScores(OpenAIServing):
             logger.exception("Error preparing request components")
             return self.create_error_response(e)
 
-        request_id = f"genscore-{self._base_request_id(raw_request, request.request_id)}"
+        request_id = f"generative-score-{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
 
         # Build prompts for each item
@@ -355,10 +353,14 @@ class OpenAIServingGenerativeScores(OpenAIServing):
                 apply_softmax=request.apply_softmax,
             )
 
+            # Use the first label token's probability as the score
+            first_label_id = request.label_token_ids[0]
+            score = token_probs[first_label_id]
+
             item_results.append(
                 GenerativeScoreItemResult(
                     index=i,
-                    token_probs={str(k): v for k, v in token_probs.items()},
+                    score=score,
                 )
             )
 
@@ -372,7 +374,7 @@ class OpenAIServingGenerativeScores(OpenAIServing):
             id=request_id,
             created=created_time,
             model=model_name,
-            results=item_results,
+            data=item_results,
             usage=UsageInfo(
                 prompt_tokens=total_prompt_tokens,
                 total_tokens=total_prompt_tokens + total_completion_tokens,
@@ -398,16 +400,12 @@ class OpenAIServingGenerativeScores(OpenAIServing):
         Returns:
             Tuple of (list of TokensPrompt, list of prompt token counts).
         """
-        # Get async tokenizer once for efficiency
-        async_tokenizer = self._get_async_tokenizer(tokenizer)
-
         # Tokenize query if it's a string
         if isinstance(request.query, str):
-            query_result = await async_tokenizer(
+            query_token_ids = tokenizer.encode(
                 request.query,
                 add_special_tokens=request.add_special_tokens,
             )
-            query_token_ids = query_result.input_ids
         else:
             query_token_ids = request.query
 
@@ -418,11 +416,10 @@ class OpenAIServingGenerativeScores(OpenAIServing):
             # Tokenize item if it's a string
             if isinstance(item, str):
                 # Don't add special tokens for items to avoid duplicate BOS/EOS
-                item_result = await async_tokenizer(
+                item_token_ids = tokenizer.encode(
                     item,
                     add_special_tokens=False,
                 )
-                item_token_ids = item_result.input_ids
             else:
                 item_token_ids = item
 
