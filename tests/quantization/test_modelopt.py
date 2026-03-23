@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.config.model import ModelConfig
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -46,7 +47,7 @@ def _snapshot_download_or_skip(model_id: str) -> str:
     not is_quant_method_supported("modelopt"),
     reason="ModelOpt FP8 is not supported on this GPU type.",
 )
-def test_modelopt_fp8_checkpoint_setup(vllm_runner):
+def test_modelopt_fp8_checkpoint_setup(default_vllm_config, vllm_runner):
     """Test ModelOpt FP8 checkpoint loading and structure validation."""
     # TODO: provide a small publicly available test checkpoint
     model_path = (
@@ -61,6 +62,8 @@ def test_modelopt_fp8_checkpoint_setup(vllm_runner):
             "This test requires a local ModelOpt FP8 checkpoint."
         )
 
+    # Set model config as model_config.dtype is required in ModelOptFp8LinearMethod.
+    default_vllm_config.model_config = ModelConfig()
     with vllm_runner(model_path, quantization="modelopt", enforce_eager=True) as llm:
 
         def check_model(model):
