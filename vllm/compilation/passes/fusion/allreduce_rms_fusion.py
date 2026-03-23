@@ -62,6 +62,11 @@ FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
         4: 32,  # 32MB
         8: 1,  # 1MB
     },
+    103: {
+        2: 64,  # 64MB
+        4: 64,  # 64MB
+        8: 2,  # 2MB
+    },
 }
 
 # Max size of the input tensor per world size per device capability
@@ -77,6 +82,11 @@ _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[int, dict[int, float]] = {
         2: 32,  # 32MB
         4: 4,  # 4MB
         8: 1,  # 1MB
+    },
+    103: {
+        2: 32,  # 32MB
+        4: 4,  # 4MB
+        8: 2,  # 2MB
     },
 }
 
