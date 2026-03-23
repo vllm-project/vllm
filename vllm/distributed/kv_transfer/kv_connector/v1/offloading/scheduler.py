@@ -51,6 +51,13 @@ class OffloadingConnectorScheduler:
                 self.offloaded_block_size // self.hash_block_size
             )
         self.block_size_factors = tuple(spec.block_size_factors)
+        if self.hybrid_offload_enabled:
+            for gpu_block_size, unit_size in zip(
+                self.gpu_block_sizes, self.group_hash_block_sizes
+            ):
+                assert gpu_block_size % unit_size == 0, (
+                    "Hybrid GPU block size must be divisible by group offload unit size"
+                )
         self.manager: OffloadingManager = spec.get_manager()
 
         self._requests: dict[ReqId, Request] = {}
@@ -161,9 +168,6 @@ class OffloadingConnectorScheduler:
         for group_index, group_block_ids in enumerate(block_groups):
             unit_size = self.group_hash_block_sizes[group_index]
             gpu_block_size = self.gpu_block_sizes[group_index]
-            assert gpu_block_size % unit_size == 0, (
-                "Hybrid GPU block size must be divisible by group offload unit size"
-            )
             sub_blocks_per_gpu_block = gpu_block_size // unit_size
 
             start_unit_idx = group_start_tokens[group_index] // unit_size
