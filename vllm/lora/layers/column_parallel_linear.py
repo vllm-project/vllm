@@ -262,9 +262,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         Expand packed adapter groups when they don't match n_slices.
         E.g. in_proj_qkv (covers Q+K+V) + in_proj_z
         """
-        # FIXME(Isotr0py): Currently, we assume multiple slices are always
-        # like qkv in qkvz (start from 0). We need to think about what if
-        # slices don't start from 0 in the future.
         expanded_a: list[torch.Tensor] = []
         expanded_b: list[torch.Tensor] = []
         start_idx = 0
