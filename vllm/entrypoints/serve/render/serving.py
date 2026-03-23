@@ -404,7 +404,15 @@ class OpenAIServingRender:
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
-        engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+
+        # Decode token IDs to text for logging purposes
+        tokenizer = self.renderer.tokenizer
+        prompt_text = tokenizer.decode(prompt_token_ids) if tokenizer else None
+
+        engine_prompt = TokensPrompt(
+            prompt_token_ids=prompt_token_ids,
+            prompt=prompt_text,
+        )
 
         # Add cache_salt if provided in the request
         if request.cache_salt is not None:

@@ -712,7 +712,15 @@ class OpenAIServingResponses(OpenAIServing):
 
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
-        engine_prompt = token_inputs(prompt_token_ids)
+
+        # Decode token IDs to text for logging purposes
+        tokenizer = self.renderer.get_tokenizer()
+        prompt_text = tokenizer.decode(prompt_token_ids) if tokenizer else None
+
+        engine_prompt = token_inputs(
+            prompt_token_ids,
+            prompt=prompt_text,
+        )
 
         # Add cache_salt if provided in the request
         if request.cache_salt is not None:
