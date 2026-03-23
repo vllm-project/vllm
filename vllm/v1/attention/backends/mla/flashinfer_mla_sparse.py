@@ -27,6 +27,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
+    build_sparse_mla_prefill_fields,
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
@@ -43,7 +44,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 )
 from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
-    build_sparse_prefill_metadata,
+    split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -231,7 +232,10 @@ class FlashInferMLASparseMetadataBuilder(
         )
         req_id_per_token_tensor = self.req_id_per_token_buffer[:num_tokens]
 
-        pm = build_sparse_prefill_metadata(cm)
+        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(cm)
+        prefill_query_start_loc, prefill_max_query_len, has_context = (
+            build_sparse_mla_prefill_fields(cm, num_decodes, num_prefills)
+        )
 
         return FlashInferMLASparseMetadata(
             num_reqs=cm.num_reqs,
@@ -245,12 +249,12 @@ class FlashInferMLASparseMetadataBuilder(
             seq_lens=cm.seq_lens,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
-            num_decodes=pm.num_decodes,
-            num_prefills=pm.num_prefills,
-            num_decode_tokens=pm.num_decode_tokens,
-            prefill_query_start_loc=pm.prefill_query_start_loc,
-            prefill_max_query_len=pm.prefill_max_query_len,
-            has_context=pm.has_context,
+            num_decodes=num_decodes,
+            num_prefills=num_prefills,
+            num_decode_tokens=num_decode_tokens,
+            prefill_query_start_loc=prefill_query_start_loc,
+            prefill_max_query_len=prefill_max_query_len,
+            has_context=has_context,
         )
 
 

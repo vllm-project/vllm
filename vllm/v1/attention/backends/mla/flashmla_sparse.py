@@ -15,6 +15,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
+    build_sparse_mla_prefill_fields,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -32,7 +33,6 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.utils import (
-    build_sparse_prefill_metadata,
     reshape_attn_output_for_spec_decode,
     reshape_query_for_spec_decode,
     split_decodes_and_prefills,
@@ -522,9 +522,12 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             else:
                 fp8_extra_metadata = self._build_fp8_separate_prefill_decode(cm)
 
-        pm = build_sparse_prefill_metadata(
+        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             cm,
             decode_threshold=self.reorder_batch_threshold or 1,
+        )
+        prefill_query_start_loc, prefill_max_query_len, has_context = (
+            build_sparse_mla_prefill_fields(cm, num_decodes, num_prefills)
         )
 
         metadata = FlashMLASparseMetadata(
@@ -538,13 +541,13 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
-            num_decodes=pm.num_decodes,
-            num_prefills=pm.num_prefills,
-            num_decode_tokens=pm.num_decode_tokens,
+            num_decodes=num_decodes,
+            num_prefills=num_prefills,
+            num_decode_tokens=num_decode_tokens,
             seq_lens=cm.seq_lens,
-            prefill_query_start_loc=pm.prefill_query_start_loc,
-            prefill_max_query_len=pm.prefill_max_query_len,
-            has_context=pm.has_context,
+            prefill_query_start_loc=prefill_query_start_loc,
+            prefill_max_query_len=prefill_max_query_len,
+            has_context=has_context,
             fp8_extra_metadata=fp8_extra_metadata,
             fp8_use_mixed_batch=fp8_use_mixed_batch,
         )

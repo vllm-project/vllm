@@ -22,10 +22,44 @@ from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.v1.attention.backend import CommonAttentionMetadata
 
 logger = init_logger(__name__)
 
 T = TypeVar("T", bound=AttentionMetadata)
+
+
+def build_sparse_mla_prefill_fields(
+    cm: "CommonAttentionMetadata",
+    num_decodes: int,
+    num_prefills: int,
+) -> tuple[torch.Tensor | None, int, bool]:
+    """Compute prefill fields for sparse MLA metadata builders.
+
+    Mirrors how MLACommonMetadataBuilder.build() computes prefill_query_start_loc.
+
+    Returns:
+        (prefill_query_start_loc, prefill_max_query_len, has_context)
+    """
+    if num_prefills == 0:
+        return None, 0, False
+
+    offset = cm.query_start_loc[num_decodes]
+    prefill_query_start_loc = cm.query_start_loc[num_decodes:] - offset
+
+    qsl_cpu = cm.query_start_loc_cpu
+    prefill_qlens = qsl_cpu[num_decodes + 1 :] - qsl_cpu[num_decodes:-1]
+    prefill_max_query_len = int(prefill_qlens.max().item())
+
+    has_context = False
+    seq_lens_cpu = cm.seq_lens.cpu()
+    for i in range(num_prefills):
+        idx = num_decodes + i
+        if seq_lens_cpu[idx] > qsl_cpu[idx + 1] - qsl_cpu[idx]:
+            has_context = True
+            break
+
+    return prefill_query_start_loc, prefill_max_query_len, has_context
 
 
 @triton.jit
