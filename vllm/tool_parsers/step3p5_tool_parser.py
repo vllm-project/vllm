@@ -23,10 +23,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import (
-    ToolParser,
-    ToolParserManager,
-)
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
 
 logger = init_logger(__name__)
 
@@ -298,7 +295,7 @@ class StreamingXMLToolCallParser:
                     final_delta = DeltaMessage(
                         role=None,
                         content=None,
-                        reasoning_content=None,
+                        reasoning=None,
                         tool_calls=[
                             DeltaToolCall(
                                 index=self.tool_call_index - 1,
@@ -1367,7 +1364,6 @@ class StreamingXMLToolCallParser:
         self.deferred_param_raw_value = ""
 
 
-@ToolParserManager.register_module("step3p5")
 class Step3p5ToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
