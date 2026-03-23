@@ -109,6 +109,7 @@ def test_gsm8k_correctness(config_filename):
 
         measured_metric = results["accuracy"]
         expected_metric = eval_config["accuracy_threshold"]
+        TOL = eval_config.get("tolerance", 0.08)
 
         print(f"GSM8K Results for {eval_config['model_name']}:")
         print(f"  Measured metric: {measured_metric:.4f}")
