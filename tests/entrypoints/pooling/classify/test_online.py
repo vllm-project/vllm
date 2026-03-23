@@ -436,26 +436,7 @@ async def test_pooling_classify(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: str):
-    task = "token_classify"
-    response = requests.post(
-        server.url_for("pooling"),
-        json={
-            "model": model_name,
-            "input": input_text,
-            "encoding_format": "float",
-            "task": task,
-        },
-    )
-    poolings = PoolingResponse.model_validate(response.json())
-    assert len(poolings.data) == 1
-    assert len(poolings.data[0].data) == 8
-    assert len(poolings.data[0].data[0]) == 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
+@pytest.mark.parametrize("task", ["token_classify", "embed", "token_embed", "plugin"])
 async def test_pooling_not_supported(
     server: RemoteOpenAIServer, model_name: str, task: str
 ):

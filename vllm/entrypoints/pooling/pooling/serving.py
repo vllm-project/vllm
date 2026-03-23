@@ -37,6 +37,7 @@ from vllm.inputs import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.renderers.inputs.preprocess import prompt_to_seq
+from vllm.tasks import SupportedTask
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
@@ -49,6 +50,7 @@ class OpenAIServingPooling(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         openai_serving_render: OpenAIServingRender,
+        pooling_task: SupportedTask,
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
@@ -61,6 +63,7 @@ class OpenAIServingPooling(OpenAIServing):
             request_logger=request_logger,
         )
 
+        self.pooling_task = pooling_task
         self.openai_serving_render = openai_serving_render
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -88,6 +91,12 @@ class OpenAIServingPooling(OpenAIServing):
 
         if getattr(request, "dimensions", None) is not None:
             return self.create_error_response("dimensions is currently not supported")
+
+        if request.task != self.pooling_task:
+            raise ValueError(
+                f"Unsupported task: {request.task!r} "
+                f"Supported tasks: {self.pooling_task}"
+            )
 
         engine_prompts: Sequence[ProcessorInputs]
         if use_io_processor := isinstance(request, IOProcessorRequest):

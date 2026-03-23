@@ -1414,11 +1414,16 @@ class ModelConfig:
         if self.pooler_config is None:
             return None
 
-        if self.pooler_config.pooling_task is not None:
+        pooling_task = self.pooler_config.pooling_task
+
+        if pooling_task is not None:
             if self.pooler_config.pooling_task in supported_tasks:
                 return self.pooler_config.pooling_task
             else:
-                raise RuntimeError()
+                raise RuntimeError(
+                    f"Unsupported task: {pooling_task!r} "
+                    f"Supported tasks: {supported_tasks}"
+                )
 
         if "token_classify" in supported_tasks:
             for architecture in self.architectures:

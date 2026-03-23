@@ -18,7 +18,7 @@ from vllm.entrypoints.pooling import enable_scoring_api
 from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.entrypoints.serve.instrumentator.basic import base
 from vllm.entrypoints.serve.instrumentator.health import health
-from vllm.tasks import POOLING_TASKS, SupportedTask
+from vllm.tasks import SupportedTask
 
 # TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
 # (requires typing_extensions >= 4.13)
@@ -53,50 +53,56 @@ def get_invocation_types(
             (CompletionRequest, (completion, create_completion)),
         ]
 
-    if "embed" in supported_tasks:
-        from vllm.entrypoints.pooling.embed.api_router import (
-            create_embedding,
-            embedding,
-        )
-        from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
+    if model_config:
+        pooling_task = model_config.get_pooling_task(supported_tasks)
 
-        INVOCATION_TYPES += [
-            (EmbeddingRequest, (embedding, create_embedding)),
-        ]
+        if pooling_task == "embed":
+            from vllm.entrypoints.pooling.embed.api_router import (
+                create_embedding,
+                embedding,
+            )
+            from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
 
-    if "classify" in supported_tasks:
-        from vllm.entrypoints.pooling.classify.api_router import (
-            classify,
-            create_classify,
-        )
-        from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
+            INVOCATION_TYPES += [
+                (EmbeddingRequest, (embedding, create_embedding)),
+            ]
 
-        INVOCATION_TYPES += [
-            (ClassificationRequest, (classify, create_classify)),
-        ]
+        if pooling_task == "classify":
+            from vllm.entrypoints.pooling.classify.api_router import (
+                classify,
+                create_classify,
+            )
+            from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
 
-    if enable_scoring_api(supported_tasks, model_config):
-        from vllm.entrypoints.pooling.score.api_router import do_rerank, rerank
-        from vllm.entrypoints.pooling.score.protocol import RerankRequest
+            INVOCATION_TYPES += [
+                (ClassificationRequest, (classify, create_classify)),
+            ]
 
-        INVOCATION_TYPES += [
-            (RerankRequest, (rerank, do_rerank)),
-        ]
+        if enable_scoring_api(supported_tasks, model_config):
+            from vllm.entrypoints.pooling.score.api_router import do_rerank, rerank
+            from vllm.entrypoints.pooling.score.protocol import RerankRequest
 
-        from vllm.entrypoints.pooling.score.api_router import create_score, score
-        from vllm.entrypoints.pooling.score.protocol import ScoreRequest
+            INVOCATION_TYPES += [
+                (RerankRequest, (rerank, do_rerank)),
+            ]
 
-        INVOCATION_TYPES += [
-            (ScoreRequest, (score, create_score)),
-        ]
+            from vllm.entrypoints.pooling.score.api_router import create_score, score
+            from vllm.entrypoints.pooling.score.protocol import ScoreRequest
 
-    if any(task in POOLING_TASKS for task in supported_tasks):
-        from vllm.entrypoints.pooling.pooling.api_router import create_pooling, pooling
-        from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
+            INVOCATION_TYPES += [
+                (ScoreRequest, (score, create_score)),
+            ]
 
-        INVOCATION_TYPES += [
-            (PoolingRequest, (pooling, create_pooling)),
-        ]
+        if pooling_task is not None:
+            from vllm.entrypoints.pooling.pooling.api_router import (
+                create_pooling,
+                pooling,
+            )
+            from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
+
+            INVOCATION_TYPES += [
+                (PoolingRequest, (pooling, create_pooling)),
+            ]
 
     return INVOCATION_TYPES
 
