@@ -83,7 +83,9 @@ class EncoderCudaGraphManager:
                 else self._generate_budgets(min_budget, max_budget)
             )
             self.max_batch_size = (
-                user_max_images if user_max_images > 0 else max_budget // min_budget
+                user_max_images
+                if user_max_images > 0
+                else min(max_budget // min_budget, min_budget)
             )
 
         mm_config = vllm_config.model_config.multimodal_config
