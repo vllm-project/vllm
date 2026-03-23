@@ -942,12 +942,16 @@ def test_draft_model_engine_args_tensor_parallelism():
     ],
     [
         # Draft overrides target
-        ("flashinfer_trtllm", "triton",
-         "flashinfer_trtllm", "triton", "triton", True),
+        ("flashinfer_trtllm", "triton", "flashinfer_trtllm", "triton", "triton", True),
         # Draft inherits target when unset
-        ("flashinfer_cutlass", None,
-         "flashinfer_cutlass", "flashinfer_cutlass", "flashinfer_cutlass",
-         True),
+        (
+            "flashinfer_cutlass",
+            None,
+            "flashinfer_cutlass",
+            "flashinfer_cutlass",
+            "flashinfer_cutlass",
+            True,
+        ),
         # Both default to auto
         ("auto", None, "auto", "auto", "auto", True),
         # No speculative config at all
