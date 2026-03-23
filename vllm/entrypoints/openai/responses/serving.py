@@ -183,6 +183,7 @@ class OpenAIServingResponses(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -194,6 +195,7 @@ class OpenAIServingResponses(OpenAIServing):
         self.openai_serving_render = openai_serving_render
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.default_chat_template_kwargs = default_chat_template_kwargs or {}
         self.enable_log_outputs = enable_log_outputs
 
         # Set up the unified parser - either a unified parser or fall back to
@@ -266,6 +268,24 @@ class OpenAIServingResponses(OpenAIServing):
         self.background_tasks: dict[str, asyncio.Task] = {}
 
         self.tool_server = tool_server
+
+    def _get_chat_template_kwargs(self, request: ResponsesRequest) -> dict[str, Any]:
+        return self._prepare_extra_chat_template_kwargs(
+            request.chat_template_kwargs,
+            self.default_chat_template_kwargs,
+        )
+
+    def _make_reasoning_parser(
+        self,
+        tokenizer: TokenizerLike,
+        request: ResponsesRequest,
+    ):
+        if self.parser is None or self.parser.reasoning_parser_cls is None:
+            return None
+        return self.parser.reasoning_parser_cls(
+            tokenizer,
+            chat_template_kwargs=self._get_chat_template_kwargs(request),
+        )
 
     def _validate_generator_input(
         self,
@@ -453,6 +473,7 @@ class OpenAIServingResponses(OpenAIServing):
                         if self.parser
                         else None,
                         request=request,
+                        chat_template_kwargs=self._get_chat_template_kwargs(request),
                         tool_parser_cls=self.parser.tool_parser_cls
                         if self.parser
                         else None,
@@ -464,7 +485,8 @@ class OpenAIServingResponses(OpenAIServing):
                     context = SimpleContext()
 
             if self.parser and self.parser.reasoning_parser_cls is not None:
-                reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
+                reasoning_parser = self._make_reasoning_parser(tokenizer, request)
+                assert reasoning_parser is not None
                 if (
                     isinstance(
                         struct_out := sampling_params.structured_outputs,
@@ -591,7 +613,7 @@ class OpenAIServingResponses(OpenAIServing):
             messages,
             default_template=self.chat_template,
             default_template_content_format=self.chat_template_content_format,
-            default_template_kwargs=None,
+            default_template_kwargs=self.default_chat_template_kwargs,
             tool_dicts=tool_dicts,
             tool_parser=self.parser.tool_parser_cls if self.parser else None,
         )
@@ -615,7 +637,7 @@ class OpenAIServingResponses(OpenAIServing):
             new_messages,
             default_template=chat_template,
             default_template_content_format=chat_template_content_format,
-            default_template_kwargs=None,
+            default_template_kwargs=self.default_chat_template_kwargs,
             tool_dicts=tool_dicts,
             tool_parser=tool_parser,
         )
@@ -837,7 +859,8 @@ class OpenAIServingResponses(OpenAIServing):
             and self.parser.reasoning_parser_cls is not None
             and isinstance(context, (SimpleContext, ParsableContext))
         ):
-            reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
+            reasoning_parser = self._make_reasoning_parser(tokenizer, request)
+            assert reasoning_parser is not None
             accumulated = getattr(context, "_accumulated_token_ids", []) or []
             num_reasoning_tokens = reasoning_parser.count_reasoning_tokens(accumulated)
 
@@ -1005,7 +1028,10 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Use parser to extract and create response output items
         if self.parser:
-            parser = self.parser(tokenizer)
+            parser = self.parser(
+                tokenizer,
+                chat_template_kwargs=self._get_chat_template_kwargs(request),
+            )
             return parser.extract_response_outputs(
                 model_output=final_output.text,
                 model_output_token_ids=final_output.token_ids,
@@ -1345,7 +1371,7 @@ class OpenAIServingResponses(OpenAIServing):
         current_item_id = ""
         reasoning_parser = None
         if self.parser and self.parser.reasoning_parser_cls:
-            reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
+            reasoning_parser = self._make_reasoning_parser(tokenizer, request)
         tool_parser = None
         if self.parser and self.parser.tool_parser_cls:
             tool_parser = self.parser.tool_parser_cls(tokenizer)
