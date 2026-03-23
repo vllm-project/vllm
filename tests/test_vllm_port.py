@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.envs import get_vllm_port
+from vllm.envs_impl import get_vllm_port
 
 
 def test_get_vllm_port_not_set():
