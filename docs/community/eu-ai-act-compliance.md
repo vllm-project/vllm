@@ -158,63 +158,82 @@ import logging
 import uuid
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
-logger = logging.getLogger(\"compliance\")
+logger = logging.getLogger("compliance")
 
 class ComplianceLoggingMiddleware(BaseHTTPMiddleware):
-    \"\"\"
+    """
     Captures full request/response content for Article 12 compliance.
     Logs to a structured JSON format suitable for audit backends.
-    \"\"\"
+    Handles both streaming and non-streaming responses.
+    """
 
-    AUDITABLE_PATHS = {\"/v1/chat/completions\", \"/v1/completions\", \"/v1/embeddings\"}
+    AUDITABLE_PATHS = {"/v1/chat/completions", "/v1/completions", "/v1/embeddings"}
 
     async def dispatch(self, request: Request, call_next):
         if request.url.path not in self.AUDITABLE_PATHS:
             return await call_next(request)
 
-        request_id = request.headers.get(
-            \"x-request-id\", str(uuid.uuid4())
-        )
+        request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
         start_time = time.time()
 
         # Capture request body
         body_bytes = await request.body()
         request_body = json.loads(body_bytes) if body_bytes else {}
+        is_streaming = request_body.get("stream", False)
 
         response = await call_next(request)
 
-        # Capture response body (non-streaming only)
-        response_body = b\"\"
+        def build_audit_record(output_data, end_time):
+            return {
+                "request_id": request_id,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start_time)),
+                "latency_ms": round((end_time - start_time) * 1000, 2),
+                "endpoint": request.url.path,
+                "model": request_body.get("model", "unknown"),
+                "parameters": {
+                    "temperature": request_body.get("temperature"),
+                    "max_tokens": request_body.get("max_tokens"),
+                    "top_p": request_body.get("top_p"),
+                    "stream": is_streaming,
+                },
+                "input": request_body.get("messages") or request_body.get("prompt"),
+                "output": output_data,
+                "user": request_body.get("user"),
+                "status_code": response.status_code,
+            }
+
+        if is_streaming:
+            # Wrap the stream: yield chunks to client while accumulating for audit
+            async def logging_iterator():
+                response_body = b""
+                async for chunk in response.body_iterator:
+                    response_body += chunk if isinstance(chunk, bytes) else chunk.encode()
+                    yield chunk
+                # Log after stream completes
+                record = build_audit_record(
+                    response_body.decode("utf-8", errors="ignore"), time.time()
+                )
+                logger.info(json.dumps(record))
+
+            return StreamingResponse(
+                content=logging_iterator(),
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                media_type=response.media_type,
+            )
+
+        # Non-streaming: consume body, log, return new Response
+        response_body = b""
         async for chunk in response.body_iterator:
             response_body += chunk if isinstance(chunk, bytes) else chunk.encode()
 
-        end_time = time.time()
+        record = build_audit_record(
+            json.loads(response_body) if response_body else None, time.time()
+        )
+        logger.info(json.dumps(record))
 
-        # Build the Article 12 audit record
-        audit_record = {
-            \"request_id\": request_id,
-            \"timestamp\": time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime(start_time)),
-            \"latency_ms\": round((end_time - start_time) * 1000, 2),
-            \"endpoint\": request.url.path,
-            \"model\": request_body.get(\"model\", \"unknown\"),
-            \"parameters\": {
-                \"temperature\": request_body.get(\"temperature\"),
-                \"max_tokens\": request_body.get(\"max_tokens\"),
-                \"top_p\": request_body.get(\"top_p\"),
-                \"stream\": request_body.get(\"stream\", False),
-            },
-            \"input\": request_body.get(\"messages\") or request_body.get(\"prompt\"),
-            \"output\": json.loads(response_body) if response_body else None,
-            \"user\": request_body.get(\"user\"),
-            \"status_code\": response.status_code,
-        }
-
-        # Send to your audit backend (replace with your sink)
-        logger.info(json.dumps(audit_record))
-
-        # Reconstruct response for the client
         return Response(
             content=response_body,
             status_code=response.status_code,
@@ -452,13 +471,3 @@ Review each file. The scanner identifies what your codebase provides and what is
 ---
 
 *This guide was generated with assistance from [AI Trace Auditor](https://github.com/BipinRimal314/ai-trace-auditor) and reviewed for accuracy. It is not legal advice. Consult a qualified professional for compliance decisions.*
-ENDOFFILE","description":"Write the EU AI Act compliance guide for vLLM to the target file"},"caller":{"type":"direct"}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":1,"cache_creation_input_tokens":6622,"cache_read_input_tokens":51578,"output_tokens":5798,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":6622},"inference_geo":"","iterations":[],"speed":"standard"}},"requestId":"req_011CZKXsnw17Uyn3hUeo6rh4","type":"assistant","uuid":"7f1e4903-6f2a-44ae-895c-f7455a58e788","timestamp":"2026-03-23T06:25:44.283Z","userType":"external","entrypoint":"cli","cwd":"/Users/bipinrimal/Downloads/Website","sessionId":"e0aa88c5-43b4-4f80-b7be-1f043c2b0d82","version":"2.1.81","gitBranch":"main","slug":"polished-hatching-haven"}
-{"parentUuid":"7f1e4903-6f2a-44ae-895c-f7455a58e788","isSidechain":true,"agentId":"aa05db495cff8937b","type":"progress","data":{"type":"hook_progress","hookEvent":"PreToolUse","hookName":"PreToolUse:Bash","command":"node \"$HOME/.claude/scripts/hooks/pre-bash-tmux-reminder.js\""},"toolUseID":"toolu_01N3uv2Z9LxpdF8kQ6ew1im5","parentToolUseID":"toolu_01N3uv2Z9LxpdF8kQ6ew1im5","uuid":"86b33bf5-868a-41e0-a3f2-7d2f5c647d4d","timestamp":"2026-03-23T06:25:44.303Z","userType":"external","entrypoint":"cli","cwd":"/Users/bipinrimal/Downloads/Website","sessionId":"e0aa88c5-43b4-4f80-b7be-1f043c2b0d82","version":"2.1.81","gitBranch":"main","slug":"polished-hatching-haven"}
-{"parentUuid":"7f1e4903-6f2a-44ae-895c-f7455a58e788","isSidechain":true,"promptId":"c73181a2-8e64-44f9-99a7-8bf629f4261d","agentId":"aa05db495cff8937b","type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"Permission to use Bash has been denied. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this denial in malicious ways, e.g. do not use your ability to run tests to execute non-test actions. You should only try to work around this restriction in reasonable ways that do not attempt to bypass the intent behind this denial. If you believe this capability is essential to complete the user's request, STOP and explain to the user what you were trying to do and why you need this permission. Let the user decide how to proceed.","is_error":true,"tool_use_id":"toolu_01N3uv2Z9LxpdF8kQ6ew1im5"}]},"uuid":"798be3a1-eed8-4d33-b194-9c26e989268d","timestamp":"2026-03-23T06:25:44.345Z","toolUseResult":"Error: Permission to use Bash has been denied. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this denial in malicious ways, e.g. do not use your ability to run tests to execute non-test actions. You should only try to work around this restriction in reasonable ways that do not attempt to bypass the intent behind this denial. If you believe this capability is essential to complete the user's request, STOP and explain to the user what you were trying to do and why you need this permission. Let the user decide how to proceed.","sourceToolAssistantUUID":"7f1e4903-6f2a-44ae-895c-f7455a58e788","userType":"external","entrypoint":"cli","cwd":"/Users/bipinrimal/Downloads/Website","sessionId":"e0aa88c5-43b4-4f80-b7be-1f043c2b0d82","version":"2.1.81","gitBranch":"main","slug":"polished-hatching-haven"}
-{"parentUuid":"798be3a1-eed8-4d33-b194-9c26e989268d","isSidechain":true,"agentId":"aa05db495cff8937b","message":{"model":"claude-opus-4-6","id":"msg_01AU7YUv1KjfuGwMGgwhJSvi","type":"message","role":"assistant","content":[{"type":"text","text":"Both the `Write` tool and `Bash` tool are being denied permission. I need one of these to create the file at `/Users/bipinrimal/Downloads/aitrace-pr-drafts/vllm/eu-ai-act-compliance.md`.
-
-Could you grant permission to either:
-- **Write** (to create the file directly), or
-- **Bash** (to use `cat >` to write the file)
-
-The complete guide (~400 lines of Markdown) is fully drafted and ready to write. It covers all 11 sections you specified, with vLLM-specific code examples using `--middleware`, `--enable-request-id-headers`, YAML config, OpenAI-compatible client code, Prometheus metrics tables, and the correct Article 14/Article 50/Annex III phrasing from the Greptile review patterns."}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"cache_creation_input_tokens":5963,"cache_read_input_tokens":58200,"output_tokens":200,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":5963},"inference_geo":"","iterations":[],"speed":"standard"}},"requestId":"req_011CZKXzQDD4tQbHkqPVLarw","type":"assistant","uuid":"ea76d531-77df-4625-9f00-d9ef2473a729","timestamp":"2026-03-23T06:25:56.796Z","userType":"external","entrypoint":"cli","cwd":"/Users/bipinrimal/Downloads/Website","sessionId":"e0aa88c5-43b4-4f80-b7be-1f043c2b0d82","version":"2.1.81","gitBranch":"main","slug":"polished-hatching-haven"}
