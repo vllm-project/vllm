@@ -69,7 +69,7 @@ __global__ void rms_norm_static_fp8_quant_kernel(
       // Without this, the compiler may optimize away the half-precision
       // truncation in the Half*Half->float chain, keeping extra float32
       // precision that causes 1-ULP FP8 mismatches on some architectures.
-      scalar_t out_norm = ((scalar_t)(x * s_variance)) * src2.val[j];
+      scalar_t const out_norm = ((scalar_t)(x * s_variance)) * src2.val[j];
       out[blockIdx.x * hidden_size + idx * VEC_SIZE + j] =
           scaled_fp8_conversion<true, fp8_type>(static_cast<float>(out_norm),
                                                 scale_inv);
@@ -181,7 +181,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)residual[blockIdx.x * hidden_size + idx];
-    scalar_t out_norm = ((scalar_t)(x * s_variance)) * weight[idx];
+    scalar_t const out_norm = ((scalar_t)(x * s_variance)) * weight[idx];
     out[blockIdx.x * hidden_size + idx] = scaled_fp8_conversion<true, fp8_type>(
         static_cast<float>(out_norm), scale_inv);
   }
