@@ -919,6 +919,79 @@ class Envs:
     VLLM_DEBUG_MFU_METRICS: bool
     """Debug logging for --enable-mfu-metrics."""
 
+    VLLM_USE_MEGA_AOT_ARTIFACT: bool
+    """Use a mega AOT artifact combining AOT Autograd and Inductor artifacts."""
+
+    VLLM_LORA_DISABLE_PDL: bool
+    """Disable Persistent Data Loader (PDL) for LoRA Triton ops."""
+
+    VLLM_ZENTORCH_WEIGHT_PREPACK: bool
+    """Enable zentorch weight prepack for linear ops (default: enabled)."""
+
+    VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool
+    """Disable pinned memory when offloading weights to CPU."""
+
+    VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool
+    """Disable Unified Virtual Addressing for CPU weight offloading."""
+
+    VLLM_USE_FLASHINFER_MOE_INT4: bool
+    """Use FlashInfer trtllm fused MoE int4 kernels."""
+
+    VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool
+    """Use TMA-aligned scales with DeepGEMM FP8 kernels."""
+
+    VLLM_MEDIA_FETCH_MAX_RETRIES: int
+    """Maximum number of retries for fetching media (images, video, audio)."""
+
+    VLLM_MM_HASHER_ALGORITHM: str
+    """Hash algorithm for multimodal content hashing (blake3, sha256, sha512)."""
+
+    VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None
+    """Comma-separated list of Hugging Face repos to search for LoRA adapters."""
+
+    VLLM_ROCM_USE_AITER_FP4BMM: bool
+    """Enable ROCm aiter FP4 batch matrix multiplication kernel."""
+
+    VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool
+    """Enable ROCm KV cache layout shuffling for aiter attention."""
+
+    VLLM_ENABLE_PREGRAD_PASSES: bool
+    """Enable inductor pregrad passes during compilation."""
+
+    VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str
+    """Comma-separated env var prefixes to copy to Ray actors (additive)."""
+
+    VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str
+    """Comma-separated env var names to copy to Ray actors (additive)."""
+
+    VLLM_FLASHINFER_ALLREDUCE_BACKEND: str
+    """Backend for FlashInfer all-reduce (auto, trtllm, or mnnvl)."""
+
+    VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool
+    """Disable randomization of request IDs (deprecated)."""
+
+    VLLM_ALLREDUCE_USE_FLASHINFER: bool
+    """Use FlashInfer backend for all-reduce operations."""
+
+    VLLM_SYSTEM_START_DATE: str | None
+    """System start date string (YYYY-MM-DD) for harmony system instructions."""
+
+    VLLM_DISABLE_LOG_LOGO: bool
+    """Suppress the vLLM ASCII logo on startup."""
+
+    VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool
+    """Enable elastic expert-parallel scale-up launch mode."""
+
+    VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool
+    """Drain in-flight requests before scaling in elastic EP mode."""
+
+    VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool
+    """Profile CUDA graph memory during memory profiling for more accurate
+      KV cache sizing."""
+
+    VLLM_NIXL_EP_MAX_NUM_RANKS: int
+    """Maximum number of EP ranks for NIXL all-to-all buffers."""
+
     # ------------------------------------------------------------------
     # Internal class variable: the dict of lazy getters
     # ------------------------------------------------------------------
@@ -1594,6 +1667,82 @@ class Envs:
         "VLLM_DEBUG_MFU_METRICS": lambda: bool(
             int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
         ),
+        "VLLM_USE_MEGA_AOT_ARTIFACT": lambda: bool(
+            int(os.getenv("VLLM_USE_MEGA_AOT_ARTIFACT", "0"))
+        ),
+        "VLLM_LORA_DISABLE_PDL": lambda: bool(
+            int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))
+        ),
+        "VLLM_ZENTORCH_WEIGHT_PREPACK": lambda: bool(
+            int(os.getenv("VLLM_ZENTORCH_WEIGHT_PREPACK", "1"))
+        ),
+        "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
+            int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", "0"))
+        ),
+        "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
+            int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
+        ),
+        "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
+            int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
+        ),
+        "VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES": lambda: bool(
+            int(os.getenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "0"))
+        ),
+        "VLLM_MEDIA_FETCH_MAX_RETRIES": lambda: int(
+            os.getenv("VLLM_MEDIA_FETCH_MAX_RETRIES", "3")
+        ),
+        "VLLM_MM_HASHER_ALGORITHM": env_with_choices(
+            "VLLM_MM_HASHER_ALGORITHM",
+            "blake3",
+            ["blake3", "sha256", "sha512"],
+            case_sensitive=False,
+        ),
+        "VLLM_LORA_RESOLVER_HF_REPO_LIST": lambda: os.getenv(
+            "VLLM_LORA_RESOLVER_HF_REPO_LIST", None
+        ),
+        "VLLM_ROCM_USE_AITER_FP4BMM": lambda: (
+            os.getenv("VLLM_ROCM_USE_AITER_FP4BMM", "True").lower() in ("true", "1")
+        ),
+        "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
+            os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower()
+            in ("true", "1")
+        ),
+        "VLLM_ENABLE_PREGRAD_PASSES": lambda: bool(
+            int(os.environ.get("VLLM_ENABLE_PREGRAD_PASSES", "0"))
+        ),
+        "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY": lambda: os.getenv(
+            "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY", ""
+        ),
+        "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY": lambda: os.getenv(
+            "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", ""
+        ),
+        "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
+            "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
+            "trtllm",
+            ["auto", "trtllm", "mnnvl"],
+        ),
+        "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION": lambda: bool(
+            int(os.getenv("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "0"))
+        ),
+        "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
+            int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "0"))
+        ),
+        "VLLM_SYSTEM_START_DATE": lambda: os.getenv("VLLM_SYSTEM_START_DATE", None),
+        "VLLM_DISABLE_LOG_LOGO": lambda: bool(
+            int(os.getenv("VLLM_DISABLE_LOG_LOGO", "0"))
+        ),
+        "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": lambda: bool(
+            int(os.getenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", "0"))
+        ),
+        "VLLM_ELASTIC_EP_DRAIN_REQUESTS": lambda: bool(
+            int(os.getenv("VLLM_ELASTIC_EP_DRAIN_REQUESTS", "0"))
+        ),
+        "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
+            int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "0"))
+        ),
+        "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
+            os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
+        ),
     }
     # --8<-- [end:env-vars-definition]
 
@@ -1769,6 +1918,27 @@ class Envs:
             factors[var] = normalize_value(os.getenv(var))
 
         return factors
+
+    def validate_environ(self, hard_fail: bool) -> None:
+        """Check for unknown ``VLLM_*`` environment variables.
+
+        Iterates over ``os.environ`` and warns (or raises) for any
+        ``VLLM_*`` variable that is not registered in :attr:`_env_vars`.
+
+        Args:
+            hard_fail: If ``True``, raise :exc:`ValueError` on the first
+                unknown variable; otherwise emit a warning and continue.
+        """
+        for env in os.environ:
+            if env.startswith("VLLM_") and env not in self._env_vars:
+                if hard_fail:
+                    raise ValueError(
+                        f"Unknown vLLM environment variable detected: {env}"
+                    )
+                else:
+                    logger.warning(
+                        "Unknown vLLM environment variable detected: %s", env
+                    )
 
 
 # ---------------------------------------------------------------------------

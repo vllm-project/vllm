@@ -97,6 +97,10 @@ plugins = ['pydantic.mypy']
 ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
+# vllm/envs.py replaces itself in sys.modules at runtime; envs.pyi is the
+# authoritative stub.  Exclude the .py source so mypy doesn't report a
+# "Duplicate module" error when both files are present.
+exclude = "vllm/envs\\.py"
 
 [tool.pytest.ini_options]
 markers = [

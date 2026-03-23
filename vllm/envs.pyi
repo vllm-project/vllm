@@ -266,6 +266,30 @@ VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"]
 VLLM_USE_V2_MODEL_RUNNER: bool
 VLLM_LOG_MODEL_INSPECTION: bool
 VLLM_DEBUG_MFU_METRICS: bool
+VLLM_USE_MEGA_AOT_ARTIFACT: bool
+VLLM_LORA_DISABLE_PDL: bool
+VLLM_ZENTORCH_WEIGHT_PREPACK: bool
+VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool
+VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool
+VLLM_USE_FLASHINFER_MOE_INT4: bool
+VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool
+VLLM_MEDIA_FETCH_MAX_RETRIES: int
+VLLM_MM_HASHER_ALGORITHM: str
+VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None
+VLLM_ROCM_USE_AITER_FP4BMM: bool
+VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool
+VLLM_ENABLE_PREGRAD_PASSES: bool
+VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str
+VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str
+VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"]
+VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool
+VLLM_ALLREDUCE_USE_FLASHINFER: bool
+VLLM_SYSTEM_START_DATE: str | None
+VLLM_DISABLE_LOG_LOGO: bool
+VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool
+VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool
+VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool
+VLLM_NIXL_EP_MAX_NUM_RANKS: int
 
 # ---------------------------------------------------------------------------
 # Envs instance methods (promoted to module level via sys.modules replacement)
@@ -273,3 +297,6 @@ VLLM_DEBUG_MFU_METRICS: bool
 
 def is_set(name: str) -> bool: ...
 def compile_factors() -> dict[str, object]: ...
+def _is_envs_cache_enabled() -> bool: ...
+def __contains__(item: object) -> bool: ...
+def validate_environ(hard_fail: bool) -> None: ...

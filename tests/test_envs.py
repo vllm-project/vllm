@@ -96,9 +96,9 @@ def test_envs_is_instance() -> None:
 
 def test_envs_contains() -> None:
     """``name in envs`` reflects os.environ membership."""
-    assert "VLLM_HOST_IP" not in envs
+    assert "VLLM_HOST_IP" not in envs  # type: ignore[operator]
     with patch.dict(os.environ, {"VLLM_HOST_IP": "1.2.3.4"}):
-        assert "VLLM_HOST_IP" in envs
+        assert "VLLM_HOST_IP" in envs  # type: ignore[operator]
 
 
 def test_envs_dir() -> None:
