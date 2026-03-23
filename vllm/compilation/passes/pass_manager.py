@@ -144,7 +144,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [ScatterSplitReplacementPass(config)]
                 self.passes += [RopeKVCacheFusionPass(config)]
 
-            if self.pass_config.fuse_cache_mla_rope:
+            if self.pass_config.enable_cache_mla_rope_fusion:
                 self.passes += [KVCacheMLARoPEFusionPass(config)]
 
             if self.pass_config.fuse_attn_quant:
