@@ -65,21 +65,10 @@ class BgeM3SparseEmbeddingsProcessor(
                 f"Unsupported task {raw_embed_request}, "
                 f"Supported tasks are {EMBED_TASKS}"
             )
-        has_dense_embed = True
-        if raw_embed_request.embed_task == "dense":
-            params.task = "embed"
-            params.skip_reading_prefix_cache = False
-        elif raw_embed_request.embed_task == "sparse":
-            params.task = "token_classify"
-            has_dense_embed = False
-        else:
-            params.task = "embed&token_classify"
+        params.task = "embed&token_classify"
         params.use_activation = raw_embed_request.use_activation
         if params.use_activation is None:
             params.use_activation = True
-        if not has_dense_embed:
-            params.dimensions = None
-            return params
 
         params.dimensions = raw_embed_request.dimensions
 
@@ -170,13 +159,11 @@ class BgeM3SparseEmbeddingsProcessor(
         raw_request = self._get_sparse_embedding_request(request_id)
         has_dense_embed = raw_request.embed_task in ["dense", "dense&sparse"]
         has_sparse_embed = raw_request.embed_task in ["sparse", "dense&sparse"]
-        embed_dimensions = 0
-        if has_dense_embed:
-            embed_dimensions = (
-                self.embed_dimensions
-                if raw_request.dimensions is None
-                else raw_request.dimensions
-            )
+        embed_dimensions = (
+            self.embed_dimensions
+            if raw_request.dimensions is None
+            else raw_request.dimensions
+        )
         for idx in range(len(model_output)):
             mo = model_output[idx]
             sparse_embedding_dict: dict[int, float] = {}
