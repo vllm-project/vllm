@@ -289,6 +289,22 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if aiter_ca is not None:
             n = input_.shape[-1]
             total_bytes = input_.numel() * input_.element_size()
+            # Constraints from the AITER fused AR+RMS HIP kernel
+            # (custom_all_reduce.cuh dispatchFusedAllReduceRMSNorm):
+            #
+            # n <= 16384: the kernel's rmsnorm step handles n_bytes
+            #   (= n * sizeof(T)) in [1024, 32768]. For bf16 that
+            #   means hidden_dim up to 16384.
+            #
+            # total_bytes < 64 MB (8 * 1024 * 8192): AITER's
+            #   CustomAllreduce IPC buffer is 128 MB; 2-stage write
+            #   mode halves usable capacity (max_size / 2).
+            #
+            # world_size != 6: the fused kernel only has template
+            #   instantiations for world_size {2, 4, 8}. world_size=6
+            #   is unsupported by the AITER fused kernel (the base
+            #   allreduce kernel supports it, but the fused variant
+            #   does not).
             can_use_fused = (
                 n <= 16384
                 and total_bytes < 8 * 1024 * 8192
@@ -299,6 +315,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 and not aiter_ca.disabled
                 and aiter_ca.should_custom_ar(input_)
             ):
+                # 1-stage is faster for small payloads. AITER uses
+                # ~80 KB (8 GPU) to ~160 KB (4 GPU) thresholds;
+                # 128 KB is a conservative middle ground.
                 use_1stage = total_bytes <= 128 * 1024
                 result = aiter_ca.custom_fused_ar_rms(
                     input_, residual, weight, eps, use_1stage
