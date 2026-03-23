@@ -12,6 +12,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
@@ -859,11 +860,30 @@ def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
     return sliding_window == 1024 and head_size in (128, 256)
 
 
+def _use_small_sm8x_sink_tiles(
+    device_capability: DeviceCapability | None,
+    has_sinks: bool,
+) -> bool:
+    """Prefer smaller sink tiles on Ada/GA10x-class SM8x GPUs.
+
+    SM86/SM89 parts have materially less shared memory per SM than SM80,
+    so the sink-capable unified Triton path benefits from a smaller tile.
+    """
+    return (
+        has_sinks
+        and device_capability is not None
+        and device_capability.major == 8
+        and device_capability.minor in (6, 9)
+    )
+
+
 def _get_tile_size(
     head_size: int,
     sliding_window: int,
     element_size: int,
     is_prefill: bool,
+    has_sinks: bool = False,
+    device_capability: DeviceCapability | None = None,
 ) -> int:
     """Select tile size with Gemma3-specific optimization.
 
@@ -874,6 +894,9 @@ def _get_tile_size(
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
         return 32
+
+    if is_prefill and _use_small_sm8x_sink_tiles(device_capability, has_sinks):
+        return 16
 
     # Default behavior
     if is_prefill:
@@ -958,17 +981,24 @@ def unified_attention(
     # Tile sizes for prefill and decode. Gemma3 models use optimized values.
     # Note: tile size must be at least 32 for fp8 (element_size == 1).
     sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
+    device_capability = (
+        current_platform.get_device_capability() if current_platform.is_cuda() else None
+    )
     TILE_SIZE_PREFILL = _get_tile_size(
         head_size,
         sliding_window_val,
         q.element_size(),
         is_prefill=True,
+        has_sinks=sinks is not None,
+        device_capability=device_capability,
     )
     TILE_SIZE_DECODE = _get_tile_size(
         head_size,
         sliding_window_val,
         q.element_size(),
         is_prefill=False,
+        has_sinks=sinks is not None,
+        device_capability=device_capability,
     )
 
     # Launch the 2D kernel if
