@@ -473,6 +473,13 @@ def test_extract_tool_calls_anyof_type_conversion(qwen3_tool_parser):
                         "type_as_array": {
                             "type": ["integer", "null"],
                         },
+                        "multi_non_null": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "integer"},
+                                {"type": "null"},
+                            ],
+                        },
                     },
                 },
             },
@@ -496,6 +503,9 @@ hello
 <parameter=type_as_array>
 42
 </parameter>
+<parameter=multi_non_null>
+some text
+</parameter>
 </function>
 </tool_call>"""
 
@@ -515,6 +525,9 @@ hello
     assert isinstance(args["anyof_obj"], dict)
     assert args["type_as_array"] == 42
     assert isinstance(args["type_as_array"], int)
+    # Multi non-null: anyOf[string, integer, null] → first non-null is string
+    assert args["multi_non_null"] == "some text"
+    assert isinstance(args["multi_non_null"], str)
 
 
 @pytest.mark.parametrize(

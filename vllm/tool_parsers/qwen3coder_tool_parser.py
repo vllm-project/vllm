@@ -131,11 +131,47 @@ class Qwen3CoderToolParser(ToolParser):
         logger.debug("Tool '%s' is not defined in the tools list.", func_name)
         return {}
 
+    @staticmethod
+    def _first_non_null_type(type_value: Any) -> str | None:
+        """Extract the first non-null type from a type value.
+
+        Handles both scalar types ("integer") and type-as-array
+        (["integer", "null"]) per JSON Schema spec.
+        """
+        if isinstance(type_value, list):
+            return next(
+                (str(t).strip().lower() for t in type_value
+                 if t is not None and str(t).lower() != "null"),
+                None)
+        if type_value is not None and str(type_value).lower() != "null":
+            return str(type_value).strip().lower()
+        return None
+
+    def _resolve_param_type(self, param_def: dict) -> str:
+        """Resolve the effective type string from a parameter definition.
+
+        Handles direct "type" fields (including type-as-array) and
+        anyOf/oneOf schemas emitted by Pydantic v2 for Optional[T].
+        """
+        if "type" in param_def:
+            resolved = self._first_non_null_type(param_def["type"])
+            return resolved or "string"
+
+        if "anyOf" in param_def or "oneOf" in param_def:
+            variants = param_def.get("anyOf") or param_def.get("oneOf", [])
+            for v in variants:
+                if not isinstance(v, dict):
+                    continue
+                resolved = self._first_non_null_type(v.get("type"))
+                if resolved:
+                    return resolved
+
+        return "string"
+
     def _convert_param_value(
         self, param_value: str, param_name: str, param_config: dict, func_name: str
     ) -> Any:
         """Convert parameter value based on its type in the schema."""
-        # Handle null value for any type
         if param_value.lower() == "null":
             return None
 
@@ -150,57 +186,10 @@ class Qwen3CoderToolParser(ToolParser):
                 )
             return param_value
 
-        if isinstance(param_config[param_name], dict):
-            param_def = param_config[param_name]
-            if "type" in param_def:
-                raw_type = param_def["type"]
-                # Handle type-as-array at top level,
-                # e.g. {"type": ["integer", "null"]}
-                if isinstance(raw_type, list):
-                    actual = next(
-                        (t for t in raw_type
-                         if t is not None and str(t).lower() != "null"),
-                        None)
-                    param_type = str(actual).strip().lower() if actual \
-                        else "string"
-                else:
-                    param_type = str(raw_type).strip().lower()
-            elif "anyOf" in param_def or "oneOf" in param_def:
-                # Extract the first non-null type from anyOf/oneOf variants.
-                # Pydantic v2 emits anyOf for Optional[T] (e.g. int | None),
-                # which has no top-level "type" key. The previous fix (#36032)
-                # hardcoded "object" here, but that breaks integer, string,
-                # and array nullable params — they need their actual type
-                # to hit the correct conversion branch (int(), float(), etc.).
-                variants = param_def.get(
-                    "anyOf") or param_def.get("oneOf", [])
-                non_null_types = []
-                for v in variants:
-                    if not isinstance(v, dict):
-                        continue
-                    schema_type = v.get("type")
-                    if schema_type is None:
-                        continue
-                    # Handle type-as-array, e.g. {"type": ["integer", "null"]}
-                    if isinstance(schema_type, list):
-                        actual = next(
-                            (t for t in schema_type
-                             if t is not None
-                             and str(t).lower() != "null"),
-                            None)
-                        if actual:
-                            non_null_types.append({"type": actual})
-                    elif str(schema_type).lower() != "null":
-                        non_null_types.append(v)
-                if non_null_types:
-                    param_type = str(
-                        non_null_types[0]["type"]).strip().lower()
-                else:
-                    param_type = "string"
-            else:
-                param_type = "string"
-        else:
-            param_type = "string"
+        if not isinstance(param_config[param_name], dict):
+            return param_value
+
+        param_type = self._resolve_param_type(param_config[param_name])
         if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
             return param_value
         elif (
