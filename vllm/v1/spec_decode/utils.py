@@ -272,11 +272,19 @@ def create_vllm_config_for_draft_model(
     new_parallel_config = replace(
         old_spec_config.draft_parallel_config, rank=old.parallel_config.rank
     )
+
+    draft_moe_backend = old_spec_config.moe_backend
+    if draft_moe_backend is not None:
+        new_kernel_config = replace(old.kernel_config, moe_backend=draft_moe_backend)
+    else:
+        new_kernel_config = old.kernel_config
+
     new: VllmConfig = replace(
         old,
         quant_config=None,
         parallel_config=new_parallel_config,
         model_config=old_spec_config.draft_model_config,
+        kernel_config=new_kernel_config,
     )
     return new
 
