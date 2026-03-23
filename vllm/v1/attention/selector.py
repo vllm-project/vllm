@@ -46,6 +46,11 @@ class AttentionSelectorConfig(NamedTuple):
             f"model_architectures={self.model_architectures})"
         )
 
+    def validation_kwargs(self) -> dict[str, object]:
+        config = self._asdict()
+        config.pop("model_architectures", None)
+        return config
+
 
 def get_attn_backend(
     head_size: int,

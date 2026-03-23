@@ -3,15 +3,15 @@
 """Tests for CUDA model-aware attention backend policy."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
 from vllm.config import set_current_vllm_config
-from vllm.platforms.cuda import _get_backend_priorities
+from vllm.platforms.cuda import CudaPlatform, _get_backend_priorities
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.attention.selector import AttentionSelectorConfig, get_attn_backend
 
 
 def setup_function():
@@ -121,4 +121,36 @@ def test_get_attn_backend_uses_declared_architectures_for_policy():
     assert attn_selector_config.model_architectures == (
         "GptOssForCausalLM",
         "StaleWrappedArchitecture",
+    )
+
+
+def test_cuda_validation_excludes_policy_only_model_architectures():
+    backend = Mock()
+    backend_class = Mock()
+    backend.get_class.return_value = backend_class
+    backend_class.validate_configuration.return_value = []
+
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=None,
+        block_size=None,
+        has_sink=True,
+        model_architectures=("GptOssForCausalLM",),
+    )
+
+    with patch(
+        "vllm.platforms.cuda._get_backend_priorities",
+        return_value=[backend],
+    ):
+        valid, invalid = CudaPlatform.get_valid_backends(
+            device_capability=DeviceCapability(8, 9),
+            attn_selector_config=attn_selector_config,
+        )
+
+    assert valid == [(backend, 0)]
+    assert invalid == {}
+    assert (
+        "model_architectures"
+        not in backend_class.validate_configuration.call_args.kwargs
     )
