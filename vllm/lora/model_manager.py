@@ -556,32 +556,20 @@ class LoRAModelManager:
                 replacements = self.packed_modules_mapping[parts[-1]]
                 n_slices = getattr(module, "n_slices", len(replacements))
                 subloras: list[LoRALayerWeights | None] = []
+                # HACK: overrides replacements for qkvz = qkv + z case.
+                # Any better methods to handle this case?
                 if n_slices != len(replacements):
-                    # When a packed module has more slices than replacements
-                    # (e.g. in_proj_qkvz has 4 slices but only 2 replacements),
-                    # create one dummy sublora per slice so that set_lora
-                    # receives len(lora_b) == n_slices without expansion.
-                    for i in range(n_slices):
-                        lora = LoRALayerWeights.create_dummy_lora_weights(
-                            module_name + f".slice_{i}",
-                            module.lora_a_stacked[i].shape[-1],
-                            module.lora_b_stacked[i].shape[-2],
-                            rank,
-                            module.lora_a_stacked[i].dtype,
-                            "cpu",
-                        )
-                        subloras.append(lora)
-                else:
-                    for i, r in enumerate(replacements):
-                        lora = LoRALayerWeights.create_dummy_lora_weights(
-                            module_name + "." + r,
-                            module.lora_a_stacked[i].shape[-1],
-                            module.lora_b_stacked[i].shape[-2],
-                            rank,
-                            module.lora_a_stacked[i].dtype,
-                            "cpu",
-                        )
-                        subloras.append(lora)
+                    replacements = [f"slice_{i}" for i in range(n_slices)]
+                for i, r in enumerate(replacements):
+                    lora = LoRALayerWeights.create_dummy_lora_weights(
+                        module_name + "." + r,
+                        module.lora_a_stacked[i].shape[-1],
+                        module.lora_b_stacked[i].shape[-2],
+                        rank,
+                        module.lora_a_stacked[i].dtype,
+                        "cpu",
+                    )
+                    subloras.append(lora)
                 if module.__class__.__name__ == "FusedMoEWithLoRA":
                     # For non-gated MoE, pad subloras to 3 elements per expert
                     # to match pack_moe expectations (w1, w2, None for w3)
