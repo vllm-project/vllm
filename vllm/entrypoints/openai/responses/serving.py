@@ -1314,7 +1314,9 @@ class OpenAIServingResponses(OpenAIServing):
             if request.input or not request.previous_input_messages:
                 messages.append(get_user_message(request.input))
         else:
-            if prev_response is not None:
+            if conv_items is not None:
+                prev_outputs = list(conv_items)
+            elif prev_response is not None:
                 prev_outputs = copy(prev_response.output)
             else:
                 prev_outputs = []
@@ -1552,7 +1554,10 @@ class OpenAIServingResponses(OpenAIServing):
                 return self._make_conversation_not_found_error(conv_id)
             items = list(self.conversation_items_store.get(conv_id, []))
 
-        # Apply cursors on insertion-order list first, then reverse.
+        # Reverse first so cursors operate on the client-visible order.
+        if order == "desc":
+            items = list(reversed(items))
+
         if after:
             idx = next((i for i, ci in enumerate(items) if ci.id == after), -1)
             items = items[idx + 1 :] if idx >= 0 else items
@@ -1563,9 +1568,6 @@ class OpenAIServingResponses(OpenAIServing):
                 len(items),
             )
             items = items[:idx]
-
-        if order == "desc":
-            items = list(reversed(items))
 
         has_more = len(items) > limit
         page = items[:limit]
