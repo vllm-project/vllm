@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -13,8 +15,11 @@ from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
+    from openai.types.responses.tool import Tool
+
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 logger = init_logger(__name__)
 
@@ -158,7 +163,12 @@ class GptOssReasoningParser(ReasoningParser):
 
     # This function prepares the structural tag to format reasoning output
     def prepare_structured_tag(
-        self, original_tag: str | None, tool_server: ToolServer | None
+        self,
+        original_tag: str | StructuredOutputsParams | None,
+        tool_server: ToolServer | None,
+        sampling_params: SamplingParams | None = None,
+        tools: list[Tool] | None = None,
+        model_architecture: str | None = None,
     ) -> str | None:
         if original_tag is None:
             if tool_server is None:
