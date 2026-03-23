@@ -1,5 +1,10 @@
 # Sparse MLA benchmark: forward_mha vs forward_mqa comparison
 #
+# Tests three regimes:
+#   1. Pure prefill (no context): MHA does causal FA4 at 192d vs MQA at 576d
+#   2. Short-context extends (seq_len <= topk=2048): MHA does causal FA4, no mask
+#   3. Long-context extends (seq_len > topk): MHA uses masked FA4
+#
 # Usage:
 #   python benchmark.py --config configs/mla_sparse_mha_vs_mqa.yaml
 
@@ -18,111 +23,58 @@ model:
   block_size: 128
 
 batch_specs:
-  # Pure prefill (no context) — isolates kv_b_proj + causal attn cost
-  - "q1"
-  - "q2"
-  - "q4"
-  - "q8"
-  - "q16"
-  - "q32"
-  - "q64"
+  # === Pure prefill: find crossover point ===
+  # MHA loses at q128, wins at q256. Zoom in.
   - "q128"
+  - "q160"
+  - "q192"
+  - "q224"
   - "q256"
+
+  # === Pure prefill: characterize peak and convergence ===
+  # MHA peaks ~2x at q512-q1k, converges at q8k. Where does it cross back?
   - "q512"
   - "q1k"
   - "q2k"
   - "q4k"
+  - "q6k"
   - "q8k"
+  - "q12k"
+  - "q16k"
 
-  - "2q1"
-  - "2q2"
-  - "2q4"
-  - "2q8"
-  - "2q16"
-  - "2q32"
-  - "2q64"
-  - "2q128"
-  - "2q256"
-  - "2q512"
-  - "2q1k"
-  - "2q2k"
-  - "2q4k"
-  - "2q8k"
-
-  - "4q1"
-  - "4q2"
-  - "4q4"
-  - "4q8"
-  - "4q16"
-  - "4q64"
-  - "4q128"
+  # Batched pure prefill (confirms ~2x holds with batching)
   - "4q256"
   - "4q512"
   - "4q1k"
   - "4q2k"
-  - "4q4k"
-  - "4q8k"
-
-  - "8q1"
-  - "8q2"
-  - "8q4"
-  - "8q8"
-  - "8q16"
-  - "8q64"
-  - "8q128"
-  - "8q256"
-  - "8q512"
-  - "8q1k"
-  - "8q2k"
-  - "8q4k"
-  - "8q8k"
-
-  - "16q1"
-  - "16q2"
-  - "16q4"
-  - "16q8"
-  - "16q16"
-  - "16q64"
-  - "16q128"
   - "16q256"
   - "16q512"
-  - "16q1k"
-  - "16q2k"
-  - "16q4k"
-  - "16q8k"
 
-  - "32q1"
-  - "32q2"
-  - "32q4"
-  - "32q8"
-  - "32q16"
-  - "32q64"
-  - "32q128"
-  - "32q256"
-  - "32q512"
-  - "32q1k"
-  - "32q2k"
-  - "32q4k"
-  - "32q8k"
+  # === Extends: find context length where MHA becomes slower ===
+  # q512 pure prefill: MHA 2x win. q512s1k: MHA 2x loss.
+  # Zoom into the crossover by adding small amounts of context.
+  - "q512s513"
+  - "q512s528"
+  - "q512s544"
+  - "q512s576"
+  - "q512s640"
+  - "q512s768"
+  - "q512s1k"
 
-  - "64q1"
-  - "64q2"
-  - "64q4"
-  - "64q8"
-  - "64q16"
-  - "64q64"
-  - "64q128"
-  - "64q256"
-  - "64q512"
-  - "64q1k"
-  - "64q2k"
-  - "64q4k"
-  - "64q8k"
+  # Same investigation for q1k
+  - "q1ks1025"
+  - "q1ks1056"
+  - "q1ks1088"
+  - "q1ks1152"
+  - "q1ks1280"
+  - "q1ks1536"
+  - "q1ks2k"
 
-  # Extends
-  - "16q64s128"
-  - "32q64s128"
-  - "64q64s128"
+  # === Extends: context scaling (confirms linear growth) ===
+  - "q256s512"
+  - "q256s1k"
+  - "q256s2k"
+  - "q256s4k"
 
 backends:
   - FLASHMLA_SPARSE

@@ -291,10 +291,41 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
 
         device = q.device
         prefill_qsl = getattr(attn_metadata, "prefill_query_start_loc", None)
+        prefill_max_ql: int = getattr(attn_metadata, "prefill_max_query_len", 0)
+        has_context: bool = getattr(attn_metadata, "has_context", False)
+
         assert prefill_qsl is not None, (
             "Metadata must provide prefill_query_start_loc for forward_mha"
         )
 
+        if not has_context:
+            # No cached context — decompress new tokens and run causal FA4.
+            kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+            )
+            k_nope_new, v_new = kv_nope.split(
+                [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+            )
+            k_new = self._concat_k_nope_k_pe(k_nope_new, k_pe)
+
+            attn_out, _ = flash_attn_varlen_func(
+                q=q,
+                k=k_new,
+                v=v_new,
+                cu_seqlens_q=prefill_qsl,
+                cu_seqlens_k=prefill_qsl,
+                max_seqlen_q=prefill_max_ql,
+                max_seqlen_k=prefill_max_ql,
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=True,
+                fa_version=4,
+            )
+            attn_out = attn_out[..., : self.v_head_dim]
+            output.copy_(attn_out.flatten(start_dim=-2))
+            return
+
+        # ----- Has cached context -----
         num_decodes: int = getattr(attn_metadata, "num_decodes", 0)
         num_prefills: int = getattr(attn_metadata, "num_prefills", 0)
         num_decode_tokens: int = getattr(attn_metadata, "num_decode_tokens", 0)
@@ -318,19 +349,6 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         total_kv_tokens = cu_seqlens_k[-1].item()
         max_kv_len = seq_lens_t.max().item() if num_prefills > 0 else 0
 
-        # Get topk indices for prefill tokens
-        assert self.topk_indices_buffer is not None
-        num_prefill_tokens = q.shape[0]
-        topk_all = self.topk_indices_buffer[
-            num_decode_tokens : num_decode_tokens + num_prefill_tokens
-        ]
-        topk_per_req: list[torch.Tensor] = []
-        ti_offset = 0
-        for i in range(num_prefills):
-            ql = q_lens[i]
-            topk_per_req.append(topk_all[ti_offset : ti_offset + ql])
-            ti_offset += ql
-
         # Gather all positions from cache and decompress
         block_table = getattr(attn_metadata, "block_table", None)
         assert block_table is not None
@@ -345,29 +363,61 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             k_scale,
         )
 
-        # Build topk mask
-        dense_mask = _build_topk_mask(
-            topk_per_req,
-            q_lens,
-            max_q_len,
-            max_kv_len,
-            device,
-        )
+        # When all seq_lens <= topk, every position is attended to.
+        # Skip the mask and use standard causal FA4.
+        assert self.topk_indices_buffer is not None
+        topk = self.topk_indices_buffer.shape[1]
+        all_within_topk = bool(seq_lens_t.max().item() <= topk)
 
-        attn_out, _ = flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=prefill_qsl,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=max_q_len,
-            max_seqlen_k=max_kv_len,
-            softmax_scale=self.scale,
-            causal=False,
-            return_softmax_lse=True,
-            fa_version=4,
-            dense_mask=dense_mask,
-        )
+        if all_within_topk:
+            attn_out, _ = flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=prefill_qsl,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_q_len,
+                max_seqlen_k=max_kv_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=True,
+                fa_version=4,
+            )
+        else:
+            # Sparse context: build topk mask for FA4 block-sparse attention
+            num_prefill_tokens = q.shape[0]
+            topk_all = self.topk_indices_buffer[
+                num_decode_tokens : num_decode_tokens + num_prefill_tokens
+            ]
+            topk_per_req: list[torch.Tensor] = []
+            ti_offset = 0
+            for i in range(num_prefills):
+                ql = q_lens[i]
+                topk_per_req.append(topk_all[ti_offset : ti_offset + ql])
+                ti_offset += ql
+
+            dense_mask = _build_topk_mask(
+                topk_per_req,
+                q_lens,
+                max_q_len,
+                max_kv_len,
+                device,
+            )
+
+            attn_out, _ = flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=prefill_qsl,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_q_len,
+                max_seqlen_k=max_kv_len,
+                softmax_scale=self.scale,
+                causal=False,
+                return_softmax_lse=True,
+                fa_version=4,
+                dense_mask=dense_mask,
+            )
 
         attn_out = attn_out[..., : self.v_head_dim]
         output.copy_(attn_out.flatten(start_dim=-2))
