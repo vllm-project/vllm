@@ -339,8 +339,11 @@ class OffloadingConnectorScheduler:
         assert self._chunk_prefix_tokens(num_blocks) == full_block_tokens
 
         assert self._get_num_offloaded_blocks(request) >= num_blocks
-        block_hashes = self._get_block_hashes(
-            request, start_idx=start_block_idx, end_idx=num_blocks
+        # Materialise into a list so the same hashes can be passed to
+        # prepare_load (which consumes the iterable) and also used to
+        # update _reqs_being_loaded without a second HybridChunkBlockHashList.
+        block_hashes = list(
+            self._get_block_hashes(request, start_idx=start_block_idx, end_idx=num_blocks)
         )
 
         src_spec = self.manager.prepare_load(block_hashes)
@@ -349,10 +352,6 @@ class OffloadingConnectorScheduler:
             start_chunk_idx=start_block_idx,
             end_chunk_idx=num_blocks,
             include_block_indices=True,
-        )
-
-        block_hashes = self._get_block_hashes(
-            request, start_idx=start_block_idx, end_idx=num_blocks
         )
 
         self._reqs_to_load[request.request_id] = (src_spec, dst_spec)
