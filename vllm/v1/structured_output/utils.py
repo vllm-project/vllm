@@ -108,22 +108,23 @@ def apply_grammar_bitmask(
 
     indices: torch.Tensor | list[int] | None = None
     if not skip_out_indices:
-        if logits.device.type == "cpu":
+        if logits.is_cpu:
             # On CPU, pass indices as a plain list — pin_memory requires CUDA,
             # and the xgrammar CPU kernel expects Sequence[int], not a tensor.
             indices = out_indices
         else:
-            index_tensor = torch.tensor(
-                out_indices,
-                dtype=torch.int32,
-                device="cpu",
-                pin_memory=True,
+            # xgrammar expects a python list of indices but it will actually
+            # work with a tensor. If we copy the tensor ourselves here we can
+            # do it in a non_blocking manner and there should be no cpu sync
+            # within xgrammar.
+            indices = torch.tensor(
+                out_indices, dtype=torch.int32, device="cpu", pin_memory=True
             )
-            indices = index_tensor.to(logits.device, non_blocking=True)
+            indices = indices.to(logits.device, non_blocking=True)
 
     # Handle dtype conversion for CPU (older xgrammar CPU kernels require float32)
     # See: https://github.com/vllm-project/vllm/issues/31901
-    if logits.device.type == "cpu" and logits.dtype != torch.float32:
+    if logits.is_cpu and logits.dtype != torch.float32:
         # Convert to float32, apply bitmask, then convert back
         logits_float32 = logits.to(torch.float32)
         xgr.apply_token_bitmask_inplace(
