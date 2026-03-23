@@ -71,6 +71,11 @@ class OffloadingConnectorScheduler:
         self._reqs_being_stored = defaultdict[ReqId, set[BlockHash]](set)
         self._reqs_being_loaded = defaultdict[ReqId, set[BlockHash]](set)
 
+        # Hybrid mode: one HybridChunkBlockHashList per active request, reused
+        # across scheduler steps so RequestBlockHashList lazily caches computed
+        # group-level hashes instead of recomputing them from scratch each step.
+        self._hybrid_hash_lists: dict[ReqId, HybridChunkBlockHashList] = {}
+
     def _ensure_transfer_supported(self) -> None:
         return
 
@@ -200,12 +205,21 @@ class OffloadingConnectorScheduler:
         end_idx: int | None = None,
     ) -> Iterable[BlockHash]:
         if self.hybrid_offload_enabled:
-            offloaded_hashes = HybridChunkBlockHashList(
-                req,
-                self.group_hash_block_sizes,
-                self.offloaded_block_size,
-                self.hash_function,
-            )
+            # Reuse a cached HybridChunkBlockHashList so that
+            # RequestBlockHashList's lazily-computed per-group hashes survive
+            # across multiple calls within a step and across scheduler steps.
+            # Without caching, each call rebuilds the list and recomputes all
+            # previously-seen group-level hashes from scratch.
+            req_id = req.request_id
+            offloaded_hashes = self._hybrid_hash_lists.get(req_id)
+            if offloaded_hashes is None:
+                offloaded_hashes = HybridChunkBlockHashList(
+                    req,
+                    self.group_hash_block_sizes,
+                    self.offloaded_block_size,
+                    self.hash_function,
+                )
+                self._hybrid_hash_lists[req_id] = offloaded_hashes
             return islice(offloaded_hashes, start_idx, end_idx)
 
         offloaded_hashes = BlockHashListWithBlockSize(
@@ -563,6 +577,7 @@ class OffloadingConnectorScheduler:
         req_id = request.request_id
         self._requests.pop(req_id, None)
         self._request_block_ids.pop(req_id, None)
+        self._hybrid_hash_lists.pop(req_id, None)
 
         # TODO(orozery): possibly kickoff offload for last block
         # which may have been deferred due to async scheduling
