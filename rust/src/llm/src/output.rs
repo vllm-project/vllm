@@ -5,7 +5,7 @@ use std::task::{Context, Poll, ready};
 use futures::Stream;
 use futures::stream::FusedStream;
 use vllm_engine_core_client::EngineCoreOutputStream;
-use vllm_engine_core_client::protocol::{EngineCoreOutput, RequestOutputKind};
+use vllm_engine_core_client::protocol::{EngineCoreOutput, FinishReason, RequestOutputKind};
 
 use crate::error::Result;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
@@ -139,5 +139,21 @@ impl Stream for GenerateOutputStream {
 impl FusedStream for GenerateOutputStream {
     fn is_terminated(&self) -> bool {
         self.raw_stream.is_terminated()
+    }
+}
+
+impl Drop for GenerateOutputStream {
+    fn drop(&mut self) {
+        if self.raw_stream.is_terminated() {
+            // Already terminated cleanly, no need to record abort metrics.
+            return;
+        }
+
+        // If the user drops a live generate stream, `EngineCoreOutputStream::Drop` will trigger an
+        // engine-side abort. Record the matching terminal request metrics here so frontend-driven
+        // aborts are still visible as `finished_reason="abort"` instead of disappearing from
+        // observability entirely.
+        self.request_metrics
+            .record_finished(current_unix_timestamp_secs(), FinishReason::Abort);
     }
 }

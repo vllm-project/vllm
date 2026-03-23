@@ -647,7 +647,7 @@ async fn generate_records_request_metrics_in_prometheus_output() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn dropping_stream_does_not_fabricate_terminal_request_metrics() {
+async fn dropping_stream_records_abort_terminal_request_metrics() {
     let handshake_address = unique_tcp_endpoint();
     let engine_identity = b"engine-metrics-drop".to_vec();
     let model_name = request_metrics_model_name("metrics-drop-model");
@@ -702,8 +702,11 @@ async fn dropping_stream_does_not_fabricate_terminal_request_metrics() {
 
     engine_task.await.unwrap();
     let rendered = METRICS.render().unwrap();
-    assert!(!rendered.contains(&format!(
-        "vllm:request_success_total{{model_name=\"{model_name}\""
+    assert!(rendered.contains(&format!(
+        "vllm:request_success_total{{model_name=\"{model_name}\",engine=\"5\",finish_reason=\"abort\"}} 1"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:e2e_request_latency_seconds_count{{model_name=\"{model_name}\",engine=\"5\"}} 1"
     )));
 
     llm.shutdown().await.unwrap();
