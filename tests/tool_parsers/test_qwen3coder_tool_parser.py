@@ -576,6 +576,9 @@ def test_extract_tool_calls_anyof_type_conversion_streaming(
                                 {"type": "null"},
                             ],
                         },
+                        "filters": {
+                            "$ref": "#/$defs/SearchFilters",
+                        },
                     },
                 },
             },
@@ -592,6 +595,9 @@ vllm tool parser
 </parameter>
 <parameter=verbose>
 true
+</parameter>
+<parameter=filters>
+{"lang": "en", "year": 2025}
 </parameter>
 </function>
 </tool_call>"""
@@ -625,6 +631,9 @@ true
     assert isinstance(args["count"], int)
     assert args["verbose"] is True
     assert isinstance(args["verbose"], bool)
+    # $ref: treated as object, parsed via json.loads
+    assert args["filters"] == {"lang": "en", "year": 2025}
+    assert isinstance(args["filters"], dict)
 
 
 @pytest.mark.parametrize(
