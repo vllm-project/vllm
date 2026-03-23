@@ -66,16 +66,19 @@ async def monitor_prefiller_engine_ids(app: FastAPI):
     """
     Periodically monitor and automatically update stale engine_ids.
     This handles the case where a prefiller restarts and gets a new engine_id.
+    Also updates the readiness status based on health checks.
     """
     await app.state.ready.wait()
 
     while True:
         await asyncio.sleep(30)
 
+        all_healthy = True
         for prefill_client in app.state.prefill_clients:
             try:
                 response = await prefill_client["client"].get("/health")
                 if response.status_code != 200:
+                    all_healthy = False
                     continue
 
                 response = await prefill_client["client"].get(
@@ -97,9 +100,19 @@ async def monitor_prefiller_engine_ids(app: FastAPI):
                             f"{cached_engine_id} -> {current_engine_id}"
                         )
             except Exception as e:
+                all_healthy = False
                 print(
                     f"Error monitoring prefiller {prefill_client['url']}: {e}"
                 )
+
+        if all_healthy:
+            if not app.state.ready.is_set():
+                app.state.ready.set()
+                print("All prefiller instances are healthy, readiness restored")
+        else:
+            if app.state.ready.is_set():
+                app.state.ready.clear()
+                print("One or more prefiller instances unhealthy, readiness cleared")
 
 
 @asynccontextmanager
