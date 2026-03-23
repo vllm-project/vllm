@@ -88,6 +88,11 @@ class CPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         pass
 
+    def _zero_block_ids(self, block_ids: list[int]) -> None:
+        # CPU attention assigns -INF to logits at invalid positions,
+        # so stale KV cache data never affects computation.
+        pass
+
     def get_dp_padding(self, num_tokens: int) -> tuple[int, torch.Tensor | None]:
         # Note: For CPU backend, dp padding is not required for now.
         return 0, None
