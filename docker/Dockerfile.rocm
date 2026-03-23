@@ -80,7 +80,7 @@ RUN uv pip install --index-url ${PIP_EXTRA_INDEX_URL} "rocm[devel]" \
     && rocm-sdk init
 
 # ROCm SDK environment setup
-ENV SITE_PACKAGES=${SITE_PACKAGES:-/opt/python/lib/python3.12/site-packages}
+ENV SITE_PACKAGES=${SITE_PACKAGES:-/opt/venv/lib/python3.12/site-packages}
 ENV ROCM_PATH=$SITE_PACKAGES/_rocm_sdk_devel
 ENV HIP_DEVICE_LIB_PATH=$SITE_PACKAGES/_rocm_sdk_core/lib/llvm/amdgcn/bitcode
 
