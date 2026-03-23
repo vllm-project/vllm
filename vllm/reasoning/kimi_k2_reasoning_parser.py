@@ -2,17 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Sequence
-from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
-
-if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
 class KimiK2ReasoningParser(ReasoningParser):
@@ -146,14 +141,12 @@ class KimiK2ReasoningParser(ReasoningParser):
         # still reasoning (no content)
         return []
 
-    def extract_reasoning(
-        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
-    ) -> tuple[str | None, str | None]:
+    def extract_reasoning(self, model_output: str) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.
         """
         if self._identity_parser is not None:
-            return self._identity_parser.extract_reasoning(model_output, request)
+            return self._identity_parser.extract_reasoning(model_output)
 
         # thinking does not require a think start token but consume it if present
         start_token_index = model_output.find(self._start_token)

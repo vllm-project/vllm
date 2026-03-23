@@ -48,7 +48,7 @@ def run_reasoning_extraction(
         )
     else:
         reasoning, content = run_reasoning_extraction_nonstreaming(
-            reasoning_parser, model_output, request
+            reasoning_parser, model_output
         )
         return reasoning, content
 
@@ -77,7 +77,7 @@ def run_reasoning_extraction_mistral(
             model_output
         )
         reasoning, content = run_reasoning_extraction_nonstreaming(
-            reasoning_parser, str_output, request
+            reasoning_parser, str_output
         )
         return reasoning, content
 
@@ -85,12 +85,8 @@ def run_reasoning_extraction_mistral(
 def run_reasoning_extraction_nonstreaming(
     reasoning_parser: ReasoningParser,
     model_output: list[str],
-    request: ChatCompletionRequest | None = None,
 ) -> tuple[str | None, str | None]:
-    request = request or ChatCompletionRequest(messages=[], model="test-model")
-    return reasoning_parser.extract_reasoning(
-        model_output="".join(model_output), request=request
-    )
+    return reasoning_parser.extract_reasoning(model_output="".join(model_output))
 
 
 def run_reasoning_extraction_streaming(

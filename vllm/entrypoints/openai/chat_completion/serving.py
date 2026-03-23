@@ -1374,9 +1374,7 @@ class OpenAIServingChat(OpenAIServing):
             if reasoning_parser:
                 # If the reasoning parser is enabled,
                 # tool calls are extracted exclusively from the content.
-                reasoning, content = reasoning_parser.extract_reasoning(
-                    output.text, request=request
-                )
+                reasoning, content = reasoning_parser.extract_reasoning(output.text)
                 if not request.include_reasoning:
                     reasoning = None
             else:

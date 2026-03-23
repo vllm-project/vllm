@@ -284,7 +284,6 @@ You can add a new `ReasoningParser` similar to [vllm/reasoning/deepseek_r1_reaso
         def extract_reasoning(
             self,
             model_output: str,
-            request: ChatCompletionRequest | ResponsesRequest,
         ) -> tuple[str | None, str | None]:
             """
             Extract reasoning content from a complete model-generated string.
@@ -295,9 +294,6 @@ You can add a new `ReasoningParser` similar to [vllm/reasoning/deepseek_r1_reaso
             Parameters:
             model_output: str
                 The model-generated string to extract reasoning content from.
-
-            request: ChatCompletionRequest
-                The request object that was used to generate the model_output.
 
             Returns:
             tuple[Optional[str], Optional[str]]

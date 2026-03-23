@@ -3,7 +3,6 @@
 
 import pytest
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 from vllm.reasoning.kimi_k2_reasoning_parser import KimiK2ReasoningParser
@@ -33,10 +32,9 @@ def test_parser_selection_thinking_disabled(kimi_k2_tokenizer):
 
 def test_extract_reasoning_with_think_tags(kimi_k2_tokenizer):
     parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
-    request = ChatCompletionRequest(model="test-model", messages=[], temperature=1.0)
 
     reasoning, content = parser.extract_reasoning(
-        "<think>step by step reasoning</think>final answer", request
+        "<think>step by step reasoning</think>final answer"
     )
     assert reasoning == "step by step reasoning"
     assert content == "final answer"
@@ -44,11 +42,8 @@ def test_extract_reasoning_with_think_tags(kimi_k2_tokenizer):
 
 def test_extract_reasoning_empty_thinking(kimi_k2_tokenizer):
     parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
-    request = ChatCompletionRequest(model="test-model", messages=[], temperature=1.0)
 
-    reasoning, content = parser.extract_reasoning(
-        "<think></think>final answer", request
-    )
+    reasoning, content = parser.extract_reasoning("<think></think>final answer")
     assert reasoning == ""
     assert content == "final answer"
 
@@ -56,11 +51,8 @@ def test_extract_reasoning_empty_thinking(kimi_k2_tokenizer):
 def test_extract_reasoning_implicit_start(kimi_k2_tokenizer):
     """When there's no <think> tag, everything is treated as reasoning."""
     parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
-    request = ChatCompletionRequest(model="test-model", messages=[], temperature=1.0)
 
-    reasoning, content = parser.extract_reasoning(
-        "implicit reasoning with no tags", request
-    )
+    reasoning, content = parser.extract_reasoning("implicit reasoning with no tags")
     assert reasoning == "implicit reasoning with no tags"
     assert content is None
 
@@ -68,10 +60,9 @@ def test_extract_reasoning_implicit_start(kimi_k2_tokenizer):
 def test_extract_reasoning_tool_section_ends_reasoning(kimi_k2_tokenizer):
     """<|tool_calls_section_begin|> implicitly ends reasoning."""
     parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
-    request = ChatCompletionRequest(model="test-model", messages=[], temperature=1.0)
 
     text = "some reasoning<|tool_calls_section_begin|>tool call data"
-    reasoning, content = parser.extract_reasoning(text, request)
+    reasoning, content = parser.extract_reasoning(text)
     assert reasoning == "some reasoning"
     assert content == "<|tool_calls_section_begin|>tool call data"
 
