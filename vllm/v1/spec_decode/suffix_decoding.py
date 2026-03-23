@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import torch
 
 from vllm.config import VllmConfig
+from vllm.v1.spec_decode.metadata import ProposeInput, SpecDecodeProposer
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
-class SuffixDecodingProposer:
+class SuffixDecodingProposer(SpecDecodeProposer):
     """
     Speculative decoding proposer for Suffix Decoding (https://arxiv.org/pdf/2411.04975).
     This class imports and uses the official implementation from Arctic Inference
@@ -32,19 +32,31 @@ class SuffixDecodingProposer:
             max_cached_requests=config.suffix_decoding_max_cached_requests,
         )
 
+    def prepare_inputs(
+        self,
+        sampled_token_ids: list[list[int]],
+        input_batch: "InputBatch",
+        **kwargs,
+    ) -> ProposeInput:
+        return ProposeInput(
+            sampled_token_ids=sampled_token_ids,
+            input_batch=input_batch,
+        )
+
     def propose(
         self,
-        input_batch: InputBatch,
-        sampled_token_ids: list[list[int]],
-        slot_mappings: dict[str, torch.Tensor]
-        | list[dict[str, torch.Tensor]]
-        | None = None,  # unused
-    ) -> list[list[int]]:
+        propose_input: ProposeInput,
+    ) -> tuple[list[list[int]], None]:
         """
         Propose speculative tokens for each request in the input batch. Suffix Decoding
         will speculate a dynamic number of tokens for each request every decoding step,
         so each entry in the returned list may have different lengths.
         """
+        sampled_token_ids = propose_input.sampled_token_ids
+        input_batch = propose_input.input_batch
+        assert sampled_token_ids is not None
+        assert input_batch is not None
+
         draft_token_ids: list[list[int]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
             if not sampled_ids:
@@ -94,7 +106,7 @@ class SuffixDecodingProposer:
         ):
             self.suffix_cache.stop_request(req_id)
 
-        return draft_token_ids
+        return draft_token_ids, None
 
     def load_model(self, *args, **kwargs):
         # No model to load.

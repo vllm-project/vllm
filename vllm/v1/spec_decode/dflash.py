@@ -11,13 +11,13 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
+from vllm.v1.spec_decode.eagle import EagleBaseProposer
 from vllm.v1.spec_decode.utils import copy_and_expand_dflash_inputs_kernel
 
 logger = init_logger(__name__)
 
 
-class DFlashProposer(SpecDecodeBaseProposer):
+class DFlashProposer(EagleBaseProposer):
     def __init__(
         self,
         vllm_config: VllmConfig,

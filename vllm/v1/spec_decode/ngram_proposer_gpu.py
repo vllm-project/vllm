@@ -19,6 +19,7 @@ from vllm.config import (
 )
 from vllm.forward_context import set_forward_context
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.spec_decode.metadata import ProposeInput, SpecDecodeProposer
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -212,7 +213,7 @@ class NgramGPUKernel(nn.Module):
         pass
 
 
-class NgramProposerGPU:
+class NgramProposerGPU(SpecDecodeProposer):
     def __init__(self, vllm_config: VllmConfig, device: torch.device, runner=None):
         assert vllm_config.speculative_config is not None
         assert vllm_config.speculative_config.prompt_lookup_min is not None
@@ -311,12 +312,22 @@ class NgramProposerGPU:
 
         return token_ids, num_tokens, sampled_flags, valid_mask
 
+    def prepare_inputs(
+        self,
+        sampled_token_ids: torch.Tensor,  # [batch_size, max_len]
+        input_batch: InputBatch,
+        **extra_inputs,
+    ) -> dict[str, torch.Tensor]:
+        return ProposeInput(
+            num_tokens_no_spec=extra_inputs["num_tokens_no_spec"],
+            token_ids_gpu=extra_inputs["token_ids_gpu"],
+            valid_sampled_token_ids_gpu=extra_inputs["valid_sampled_token_ids_gpu"],
+            valid_sampled_tokens_count=extra_inputs["valid_sampled_tokens_count"],
+        )
+
     def propose(
         self,
-        num_tokens_no_spec: torch.Tensor,  # [batch_size]
-        token_ids_gpu: torch.Tensor,  # [batch_size, max_len]
-        valid_sampled_token_ids_gpu: torch.Tensor,  # [batch_size, num_spec_tokens + 1]
-        valid_sampled_tokens_count: torch.Tensor,  # [batch_size]
+        propose_input: ProposeInput,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Propose draft tokens using GPU-accelerated n-gram matching.
@@ -335,6 +346,11 @@ class NgramProposerGPU:
             num_valid_draft_tokens: Count of leading valid draft tokens
                 per request [batch_size]
         """
+        num_tokens_no_spec = propose_input.num_tokens_no_spec
+        token_ids_gpu = propose_input.token_ids_gpu
+        valid_sampled_token_ids_gpu = propose_input.valid_sampled_token_ids_gpu
+        valid_sampled_tokens_count = propose_input.valid_sampled_tokens_count
+
         assert token_ids_gpu.device == self.device
         assert num_tokens_no_spec.device == self.device
 

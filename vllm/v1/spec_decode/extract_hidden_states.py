@@ -12,8 +12,9 @@ from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
-from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.spec_decode.metadata import ProposeInput, SpecDecodeProposer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 PADDING_SLOT_ID = -1
 
 
-class ExtractHiddenStatesProposer:
+class ExtractHiddenStatesProposer(SpecDecodeProposer):
     def __init__(self, vllm_config: VllmConfig, device):
         assert vllm_config.speculative_config is not None
 
@@ -69,15 +70,29 @@ class ExtractHiddenStatesProposer:
             self.max_num_tokens, dtype=torch.int64, device=device
         )
 
+    def prepare_inputs(self, sampled_token_ids, input_batch, **kwargs):
+        assert isinstance(sampled_token_ids, torch.Tensor), (
+            "sampled_token_ids should be a torch.Tensor for "
+            "extract_hidden_states method."
+        )
+        aux_hidden_states = kwargs["aux_hidden_states"]
+        num_scheduled_tokens = kwargs["scheduler_output"].total_num_scheduled_tokens
+        if not self.use_aux_hidden_state_outputs or aux_hidden_states is None:
+            raise ValueError(
+                "aux_hidden_states are required when using `extract_hidden_states`"
+            )
+        target_hidden_states = [h[:num_scheduled_tokens] for h in aux_hidden_states]
+
+        return ProposeInput(
+            sampled_token_ids=sampled_token_ids,
+            target_hidden_states=target_hidden_states,
+            common_attn_metadata=kwargs["common_attn_metadata"],
+        )
+
     def propose(
         self,
-        sampled_token_ids: torch.Tensor,
-        target_hidden_states: list[torch.Tensor],
-        common_attn_metadata: CommonAttentionMetadata,
-        slot_mappings: dict[str, torch.Tensor]
-        | list[dict[str, torch.Tensor]]
-        | None = None,
-    ) -> torch.Tensor:
+        propose_input: ProposeInput,
+    ) -> tuple[torch.Tensor, None]:
         """Propose draft tokens by calling the ExtractHiddenStatesModel model.
 
         The ExtractHiddenStatesModel caches the hidden states in the KV cache
@@ -101,6 +116,10 @@ class ExtractHiddenStatesProposer:
                 - Draft tokens matching sampled tokens, shape [batch_size, 1]
                 - KV connector output (if KV transfer is active), else None
         """
+        sampled_token_ids = propose_input.sampled_token_ids
+        target_hidden_states = propose_input.target_hidden_states
+        common_attn_metadata = propose_input.common_attn_metadata
+
         assert self.model is not None and isinstance(target_hidden_states, list)
 
         # target_hidden_states is a list of tensors (one per layer)
@@ -145,7 +164,7 @@ class ExtractHiddenStatesProposer:
 
         # Return the sampled tokens as "draft" tokens
         # Shape: [batch_size, 1] to match num_speculative_tokens=1
-        return sampled_token_ids
+        return sampled_token_ids, None
 
     def _get_slot_mapping(
         self,
