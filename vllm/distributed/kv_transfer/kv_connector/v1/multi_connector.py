@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorWorkerMetadata,
+    SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -123,7 +124,7 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
             self._prom_metrics[connector_id].observe(stats_data["data"], engine_idx)
 
 
-class MultiConnector(KVConnectorBase_V1):
+class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     """
     A wrapper for using multiple KVConnectors at the same time.
 
@@ -441,10 +442,24 @@ class MultiConnector(KVConnectorBase_V1):
         request: "Request",
         blocks: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
+        return self.request_finished_all_groups(request, (blocks,))
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
         async_saves = 0
         kv_txfer_params = None
         for c in self._connectors:
-            async_save, txfer_params = c.request_finished(request, blocks)
+            if isinstance(c, SupportsHMA):
+                async_save, txfer_params = c.request_finished_all_groups(
+                    request, block_ids
+                )
+            else:
+                # Flatten block_ids for non-HMA connectors
+                flat = [bid for group in block_ids for bid in group]
+                async_save, txfer_params = c.request_finished(request, flat)
             if async_save:
                 async_saves += 1
             if txfer_params is not None:

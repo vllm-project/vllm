@@ -41,6 +41,9 @@ class OffloadingConnectorScheduler:
         self.num_kv_groups = len(self.gpu_block_sizes)
         self.hash_block_size = spec.hash_block_size
         self.offloaded_block_size = spec.offloaded_block_size
+        self.max_concurrent_loads = (
+            spec.vllm_config.scheduler_config.max_num_seqs
+        )
         self.hash_block_size_factor: int | None = None
         if not self.hybrid_offload_enabled:
             assert self.offloaded_block_size % self.hash_block_size == 0
@@ -241,6 +244,13 @@ class OffloadingConnectorScheduler:
                 - `True` if tokens will be loaded asynchronously
                   (between scheduler steps).
         """
+        # Backpressure: if too many requests are already loading from
+        # external storage, defer this one to the next scheduler step.
+        # Without this cap, a burst of concurrent loads can queue
+        # hundreds of I/O tasks and stall the EngineCore.
+        if len(self._reqs_being_loaded) >= self.max_concurrent_loads:
+            return None, False
+
         num_blocks = self._get_num_offloaded_blocks(request)
         block_hashes = self._get_block_hashes(request)
 
