@@ -68,6 +68,7 @@ def test_tp2_async_tp_fp8_fusions(
             fuse_attn_quant=True,
             enable_qk_norm_rope_fusion=True,
             enable_sp=True,
+            enable_sp_moe=True,
             fuse_gemm_comms=True,
             fuse_allreduce_rms=False,
             # Override threshold for testing (models have small hidden_size)
@@ -128,6 +129,7 @@ def test_tp2_async_tp_fusions(
         pass_config=PassConfig(
             enable_qk_norm_rope_fusion=True,
             enable_sp=True,
+            enable_sp_moe=True,
             fuse_gemm_comms=True,
             fuse_allreduce_rms=False,
             # Override threshold for testing (models have small hidden_size)
@@ -193,6 +195,7 @@ def test_tp2_sp_ar_rms_fp8_fusions(
             fuse_attn_quant=True,
             enable_qk_norm_rope_fusion=True,
             enable_sp=True,
+            enable_sp_moe=True,
             fuse_gemm_comms=True,
             fuse_allreduce_rms=True,
             # Override threshold for testing (models have small hidden_size)
@@ -254,6 +257,7 @@ def test_tp2_sp_ar_rms_fusions(
         pass_config=PassConfig(
             enable_qk_norm_rope_fusion=True,
             enable_sp=True,
+            enable_sp_moe=True,
             fuse_gemm_comms=True,
             fuse_allreduce_rms=True,
             # Override threshold for testing (models have small hidden_size)
