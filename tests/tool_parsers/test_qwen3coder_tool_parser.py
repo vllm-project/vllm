@@ -525,6 +525,9 @@ def test_extract_tool_calls_anyof_type_conversion(qwen3_tool_parser):
                                 {"type": "null"},
                             ],
                         },
+                        "ref_param": {
+                            "$ref": "#/$defs/ToolInput",
+                        },
                     },
                 },
             },
@@ -551,6 +554,9 @@ hello
 <parameter=multi_non_null>
 some text
 </parameter>
+<parameter=ref_param>
+{"city": "Paris"}
+</parameter>
 </function>
 </tool_call>"""
 
@@ -573,6 +579,9 @@ some text
     # Multi non-null: anyOf[string, integer, null] → first non-null is string
     assert args["multi_non_null"] == "some text"
     assert isinstance(args["multi_non_null"], str)
+    # $ref: treated as object, parsed via json.loads
+    assert args["ref_param"] == {"city": "Paris"}
+    assert isinstance(args["ref_param"], dict)
 
 
 @pytest.mark.parametrize(
