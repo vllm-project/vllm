@@ -124,6 +124,7 @@ def _lora_shrink_kernel_fp8(
     USE_GDC: tl.constexpr,  ## should always be false in shrink kernel
     use_fp8_w8a8: tl.constexpr,
     per_channel_quant: tl.constexpr,
+    CAST_TYPE: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
     cta_n_num = tl.cdiv(N, BLOCK_N)
@@ -215,6 +216,7 @@ def _lora_shrink_kernel_fp8(
         USE_GDC,
         use_fp8_w8a8,
         per_channel_quant,
+        CAST_TYPE,
         launch_pdl,
     )
 
@@ -232,7 +234,7 @@ def _lora_shrink_fp8(
     lora_token_start_loc: torch.Tensor,  # shape [max-loras + 2]
     lora_ids: torch.Tensor,  # shape [max-loras + 1]
     no_lora_flag_cpu: torch.Tensor,  # shape [1]
-    num_active_loras: int,  # number of active LoRAs (unused here, for API compat)
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     scaling: float,
     b_scale: list[torch.Tensor],  # LoRA weight scale per slice
     a_scale: torch.Tensor | None = None,  # Activation scale - per-token or block-wise
@@ -240,6 +242,7 @@ def _lora_shrink_fp8(
     group_n: int = 0,  # Block size for N in block-wise quantization
     use_fp8_w8a8: bool = False,
     per_channel_quant: bool = False,
+    cast_type: bool = False,
 ) -> None:
     """
     Args:
@@ -251,6 +254,9 @@ def _lora_shrink_fp8(
         num_tokens_per_lora: Number of tokens per LoRA
         lora_token_start_loc: Start location for each LoRA's tokens
         lora_ids: LoRA IDs to process
+        num_active_loras: A CPU tensor of size 1, containing the number of
+            active LoRAs. Stored as a tensor (not int) so torch.compile
+            treats it as dynamic rather than a constant.
         scaling: LoRA scaling factor
         a_scale: Activation quantization scales
         b_scale: Weight quantization scales per slice
@@ -258,6 +264,7 @@ def _lora_shrink_fp8(
         group_n: Block size for N dimension quantization
         use_fp8_w8a8: Whether to use FP8 weights and activations
         per_channel_quant: Whether to use per-channel quantization
+        cast_type: Whether to cast input to weight dtype inside the kernel
     """
     assert no_lora_flag_cpu.numel() == 1
     if no_lora_flag_cpu.item():
@@ -328,7 +335,7 @@ def _lora_shrink_fp8(
     grid = (
         SPLIT_K * triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         NUM_SLICES,
-        num_active_loras,
+        num_active_loras.item(),
     )
 
     # Determine scale strides
@@ -385,6 +392,7 @@ def _lora_shrink_fp8(
         use_gdc,
         use_fp8_w8a8,
         per_channel_quant,
+        cast_type,
         use_gdc,
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
@@ -404,14 +412,15 @@ def _lora_shrink_fp8_fake(
     lora_token_start_loc: torch.Tensor,
     lora_ids: torch.Tensor,
     no_lora_flag_cpu: torch.Tensor,
-    num_active_loras: int,
+    num_active_loras: torch.Tensor,
     scaling: float,
-    b_scale: list[torch.Tensor],  # LoRA weight scale per slice
-    a_scale: torch.Tensor | None = None,  # Activation scale - per-token or block-wise
-    group_k: int = 0,  # Block size for K in block-wise quantization (0 = tensor-wise)
-    group_n: int = 0,  # Block size for N in block-wise quantization
+    b_scale: list[torch.Tensor],
+    a_scale: torch.Tensor | None = None,
+    group_k: int = 0,
+    group_n: int = 0,
     use_fp8_w8a8: bool = False,
     per_channel_quant: bool = False,
+    cast_type: bool = False,
 ) -> None:
     return
 

@@ -236,6 +236,7 @@ def do_shrink_kernel_fp8(
     USE_GDC: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
     per_channel_quant: tl.constexpr,
+    CAST_TYPE: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
     """
@@ -342,7 +343,7 @@ def do_shrink_kernel_fp8(
         group_n,
         use_fp8_w8a8,
         per_channel_quant,
-        False,
+        CAST_TYPE,
         cur_lora_ptr.dtype.element_ty,
         USE_GDC,
         base_k=pid_sk * BLOCK_K,

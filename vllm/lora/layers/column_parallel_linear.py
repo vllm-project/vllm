@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
 
 import torch
 import torch.nn as nn
@@ -9,6 +10,7 @@ from transformers import PretrainedConfig
 from vllm.config.lora import LoRAConfig
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.utils import divide
+from vllm.lora.fp8_quant_helper import _cdiv
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -21,7 +23,7 @@ from .base_linear import BaseLinearLayerWithLoRA
 from .utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace
 
 
-def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
+def _mcp_apply(x, bias, layer: ColumnParallelLinearWithLoRA):
     """
     For `ColumnParallelLinearWithLoRA` or classes that inherit from
     `ColumnParallelLinearWithLoRA`, they share the same `apply` logic.
@@ -46,8 +48,14 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         device=x.device,
     )
 
+    fp8_shrink_kwargs: dict = {}
+    fp8_expand_kwargs: dict = {}
+    if layer.enable_fp8_lora:
+        fp8_shrink_kwargs["lora_a_scale"] = layer.lora_a_scale_stacked
+        fp8_expand_kwargs["lora_b_scale"] = layer.lora_b_scale_stacked
+
     shrunk_buffers: torch.Tensor | None = layer.punica_wrapper.add_shrink(
-        buffers, x, layer.lora_a_stacked, 1.0
+        buffers, x, layer.lora_a_stacked, 1.0, **fp8_shrink_kwargs
     )
 
     if not current_platform.can_update_inplace():
@@ -62,6 +70,7 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         layer.output_slices,
         offset_start=0,
         add_input=True,
+        **fp8_expand_kwargs,
     )
 
     if not current_platform.can_update_inplace():
@@ -205,11 +214,16 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         maintainability.
         """
         self.lora_config = lora_config
+        self.enable_fp8_lora = lora_config.enable_fp8_lora
 
         lora_a_output_size_per_partition = (
             lora_config.max_lora_rank
             if not lora_config.fully_sharded_loras
             else divide(lora_config.max_lora_rank, self.tp_size)
+        )
+
+        weight_dtype = (
+            torch.float8_e4m3fn if self.enable_fp8_lora else lora_config.lora_dtype
         )
 
         self.lora_a_stacked = tuple(
@@ -218,7 +232,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 1,
                 lora_a_output_size_per_partition,
                 self.input_size,
-                dtype=lora_config.lora_dtype,
+                dtype=weight_dtype,
                 device=self.device,
             )
             for _ in range(self.n_slices)
@@ -229,11 +243,40 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 1,
                 output_size,
                 lora_config.max_lora_rank,
-                dtype=lora_config.lora_dtype,
+                dtype=weight_dtype,
                 device=self.device,
             )
             for output_size in self.output_slices
         )
+
+        if self.enable_fp8_lora:
+            from vllm.lora.fp8_quant_helper import FP8LoRAQuantizer
+
+            self._fp8_quantizer = FP8LoRAQuantizer(max_rank=lora_config.max_lora_rank)
+            a_bm, a_bn = self._fp8_quantizer.lora_a_block_size
+            b_bm, b_bn = self._fp8_quantizer.lora_b_block_size
+            self.lora_a_scale_stacked = tuple(
+                torch.zeros(
+                    max_loras,
+                    1,
+                    _cdiv(lora_a_output_size_per_partition, a_bm),
+                    _cdiv(self.input_size, a_bn),
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                for _ in range(self.n_slices)
+            )
+            self.lora_b_scale_stacked = tuple(
+                torch.zeros(
+                    max_loras,
+                    1,
+                    _cdiv(output_size, b_bm),
+                    _cdiv(lora_config.max_lora_rank, b_bn),
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                for output_size in self.output_slices
+            )
 
     def slice_lora_a(
         self, lora_a: list[torch.Tensor | None]
@@ -267,13 +310,29 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
         for i in range(self.n_slices):
             if (lora_a_i := lora_a[i]) is not None:
-                self.lora_a_stacked[i][
-                    index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]
-                ].copy_(lora_a_i, non_blocking=True)
+                if self.enable_fp8_lora:
+                    self._fp8_quantizer.quantize_and_set_lora_a(
+                        self.lora_a_stacked[i],
+                        self.lora_a_scale_stacked[i],
+                        index,
+                        lora_a_i,
+                    )
+                else:
+                    self.lora_a_stacked[i][
+                        index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]
+                    ].copy_(lora_a_i, non_blocking=True)
             if (lora_b_i := lora_b[i]) is not None:
-                self.lora_b_stacked[i][
-                    index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
-                ].copy_(lora_b_i, non_blocking=True)
+                if self.enable_fp8_lora:
+                    self._fp8_quantizer.quantize_and_set_lora_b(
+                        self.lora_b_stacked[i],
+                        self.lora_b_scale_stacked[i],
+                        index,
+                        lora_b_i,
+                    )
+                else:
+                    self.lora_b_stacked[i][
+                        index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
+                    ].copy_(lora_b_i, non_blocking=True)
 
     @classmethod
     @_not_fully_sharded_can_replace

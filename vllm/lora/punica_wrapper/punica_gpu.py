@@ -21,7 +21,9 @@ if HAS_TRITON:
         LoRAKernelMeta,
         fused_moe_lora,
         lora_expand,
+        lora_expand_fp8,
         lora_shrink,
+        lora_shrink_fp8,
     )
 
 from vllm import _custom_ops as ops
@@ -48,6 +50,14 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         self.lora_config = kwargs["lora_config"]
         self.max_loras = self.lora_config.max_loras
+        self.enable_fp8_lora = self.lora_config.enable_fp8_lora
+
+        if self.enable_fp8_lora:
+            from vllm.lora.fp8_quant_helper import FP8LoRAQuantizer
+
+            self._fp8_quantizer = FP8LoRAQuantizer(
+                max_rank=self.lora_config.max_lora_rank
+            )
 
         # Compute captured LoRA counts for cudagraph specialization.
         captured_lora_counts = get_captured_lora_counts(
@@ -93,6 +103,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         x: torch.Tensor,
         lora_a_stacked: tuple[torch.Tensor, ...],
         scale: float,
+        *,
+        lora_a_scale: tuple[torch.Tensor, ...] | None = None,
         **kwargs,
     ):
         """
@@ -107,18 +119,38 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x (torch.Tensor): Input tensor
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
+            lora_a_scale: Per-block weight scales (FP8 path only).
         """
 
         x = x.view(-1, x.shape[-1])
-        lora_shrink(
-            x,
-            lora_a_stacked,
-            y,
-            *self.token_mapping_meta.meta_args(
-                x.size(0), self.lora_config.specialize_active_lora
-            ),
-            scale,
-        )
+
+        if lora_a_scale is not None:
+            q = self._fp8_quantizer
+            x_fp8, a_scale = q.per_token_quant(x, group_k=q.shrink_group_k)
+            lora_shrink_fp8(
+                x_fp8,
+                lora_a_stacked,
+                y,
+                *self.token_mapping_meta.meta_args(
+                    x.size(0), self.lora_config.specialize_active_lora
+                ),
+                scale,
+                b_scale=list(lora_a_scale),
+                a_scale=a_scale,
+                group_k=q.shrink_group_k,
+                group_n=q.shrink_group_n,
+                use_fp8_w8a8=True,
+            )
+        else:
+            lora_shrink(
+                x,
+                lora_a_stacked,
+                y,
+                *self.token_mapping_meta.meta_args(
+                    x.size(0), self.lora_config.specialize_active_lora
+                ),
+                scale,
+            )
 
     def add_expand(
         self,
@@ -128,6 +160,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         output_slices: tuple[int, ...],
         offset_start: int = 0,
         add_inputs=True,
+        *,
+        lora_b_scale: tuple[torch.Tensor, ...] | None = None,
         **kwargs,
     ) -> None:
         """
@@ -145,6 +179,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight
             output_slices (tuple[int, ...]): Every slice's size
             add_inputs (bool): Defaults to True.
+            lora_b_scale: Per-block weight scales (FP8 path only).
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
@@ -153,16 +188,35 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         assert x.size(0) == len(output_slices)
         num_tokens = x.size(1)  # first dimension is the num slices
 
-        lora_expand(
-            x,
-            lora_b_stacked,
-            y,
-            *self.token_mapping_meta.meta_args(
-                num_tokens, self.lora_config.specialize_active_lora
-            ),
-            offset_start=offset_start,
-            add_inputs=True,
-        )
+        if lora_b_scale is not None:
+            q = self._fp8_quantizer
+            x_fp8, a_scale = q.per_token_quant_3d(x, group_k=q.expand_group_k)
+            lora_expand_fp8(
+                x_fp8,
+                lora_b_stacked,
+                y,
+                *self.token_mapping_meta.meta_args(
+                    num_tokens, self.lora_config.specialize_active_lora
+                ),
+                b_scale=list(lora_b_scale),
+                a_scale=a_scale,
+                offset_start=offset_start,
+                add_inputs=True,
+                group_k=q.expand_group_k,
+                group_n=q.expand_group_n,
+                use_fp8_w8a8=True,
+            )
+        else:
+            lora_expand(
+                x,
+                lora_b_stacked,
+                y,
+                *self.token_mapping_meta.meta_args(
+                    num_tokens, self.lora_config.specialize_active_lora
+                ),
+                offset_start=offset_start,
+                add_inputs=True,
+            )
 
         y = y.view_as(y_org)
 
@@ -208,6 +262,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         output_slices: tuple[int, ...],
         *,
         buffer: torch.Tensor | None = None,
+        lora_a_scale: tuple[torch.Tensor, ...] | None = None,
+        lora_b_scale: tuple[torch.Tensor, ...] | None = None,
         **kwargs,
     ) -> None:
         """
@@ -229,6 +285,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[torch.Tensor]): Defaults to None.
+            lora_a_scale: Per-block weight scales for lora_a (FP8 only).
+            lora_b_scale: Per-block weight scales for lora_b (FP8 only).
         """
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
@@ -250,6 +308,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             lora_a_stacked,
             scale,
+            lora_a_scale=lora_a_scale,
             **kwargs,
         )
         self.add_expand(
@@ -258,6 +317,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             lora_b_stacked,
             output_slices,
             add_inputs=True,
+            lora_b_scale=lora_b_scale,
             **kwargs,
         )
 
