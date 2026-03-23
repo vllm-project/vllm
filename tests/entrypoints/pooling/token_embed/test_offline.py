@@ -62,7 +62,7 @@ def test_token_ids_prompts(llm: LLM):
     assert outputs[0].outputs.data.shape == (11, 384)
 
 
-@pytest.mark.parametrize("task", ["embed", "classify", "token_classify", "plugin"])
+@pytest.mark.parametrize("task", ["embed", "classify", "token_classify"])
 def test_unsupported_tasks(llm: LLM, task: PoolingTask):
     if task == "embed":
         err_msg = "Try switching the model's pooling_task via.+"

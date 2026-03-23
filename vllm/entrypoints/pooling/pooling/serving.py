@@ -89,11 +89,14 @@ class OpenAIServingPooling(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
+        if request.task is None:
+            request.task = self.pooling_task
+
         if getattr(request, "dimensions", None) is not None:
             return self.create_error_response("dimensions is currently not supported")
 
         # plugin task uses io_processor.parse_request to verify inputs
-        if not request.task == "plugin" and request.task != self.pooling_task:
+        if request.task != "plugin" and request.task != self.pooling_task:
             if request.task not in self.supported_tasks:
                 raise ValueError(
                     f"Unsupported task: {request.task!r} "

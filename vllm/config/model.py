@@ -25,7 +25,7 @@ from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.tasks import ScoreType, SupportedTask
+from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
     get_config,
@@ -1410,7 +1410,7 @@ class ModelConfig:
 
     def get_pooling_task(
         self, supported_tasks: tuple[SupportedTask, ...]
-    ) -> SupportedTask | None:
+    ) -> PoolingTask | None:
         if self.pooler_config is None:
             return None
 
@@ -1430,7 +1430,7 @@ class ModelConfig:
                 if "ForTokenClassification" in architecture:
                     return "token_classify"
 
-        priority: list[SupportedTask] = [
+        priority: list[PoolingTask] = [
             "embed&token_classify",
             "embed",
             "classify",
