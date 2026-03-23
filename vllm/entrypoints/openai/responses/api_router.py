@@ -126,6 +126,13 @@ async def cancel_responses(response_id: str, raw_request: Request):
 # ---- Conversations API ----
 
 
+def _require_handler(raw_request: Request) -> OpenAIServingResponses:
+    handler = responses(raw_request)
+    if handler is None:
+        raise NotImplementedError("The model does not support Responses API")
+    return handler
+
+
 def _json_or_error(result):
     """Return JSONResponse for success or error."""
     if isinstance(result, ErrorResponse):
@@ -141,23 +148,18 @@ def _json_or_error(result):
     },
 )
 @load_aware_call
-async def create_conversation(
-    request: CreateConversationRequest,
-    raw_request: Request,
-):
-    handler = responses(raw_request)
-    if handler is None:
-        raise NotImplementedError("The model does not support Responses API")
-    return _json_or_error(await handler.create_conversation(request))
+async def create_conversation(request: CreateConversationRequest, raw_request: Request):
+    return _json_or_error(
+        await _require_handler(raw_request).create_conversation(request)
+    )
 
 
 @router.get("/v1/conversations/{conv_id}")
 @load_aware_call
 async def retrieve_conversation(conv_id: str, raw_request: Request):
-    handler = responses(raw_request)
-    if handler is None:
-        raise NotImplementedError("The model does not support Responses API")
-    return _json_or_error(await handler.retrieve_conversation(conv_id))
+    return _json_or_error(
+        await _require_handler(raw_request).retrieve_conversation(conv_id)
+    )
 
 
 @router.post(
@@ -166,23 +168,19 @@ async def retrieve_conversation(conv_id: str, raw_request: Request):
 )
 @load_aware_call
 async def update_conversation(
-    conv_id: str,
-    request: UpdateConversationRequest,
-    raw_request: Request,
+    conv_id: str, request: UpdateConversationRequest, raw_request: Request
 ):
-    handler = responses(raw_request)
-    if handler is None:
-        raise NotImplementedError("The model does not support Responses API")
-    return _json_or_error(await handler.update_conversation(conv_id, request))
+    return _json_or_error(
+        await _require_handler(raw_request).update_conversation(conv_id, request)
+    )
 
 
 @router.delete("/v1/conversations/{conv_id}")
 @load_aware_call
 async def delete_conversation(conv_id: str, raw_request: Request):
-    handler = responses(raw_request)
-    if handler is None:
-        raise NotImplementedError("The model does not support Responses API")
-    return _json_or_error(await handler.delete_conversation(conv_id))
+    return _json_or_error(
+        await _require_handler(raw_request).delete_conversation(conv_id)
+    )
 
 
 @router.post(
@@ -191,14 +189,11 @@ async def delete_conversation(conv_id: str, raw_request: Request):
 )
 @load_aware_call
 async def add_conversation_items(
-    conv_id: str,
-    request: AddConversationItemsRequest,
-    raw_request: Request,
+    conv_id: str, request: AddConversationItemsRequest, raw_request: Request
 ):
-    handler = responses(raw_request)
-    if handler is None:
-        raise NotImplementedError("The model does not support Responses API")
-    return _json_or_error(await handler.add_conversation_items(conv_id, request))
+    return _json_or_error(
+        await _require_handler(raw_request).add_conversation_items(conv_id, request)
+    )
 
 
 @router.get("/v1/conversations/{conv_id}/items")
@@ -211,11 +206,8 @@ async def list_conversation_items(
     before: str | None = None,
     order: str = "asc",
 ):
-    handler = responses(raw_request)
-    if handler is None:
-        raise NotImplementedError("The model does not support Responses API")
     return _json_or_error(
-        await handler.list_conversation_items(
+        await _require_handler(raw_request).list_conversation_items(
             conv_id, limit=limit, after=after, before=before, order=order
         )
     )
@@ -223,28 +215,18 @@ async def list_conversation_items(
 
 @router.get("/v1/conversations/{conv_id}/items/{item_id}")
 @load_aware_call
-async def retrieve_conversation_item(
-    conv_id: str,
-    item_id: str,
-    raw_request: Request,
-):
-    handler = responses(raw_request)
-    if handler is None:
-        raise NotImplementedError("The model does not support Responses API")
-    return _json_or_error(await handler.retrieve_conversation_item(conv_id, item_id))
+async def retrieve_conversation_item(conv_id: str, item_id: str, raw_request: Request):
+    return _json_or_error(
+        await _require_handler(raw_request).retrieve_conversation_item(conv_id, item_id)
+    )
 
 
 @router.delete("/v1/conversations/{conv_id}/items/{item_id}")
 @load_aware_call
-async def delete_conversation_item(
-    conv_id: str,
-    item_id: str,
-    raw_request: Request,
-):
-    handler = responses(raw_request)
-    if handler is None:
-        raise NotImplementedError("The model does not support Responses API")
-    return _json_or_error(await handler.delete_conversation_item(conv_id, item_id))
+async def delete_conversation_item(conv_id: str, item_id: str, raw_request: Request):
+    return _json_or_error(
+        await _require_handler(raw_request).delete_conversation_item(conv_id, item_id)
+    )
 
 
 def attach_router(app: FastAPI):

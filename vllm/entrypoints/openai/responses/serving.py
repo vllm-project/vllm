@@ -112,6 +112,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     emit_tool_action_events,
 )
 from vllm.entrypoints.openai.responses.utils import (
+    construct_chat_messages_with_tool_call,
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
@@ -627,10 +628,6 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Build prev_msg from conversation items if provided.
         if conv_items is not None:
-            from vllm.entrypoints.openai.responses.utils import (
-                construct_chat_messages_with_tool_call,
-            )
-
             prev_msg = construct_chat_messages_with_tool_call(conv_items)
         elif prev_response:
             prev_msg = self.msg_store.get(prev_response.id)
@@ -1560,14 +1557,11 @@ class OpenAIServingResponses(OpenAIServing):
 
         if after:
             idx = next((i for i, ci in enumerate(items) if ci.id == after), -1)
-            items = items[idx + 1 :] if idx >= 0 else items
+            items = items[idx + 1 :] if idx >= 0 else []
 
         if before:
-            idx = next(
-                (i for i, ci in enumerate(items) if ci.id == before),
-                len(items),
-            )
-            items = items[:idx]
+            idx = next((i for i, ci in enumerate(items) if ci.id == before), -1)
+            items = items[:idx] if idx >= 0 else []
 
         has_more = len(items) > limit
         page = items[:limit]
