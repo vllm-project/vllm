@@ -869,6 +869,7 @@ class OpenAIServingResponses(OpenAIServing):
             output=output,
             status=status,
             usage=usage,
+            kv_transfer_params=context.kv_transfer_params,
         )
 
         if request.store:

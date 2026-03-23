@@ -713,6 +713,13 @@ class Platform:
         return False
 
     @classmethod
+    def support_deep_gemm(cls) -> bool:
+        """
+        Returns if DeepGEMM is supported by the current platform.
+        """
+        return False
+
+    @classmethod
     def use_custom_op_collectives(cls) -> bool:
         """
         Whether this platform should use torch.ops.vllm.* custom ops for collectives.

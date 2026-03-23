@@ -176,9 +176,6 @@ class BaseRenderer(ABC, Generic[_T]):
 
         For chat requests:
         - Jinja2 template compilation
-
-        For multi-modal requests:
-        - Importing libraries such as librosa triggers JIT compilation.
         """
         from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
 
