@@ -34,14 +34,14 @@ class SharedExpertsOrder(IntEnum):
     # get rid of it after _moe_forward is undone.
     EXTERNAL = (1,)
 
-    # Called by modular kernel.
-    INTERNAL = (2,)
+    # No overlap - defensively called before MK.
+    NO_OVERLAP = (2,)
 
-    # Called right before quant_method is executed.
-    BEFORE_QUANT_METHOD = (3,)
+    # Overlapped with dispatch/combine in DP/EP - called by the MK.
+    MK_INTERNAL_OVERLAPPED = (3,)
 
-    # Called right after quant_method is executed (possibly with streaming).
-    AFTER_QUANT_METHOD = (4,)
+    # Overlapped with the gate, router, experts in aux stream.
+    MULTI_STREAM_OVERLAPPED = (4,)
 
 
 class SharedExperts:
@@ -100,14 +100,14 @@ class SharedExperts:
     def _determine_shared_experts_order(
         self,
         hidden_states: torch.Tensor,
-    ) -> tuple[SharedExpertsOrder, bool]:
+    ) -> SharedExpertsOrder:
         if self._has_external_experts and not self._use_dp_chunking:
-            return SharedExpertsOrder.EXTERNAL, False
+            return SharedExpertsOrder.EXTERNAL
 
         if self._quant_method.mk_owns_shared_expert:
-            return SharedExpertsOrder.INTERNAL, False
+            return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
-        allow_shared_experts_stream = (
+        should_run_shared_in_aux_stream = (
             current_platform.is_cuda()
             and not self._use_dp_chunking
             and self._stream is not None
@@ -115,23 +115,18 @@ class SharedExperts:
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
         )
 
-        if allow_shared_experts_stream:
-            return SharedExpertsOrder.AFTER_QUANT_METHOD, True
+        if should_run_shared_in_aux_stream:
+            return SharedExpertsOrder.MULTI_STREAM_OVERLAPPED
         else:
-            return SharedExpertsOrder.BEFORE_QUANT_METHOD, False
+            return SharedExpertsOrder.NO_OVERLAP
 
     def maybe_setup_shared_experts_stream(
         self,
         shared_experts_input: torch.Tensor,
     ):
-        experts_order, use_shared_experts_stream = self._determine_shared_experts_order(
-            shared_experts_input,
-        )
+        experts_order = self._determine_shared_experts_order(shared_experts_input)
 
-        if (
-            experts_order == SharedExpertsOrder.AFTER_QUANT_METHOD
-            and use_shared_experts_stream
-        ):
+        if experts_order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
             assert self._stream is not None
             assert self._moe_config.disable_inplace
 
@@ -147,7 +142,7 @@ class SharedExperts:
             # router/gate (next op below)
             self._stream.wait_stream(current_stream())
 
-    def _call_with_shared_experts_stream(
+    def _run_in_aux_stream(
         self,
         shared_experts_input: torch.Tensor,
     ) -> torch.Tensor:
@@ -190,17 +185,15 @@ class SharedExperts:
         shared_experts_input: torch.Tensor,
         order: SharedExpertsOrder,
     ):
-        experts_order, use_shared_experts_stream = self._determine_shared_experts_order(
-            shared_experts_input,
-        )
+        experts_order = self._determine_shared_experts_order(shared_experts_input)
 
         if order != experts_order:
             return None
 
         assert self._output is None
 
-        if order == SharedExpertsOrder.AFTER_QUANT_METHOD and use_shared_experts_stream:
-            self._output = self._call_with_shared_experts_stream(shared_experts_input)
+        if order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
+            self._output = self._run_in_aux_stream(shared_experts_input)
         else:
             self._output = self._layer(shared_experts_input)
 
@@ -209,5 +202,7 @@ class SharedExperts:
             # or get rid of it completely.
             assert self._output is not None
             self._output = self._maybe_reduce_shared_out(self._output)
+
+        assert self._output is not None
 
         # TODO(bnell): potentially do AFTER reduce here instead of in runner.

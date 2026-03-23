@@ -182,7 +182,7 @@ class DefaultMoERunner(MoERunner):
         router: FusedMoERouter,
         routed_input_transform: torch.nn.Module | None,
         gate: torch.nn.Module | None,
-        shared_experts: torch.nn.Module | None,
+        shared_experts: SharedExperts | None,
         quant_method: FusedMoEMethodBase,
         reduce_results: bool,
         enable_dbo: bool,
@@ -192,21 +192,7 @@ class DefaultMoERunner(MoERunner):
         self.router = router
         self.routed_input_transform = routed_input_transform
         self.gate = gate
-
-        self.shared_experts: SharedExperts | None = None
-        if shared_experts is not None:
-            self.shared_experts = SharedExperts(
-                shared_experts,
-                moe_config=moe_config,
-                # Note: For now we must pass quant_method along to SharedExperts so it
-                # can property determine where the shared experts are supposed to be
-                # called, i.e. by a MK or by the MoERunner.
-                # Once the MK can be created upfront, we can just pass in the proper
-                # flags derived from the quant_method's MK.
-                reduce_results=reduce_results,
-                quant_method=quant_method,
-            )
-
+        self.shared_experts = shared_experts
         self.quant_method = quant_method
         self.reduce_results = reduce_results
         self.enable_dbo = enable_dbo
@@ -420,9 +406,10 @@ class DefaultMoERunner(MoERunner):
         shared_experts_input: torch.Tensor | None,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         # Run this before quant_method to avoid inplace issues.
+        # TODO(bnell): probably not needed anymore since inplace is
+        # disabled when shared experts are present.
         self._maybe_apply_shared_experts(
-            shared_experts_input,
-            SharedExpertsOrder.BEFORE_QUANT_METHOD,
+            shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
         if self.quant_method.is_monolithic:
@@ -447,7 +434,7 @@ class DefaultMoERunner(MoERunner):
 
         self._maybe_apply_shared_experts(
             shared_experts_input,
-            SharedExpertsOrder.AFTER_QUANT_METHOD,
+            SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
         )
 
         return (

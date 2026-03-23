@@ -1001,6 +1001,8 @@ class FusedMoEKernelModularImpl:
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         # Only accept shared experts if they can be run w/async.
+        # The MoERunner/SharedExperts class will coordinate with the MK to ensure
+        # that the SharedExperts are executed only once.
         self.shared_experts = (
             shared_experts if prepare_finalize.supports_async() else None
         )
@@ -1084,7 +1086,7 @@ class FusedMoEKernelModularImpl:
             assert shared_experts_input is not None
             self.shared_experts.apply(
                 shared_experts_input,
-                SharedExpertsOrder.INTERNAL,
+                SharedExpertsOrder.MK_INTERNAL_OVERLAPPED,
             )
 
     def _prepare(
@@ -1270,7 +1272,6 @@ class FusedMoEKernelModularImpl:
                 apply_router_weight_on_input,
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
-            self._maybe_apply_shared_experts(shared_experts_input)
         else:
             finalize_ret = self.prepare_finalize.finalize_async(
                 output,
@@ -1280,8 +1281,7 @@ class FusedMoEKernelModularImpl:
                 apply_router_weight_on_input,
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
-            # TODO: remove
-            # self._maybe_apply_shared_experts(shared_experts_input)
+            self._maybe_apply_shared_experts(shared_experts_input)
 
             # TODO(lucas): refactor this in the alternative schedules followup
             # currently unpack if we have hook + receiver pair or just
