@@ -105,9 +105,6 @@ class BaseFrontendArgs:
     """When `--max-logprobs` is specified, represents single tokens as
     strings of the form 'token_id:{token_id}' so that tokens that are not
     JSON-encodable can be identified."""
-    disable_frontend_multiprocessing: bool = False
-    """If specified, will run the OpenAI frontend server in the same process as
-    the model serving engine."""
     enable_auto_tool_choice: bool = False
     """Enable auto tool choice for supported models. Use `--tool-call-parser`
     to specify which parser to use."""
@@ -125,8 +122,11 @@ class BaseFrontendArgs:
     `--tool-call-parser`."""
     tool_server: str | None = None
     """Comma-separated list of host:port pairs (IPv4, IPv6, or hostname).
-    Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for demo
-    purpose."""
+    Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for
+    built-in demo tools (browser and Python code interpreter). WARNING:
+    The `demo` Python tool executes model-generated code in Docker without
+    network isolation by default. See the security guide for more
+    information."""
     log_config_file: str | None = envs.VLLM_LOGGING_CONFIG_PATH
     """Path to logging config JSON file for both vllm and uvicorn"""
     max_log_len: int | None = None
@@ -143,7 +143,8 @@ class BaseFrontendArgs:
     templates and other tokenizer configuration."""
     enable_log_outputs: bool = False
     """If set to True, log model outputs (generations).
-    Requires --enable-log-requests."""
+    Requires `--enable-log-requests`. As with `--enable-log-requests`,
+    information is only logged at INFO level at maximum."""
     enable_log_deltas: bool = True
     """If set to False, output deltas will not be logged. Relevant only if 
     --enable-log-outputs is set.

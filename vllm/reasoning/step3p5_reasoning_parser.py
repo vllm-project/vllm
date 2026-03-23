@@ -2,16 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Sequence
+from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.entrypoints.openai.responses.protocol import (
-    ResponsesRequest,
-)
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tokenizers import TokenizerLike
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
 class Step3p5ReasoningParser(BaseThinkingReasoningParser):
@@ -39,29 +38,64 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
         # whether it is immediately before </think>.
         self._pending_reasoning_newline = False
 
-        # Used to delay the reasoning end detection.
-        # This is necessary to remove the newline appears immediately after </think>,
-        # which may cause the end detection to be delayed by one round.
-        self.end_offset = 1
+        # Tracks whether we've seen </think> but are still waiting for one more
+        # token to confirm the end.
+        self._end_token_pending = False
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        if self.end_token_id in input_ids and self.end_offset > 0:
-            self.end_offset -= 1
-            return False
-        return self.end_offset < 1
+        return self._is_reasoning_end_from_ids(input_ids)
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
-        if self.end_token_id in input_ids and self.end_offset > 0:
-            self.end_offset -= 1
+        # Only examine newly generated tokens; they may contain multiple ids.
+        return self._is_reasoning_end_from_ids(tuple(delta_ids))
+
+    def _is_reasoning_end_from_ids(self, input_ids: Sequence[int]) -> bool:
+        # Scan backwards to find the last special token, <think> or </think>.
+        last_special = None
+        last_idx = -1
+        for i in range(len(input_ids) - 1, -1, -1):
+            token_id = input_ids[i]
+            if token_id == self.start_token_id:
+                last_special = "start"
+                last_idx = i
+                break
+            if token_id == self.end_token_id:
+                last_special = "end"
+                last_idx = i
+                break
+
+        if last_special == "start":
+            # If we're already waiting for one token after </think>, do not
+            # clear the pending state just because the prompt contains <think>.
+            # Streaming deltas should not include <think> for this model.
+            if self._end_token_pending:
+                return False
+            # A start token after any end token means reasoning is ongoing.
+            self._end_token_pending = False
             return False
-        return self.end_offset < 1
+
+        if last_special == "end":
+            # Require at least one token after </think> before ending.
+            if last_idx < len(input_ids) - 1:
+                self._end_token_pending = False
+                return True
+            self._end_token_pending = True
+            return False
+
+        # No special tokens in this input. If we were waiting for one token
+        # after </think>, any new token completes the end.
+        if self._end_token_pending and input_ids:
+            self._end_token_pending = False
+            return True
+
+        return False
 
     def extract_reasoning(
         self,
         model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
+        request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
         reasoning, content = super().extract_reasoning(model_output, request)
         if reasoning is not None:
@@ -136,9 +170,6 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
 
         # Content: handle the newline immediately after </think>.
         if content_to_output is not None:
-            # No need to get into parser again to remove newline after </think>.
-            self.end_offset -= 1
-
             # If we have content, reasoning must have ended.
             self._pending_reasoning_newline = False
 

@@ -119,10 +119,10 @@ The code can be found in [vllm/v1/engine/coordinator.py](../../vllm/v1/engine/co
 For a deployment with `N` GPUs, `TP` tensor parallel size, `DP` data parallel size, and `A` API server count:
 
 | Process Type | Count | Notes |
-|---|---|---|
+| - | - | - |
 | API Server | `A` (default `DP`) | Handles HTTP requests and input processing |
 | Engine Core | `DP` (default 1) | Scheduler and KV cache management |
-| GPU Worker | `N` (= `DP x TP`) | One per GPU, executes model forward passes |
+| GPU Worker | `N` (= `DP x PP x TP`) | One per GPU, executes model forward passes |
 | DP Coordinator | 1 if `DP > 1`, else 0 | Load balancing across DP ranks |
 | **Total** | **`A + DP + N` (+ 1 if DP > 1)** | |
 
@@ -208,9 +208,7 @@ configurations affect the class we ultimately get.
 
 The following figure shows the class hierarchy of vLLM:
 
-> <figure markdown="span">
->   ![](../assets/design/hierarchy.png){ align="center" alt="query" width="100%" }
-> </figure>
+![Class Hierarchy](../assets/design/hierarchy.png)
 
 There are several important design choices behind this class hierarchy:
 

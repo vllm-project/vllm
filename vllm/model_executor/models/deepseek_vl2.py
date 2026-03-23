@@ -48,7 +48,6 @@ from vllm.transformers_utils.configs.deepseek_vl2 import (
     MlpProjectorConfig,
     VisionEncoderConfig,
 )
-from vllm.transformers_utils.processors.deepseek_vl2 import DeepseekVLV2Processor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -160,7 +159,7 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(DeepseekVLV2Config)
 
     def get_hf_processor(self, **kwargs: object):
-        return self.ctx.get_hf_processor(DeepseekVLV2Processor, **kwargs)
+        return self.ctx.get_hf_processor(**kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}

@@ -325,7 +325,7 @@ class SweepPlotParetoArgs:
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
-        output_dir = Path(args.OUTPUT_DIR)
+        output_dir = Path(args.EXPERIMENT_DIR)
         if not output_dir.exists():
             raise ValueError(f"No parameter sweep results under {output_dir}")
 
@@ -342,9 +342,8 @@ class SweepPlotParetoArgs:
     @classmethod
     def add_cli_args(cls, parser: argparse.ArgumentParser):
         parser.add_argument(
-            "OUTPUT_DIR",
+            "EXPERIMENT_DIR",
             type=str,
-            default="results",
             help="The directory containing the sweep results to plot.",
         )
         parser.add_argument(

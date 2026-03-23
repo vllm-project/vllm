@@ -563,7 +563,9 @@ def emit_content_delta_events(
     channel = ctx.parser.current_channel
     recipient = ctx.parser.current_recipient
 
-    if channel == "final" and recipient is None:
+    if channel in ("final", "commentary") and recipient is None:
+        # Preambles (commentary with no recipient) and final messages
+        # are both user-visible text.
         return emit_text_delta_events(delta, state)
     elif channel == "analysis" and recipient is None:
         return emit_reasoning_delta_events(delta, state)
@@ -607,7 +609,9 @@ def emit_previous_item_done_events(
             return emit_mcp_completion_events(previous_item.recipient, text, state)
     elif previous_item.channel == "analysis":
         return emit_reasoning_done_events(text, state)
-    elif previous_item.channel == "final":
+    elif previous_item.channel in ("commentary", "final"):
+        # Preambles (commentary with no recipient) and final messages
+        # are both user-visible text.
         return emit_text_output_done_events(text, state)
     return []
 

@@ -58,6 +58,10 @@ void shuffle_rows(const torch::Tensor& input_tensor,
                   torch::Tensor& output_tensor);
 
 #ifndef USE_ROCM
+// cuBLAS bf16 x bf16 -> fp32 router GEMM (fallback for non-SM90 / batch > 16)
+torch::Tensor router_gemm_bf16_fp32(torch::Tensor const& input,
+                                    torch::Tensor const& weight);
+
 // DeepSeek V3 optimized router GEMM kernel for SM90+
 // Computes output = mat_a @ mat_b.T where:
 //   mat_a: [num_tokens, hidden_dim] in bf16
@@ -66,4 +70,8 @@ void shuffle_rows(const torch::Tensor& input_tensor,
 // Supports num_tokens in [1, 16], num_experts in {256, 384}, hidden_dim = 7168
 void dsv3_router_gemm(torch::Tensor& output, const torch::Tensor& mat_a,
                       const torch::Tensor& mat_b);
+
+// gpt-oss optimized router GEMM kernel for SM90+
+void gpt_oss_router_gemm(torch::Tensor& output, torch::Tensor input,
+                         torch::Tensor weight, torch::Tensor bias);
 #endif
