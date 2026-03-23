@@ -37,15 +37,15 @@ def test_fixed_chunk_rejects_smaller_than_hash_block_size():
         )
 
 
-def test_fixed_chunk_requires_exact_split_of_larger_gpu_blocks():
-    with pytest.raises(
-        ValueError, match="must evenly divide every gpu_block_size"
-    ):
-        HybridOffloadPlanner(
-            hash_block_size=16,
-            gpu_block_sizes=(65536, 50000, 1056),
-            fixed_chunk_size=16384,
-        )
+def test_fixed_chunk_leaves_indivisible_large_groups_unsplit():
+    planner = HybridOffloadPlanner(
+        hash_block_size=16,
+        gpu_block_sizes=(65536, 50000, 1056),
+        fixed_chunk_size=16384,
+    )
+
+    assert planner.offload_unit_sizes == (16384, 50000, 1056)
+    assert planner.requires_partial_group_offload == (True, False, False)
 
 
 def test_storeable_prefix_uses_common_fully_covered_units():

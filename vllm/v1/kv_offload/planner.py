@@ -31,16 +31,6 @@ class HybridOffloadPlanner:
             raise ValueError("gpu_block_sizes must be non-empty")
         if any(block_size <= 0 for block_size in self.gpu_block_sizes):
             raise ValueError("gpu_block_sizes must be positive")
-        if any(
-            block_size > self.fixed_chunk_size
-            and block_size % self.fixed_chunk_size != 0
-            for block_size in self.gpu_block_sizes
-        ):
-            raise ValueError(
-                "fixed_chunk_size must evenly divide every gpu_block_size "
-                "that it is meant to split"
-            )
-
     @property
     def offload_unit_sizes(self) -> tuple[int, ...]:
         units: list[int] = []
