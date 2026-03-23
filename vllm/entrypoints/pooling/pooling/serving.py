@@ -101,8 +101,8 @@ class OpenAIServingPooling(OpenAIServing):
                 )
             else:
                 raise ValueError(
-                    f"Try switching the model's pooling_task "
-                    f'via `PoolerConfig(pooling_task="{request.task}"`)'
+                    "Try switching the model's pooling_task "
+                    'via --pooler-config {"pooling_task": "' + request.task + '"\})'
                 )
 
         engine_prompts: Sequence[ProcessorInputs]
