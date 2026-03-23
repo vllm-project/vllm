@@ -43,11 +43,6 @@ class Mamba1AttentionMetadataBuilder(
             num_accepted_tokens=kwargs.get("num_accepted_tokens"),
         )
 
-        # selective_scan_fwd (C/CUDA kernel) receives cache_indices as a raw
-        # pointer and ignores tensor strides.  With spec decode the block table
-        # has 1+num_spec_tokens columns, so [:, 0] in _compute_common_metadata
-        # produces a strided (non-contiguous) 1D view that the kernel would
-        # misread.  Mamba2 kernels handle strides correctly and don't need this.
         if self.use_spec_decode and common.state_indices_tensor_p is not None:
             common = replace(
                 common,

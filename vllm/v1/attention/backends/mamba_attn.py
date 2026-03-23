@@ -146,12 +146,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 device=device,
             )
 
-        self.decode_query_start_loc_d: torch.Tensor = torch.empty(
-            (self.decode_cudagraph_max_bs + 1,),
-            dtype=torch.int32,
-            device=device,
-        )
-
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
             self.supports_update_block_table = False
@@ -170,8 +164,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             "Make sure all cudagraph capture sizes <= max_num_seq."
         )
 
+        if self.num_spec_tokens > 0:
+            assert m.max_query_len == 1 + self.num_spec_tokens  # decode-only
+
         num_accepted_tokens = None
-        if self.num_spec_tokens > 0 and m.max_query_len > 1:
+        if self.num_spec_tokens > 0:
             num_accepted_tokens = torch.diff(m.query_start_loc)
 
         return self.build(0, m, num_accepted_tokens=num_accepted_tokens)
@@ -192,7 +189,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         """
         num_accepted_tokens = None
         if self.num_spec_tokens > 0:
-            num_accepted_tokens = torch.diff(common_attn_metadata.query_start_loc)
+            num_accepted_tokens = torch.diff(
+                common_attn_metadata.query_start_loc
+            )
         return self.build(
             0,
             common_attn_metadata,
@@ -535,22 +534,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
             if self.use_spec_decode and num_accepted_tokens is not None:
                 assert query_start_loc_d is not None
-                self.decode_query_start_loc_d[: metadata.num_decodes + 1].copy_(
-                    query_start_loc_d[: metadata.num_decodes + 1],
-                    non_blocking=True,
-                )
-                # Pad remaining entries with 1-token-per-request pattern
-                if metadata.num_decodes < padded_bs:
-                    last_val = self.decode_query_start_loc_d[metadata.num_decodes]
-                    self.decode_query_start_loc_d[
-                        metadata.num_decodes + 1 : padded_bs + 1
-                    ] = last_val + torch.arange(
-                        1,
-                        padded_bs - metadata.num_decodes + 1,
-                        device=query_start_loc_d.device,
-                        dtype=query_start_loc_d.dtype,
-                    )
-                query_start_loc_d = self.decode_query_start_loc_d[: padded_bs + 1]
+                query_start_loc_d = query_start_loc_d[: padded_bs + 1]
                 self.decode_num_accepted_tokens[: metadata.num_decodes].copy_(
                     num_accepted_tokens, non_blocking=True
                 )
