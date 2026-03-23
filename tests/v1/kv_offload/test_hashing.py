@@ -50,6 +50,38 @@ def test_hybrid_chunk_block_hash_list_uses_per_group_granularity():
     assert hash_list[0] != hash_list[1]
 
 
+def test_hybrid_chunk_block_hash_list_caches_chunk_hashes():
+    """Accessing the same index twice should return the cached value."""
+    request = make_request(65536, block_size=1056)
+    hash_list = HybridChunkBlockHashList(
+        request,
+        group_block_sizes=(16384, 1056),
+        logical_chunk_size=16384,
+        hash_function=sha256,
+    )
+
+    # Cache starts empty
+    assert len(hash_list._chunk_hashes) == 0
+
+    # Access index 0: should populate the cache
+    h0 = hash_list[0]
+    assert len(hash_list._chunk_hashes) == 1
+    assert hash_list._chunk_hashes[0] == h0
+
+    # Access index 1: cache grows
+    h1 = hash_list[1]
+    assert len(hash_list._chunk_hashes) == 2
+
+    # Re-access index 0: served from cache, identical value
+    assert hash_list[0] == h0
+
+    # Re-access index 1: served from cache
+    assert hash_list[1] == h1
+
+    # Cache does not grow on repeated access
+    assert len(hash_list._chunk_hashes) == 2
+
+
 def test_hybrid_chunk_block_hash_list_skips_leading_unhashable_chunks():
     request = make_request(100000, block_size=1056)
     hash_list = HybridChunkBlockHashList(
