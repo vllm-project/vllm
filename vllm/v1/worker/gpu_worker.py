@@ -222,9 +222,7 @@ class Worker(WorkerBase):
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             parallel_config = self.parallel_config
             if (
-                parallel_config.distributed_executor_backend
-                not in ("ray", "external_launcher")
-                and parallel_config.data_parallel_backend != "ray"
+                parallel_config.distributed_executor_backend != "external_launcher"
                 and parallel_config.nnodes_within_dp == 1
             ):
                 # Use local DP rank if available, otherwise use global DP rank.
