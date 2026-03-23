@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Static,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
 
@@ -61,8 +62,11 @@ class TrtLlmFp8ExpertsBase:
     def _supports_current_device() -> bool:
         """Supports only Blackwell-family GPUs."""
         p = current_platform
-        # Add check flashinfer trtllm is available
-        return p.is_cuda() and p.is_device_capability_family(100)
+        return (
+            p.is_cuda()
+            and p.is_device_capability_family(100)
+            and has_flashinfer_trtllm_fused_moe()
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:

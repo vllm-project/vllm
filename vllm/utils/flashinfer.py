@@ -244,7 +244,7 @@ def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
     required_functions = [
         ("flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"),
         ("flashinfer", "scaled_fp4_grouped_quantize"),
-        ("flashinfer", "silu_and_scaled_nvfp4_experts_quantize"),
+        ("flashinfer", "silu_and_mul_scaled_nvfp4_experts_quantize"),
     ]
 
     for module_name, attr_name in required_functions:
