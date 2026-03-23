@@ -176,11 +176,31 @@ class RoutedExpertsCapturer:
             end_loc = topk_ids.shape[0]
             token_num_per_dp = topk_ids.shape[0]
         else:  # multi dp
-            token_num_per_dp = ctx.dp_metadata.num_tokens_across_dp_cpu[self.dp_rank]
-            cumsum = torch.cumsum(ctx.dp_metadata.num_tokens_across_dp_cpu, dim=0)
-            assert cumsum[-1] == topk_ids.shape[0]
-            end_loc = cumsum[self.dp_rank]
-            start_loc = end_loc - token_num_per_dp
+            num_tokens_dp = ctx.dp_metadata.num_tokens_across_dp_cpu
+            token_num_per_dp = int(num_tokens_dp[self.dp_rank].item())
+            total = int(num_tokens_dp.sum().item())
+            n = topk_ids.shape[0]
+
+            if n == total:
+                # Naive dispatch: all DP ranks' tokens concatenated before routing.
+                cumsum = torch.cumsum(num_tokens_dp, dim=0)
+                end_loc = int(cumsum[self.dp_rank].item())
+                start_loc = end_loc - token_num_per_dp
+            elif n == token_num_per_dp:
+                # Modular-kernel path: DP combine happens inside quant_method.apply;
+                # select_experts only sees this rank's tokens.
+                start_loc = 0
+                end_loc = token_num_per_dp
+            else:
+                logger.warning(
+                    "RoutedExpertsCapturer: unexpected topk_ids batch dim %s "
+                    "(expected %s or %s for dp_rank=%s); skipping capture",
+                    n,
+                    total,
+                    token_num_per_dp,
+                    self.dp_rank,
+                )
+                return
 
         if layer_id >= self._device_buffer.shape[1]:
             return
