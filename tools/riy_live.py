@@ -21,6 +21,7 @@ Keybindings:
     m         toggle mask overlay (show pruned experts as X)
     s         save current stats to stats.json
     p         export prune profile (prompted for threshold)
+    c         clear live mask (keeps profile mask)
     ?         toggle help
 """
 
@@ -63,6 +64,11 @@ class Stats:
     def max_freq(self):
         vals = [v.frequency for v in self.experts.values()]
         return max(vals) if vals else 1.0
+
+    @property
+    def max_count(self):
+        vals = [v.count for v in self.experts.values()]
+        return max(vals) if vals else 1
 
     @property
     def max_gate(self):
@@ -258,7 +264,7 @@ def gate_color_pair(norm):
 def freq_char(freq, max_freq):
     if max_freq <= 0 or freq <= 0:
         return '\u00b7'
-    r = _log_normalize(freq, max_freq)
+    r = (freq / max_freq) ** 0.5  # sqrt scale — shows spread without log compression
     chars = '\u00b7\u2591\u2592\u2593\u2588'
     return chars[min(int(r * (len(chars) - 1) + 0.5), len(chars) - 1)]
 
@@ -394,8 +400,8 @@ class Dashboard:
             pv = prev.experts.get(key)
             if pv is None:
                 continue
-            delta = cv.frequency - pv.frequency
-            if delta > curr.max_freq * 0.1:
+            delta = cv.count - pv.count
+            if delta > curr.max_count * 0.1:
                 self.flash_set.add(key)
 
     def set_status(self, msg, duration=2.0):
@@ -466,6 +472,15 @@ class Dashboard:
             self.set_status(f"Mask overlay: {'on' if self.show_mask else 'off'}")
         elif key == ord('s'):
             self._save_stats()
+        elif key == ord('c'):
+            url = f"http://{self.host}:{self.port}/riy/mask"
+            try:
+                req = urllib.request.Request(url, method='DELETE')
+                urllib.request.urlopen(req, timeout=3.0)
+                self.mask = set()
+                self.set_status("Live mask cleared (profile mask kept)")
+            except Exception:
+                self.set_status("Clear mask failed")
         elif key == ord('p'):
             self._prompt_prune(stdscr)
         elif key == ord('?'):
@@ -544,7 +559,7 @@ class Dashboard:
             return
 
         # Only score experts that are NOT already profile-pruned
-        mf = stats.max_freq
+        mf = stats.max_count
         mg = stats.max_gate
         scored = []
         for (l, e), v in stats.experts.items():
@@ -710,7 +725,7 @@ class Dashboard:
         num_layers = stats.max_layer + 1
         self.scroll_y = min(self.scroll_y, max(0, num_layers - max_rows))
 
-        mf = stats.max_freq
+        mf = stats.max_count
         mg = stats.max_gate
 
         for i in range(max_rows):
@@ -850,7 +865,7 @@ class Dashboard:
             pass
 
     def _draw_expert(self, stdscr, row, col, layer, expert, v,
-                     max_freq, max_gate, flash, shared):
+                     max_count, max_gate, flash, shared):
         is_profile = self.show_mask and (layer, expert) in self.profile_mask
         is_masked = self.show_mask and (layer, expert) in self.mask
         is_flash  = (layer, expert) in flash
@@ -862,7 +877,7 @@ class Dashboard:
             ch   = "X"  # runtime-masked (via TUI 'p')
             attr = curses.color_pair(7) | curses.A_BOLD
         else:
-            ch   = freq_char(v.frequency, max_freq)
+            ch   = freq_char(v.count, max_count)
             g    = _log_normalize(v.avg_gate, max_gate)
             attr = gate_color_pair(g)
             if is_flash:
