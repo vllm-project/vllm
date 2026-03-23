@@ -245,8 +245,10 @@ class OpenAIServingRender:
                 tool_parser=tool_parser,
             )
         else:
-            # For GPT-OSS.
-            should_include_tools = tool_dicts is not None
+            # For GPT-OSS: always suppress tools when tool_choice="none"
+            should_include_tools = (
+                tool_dicts is not None and request.tool_choice != "none"
+            )
             conversation, engine_prompts = self._make_request_with_harmony(
                 request, should_include_tools
             )

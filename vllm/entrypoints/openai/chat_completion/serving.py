@@ -14,6 +14,7 @@ import regex as re
 from fastapi import Request
 from partial_json_parser.core.options import Allow
 
+from vllm.config.utils import replace
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -61,6 +62,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_streamable_parser_for_assistant,
     parse_chat_output,
 )
+from vllm.entrypoints.openai.responses.serving import _constraint_to_content_format
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import ProcessorInputs
@@ -70,7 +72,11 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import ParserManager
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams
-from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.sampling_params import (
+    BeamSearchParams,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
@@ -227,6 +233,33 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
             )
+
+        # Pre-compute function tools and tool_choice for structural tags
+        function_tools_for_parser: list[dict] | None = None
+        tool_choice_for_parser: str | dict | None = None
+        if self.use_harmony and reasoning_parser is not None:
+            if request.tools:
+                ft = [
+                    {
+                        "name": t.function.name,
+                        **(
+                            {"parameters": t.function.parameters}
+                            if t.function.parameters
+                            else {}
+                        ),
+                    }
+                    for t in request.tools
+                ]
+                if ft:
+                    function_tools_for_parser = ft
+
+            # Convert ChatCompletionNamedToolChoiceParam to dict format
+            tc = request.tool_choice
+            if isinstance(tc, ChatCompletionNamedToolChoiceParam):
+                tool_choice_for_parser = {"name": tc.function.name}
+            else:
+                tool_choice_for_parser = tc
+
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
             return result
@@ -280,6 +313,58 @@ class OpenAIServingChat(OpenAIServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+
+            # Inject structural tags for Harmony models
+            if (
+                self.use_harmony
+                and reasoning_parser is not None
+                and isinstance(sampling_params, SamplingParams)
+            ):
+                struct_out = sampling_params.structured_outputs
+                if isinstance(struct_out, StructuredOutputsParams):
+                    if struct_out.all_non_structural_tag_constraints_none():
+                        sampling_params.structured_outputs = replace(
+                            struct_out,
+                            structural_tag=(
+                                reasoning_parser.prepare_structured_tag(
+                                    struct_out.structural_tag,
+                                    None,  # tool_server
+                                    tool_choice=tool_choice_for_parser,
+                                    function_tools=function_tools_for_parser,
+                                )
+                            ),
+                        )
+                    else:
+                        content_fmt = _constraint_to_content_format(struct_out)
+                        if content_fmt is not None:
+                            structural_tag = reasoning_parser.prepare_structured_tag(
+                                None,
+                                None,  # tool_server
+                                final_content_format=content_fmt,
+                                tool_choice=tool_choice_for_parser,
+                                function_tools=function_tools_for_parser,
+                            )
+                            if structural_tag is not None:
+                                sampling_params.structured_outputs = replace(
+                                    struct_out,
+                                    json=None,
+                                    regex=None,
+                                    choice=None,
+                                    grammar=None,
+                                    json_object=None,
+                                    structural_tag=structural_tag,
+                                )
+                elif struct_out is None:
+                    tag = reasoning_parser.prepare_structured_tag(
+                        None,
+                        None,  # tool_server
+                        tool_choice=tool_choice_for_parser,
+                        function_tools=function_tools_for_parser,
+                    )
+                    if tag is not None:
+                        sampling_params.structured_outputs = StructuredOutputsParams(
+                            structural_tag=tag  # type: ignore[call-arg]
+                        )
 
             self._log_inputs(
                 sub_request_id,

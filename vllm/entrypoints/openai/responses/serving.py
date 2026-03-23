@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import json as json_mod
 import time
 import uuid
 from collections import deque
@@ -66,6 +67,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_system_message,
     get_user_message,
     has_custom_tools,
+    inject_response_formats,
     render_for_completion,
 )
 from vllm.entrypoints.openai.responses.context import (
@@ -124,6 +126,52 @@ from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
+
+
+def _extract_response_format_schema(request: ResponsesRequest) -> dict | None:
+    """Extract JSON schema from the request's structured output config."""
+    if (
+        request.text is not None
+        and request.text.format is not None
+        and request.text.format.type == "json_schema"
+        and request.text.format.schema_ is not None
+    ):
+        return request.text.format.schema_
+    if (
+        request.structured_outputs is not None
+        and request.structured_outputs.json is not None
+    ):
+        val = request.structured_outputs.json
+        if isinstance(val, str):
+            return json_mod.loads(val)
+        return val
+    return None
+
+
+def _constraint_to_content_format(
+    params: StructuredOutputsParams,
+) -> dict | None:
+    """Convert a StructuredOutputsParams constraint into an xgrammar
+    content format dict suitable for embedding in a structural tag."""
+    if params.json is not None:
+        schema = (
+            params.json
+            if isinstance(params.json, dict)
+            else json_mod.loads(params.json)
+        )
+        return {"type": "json_schema", "json_schema": schema}
+    if params.json_object:
+        return {"type": "json_schema", "json_schema": {"type": "object"}}
+    if params.regex is not None:
+        return {"type": "regex", "pattern": params.regex}
+    if params.grammar is not None:
+        return {"type": "grammar", "grammar": params.grammar}
+    if params.choice is not None:
+        return {
+            "type": "or",
+            "elements": [{"type": "const_string", "value": c} for c in params.choice],
+        }
+    return None
 
 
 def _extract_allowed_tools_from_mcp_requests(
@@ -463,21 +511,78 @@ class OpenAIServingResponses(OpenAIServing):
                 else:
                     context = SimpleContext()
 
+            # Extract function tools for the reasoning parser
+            function_tools_for_parser = None
+            if request.tools:
+                ft = [
+                    {
+                        "name": t.name,
+                        **({"parameters": t.parameters} if t.parameters else {}),
+                    }
+                    for t in request.tools
+                    if getattr(t, "type", None) == "function"
+                ]
+                if ft:
+                    function_tools_for_parser = ft
+
             if self.parser and self.parser.reasoning_parser_cls is not None:
                 reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
-                if (
-                    isinstance(
-                        struct_out := sampling_params.structured_outputs,
-                        StructuredOutputsParams,
+                struct_out = sampling_params.structured_outputs
+
+                if isinstance(struct_out, StructuredOutputsParams):
+                    if struct_out.all_non_structural_tag_constraints_none():
+                        # No content constraint — just apply reasoning
+                        # channel tags + tool_choice + function tools
+                        sampling_params.structured_outputs = replace(
+                            struct_out,
+                            structural_tag=(
+                                reasoning_parser.prepare_structured_tag(
+                                    struct_out.structural_tag,
+                                    self.tool_server,
+                                    tool_choice=request.tool_choice,
+                                    function_tools=function_tools_for_parser,
+                                )
+                            ),
+                        )
+                    else:
+                        # Content constraint present (json, regex,
+                        # grammar, choice, json_object). Embed it in the
+                        # final channel tag within the structural tag.
+                        content_fmt = _constraint_to_content_format(struct_out)
+                        if content_fmt is not None:
+                            structural_tag = reasoning_parser.prepare_structured_tag(
+                                None,
+                                self.tool_server,
+                                final_content_format=content_fmt,
+                                tool_choice=request.tool_choice,
+                                function_tools=function_tools_for_parser,
+                            )
+                            if structural_tag is not None:
+                                # Clear content constraints, set
+                                # structural_tag, but preserve options
+                                # like disable_any_whitespace.
+                                sampling_params.structured_outputs = replace(
+                                    struct_out,
+                                    json=None,
+                                    regex=None,
+                                    choice=None,
+                                    grammar=None,
+                                    json_object=None,
+                                    structural_tag=structural_tag,
+                                )
+                elif struct_out is None:
+                    # No structured output requested, but still need
+                    # reasoning channel tags + tool_choice + function tools
+                    tag = reasoning_parser.prepare_structured_tag(
+                        None,
+                        self.tool_server,
+                        tool_choice=request.tool_choice,
+                        function_tools=function_tools_for_parser,
                     )
-                    and struct_out.all_non_structural_tag_constraints_none()
-                ):
-                    sampling_params.structured_outputs = replace(
-                        struct_out,
-                        structural_tag=reasoning_parser.prepare_structured_tag(
-                            struct_out.structural_tag, self.tool_server
-                        ),
-                    )
+                    if tag is not None:
+                        sampling_params.structured_outputs = StructuredOutputsParams(
+                            structural_tag=tag  # type: ignore[call-arg]
+                        )
             generator = self._generate_with_builtin_tools(
                 request_id=request.request_id,
                 engine_prompt=engine_prompt,
@@ -705,11 +810,6 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        if request.tool_choice != "auto":
-            raise NotImplementedError(
-                "Only 'auto' tool_choice is supported in response API with Harmony"
-            )
-
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
         engine_prompt = token_inputs(prompt_token_ids)
@@ -821,6 +921,7 @@ class OpenAIServingResponses(OpenAIServing):
             num_tool_output_tokens = 0
 
         assert isinstance(context, (SimpleContext, HarmonyContext, ParsableContext))
+        status = self._check_tool_choice_violation(request, output, status, context)
         num_prompt_tokens = context.num_prompt_tokens
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
@@ -1033,6 +1134,37 @@ class OpenAIServingResponses(OpenAIServing):
             )
         ]
 
+    def _check_tool_choice_violation(
+        self,
+        request: ResponsesRequest,
+        output: list[ResponseOutputItem],
+        status: ResponseStatus,
+        context: ConversationContext,
+    ) -> ResponseStatus:
+        """Detect when tool_choice requires a function call but none was
+        produced.  Returns ``"incomplete"`` if the constraint is violated,
+        otherwise returns *status* unchanged."""
+        if request.tool_choice != "required" and not isinstance(
+            request.tool_choice, dict
+        ):
+            return status
+        has_function_call = any(
+            isinstance(item, ResponseFunctionToolCall) for item in output
+        )
+        if not has_function_call:
+            logger.warning(
+                "tool_choice=%r but no function tool call in output "
+                "(output_items=%d, status=%s, finish_reason=%s, "
+                "output_tokens=%d). Grammar enforcement may have failed.",
+                request.tool_choice,
+                len(output),
+                status,
+                getattr(context, "finish_reason", None),
+                getattr(context, "num_output_tokens", -1),
+            )
+            return "incomplete"
+        return status
+
     def _make_response_output_items_with_harmony(
         self,
         context: HarmonyContext,
@@ -1072,7 +1204,10 @@ class OpenAIServingResponses(OpenAIServing):
         return system_msg
 
     def _construct_harmony_system_input_message(
-        self, request: ResponsesRequest, with_custom_tools: bool, tool_types: set[str]
+        self,
+        request: ResponsesRequest,
+        tools_visible: bool,
+        tool_types: set[str],
     ) -> OpenAIHarmonyMessage:
         model_identity = self._extract_system_message_from_request(request)
 
@@ -1083,11 +1218,14 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Get filtered tool descriptions first.
         # If get_tool_description returns None (due to filtering), the tool is disabled.
+        # When tools_visible is False (e.g. tool_choice="none"), suppress all
+        # builtin tool descriptions so the model doesn't see them.
         browser_description = (
             self.tool_server.get_tool_description(
                 "browser", allowed_tools_map.get("web_search_preview")
             )
-            if "web_search_preview" in tool_types
+            if tools_visible
+            and "web_search_preview" in tool_types
             and self.tool_server is not None
             and self.tool_server.has_tool("browser")
             else None
@@ -1096,7 +1234,8 @@ class OpenAIServingResponses(OpenAIServing):
             self.tool_server.get_tool_description(
                 "python", allowed_tools_map.get("code_interpreter")
             )
-            if "code_interpreter" in tool_types
+            if tools_visible
+            and "code_interpreter" in tool_types
             and self.tool_server is not None
             and self.tool_server.has_tool("python")
             else None
@@ -1105,7 +1244,8 @@ class OpenAIServingResponses(OpenAIServing):
             self.tool_server.get_tool_description(
                 "container", allowed_tools_map.get("container")
             )
-            if "container" in tool_types
+            if tools_visible
+            and "container" in tool_types
             and self.tool_server is not None
             and self.tool_server.has_tool("container")
             else None
@@ -1118,7 +1258,7 @@ class OpenAIServingResponses(OpenAIServing):
             python_description=python_description,
             container_description=container_description,
             instructions=request.instructions,
-            with_custom_tools=with_custom_tools,
+            with_custom_tools=tools_visible,
         )
         return sys_msg
 
@@ -1133,13 +1273,37 @@ class OpenAIServingResponses(OpenAIServing):
             tool_types = extract_tool_types(request.tools)
             with_custom_tools = has_custom_tools(tool_types)
 
+            # When tool_choice=none, suppress tool awareness in the
+            # prompt so the model doesn't attempt tool calls.  The
+            # structural tag grammar already blocks tool channels, but
+            # omitting tools from the system/developer messages
+            # prevents the model from even reasoning about calling them.
+            tools_visible = with_custom_tools and request.tool_choice != "none"
+
             sys_msg = self._construct_harmony_system_input_message(
-                request, with_custom_tools, tool_types
+                request, tools_visible, tool_types
             )
             messages.append(sys_msg)
-            if with_custom_tools:
+
+            # Determine if we need a developer message.
+            # Per Harmony cookbook: developer message holds instructions,
+            # function tools, AND response format schemas.
+            response_format_schema = _extract_response_format_schema(request)
+            needs_dev_msg = (
+                tools_visible
+                or response_format_schema is not None
+                or request.instructions is not None
+            )
+
+            if needs_dev_msg:
+                dev_instructions = request.instructions
+                if response_format_schema is not None:
+                    dev_instructions = inject_response_formats(
+                        dev_instructions, response_format_schema
+                    )
                 dev_msg = get_developer_message(
-                    instructions=request.instructions, tools=request.tools
+                    instructions=dev_instructions,
+                    tools=request.tools if tools_visible else None,
                 )
                 messages.append(dev_msg)
             messages += construct_harmony_previous_input_messages(request)
@@ -1979,7 +2143,7 @@ class OpenAIServingResponses(OpenAIServing):
                 output=[],
                 status="in_progress",
                 usage=None,
-            ).model_dump()
+            )
             yield _increment_sequence_number_and_return(
                 ResponseCreatedEvent(
                     type="response.created",

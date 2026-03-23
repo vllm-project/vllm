@@ -10,6 +10,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
     get_system_message,
     has_custom_tools,
+    inject_response_formats,
     parse_chat_input_to_harmony_message,
     parse_chat_output,
 )
@@ -928,3 +929,32 @@ class TestResponseInputToHarmonyReasoningItem:
         msg = response_input_to_harmony(item, prev_responses=[])
 
         assert msg is None
+
+
+class TestInjectResponseFormats:
+    def test_appends_to_existing_instructions(self):
+        result = inject_response_formats("You are helpful.", {"type": "object"})
+        assert result.startswith("You are helpful.")
+        assert "# Response Formats" in result
+        assert '{"type":"object"}' in result
+
+    def test_none_instructions_creates_section(self):
+        result = inject_response_formats(None, {"type": "object"})
+        assert result.startswith("# Response Formats")
+        assert '{"type":"object"}' in result
+
+    def test_custom_format_name(self):
+        result = inject_response_formats(None, {"type": "object"}, format_name="order")
+        assert "## order" in result
+
+    def test_compact_json_no_spaces(self):
+        schema = {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        }
+        result = inject_response_formats(None, schema)
+        assert '{"type":"object","properties":{"name":{"type":"string"}}}' in result
+
+    def test_section_separated_by_blank_lines(self):
+        result = inject_response_formats("Instructions here.", {"type": "object"})
+        assert "\n\n# Response Formats\n\n## structured_output\n\n" in result
