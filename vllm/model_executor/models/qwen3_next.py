@@ -501,6 +501,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.A_log = nn.Parameter(
             torch.empty(
                 divide(self.num_v_heads, self.tp_size),
+                dtype=torch.float32,
             )
         )
 
