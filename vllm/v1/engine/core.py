@@ -45,6 +45,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     EEPNotificationType,
@@ -228,7 +229,6 @@ class EngineCore:
         start = time.time()
 
         # register all kvcache specs in enginecore process.
-        from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 
         register_all_kvcache_specs(vllm_config)
 

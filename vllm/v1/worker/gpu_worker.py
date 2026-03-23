@@ -48,6 +48,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -517,8 +518,6 @@ class Worker(WorkerBase):
         return {tp_rank: metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-
         # register all kvcache specs in worker process
         register_all_kvcache_specs(self.vllm_config)
         return self.model_runner.get_kv_cache_spec()
