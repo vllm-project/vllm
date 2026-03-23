@@ -171,7 +171,7 @@ async def transfer_run_periodically(
                     consumed_event=consumed_event,
                 )
 
-                consumed_event.wait(cuda_stream)
+                consumed_event.wait(stream=cuda_stream)
                 layer_idx += 1
 
         state.rearrange_event.clear()
