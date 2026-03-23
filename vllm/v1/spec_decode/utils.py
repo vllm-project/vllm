@@ -272,9 +272,8 @@ def create_vllm_config_for_draft_model(
     new_parallel_config = replace(
         old_spec_config.draft_parallel_config, rank=old.parallel_config.rank
     )
-    # Copy cache_config so the draft model's verify_and_update_config
-    # (triggered by VllmConfig.__post_init__) does not overwrite the
-    # target model's mamba_page_size_padded / block_size.
+    # Shallow-copy cache_config so the draft model's config initialization
+    # does not mutate the target model's cache settings.
     new_cache_config = replace(old.cache_config)
     new: VllmConfig = replace(
         old,
