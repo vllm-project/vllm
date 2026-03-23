@@ -138,10 +138,8 @@ class BlockTables:
         num_tokens_padded: int,
     ) -> torch.Tensor:
         num_reqs = idx_mapping.shape[0]
-        num_tokens = positions.shape[0]
         num_groups = self.num_kv_cache_groups
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
-            num_tokens,
             self.max_num_batched_tokens,
             idx_mapping,
             query_start_loc,
@@ -171,7 +169,7 @@ class BlockTables:
         return self.slot_mappings[:, :num_tokens]
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_reqs"])
 def _gather_block_tables_kernel(
     batch_idx_to_req_idx,  # [batch_size]
     src_block_table_ptrs,  # [num_kv_cache_groups]
@@ -213,7 +211,6 @@ def _gather_block_tables_kernel(
 
 @triton.jit
 def _compute_slot_mappings_kernel(
-    num_tokens,
     max_num_tokens,
     idx_mapping,  # [num_reqs]
     query_start_loc,  # [num_reqs + 1]
@@ -236,7 +233,11 @@ def _compute_slot_mappings_kernel(
 
     if batch_idx == tl.num_programs(1) - 1:
         # Pad remaining slots to -1. This is needed for CUDA graphs.
-        for i in range(num_tokens, max_num_tokens, TRITON_BLOCK_SIZE):
+        # Start from actual token count (not padded) to cover the gap
+        # between actual tokens and padded tokens that can contain stale
+        # valid slot IDs from previous chunks during chunked prefill.
+        actual_num_tokens = tl.load(query_start_loc + batch_idx)
+        for i in range(actual_num_tokens, max_num_tokens, TRITON_BLOCK_SIZE):
             offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
             tl.store(slot_mapping_ptr + offset, PAD_ID, mask=offset < max_num_tokens)
         return
