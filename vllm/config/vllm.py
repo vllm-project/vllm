@@ -1395,6 +1395,8 @@ class VllmConfig:
                     )
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
+                if max_cudagraph_capture_size not in cudagraph_capture_sizes:
+                    cudagraph_capture_sizes.append(max_cudagraph_capture_size)
 
             if (
                 self.parallel_config.tensor_parallel_size > 1
