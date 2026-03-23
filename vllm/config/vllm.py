@@ -120,7 +120,7 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
         and current_platform.is_cuda()
         and has_flashinfer()
         and (
-            current_platform.is_device_capability(100)
+            current_platform.is_device_capability_family(100)
             or current_platform.is_device_capability(90)
         )
         # tp-dp combination broken:
@@ -682,12 +682,11 @@ class VllmConfig:
                 self.model_config, self.load_config
             )
 
+        from vllm.v1.executor.abstract import Executor
+
         executor_backend = self.parallel_config.distributed_executor_backend
-        executor_supports_async_sched = executor_backend in (
-            "mp",
-            "uni",
-            "external_launcher",
-        )
+        executor_class = Executor.get_class(self)
+        executor_supports_async_sched = executor_class.supports_async_scheduling()
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
@@ -711,9 +710,7 @@ class VllmConfig:
                     )
             if not executor_supports_async_sched:
                 raise ValueError(
-                    "Currently, async scheduling only supports `mp`, `uni`, or "
-                    "`external_launcher` distributed executor backend, but you chose "
-                    f"`{executor_backend}`."
+                    f"`{executor_backend}` does not support async scheduling yet."
                 )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
@@ -742,8 +739,7 @@ class VllmConfig:
             elif not executor_supports_async_sched:
                 logger.warning_once(
                     "Async scheduling will be disabled because it is not supported "
-                    "with the `%s` distributed executor backend (only `mp`, `uni`, and "
-                    "`external_launcher` are supported).",
+                    "with the `%s` distributed executor backend. ",
                     executor_backend,
                     scope="local",
                 )
@@ -769,6 +765,17 @@ class VllmConfig:
                 self.parallel_config.disable_nccl_for_dp_synchronization = True
             else:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
+
+        if (
+            self.model_config is not None
+            and self.model_config.multimodal_config is not None
+            and self.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"
+            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
+        ):
+            raise ValueError(
+                "torch_shm is known to fail without "
+                "VLLM_WORKER_MULTIPROC_METHOD set to spawn"
+            )
 
         from vllm.platforms import current_platform
 
@@ -989,8 +996,6 @@ class VllmConfig:
                 "--kv-sharing-fast-prefill requires changes on model side for "
                 "correctness and to realize prefill savings."
             )
-        # TODO: Move after https://github.com/vllm-project/vllm/pull/26847 lands
-        self._set_compile_ranges()
 
         if (
             self.model_config
@@ -1025,6 +1030,10 @@ class VllmConfig:
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
+
+        # Re-compute compile ranges after platform-specific config updates
+        # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
+        self._set_compile_ranges()
 
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (

@@ -207,6 +207,7 @@ from .utils import (
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+    from vllm.v1.worker.gpu.mm.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
 
@@ -420,8 +421,9 @@ class GPUModelRunner(
         self.is_multimodal_raw_input_only_model = (
             model_config.is_multimodal_raw_input_only_model
         )
-        # This will be overridden in load_model()
+        # These will be overridden in load_model()
         self.is_multimodal_pruning_enabled = False
+        self.requires_sequential_video_encoding = False
         # Set to True after init_routed_experts_capturer() completes.
         # Prevents routed experts code from running during profiling/dummy run.
         self.routed_experts_initialized = False
@@ -497,6 +499,9 @@ class GPUModelRunner(
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
         self.late_interaction_runner = LateInteractionRunner()
+
+        # Encoder CUDA graph manager (initialized after model load if enabled)
+        self.encoder_cudagraph_manager: EncoderCudaGraphManager | None = None
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
@@ -738,19 +743,6 @@ class GPUModelRunner(
             )
 
         self.uniform_decode_query_len = 1 + self.num_spec_tokens
-
-        # When spec decode is active, the mamba backend classifies requests
-        # with query_len <= reorder_batch_threshold as "decodes". Prefill
-        # chunks that fall under this threshold get processed via the decode
-        # path, which stores intermediate states at sequential slots. We must
-        # set num_accepted_tokens to the chunk's query_len for those requests
-        # so the next iteration reads from the correct final-state slot.
-        # Prefills that went through the actual prefill path should keep the
-        # default value of 1 (the prefill path stores state at slot 0 only).
-        self.needs_prefill_as_decode_slots: bool = False
-        self.prefill_as_decode_num_tokens = self._make_buffer(
-            self.max_num_reqs, dtype=torch.int32
-        )
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
@@ -1368,16 +1360,6 @@ class GPUModelRunner(
             .int()
             .argmax(-1)
         )
-        spec_decode_active = bool(scheduler_output.scheduled_spec_decode_tokens)
-        if self.needs_prefill_as_decode_slots and spec_decode_active:
-            mamba_utils.update_accepted_tokens_for_prefill_as_decode(
-                self.input_batch,
-                self.prefill_as_decode_num_tokens,
-                self.num_accepted_tokens.gpu,
-                scheduler_output,
-                self.reorder_batch_threshold,
-                num_reqs,
-            )
 
         if self.cache_config.mamba_cache_mode == "align":
             for i, num_tokens in enumerate(
@@ -1981,14 +1963,23 @@ class GPUModelRunner(
             attn_gid = self.routed_experts_attn_gid
             slot_mapping_attn = slot_mappings[attn_gid]
             self.slot_mapping = slot_mapping_attn[:num_tokens].cpu().numpy()
+        # Compute is_prefilling: True if request is still in prefill phase
+        # (num_computed_tokens < num_prompt_tokens). Used by mamba backends to
+        # distinguish actual decodes from short extends.
+        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+            :num_reqs_padded
+        ]
+        num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
+            :num_reqs_padded
+        ]
+        is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
+
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
             seq_lens=self.seq_lens.gpu[:num_reqs_padded],
             _seq_lens_cpu=self.seq_lens.cpu[:num_reqs_padded],
-            _num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[
-                :num_reqs_padded
-            ],
+            _num_computed_tokens_cpu=num_computed_tokens_cpu,
             num_reqs=num_reqs_padded,
             num_actual_tokens=num_tokens_padded,
             max_query_len=max_query_len,
@@ -1996,6 +1987,7 @@ class GPUModelRunner(
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
             causal=True,
+            is_prefilling=is_prefilling,
         )
 
         if self.dcp_world_size > 1:
@@ -2047,8 +2039,6 @@ class GPUModelRunner(
                 else 0
             )
 
-            if isinstance(builder, Mamba2AttentionMetadataBuilder):
-                self.needs_prefill_as_decode_slots = True
             extra_attn_metadata_args = {}
             if use_spec_decode and isinstance(
                 builder, (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder)
@@ -2625,17 +2615,23 @@ class GPUModelRunner(
         ):
             batch_outputs: MultiModalEmbeddings
 
-            # EVS-related change.
+            # EVS and dynamic res video related change.
             # (ekhvedchenia): Temporary hack to limit peak memory usage when
             # processing multimodal data. This solves the issue with scheduler
             # putting too many video samples into a single batch. Scheduler
             # uses pruned vision tokens count to compare it versus compute
             # budget which is incorrect (Either input media size or non-pruned
             # output vision tokens count should be considered)
+            # dynamic res video for nemotron temporarily uses this hack via
+            # requires_sequential_video_encoding
+            # because it doesn't yet support video batching.
             # TODO(ywang96): Fix memory profiling to take EVS into account and
             # remove this hack.
             if (
-                self.is_multimodal_pruning_enabled
+                (
+                    self.is_multimodal_pruning_enabled
+                    or self.requires_sequential_video_encoding
+                )
                 and modality == "video"
                 and num_items > 1
             ):
@@ -2672,7 +2668,19 @@ class GPUModelRunner(
                 with self.timed_encoder_operation(
                     should_time, mm_lora_refs, current_item_idx, num_items
                 ):
-                    batch_outputs = model.embed_multimodal(**mm_kwargs_batch)
+                    cudagraph_output = None
+                    if (
+                        self.encoder_cudagraph_manager is not None
+                        and self.encoder_cudagraph_manager.supports_modality(modality)
+                    ):
+                        cudagraph_output = self.encoder_cudagraph_manager.execute(
+                            mm_kwargs_batch,
+                        )
+
+                    if cudagraph_output is not None:
+                        batch_outputs = cudagraph_output
+                    else:
+                        batch_outputs = model.embed_multimodal(**mm_kwargs_batch)
 
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
@@ -2827,15 +2835,7 @@ class GPUModelRunner(
         if not is_pooling_model(model):
             return []
 
-        supported_tasks = list(model.pooler.get_supported_tasks())
-
-        if "score" in supported_tasks:
-            num_labels = getattr(self.model_config.hf_config, "num_labels", 0)
-            if num_labels != 1:
-                supported_tasks.remove("score")
-                logger.debug_once("Score API is only enabled for num_labels == 1.")
-
-        return supported_tasks
+        return list(model.pooler.get_supported_tasks())
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks = list[SupportedTask]()
@@ -2928,7 +2928,10 @@ class GPUModelRunner(
 
         pooling_metadata = self.input_batch.get_pooling_metadata()
         pooling_metadata.build_pooling_cursor(
-            num_scheduled_tokens_np, seq_lens_cpu, device=hidden_states.device
+            num_scheduled_tokens_np,
+            seq_lens_cpu,
+            device=hidden_states.device,
+            query_start_loc_gpu=self.query_start_loc.gpu[: num_reqs + 1],
         )
 
         model = cast(VllmModelForPooling, self.model)
@@ -3594,10 +3597,10 @@ class GPUModelRunner(
                 scheduled_spec_decode_tokens=spec_decode_tokens_copy,
             )
 
-        if scheduler_output.preempted_req_ids and has_kv_transfer_group():
-            get_kv_transfer_group().handle_preemptions(
-                scheduler_output.preempted_req_ids
-            )
+        if has_kv_transfer_group():
+            kv_connector_metadata = scheduler_output.kv_connector_metadata
+            assert kv_connector_metadata is not None
+            get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with (
@@ -4606,6 +4609,9 @@ class GPUModelRunner(
             and mm_config is not None
             and mm_config.is_multimodal_pruning_enabled()
         )
+        self.requires_sequential_video_encoding = hasattr(
+            self.get_model(), "requires_sequential_video_encoding"
+        )  # Temporary hack for dynamic res video w/o support for bs>1 yet
 
         if (
             is_mixture_of_experts(self.model)
@@ -5510,13 +5516,14 @@ class GPUModelRunner(
                             dummy_modality
                         ]
 
-                        logger.info(
+                        logger.info_once(
                             "Encoder cache will be initialized with a "
                             "budget of %s tokens, and profiled with "
                             "%s %s items of the maximum feature size.",
                             encoder_budget,
                             max_mm_items_per_batch,
                             dummy_modality,
+                            scope="local",
                         )
 
                         # Create dummy batch of multimodal inputs.
@@ -5724,6 +5731,33 @@ class GPUModelRunner(
             )
             return 0
 
+        # Initialize encoder CUDA graph manager if enabled.
+        # Use get_model() to unwrap CUDAGraphWrapper/UBatchWrapper,
+        # because @runtime_checkable Protocol isinstance() checks do not
+        # work through __getattr__ forwarding.
+        if (
+            self.compilation_config.cudagraph_mm_encoder
+            and self.supports_mm_inputs
+            and self.encoder_cudagraph_manager is None
+        ):
+            from vllm.model_executor.models.interfaces import (
+                SupportsEncoderCudaGraph,
+                supports_encoder_cudagraph,
+            )
+            from vllm.v1.worker.gpu.mm.encoder_cudagraph import (
+                EncoderCudaGraphManager,
+            )
+
+            raw_model = self.get_model()
+            if supports_encoder_cudagraph(raw_model):
+                self.encoder_cudagraph_manager = EncoderCudaGraphManager(
+                    vllm_config=self.vllm_config,
+                    device=self.device,
+                    dtype=self.dtype,
+                    model=cast(SupportsEncoderCudaGraph, raw_model),
+                )
+                logger.info("Initialized EncoderCudaGraphManager for vision encoder")
+
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
         start_time = time.perf_counter()
@@ -5746,6 +5780,10 @@ class GPUModelRunner(
                     cudagraph_runtime_mode=runtime_mode,
                 )
                 torch.accelerator.synchronize()
+
+            # Capture encoder CUDA graphs if enabled
+            if self.encoder_cudagraph_manager is not None:
+                self.encoder_cudagraph_manager.capture()
 
             torch.accelerator.synchronize()
             end_free_gpu_memory = torch.cuda.mem_get_info()[0]
