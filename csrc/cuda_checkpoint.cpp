@@ -57,6 +57,9 @@ static bool load_checkpoint_apis() {
   if (!handle) {
     // Try loading fresh
     handle = dlopen("libcuda.so.1", RTLD_LAZY);
+    if (!handle) {
+      handle = dlopen("libcuda.so", RTLD_LAZY);
+    }
   }
   if (!handle) {
     return false;
