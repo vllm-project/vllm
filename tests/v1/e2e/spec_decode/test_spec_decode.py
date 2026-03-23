@@ -206,6 +206,14 @@ def test_ngram_gpu_default_with_async_scheduling(
         max_model_len=4096,
         async_scheduling=async_scheduling,
     )
+    # Assert the resolved async_scheduling config matches what was requested.
+    assert (
+        spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+        == async_scheduling
+    ), (
+        f"Expected async_scheduling={async_scheduling}, got "
+        f"{spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling}"
+    )
     evaluate_llm_for_gsm8k(spec_llm, expected_accuracy_threshold=0.8)
     del spec_llm
     cleanup_dist_env_and_memory()
@@ -456,6 +464,11 @@ def _run_eagle_correctness(
             enable_chunked_prefill=enable_chunked_prefill,
             model_impl=model_impl,
             attention_config=attention_config,
+        )
+        # EAGLE/EAGLE3 auto-enables async scheduling; assert it is active.
+        assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling, (
+            "Expected async_scheduling=True for EAGLE spec decode, "
+            f"got False. method={method}"
         )
         evaluate_llm_for_gsm8k(
             spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
@@ -760,6 +773,11 @@ def test_mtp_correctness(
             max_model_len=2048,
             attention_backend=attn_backend,
         )
+        # MTP auto-enables async scheduling; assert it is active.
+        assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling, (
+            "Expected async_scheduling=True for MTP spec decode, "
+            f"got False. method={method}"
+        )
         evaluate_llm_for_gsm8k(
             spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
         )
@@ -970,6 +988,10 @@ def assert_draft_model_correctness(args: ArgsTest):
         tensor_parallel_size=args.target_tensor_parallel_size,
         enforce_eager=args.enforce_eager,
         disable_log_stats=False,  # enables get_metrics()
+    )
+    # draft_model auto-enables async scheduling; assert it is active.
+    assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling, (
+        "Expected async_scheduling=True for draft_model spec decode, got False."
     )
     # we don't check the outputs, only check the metrics
     spec_llm.chat(test_prompts, args.sampling_config)
