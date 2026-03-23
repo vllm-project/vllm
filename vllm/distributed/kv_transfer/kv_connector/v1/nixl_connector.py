@@ -613,6 +613,18 @@ class NixlConnectorScheduler:
             for n_tokens, block_size in sw_sizes_tokens
         ]
 
+        # Remote pull threshold: minimum number of remote tokens
+        # before P pulls KV from D instead of recomputing locally.
+        self.remote_pull_threshold: int = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "remote_pull_threshold", 0
+            )
+        )
+        if self.remote_pull_threshold > 0:
+            logger.info(
+                "Remote pull threshold set to %d tokens", self.remote_pull_threshold
+            )
+
     def shutdown(self):
         self._stop_event.set()
         if self._nixl_handshake_listener_t is not None:
@@ -792,6 +804,46 @@ class NixlConnectorScheduler:
         if params is not None and params.get("do_remote_decode") and self._has_mamba:
             self._truncate_mamba_request_for_prefill(request)
 
+        elif (
+            params is not None
+            and params.get("do_remote_decode")
+            and params.get("remote_block_ids")
+            and all(
+                p in params for p in ("remote_engine_id", "remote_host", "remote_port")
+            )
+        ):
+            # Decode worker sent remote block ids, so, provide them
+            # as an external token count to scheduler.
+            # The tokens will be loaded if not already present in the local cache.
+            max_external = len(request.prompt_token_ids or [])
+            remote_num_tokens = params.get("remote_num_tokens") or 0
+            remote_block_ids = params.get("remote_block_ids") or []
+
+            # remote_block_ids is list[list[int]] — one list per KV cache group
+            # Use the largest group (full attention) to validate token count
+            if remote_block_ids and isinstance(remote_block_ids[0], list):
+                max_blocks = max(len(g) for g in remote_block_ids)
+            else:
+                max_blocks = len(remote_block_ids)
+
+            assert remote_num_tokens <= max_blocks * self.block_size
+            count = min(remote_num_tokens, max_external) - num_computed_tokens
+            if count > 0:
+                # Check remote pull threshold: skip pull if
+                # remote tokens are below the threshold.
+                if (
+                    self.remote_pull_threshold > 0
+                    and count < self.remote_pull_threshold
+                ):
+                    logger.info(
+                        "Skipping remote pull for %s: %d remote tokens < threshold %d",
+                        request.request_id,
+                        count,
+                        self.remote_pull_threshold,
+                    )
+                    return 0, False
+                return count, True
+
         # No remote prefill for this request.
         return 0, False
 
@@ -811,6 +863,46 @@ class NixlConnectorScheduler:
 
         if params.get("do_remote_decode"):
             self._reqs_in_batch.add(request.request_id)
+
+            # Check if P worker got remote blocks from D worker and
+            # if they need to be loaded
+            if (num_external_tokens > 0) and params.get("remote_block_ids"):
+                if (
+                    self.remote_pull_threshold > 0
+                    and num_external_tokens < self.remote_pull_threshold
+                ):
+                    logger.debug(
+                        "Skipping remote pull in update_state_after_alloc "
+                        "for %s: %d external tokens < threshold %d",
+                        request.request_id,
+                        num_external_tokens,
+                        self.remote_pull_threshold,
+                    )
+
+                elif all(
+                    p in params
+                    for p in ("remote_engine_id", "remote_host", "remote_port")
+                ):
+                    unhashed_local_block_ids_p: BlockIds = (
+                        blocks.get_unhashed_block_ids_all_groups()
+                    )
+                    local_block_ids = self.get_sw_clipped_blocks(
+                        unhashed_local_block_ids_p
+                    )
+
+                    # Get unhashed blocks to pull into from remote.
+                    self._reqs_need_recv[request.request_id] = (
+                        request,
+                        local_block_ids,
+                    )
+
+                else:
+                    logger.warning(
+                        "Got invalid KVTransferParams: %s. This "
+                        "request will not utilize KVTransfer",
+                        params,
+                    )
+
         if self.use_host_buffer and params.get("do_remote_decode"):
             # NOTE: when accelerator is not directly supported by Nixl,
             # prefilled blocks need to be saved to host memory before transfer.
@@ -956,6 +1048,53 @@ class NixlConnectorScheduler:
             return False, None
 
         if not params.get("do_remote_decode"):
+            # This is a decode generation request (do_remote_prefill was
+            # cleared by update_state_after_alloc, do_remote_decode is False).
+            # Return block info so the proxy can cache it for the next turn.
+            # Delay block free so the prefill node can pull the blocks via
+            # NIXL before they are released.
+            if request.status in (
+                RequestStatus.FINISHED_STOPPED,
+                RequestStatus.FINISHED_LENGTH_CAPPED,
+            ):
+                delay_free = any(len(group) > 0 for group in block_ids)
+                if delay_free:
+                    # Track in _reqs_in_batch so the worker adds it to
+                    # _reqs_to_process, which is required for _reqs_to_send
+                    # to be accepted by the worker.
+                    self._reqs_in_batch.add(request.request_id)
+                    self._reqs_need_send[request.request_id] = (
+                        time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
+                    )
+
+                # NOTE HMA will "mark" empty/null blocks in groups with
+                # 0s (eg SWA ones), trimming down after allocating for the
+                # whole sequence length. Empty blocks are always at the
+                # start of the list.
+                # Here we "unpad" blocks to send the actual remote blocks to be read.
+                block_ids = self.get_sw_clipped_blocks(block_ids)
+
+                remote_num_tokens = min(
+                    request.num_tokens,
+                    max(
+                        len(g) * self.block_size
+                        for g in (
+                            block_ids if isinstance(block_ids[0], list) else [block_ids]
+                        )
+                    ),
+                )
+
+                return delay_free, dict(
+                    do_remote_prefill=False,
+                    do_remote_decode=True,
+                    remote_block_ids=block_ids,
+                    remote_engine_id=self.engine_id,
+                    remote_request_id=request.request_id,
+                    remote_host=self.side_channel_host,
+                    remote_port=self.side_channel_port,
+                    tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+                    remote_num_tokens=remote_num_tokens,
+                )
             return False, None
         if request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
             # Also include the case of a P/D Prefill request with immediate
