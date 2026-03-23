@@ -1548,6 +1548,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             await self._scale_down_elastic_ep(
                 cur_data_parallel_size, new_data_parallel_size
             )
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            await self.client_sentinel.scale_elastic_ep(new_data_parallel_size)
 
     async def _eep_wait_for_setup_switch_complete(self) -> None:
         """
