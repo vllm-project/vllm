@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -33,8 +33,10 @@ class HybridOffloadPlanner:
         if any(block_size <= 0 for block_size in self.gpu_block_sizes):
             raise ValueError("gpu_block_sizes must be positive")
 
-    @property
-    def offload_unit_sizes(self) -> tuple[int, ...]:
+        # Pre-compute derived values that are called in tight loops
+        # (e.g. chunk_count_for_tokens binary search calls offload_unit_sizes
+        # and first_hashable_chunk_idx on every iteration).  Using
+        # object.__setattr__ is the standard pattern for frozen dataclasses.
         units: list[int] = []
         for gpu_block_size in self.gpu_block_sizes:
             if gpu_block_size <= self.fixed_chunk_size:
@@ -43,7 +45,24 @@ class HybridOffloadPlanner:
                 units.append(self.fixed_chunk_size)
             else:
                 units.append(gpu_block_size)
-        return tuple(units)
+        object.__setattr__(self, "_offload_unit_sizes", tuple(units))
+        object.__setattr__(
+            self,
+            "_first_hashable_chunk_idx",
+            max(math.ceil(u / self.fixed_chunk_size) for u in units) - 1,
+        )
+        object.__setattr__(
+            self,
+            "_group_hash_factors",
+            tuple(
+                u // self.hash_block_size if u % self.hash_block_size == 0 else None
+                for u in units
+            ),
+        )
+
+    @property
+    def offload_unit_sizes(self) -> tuple[int, ...]:
+        return self._offload_unit_sizes  # type: ignore[attr-defined]
 
     @property
     def requires_partial_group_offload(self) -> tuple[bool, ...]:
@@ -60,21 +79,11 @@ class HybridOffloadPlanner:
 
     @property
     def first_hashable_chunk_idx(self) -> int:
-        return max(
-            math.ceil(unit_size / self.fixed_chunk_size)
-            for unit_size in self.offload_unit_sizes
-        ) - 1
+        return self._first_hashable_chunk_idx  # type: ignore[attr-defined]
 
     @property
     def group_hash_factors(self) -> tuple[int | None, ...]:
-        return tuple(
-            (
-                unit_size // self.hash_block_size
-                if unit_size % self.hash_block_size == 0
-                else None
-            )
-            for unit_size in self.offload_unit_sizes
-        )
+        return self._group_hash_factors  # type: ignore[attr-defined]
 
     def group_covered_tokens_for_chunk_count(
         self, chunk_count: int
