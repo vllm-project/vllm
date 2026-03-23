@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: Spec Decode Eagle
   timeout_in_minutes: 30
+  nightly: true 
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
@@ -13,6 +14,7 @@ steps:
 
 - label: Spec Decode Speculators + MTP
   timeout_in_minutes: 30
+  nightly: true 
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
@@ -23,6 +25,7 @@ steps:
 
 - label: Spec Decode Ngram + Suffix
   timeout_in_minutes: 30
+  nightly: true 
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
@@ -32,6 +35,7 @@ steps:
 
 - label: Spec Decode Draft Model
   timeout_in_minutes: 30
+  nightly: true 
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
