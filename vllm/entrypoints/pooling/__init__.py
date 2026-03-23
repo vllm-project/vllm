@@ -105,7 +105,7 @@ def init_pooling_state(
                 engine_client,
                 state.openai_serving_models,
                 state.openai_serving_render,
-                pooling_task=pooling_task,
+                supported_tasks=supported_tasks,
                 request_logger=request_logger,
                 chat_template=resolved_chat_template,
                 chat_template_content_format=args.chat_template_content_format,

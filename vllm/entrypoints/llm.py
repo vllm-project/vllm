@@ -1228,17 +1228,18 @@ class LLM:
                 "Try converting the model using `--convert classify`."
             )
 
-        if pooling_task not in self.supported_tasks:
-            raise ValueError(
-                f"Unsupported task: {pooling_task!r} "
-                f"Supported tasks: {self.supported_tasks}"
-            )
-
-        if pooling_task != self.pooling_task:
-            raise ValueError(
-                f"Try switching the model's pooling_task "
-                f'via `PoolerConfig(pooling_task="{pooling_task}"`)'
-            )
+        # plugin task uses io_processor.parse_request to verify inputs
+        if not pooling_task == "plugin" and pooling_task != self.pooling_task:
+            if pooling_task not in self.supported_tasks:
+                raise ValueError(
+                    f"Unsupported task: {pooling_task!r} "
+                    f"Supported tasks: {self.pooling_task}"
+                )
+            else:
+                raise ValueError(
+                    f"Try switching the model's pooling_task "
+                    f'via `PoolerConfig(pooling_task="{pooling_task}"`)'
+                )
 
     def embed(
         self,

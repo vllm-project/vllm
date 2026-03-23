@@ -50,7 +50,7 @@ class OpenAIServingPooling(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         openai_serving_render: OpenAIServingRender,
-        pooling_task: SupportedTask,
+        supported_tasks: tuple[SupportedTask, ...],
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
@@ -62,8 +62,8 @@ class OpenAIServingPooling(OpenAIServing):
             models=models,
             request_logger=request_logger,
         )
-
-        self.pooling_task = pooling_task
+        self.supported_tasks = supported_tasks
+        self.pooling_task = self.model_config.get_pooling_task(supported_tasks)
         self.openai_serving_render = openai_serving_render
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -92,11 +92,18 @@ class OpenAIServingPooling(OpenAIServing):
         if getattr(request, "dimensions", None) is not None:
             return self.create_error_response("dimensions is currently not supported")
 
-        if request.task != self.pooling_task:
-            raise ValueError(
-                f"Unsupported task: {request.task!r} "
-                f"Supported tasks: {self.pooling_task}"
-            )
+        # plugin task uses io_processor.parse_request to verify inputs
+        if not request.task == "plugin" and request.task != self.pooling_task:
+            if request.task not in self.supported_tasks:
+                raise ValueError(
+                    f"Unsupported task: {request.task!r} "
+                    f"Supported tasks: {self.pooling_task}"
+                )
+            else:
+                raise ValueError(
+                    f"Try switching the model's pooling_task "
+                    f'via `PoolerConfig(pooling_task="{request.task}"`)'
+                )
 
         engine_prompts: Sequence[ProcessorInputs]
         if use_io_processor := isinstance(request, IOProcessorRequest):
