@@ -253,6 +253,13 @@ def build_app(
 
         register_generative_scoring_api_router(app)
 
+    if args.enable_fault_tolerance:
+        from vllm.entrypoints.serve.fault_tolerance.api_router import (
+            register_fault_tolerance_api_router,
+        )
+
+        register_fault_tolerance_api_router(app)
+
     app.root_path = args.root_path
     app.add_middleware(
         CORSMiddleware,

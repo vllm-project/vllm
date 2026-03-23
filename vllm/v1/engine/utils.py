@@ -26,6 +26,11 @@ from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.utils import (
+    FaultToleranceZmqAddresses,
+    make_engine_down_report_socket,
+    notify_engine_down,
+)
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -66,6 +71,8 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
+    # ZMQ socket addresses for fault tolerance if applicable
+    fault_tolerance_addresses: FaultToleranceZmqAddresses | None = None
 
 
 @dataclass
@@ -107,7 +114,10 @@ class CoreEngineProcManager:
             "log_stats": log_stats,
             "tensor_queue": tensor_queue,
         }
-
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.ctx, self.engine_down_socket = make_engine_down_report_socket(
+                vllm_config
+            )
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
@@ -135,6 +145,8 @@ class CoreEngineProcManager:
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
         self.manager_stopped = threading.Event()
         self.failed_proc_name: str | None = None
+        self.vllm_config = vllm_config
+        self.start_index = start_index
 
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
@@ -157,6 +169,9 @@ class CoreEngineProcManager:
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine core processes with configurable timeout."""
         self.manager_stopped.set()
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.engine_down_socket.close(linger=0)
+            self.ctx.term()
         if self._finalizer.detach() is not None:
             shutdown(self.processes, timeout=timeout)
 
@@ -165,20 +180,28 @@ class CoreEngineProcManager:
 
         sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
         sentinels = set(sentinel_to_proc.keys())
+        enable_ft = self.vllm_config.fault_tolerance_config.enable_fault_tolerance
+        try:
+            while sentinels and not self.manager_stopped.is_set():
+                died_sentinels = connection.wait(sentinels, timeout=1)
 
-        while sentinels and not self.manager_stopped.is_set():
-            died_sentinels = connection.wait(sentinels, timeout=1)
+                for sentinel in died_sentinels:
+                    proc = sentinel_to_proc.pop(cast(int, sentinel))
+                    exitcode = proc.exitcode
+                    if exitcode != 0 and not self.manager_stopped.is_set():
+                        self.failed_proc_name = proc.name
+                    if enable_ft:
+                        engine_rank = self.processes.index(proc)
+                        notify_engine_down(
+                            self.engine_down_socket,
+                            engine_id=str(engine_rank + self.start_index),
+                        )
+                        sentinels.remove(cast(int, sentinel))
 
-            for sentinel in died_sentinels:
-                proc = sentinel_to_proc.pop(cast(int, sentinel))
-                exitcode = proc.exitcode
-                if exitcode != 0 and not self.manager_stopped.is_set():
-                    self.failed_proc_name = proc.name
-            if died_sentinels:
-                # Any engine exit currently triggers a shutdown. Future
-                # work (e.g., Elastic and fault-tolerant EP) will add finer-grained
-                # handling for different exit scenarios.
-                break
+                if died_sentinels and not enable_ft:
+                    break
+        except zmq.ZMQError:
+            pass
 
         self.shutdown()
 
@@ -304,7 +327,7 @@ class CoreEngineActorManager:
             if dp_size > 1 and vllm_config.model_config.is_moe
             else EngineCoreActor
         )
-
+        self.vllm_config = vllm_config
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
@@ -322,6 +345,11 @@ class CoreEngineActorManager:
         self.manager_stopped = threading.Event()
         self.failed_proc_name: str | None = None
 
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.ctx, self.engine_down_socket = make_engine_down_report_socket(
+                vllm_config
+            )
+        self.start_rank = vllm_config.parallel_config.data_parallel_index
         if ray.is_initialized():
             logger.info("Ray is already initialized. Skipping Ray initialization.")
         else:
@@ -855,30 +883,42 @@ class CoreEngineActorManager:
     def monitor_engine_liveness(self) -> None:
         import ray
 
-        while not self.manager_stopped.is_set():
-            actor_run_refs = list(self.get_run_refs())
-            if not actor_run_refs:
-                logger.info(
-                    "There are no actors to monitor currently. "
-                    "The monitoring function is about to terminate."
-                )
-                break
-            actor_done_refs, _ = ray.wait(actor_run_refs, timeout=5)
-            unexpected_failure = False
-            for actor_ref in actor_done_refs:
-                if self.manager_stopped.is_set():
+        enable_ft = self.vllm_config.fault_tolerance_config.enable_fault_tolerance
+        failed_ref = set()
+        try:
+            while not self.manager_stopped.is_set():
+                actor_run_refs = [r for r in self.get_run_refs() if r not in failed_ref]
+                if not actor_run_refs:
+                    logger.info(
+                        "There are no actors to monitor currently. "
+                        "The monitoring function is about to terminate."
+                    )
                     break
-                if actor_ref not in self.get_run_refs():
-                    # The run refs may have been updated by elastic scale-down.
-                    continue
-                try:
-                    ray.get(actor_ref)
-                except ray.exceptions.RayActorError:
-                    self.failed_proc_name = f"Actor {actor_ref}"
-                    unexpected_failure = True
+                actor_done_refs, _ = ray.wait(actor_run_refs, timeout=5)
+                unexpected_failure = False
+                for actor_ref in actor_done_refs:
+                    if self.manager_stopped.is_set():
+                        break
+                    if actor_ref not in self.get_run_refs():
+                        # The run refs may have been updated by elastic scale-down.
+                        continue
+                    try:
+                        ray.get(actor_ref)
+                    except ray.exceptions.RayActorError:
+                        self.failed_proc_name = f"Actor {actor_ref}"
+                        unexpected_failure = True
+                        if enable_ft:
+                            engine_rank = self.get_run_refs().index(actor_ref)
+                            notify_engine_down(
+                                self.engine_down_socket,
+                                str(engine_rank + self.start_rank),
+                            )
+                            failed_ref.add(actor_ref)
 
-            if unexpected_failure:
-                break
+                if unexpected_failure and not enable_ft:
+                    break
+        except zmq.ZMQError:
+            pass
 
         self.shutdown()
 
@@ -886,6 +926,9 @@ class CoreEngineActorManager:
         import ray
 
         self.manager_stopped.set()
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.engine_down_socket.close(linger=0)
+            self.ctx.term()
         for actor in self.local_engine_actors + self.remote_engine_actors:
             ray.kill(actor)
         for pg in self.created_placement_groups:
@@ -989,6 +1032,11 @@ def launch_core_engines(
         logger.info("Started DP Coordinator process (PID: %d)", coordinator.proc.pid)
     else:
         coordinator = None
+
+    if vllm_config.fault_tolerance_config.enable_fault_tolerance is True:
+        addresses.fault_tolerance_addresses = FaultToleranceZmqAddresses.build(
+            host, dp_size, vllm_config.fault_tolerance_config
+        )
 
     if parallel_config.data_parallel_backend == "ray":
         logger.info("Starting ray-based data parallel backend")

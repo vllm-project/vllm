@@ -68,6 +68,10 @@ from vllm.v1.engine.utils import (
     get_device_indices,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.engine_core_sentinel import (
+    EngineCoreSentinel,
+    busy_loop_wrapper,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
@@ -796,10 +800,6 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
-        executor_fail_callback = lambda: self.input_queue.put_nowait(
-            (EngineCoreRequestType.EXECUTOR_FAILED, b"")
-        )
-
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
@@ -844,6 +844,32 @@ class EngineCoreProc(EngineCore):
                     vllm_config=vllm_config,
                 )
             self._init_data_parallel(vllm_config)
+
+            # Initialize fault tolerance settings.
+            ft_config = vllm_config.fault_tolerance_config
+            self.enable_fault_tolerance = ft_config.enable_fault_tolerance
+            if self.enable_fault_tolerance:
+                # Queue for reporting EngineCore exceptions to EngineCoreSentinel.
+                self.fault_signal_q: queue.Queue[Exception] = queue.Queue()
+                self.engine_recovery_timeout_sec = ft_config.engine_recovery_timeout_sec
+                assert addresses.fault_tolerance_addresses is not None
+                ft_addresses = addresses.fault_tolerance_addresses
+                engine_core_sentinel_ids = ft_addresses.engine_core_sentinel_identities
+                self.engine_core_sentinel = EngineCoreSentinel(
+                    engine_index=self.engine_index,
+                    fault_signal_q=self.fault_signal_q,
+                    engine_fault_socket_addr=ft_addresses.engine_fault_socket_addr,
+                    sentinel_identity=engine_core_sentinel_ids[self.engine_index],
+                    vllm_config=vllm_config,
+                )
+                # Do not shut down the engine immediately upon failure.
+                executor_fail_callback = lambda: self.fault_signal_q.put(
+                    RuntimeError(f"Executor on EngineCore {self.engine_index} failed.")
+                )
+            else:
+                executor_fail_callback = lambda: self.input_queue.put_nowait(
+                    (EngineCoreRequestType.EXECUTOR_FAILED, b"")
+                )
 
             super().__init__(
                 vllm_config,
@@ -1133,6 +1159,7 @@ class EngineCoreProc(EngineCore):
         """Returns true if shutdown has not been requested."""
         return self.shutdown_state == EngineShutdownState.RUNNING
 
+    @busy_loop_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
         while self._handle_shutdown():
@@ -1575,6 +1602,11 @@ class EngineCoreProc(EngineCore):
             for client_index, req_ids in by_client.items():
                 self._send_abort_outputs_to_client(list(req_ids), client_index)
 
+    def shutdown(self):
+        super().shutdown()
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.engine_core_sentinel.shutdown()
+
 
 class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process
@@ -1693,6 +1725,7 @@ class DPEngineCoreProc(EngineCoreProc):
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
+    @busy_loop_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 
