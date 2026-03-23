@@ -165,13 +165,11 @@ class KVCacheMLARoPEFusionPattern:
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             dummy = torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
-            k_pe_squeezed = k_pe.squeeze(1)
-            print("replace")
             self.FUSED_OP(
                 dummy=dummy,
                 positions=positions,
                 q_pe=q,
-                k_pe=k_pe_squeezed,
+                k_pe=k_pe,
                 kv_c=kv_c_normed,
                 cos_sin_cache=cos_sin_cache.to(q.dtype),
                 is_neox=self.is_neox,
@@ -179,7 +177,7 @@ class KVCacheMLARoPEFusionPattern:
                 kv_cache_scale=k_scale,
                 layer_name=self.layer_name,
             )
-            return dummy, q, k_pe_squeezed.unsqueeze(1)
+            return dummy, q, k_pe
 
         # NOTE: use view_to_reshape to unify view/reshape to simplify
         # pattern and increase matching opportunities
@@ -315,8 +313,7 @@ class KVCacheMLARoPEFusionPass(VllmPatternMatcherPass):
         attn_layers = get_layers_from_vllm_config(config, MLAAttention)
 
         for _, layer in attn_layers.items():
-            # is_neox == True causes shape issues when deleting shuffles
-            for is_neox in [False]:
+            for is_neox in [False, True]:
                 if RotaryEmbedding.enabled():
                     for use_flashinfer in [False, True]:
                         KVCacheMLARoPEFusionPattern(
@@ -330,10 +327,10 @@ class KVCacheMLARoPEFusionPass(VllmPatternMatcherPass):
                         is_neox,
                     ).register(self.patterns)
 
-                KVCacheMLARoPEDeepseekScalingFusionPattern(
-                    layer,
-                    is_neox,
-                ).register(self.patterns)
+            KVCacheMLARoPEDeepseekScalingFusionPattern(
+                layer,
+                is_neox=False,
+            ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
