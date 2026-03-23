@@ -385,6 +385,11 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             )
         else:
             # Sparse context: build topk mask for FA4 block-sparse attention
+            from vllm.vllm_flash_attn.cute.topk_mask import (
+                dense_mask_mod,
+                dense_mask_to_block_sparse,
+            )
+
             num_prefill_tokens = q.shape[0]
             topk_all = self.topk_indices_buffer[
                 num_decode_tokens : num_decode_tokens + num_prefill_tokens
@@ -404,6 +409,15 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                 device,
             )
 
+            # SM100+: m_block=128, q_stage=2 → tile_m=256; tile_n=128
+            block_sparse_tensors = dense_mask_to_block_sparse(
+                dense_mask,
+                max_q_len,
+                max_kv_len,
+                tile_m=256,
+                tile_n=128,
+            )
+
             attn_out, _ = flash_attn_varlen_func(
                 q=q,
                 k=k,
@@ -416,7 +430,9 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                 causal=False,
                 return_softmax_lse=True,
                 fa_version=4,
-                dense_mask=dense_mask,
+                mask_mod=dense_mask_mod,
+                block_sparse_tensors=block_sparse_tensors,
+                aux_tensors=[dense_mask],
             )
 
         attn_out = attn_out[..., : self.v_head_dim]
