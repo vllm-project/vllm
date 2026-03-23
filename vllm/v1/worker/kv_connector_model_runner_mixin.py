@@ -354,8 +354,8 @@ class KVConnectorModelRunnerMixin:
 
         common_stride_order: tuple[int, ...] | None = None
         for groups in attn_groups:
-            for group in groups:
-                attn_backend = group.backend
+            for attn_group in groups:
+                attn_backend = attn_group.backend
                 kv_cache_shape = attn_backend.get_kv_cache_shape(
                     1234,
                     spec.block_size,
