@@ -236,6 +236,13 @@ class ResponsesRequest(OpenAIBaseModel):
     # this cannot be used in conjunction with previous_response_id
     # TODO: consider supporting non harmony messages as well
     previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
+    # Accept full previous response for stateless multi-turn (RFC #26934 + @grs).
+    # The client stores the full response object and passes it back on the next
+    # turn instead of a previous_response_id.  vLLM extracts the Harmony message
+    # history from the encrypted_content state carrier embedded in the response
+    # output, so no server-side store is required.
+    # Cannot be set together with previous_response_id.
+    previous_response: "ResponsesResponse | None" = None
     structured_outputs: StructuredOutputsParams | None = Field(
         default=None,
         description="Additional kwargs for structured outputs",
@@ -389,6 +396,33 @@ class ResponsesRequest(OpenAIBaseModel):
             isinstance(self.include, list)
             and "message.output_text.logprobs" in self.include
         )
+
+    @model_validator(mode="after")
+    def validate_previous_response_xor_id(self) -> "ResponsesRequest":
+        if self.previous_response_id and self.previous_response is not None:
+            raise ValueError(
+                "Cannot set both 'previous_response_id' and 'previous_response'. "
+                "Use 'previous_response_id' for store-backed multi-turn, or "
+                "'previous_response' (with include=['reasoning.encrypted_content'] "
+                "and store=false) for stateless multi-turn."
+            )
+        if self.previous_response is not None:
+            if self.background:
+                # background mode requires store=True to retrieve the response
+                # later, but the stateless path forces store=False.  Raise
+                # explicitly rather than silently producing an unretrievable
+                # background response.
+                raise ValueError(
+                    "'background' mode cannot be used with 'previous_response'. "
+                    "Stateless multi-turn (previous_response + "
+                    "include=['reasoning.encrypted_content']) does not support "
+                    "background responses."
+                )
+            if self.store:
+                # Stateless path: store is meaningless (and would cause
+                # confusion). Mirror the silent-disable in create_responses.
+                self.store = False
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -667,3 +701,8 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseMcpCallInProgressEvent
     | ResponseMcpCallCompletedEvent
 )
+
+# Resolve forward reference: ResponsesRequest.previous_response -> ResponsesResponse
+# Both classes are defined in this module; model_rebuild() is needed because
+# ResponsesResponse did not exist when ResponsesRequest was first evaluated.
+ResponsesRequest.model_rebuild()
