@@ -429,10 +429,17 @@ class BlockPool:
             blocks: A list of blocks to touch.
         """
         for block in blocks:
-            # ref_cnt=0 means this block is in the free list (i.e. eviction
-            # candidate), so remove it.
+            # ref_cnt=0 means this block is in a free queue (i.e. eviction
+            # candidate), so remove it from whichever queue it is in.
             if block.ref_cnt == 0 and not block.is_null:
-                self.free_block_queue.remove(block)
+                if block.is_tel_safe:
+                    # Block is in tel_safe_queue (a deque), not in the
+                    # doubly-linked free_block_queue.  Remove it from there
+                    # and clear the T-LRU tag so subsequent logic is clean.
+                    self.tel_safe_queue.remove(block)
+                    block.is_tel_safe = False
+                else:
+                    self.free_block_queue.remove(block)
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)

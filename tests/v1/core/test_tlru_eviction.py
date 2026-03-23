@@ -246,6 +246,55 @@ class TestGetNewBlocksPriority:
 
 
 # ---------------------------------------------------------------------------
+# Regression test: touch() must not crash for TEL-safe blocks
+# ---------------------------------------------------------------------------
+
+class TestTouchTelSafeBlock:
+    """touch() must correctly handle blocks sitting in tel_safe_queue.
+
+    Before the fix, touch() always called free_block_queue.remove(block),
+    which raises RuntimeError for TEL-safe blocks because they are held in
+    tel_safe_queue (a plain deque) and have no linked-list pointers.
+    """
+
+    def test_touch_tel_safe_block_does_not_crash(self):
+        """Cache hit on a TEL-safe block must not raise RuntimeError."""
+        # 6 total blocks, 5 usable (null_block takes 1).
+        # xi=3, qhat=0  =>  B = max(0, 5+0-3) = 2, num_tel_safe = 3
+        pool = _make_pool(num_blocks=6, tlru_xi_blocks=3, tlru_qhat_blocks=0)
+        blocks = pool.get_new_blocks(5)
+        pool.free_blocks_tlru(blocks, req_total_blocks=5)
+
+        tel_safe_blocks = [b for b in blocks if b.is_tel_safe]
+        assert len(tel_safe_blocks) > 0, "Pre-condition: need at least one TEL-safe block"
+
+        # Simulate a prefix-cache hit: touch should NOT raise RuntimeError.
+        pool.touch(tel_safe_blocks[:1])
+
+        # After touch the block is no longer in tel_safe_queue.
+        assert tel_safe_blocks[0] not in pool.tel_safe_queue
+        # The TEL-safe tag must be cleared.
+        assert tel_safe_blocks[0].is_tel_safe is False
+        # ref_cnt must have been incremented.
+        assert tel_safe_blocks[0].ref_cnt == 1
+
+    def test_touch_normal_block_still_works(self):
+        """Sanity-check that touch() still works for normal (non-TEL-safe) blocks."""
+        pool = _make_pool(num_blocks=6, tlru_xi_blocks=1, tlru_qhat_blocks=0)
+        blocks = pool.get_new_blocks(5)
+        # xi=1 is very tight: B = max(0, 5+0-1) = 4, num_tel_safe = 1
+        # Most blocks are normal (non-TEL-safe).
+        pool.free_blocks_tlru(blocks, req_total_blocks=5)
+
+        normal_blocks = [b for b in blocks if not b.is_tel_safe]
+        assert len(normal_blocks) > 0, "Pre-condition: need at least one non-TEL-safe block"
+
+        # touch() must work as before for normal blocks.
+        pool.touch(normal_blocks[:1])
+        assert normal_blocks[0].ref_cnt == 1
+
+
+# ---------------------------------------------------------------------------
 # Tests for CacheConfig T-LRU fields
 # ---------------------------------------------------------------------------
 
