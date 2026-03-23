@@ -37,6 +37,8 @@ else:
 
 logger = init_logger(__name__)
 
+_GPT_OSS_MODEL_ARCH = "GptOssForCausalLM"
+
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
@@ -53,8 +55,54 @@ def _get_backend_priorities(
     device_capability: DeviceCapability,
     num_heads: int | None = None,
     kv_cache_dtype: CacheDType | None = None,
+    model_architectures: tuple[str, ...] = (),
+    has_sink: bool = False,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
+    if not use_mla and has_sink and _GPT_OSS_MODEL_ARCH in model_architectures:
+        if device_capability.major == 10:
+            logger.info_once(
+                "Using GPT-OSS CUDA attention policy for SM100+: "
+                "prioritizing FlashInfer/TRTLLM because GPT-OSS requires "
+                "attention sinks.",
+                scope="local",
+            )
+            return [
+                AttentionBackendEnum.FLASHINFER,
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.FLEX_ATTENTION,
+            ]
+
+        if device_capability >= DeviceCapability(9, 0):
+            logger.info_once(
+                "Using GPT-OSS CUDA attention policy for SM90/SM9x: "
+                "prioritizing FlashAttention because GPT-OSS requires "
+                "attention sinks and FlashInfer sink support depends on "
+                "TRTLLM attention.",
+                scope="local",
+            )
+            return [
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.FLASHINFER,
+                AttentionBackendEnum.FLEX_ATTENTION,
+            ]
+
+        logger.info_once(
+            "Using GPT-OSS CUDA attention policy for SM8x: "
+            "prioritizing Triton because GPT-OSS requires attention sinks, "
+            "FlashAttention sink support starts at SM90, and FlashInfer "
+            "sink support depends on TRTLLM attention.",
+            scope="local",
+        )
+        return [
+            AttentionBackendEnum.TRITON_ATTN,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.FLASHINFER,
+            AttentionBackendEnum.FLEX_ATTENTION,
+        ]
+
     if use_mla:
         if device_capability.major == 10:
             # Sparse MLA backend priorities
@@ -228,6 +276,8 @@ class CudaPlatformBase(Platform):
             device_capability,
             num_heads,
             attn_selector_config.kv_cache_dtype,
+            attn_selector_config.model_architectures,
+            attn_selector_config.has_sink,
         )
         for priority, backend in enumerate(backend_priorities):
             try:
