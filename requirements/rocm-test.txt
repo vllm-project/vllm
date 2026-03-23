@@ -47,6 +47,8 @@ pystemmer==3.0.0
 # Multi-modal processing
 av==16.1.0
     # required for audio_in_video tests
+resampy==0.4.3
+    # audio processing, required for audio_in_video tests
 blobfile==3.0.0
     # Multi-Modal Models Test
 decord==0.6.0

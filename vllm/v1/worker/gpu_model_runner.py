@@ -208,6 +208,7 @@ from .utils import (
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+    from vllm.v1.worker.gpu.mm.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
 
@@ -499,6 +500,9 @@ class GPUModelRunner(
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
         self.late_interaction_runner = LateInteractionRunner()
+
+        # Encoder CUDA graph manager (initialized after model load if enabled)
+        self.encoder_cudagraph_manager: EncoderCudaGraphManager | None = None
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
@@ -2849,7 +2853,19 @@ class GPUModelRunner(
                 with self.timed_encoder_operation(
                     should_time, mm_lora_refs, current_item_idx, num_items
                 ):
-                    batch_outputs = model.embed_multimodal(**mm_kwargs_batch)
+                    cudagraph_output = None
+                    if (
+                        self.encoder_cudagraph_manager is not None
+                        and self.encoder_cudagraph_manager.supports_modality(modality)
+                    ):
+                        cudagraph_output = self.encoder_cudagraph_manager.execute(
+                            mm_kwargs_batch,
+                        )
+
+                    if cudagraph_output is not None:
+                        batch_outputs = cudagraph_output
+                    else:
+                        batch_outputs = model.embed_multimodal(**mm_kwargs_batch)
 
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
@@ -3253,6 +3269,8 @@ class GPUModelRunner(
             positions = self.xdrope_positions.gpu[:, :num_input_tokens]
         else:
             positions = self.positions[:num_input_tokens]
+            if num_input_tokens > num_scheduled_tokens:
+                self.positions[num_scheduled_tokens:num_input_tokens].zero_()
 
         if is_first_rank:
             intermediate_tensors = None
@@ -5929,6 +5947,33 @@ class GPUModelRunner(
             )
             return 0
 
+        # Initialize encoder CUDA graph manager if enabled.
+        # Use get_model() to unwrap CUDAGraphWrapper/UBatchWrapper,
+        # because @runtime_checkable Protocol isinstance() checks do not
+        # work through __getattr__ forwarding.
+        if (
+            self.compilation_config.cudagraph_mm_encoder
+            and self.supports_mm_inputs
+            and self.encoder_cudagraph_manager is None
+        ):
+            from vllm.model_executor.models.interfaces import (
+                SupportsEncoderCudaGraph,
+                supports_encoder_cudagraph,
+            )
+            from vllm.v1.worker.gpu.mm.encoder_cudagraph import (
+                EncoderCudaGraphManager,
+            )
+
+            raw_model = self.get_model()
+            if supports_encoder_cudagraph(raw_model):
+                self.encoder_cudagraph_manager = EncoderCudaGraphManager(
+                    vllm_config=self.vllm_config,
+                    device=self.device,
+                    dtype=self.dtype,
+                    model=cast(SupportsEncoderCudaGraph, raw_model),
+                )
+                logger.info("Initialized EncoderCudaGraphManager for vision encoder")
+
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
         start_time = time.perf_counter()
@@ -5951,6 +5996,10 @@ class GPUModelRunner(
                     cudagraph_runtime_mode=runtime_mode,
                 )
                 torch.accelerator.synchronize()
+
+            # Capture encoder CUDA graphs if enabled
+            if self.encoder_cudagraph_manager is not None:
+                self.encoder_cudagraph_manager.capture()
 
             torch.accelerator.synchronize()
             end_free_gpu_memory = torch.cuda.mem_get_info()[0]
