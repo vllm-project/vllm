@@ -2,7 +2,10 @@ use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 
-use crate::{FinishedReasonCounterFamily, HistogramFamily};
+use crate::{
+    EngineLabels, FinishedReasonCounterFamily, HistogramFamily, PromptTokenSourceCounterFamily,
+    U64Counter,
+};
 
 const TTFT_BUCKETS: [f64; 22] = [
     0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
@@ -63,6 +66,20 @@ fn request_params_n_histogram() -> Histogram {
 
 /// Request-lifecycle Prometheus families exported from the `llm` layer.
 pub struct RequestMetrics {
+    // Request-derived counters.
+    pub num_preemptions: Family<EngineLabels, U64Counter>,
+    pub prompt_tokens: Family<EngineLabels, U64Counter>,
+    pub prompt_tokens_by_source: PromptTokenSourceCounterFamily,
+    pub prompt_tokens_cached: Family<EngineLabels, U64Counter>,
+    pub prompt_tokens_recomputed: Family<EngineLabels, U64Counter>,
+    pub generation_tokens: Family<EngineLabels, U64Counter>,
+
+    // We intentionally don't support iteration-level histograms for now, since it seems to make
+    // more sense if the engine maintains these metrics and frontend simply forwards.
+    //
+    // pub iteration_tokens_total: HistogramFamily,
+
+    // Request lifecycle counters and histograms.
     pub request_success: FinishedReasonCounterFamily,
     pub request_prompt_tokens: HistogramFamily,
     pub request_generation_tokens: HistogramFamily,
@@ -83,6 +100,49 @@ pub struct RequestMetrics {
 impl RequestMetrics {
     /// Register the request-oriented metric families into the shared registry.
     pub(crate) fn register(registry: &mut Registry) -> Self {
+        // Request-derived counters.
+        let num_preemptions = Family::default();
+        registry.register(
+            "vllm:num_preemptions",
+            "Cumulative number of preemption events.",
+            num_preemptions.clone(),
+        );
+
+        let prompt_tokens = Family::default();
+        registry.register(
+            "vllm:prompt_tokens",
+            "Number of prefill tokens processed.",
+            prompt_tokens.clone(),
+        );
+
+        let prompt_tokens_by_source = Family::default();
+        registry.register(
+            "vllm:prompt_tokens_by_source",
+            "Number of prompt tokens by source.",
+            prompt_tokens_by_source.clone(),
+        );
+
+        let prompt_tokens_cached = Family::default();
+        registry.register(
+            "vllm:prompt_tokens_cached",
+            "Number of prompt tokens with prefix cache hits.",
+            prompt_tokens_cached.clone(),
+        );
+
+        let prompt_tokens_recomputed = Family::default();
+        registry.register(
+            "vllm:prompt_tokens_recomputed",
+            "Number of cached prompt tokens recomputed during prefill.",
+            prompt_tokens_recomputed.clone(),
+        );
+
+        let generation_tokens = Family::default();
+        registry.register(
+            "vllm:generation_tokens",
+            "Number of generation tokens processed.",
+            generation_tokens.clone(),
+        );
+
         // Request lifecycle counters and histograms.
         let request_success = Family::default();
         registry.register(
@@ -205,6 +265,12 @@ impl RequestMetrics {
         );
 
         Self {
+            num_preemptions,
+            prompt_tokens,
+            prompt_tokens_by_source,
+            prompt_tokens_cached,
+            prompt_tokens_recomputed,
+            generation_tokens,
             request_success,
             request_prompt_tokens,
             request_generation_tokens,

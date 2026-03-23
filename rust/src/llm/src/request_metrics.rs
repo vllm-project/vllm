@@ -3,11 +3,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use vllm_engine_core_client::protocol::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreOutput, FinishReason,
 };
-use vllm_metrics::{EngineLabels, FinishedReasonLabels, METRICS, RequestMetrics};
+use vllm_metrics::{
+    EngineLabels, FinishedReasonLabels, METRICS, PromptTokenSourceLabels, RequestMetrics,
+};
 
 fn metrics() -> &'static RequestMetrics {
     &METRICS.request
 }
+
+const PROMPT_TOKEN_SOURCE_LOCAL_COMPUTE: &str = "local_compute";
+const PROMPT_TOKEN_SOURCE_LOCAL_CACHE_HIT: &str = "local_cache_hit";
+const PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER: &str = "external_kv_transfer";
 
 /// Request-scoped metrics state tracked across streamed engine-core updates.
 ///
@@ -78,12 +84,23 @@ impl RequestMetricsTracker {
         self.last_seen_engine_index = engine_index;
         self.latest_num_cached_tokens = output.num_cached_tokens;
         self.num_generation_tokens += output.new_token_ids.len() as u32;
+        metrics()
+            .generation_tokens
+            .get_or_create(&engine_labels(&self.model_name, engine_index))
+            .inc_by(output.new_token_ids.len() as u64);
 
         if let Some(events) = &output.events {
-            self.observe_events(events);
+            self.observe_events(engine_index, events);
         }
 
         if self.is_prefilling {
+            record_prompt_tokens(
+                &self.model_name,
+                engine_index,
+                self.prompt_len,
+                output.num_cached_tokens,
+                output.num_external_computed_tokens,
+            );
             self.first_token_latency = received_at - self.arrival_time;
             observe_time_to_first_token_seconds(
                 &self.model_name,
@@ -177,7 +194,7 @@ impl RequestMetricsTracker {
             .observe(time_per_output_token_seconds);
     }
 
-    fn observe_events(&mut self, events: &[EngineCoreEvent]) {
+    fn observe_events(&mut self, engine_index: u32, events: &[EngineCoreEvent]) {
         for event in events {
             match event.r#type {
                 EngineCoreEventType::Queued => {
@@ -188,7 +205,12 @@ impl RequestMetricsTracker {
                         self.scheduled_ts = event.timestamp;
                     }
                 }
-                EngineCoreEventType::Preempted => {}
+                EngineCoreEventType::Preempted => {
+                    metrics()
+                        .num_preemptions
+                        .get_or_create(&engine_labels(&self.model_name, engine_index))
+                        .inc();
+                }
             }
         }
     }
@@ -224,6 +246,70 @@ fn record_request_success(model_name: &str, engine: u32, finish_reason: FinishRe
             finished_reason: finish_reason.as_str(),
         })
         .inc();
+}
+
+fn prompt_token_source_labels(
+    model_name: &str,
+    engine: u32,
+    source: &'static str,
+) -> PromptTokenSourceLabels {
+    PromptTokenSourceLabels {
+        model_name: model_name.to_string(),
+        engine,
+        source,
+    }
+}
+
+fn record_prompt_tokens(
+    model_name: &str,
+    engine: u32,
+    prompt_len: u32,
+    num_cached_tokens: u32,
+    num_external_computed_tokens: u32,
+) {
+    let recomputed = u64::from(num_cached_tokens + 1 == prompt_len);
+    let computed = prompt_len.saturating_sub(num_cached_tokens) as u64;
+    let external_kv_transfer = num_external_computed_tokens as u64;
+    let local_cache_hit = (num_cached_tokens as u64)
+        .saturating_add(recomputed)
+        .saturating_sub(external_kv_transfer);
+
+    metrics()
+        .prompt_tokens
+        .get_or_create(&engine_labels(model_name, engine))
+        .inc_by(prompt_len as u64);
+    metrics()
+        .prompt_tokens_by_source
+        .get_or_create(&prompt_token_source_labels(
+            model_name,
+            engine,
+            PROMPT_TOKEN_SOURCE_LOCAL_COMPUTE,
+        ))
+        .inc_by(computed);
+    metrics()
+        .prompt_tokens_by_source
+        .get_or_create(&prompt_token_source_labels(
+            model_name,
+            engine,
+            PROMPT_TOKEN_SOURCE_LOCAL_CACHE_HIT,
+        ))
+        .inc_by(local_cache_hit);
+    metrics()
+        .prompt_tokens_by_source
+        .get_or_create(&prompt_token_source_labels(
+            model_name,
+            engine,
+            PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER,
+        ))
+        .inc_by(external_kv_transfer);
+    metrics()
+        .prompt_tokens_cached
+        .get_or_create(&engine_labels(model_name, engine))
+        .inc_by(num_cached_tokens as u64);
+    metrics()
+        .prompt_tokens_recomputed
+        .get_or_create(&engine_labels(model_name, engine))
+        .inc_by(recomputed);
 }
 
 fn diff_or_zero(end: f64, start: f64) -> f64 {

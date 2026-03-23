@@ -595,10 +595,14 @@ async fn generate_records_request_metrics_in_prometheus_output() {
                 EngineCoreOutputs {
                     engine_index: 4,
                     timestamp: 11.5,
-                    outputs: vec![request_output(
+                    outputs: vec![request_output_with_events(
                         "req-metrics",
                         vec![2, 3],
                         Some(FinishReason::Length),
+                        Some(vec![EngineCoreEvent {
+                            r#type: EngineCoreEventType::Preempted,
+                            timestamp: 10.5,
+                        }]),
                     )],
                     finished_requests: Some(BTreeSet::from(["req-metrics".to_string()])),
                     ..Default::default()
@@ -621,7 +625,31 @@ async fn generate_records_request_metrics_in_prometheus_output() {
 
     let rendered = METRICS.render().unwrap();
     assert!(rendered.contains(&format!(
-        "vllm:request_success_total{{model_name=\"{model_name}\",engine=\"4\",finish_reason=\"length\"}} 1"
+        "vllm:request_success_total{{model_name=\"{model_name}\",engine=\"4\",finished_reason=\"length\"}} 1"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:prompt_tokens_total{{model_name=\"{model_name}\",engine=\"4\"}} 2"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"local_compute\"}} 2"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"local_cache_hit\"}} 0"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:prompt_tokens_by_source_total{{model_name=\"{model_name}\",engine=\"4\",source=\"external_kv_transfer\"}} 0"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:prompt_tokens_cached_total{{model_name=\"{model_name}\",engine=\"4\"}} 0"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:prompt_tokens_recomputed_total{{model_name=\"{model_name}\",engine=\"4\"}} 0"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:generation_tokens_total{{model_name=\"{model_name}\",engine=\"4\"}} 3"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
     )));
     assert!(rendered.contains(&format!(
         "vllm:time_to_first_token_seconds_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
@@ -703,7 +731,7 @@ async fn dropping_stream_records_abort_terminal_request_metrics() {
     engine_task.await.unwrap();
     let rendered = METRICS.render().unwrap();
     assert!(rendered.contains(&format!(
-        "vllm:request_success_total{{model_name=\"{model_name}\",engine=\"5\",finish_reason=\"abort\"}} 1"
+        "vllm:request_success_total{{model_name=\"{model_name}\",engine=\"5\",finished_reason=\"abort\"}} 1"
     )));
     assert!(rendered.contains(&format!(
         "vllm:e2e_request_latency_seconds_count{{model_name=\"{model_name}\",engine=\"5\"}} 1"

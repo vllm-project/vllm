@@ -124,6 +124,7 @@ impl EngineCoreClient {
         &self.engine_identity
     }
 
+    /// Get the model name associated with this client used for metrics labeling.
     pub fn model_name(&self) -> &str {
         self.inner.model_name()
     }

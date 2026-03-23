@@ -36,11 +36,19 @@ pub struct FinishedReasonLabels {
     pub finished_reason: &'static str,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct PromptTokenSourceLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub source: &'static str,
+}
+
 pub(crate) type U64Counter = Counter<u64, AtomicU64>;
 pub(crate) type U64Gauge = Gauge<u64, AtomicU64>;
 pub(crate) type F64Gauge = Gauge<f64, AtomicU64>;
 pub(crate) type HistogramFamily = Family<EngineLabels, Histogram, fn() -> Histogram>;
 pub(crate) type FinishedReasonCounterFamily = Family<FinishedReasonLabels, U64Counter>;
+pub(crate) type PromptTokenSourceCounterFamily = Family<PromptTokenSourceLabels, U64Counter>;
 
 /// Shared Prometheus registry for frontend metrics.
 ///

@@ -23,20 +23,29 @@ fn kv_block_reuse_gap_histogram() -> Histogram {
 
 /// Scheduler/batch-scoped Prometheus families exported from `SchedulerStats`.
 pub struct SchedulerMetrics {
+    // Scheduler state gauges.
     pub scheduler_running: Family<EngineLabels, U64Gauge>,
     pub scheduler_waiting: Family<EngineLabels, U64Gauge>,
     pub kv_cache_usage: Family<EngineLabels, F64Gauge>,
+
+    // Prefix-cache counters, including the connector-backed external cache path.
     pub prefix_cache_queries: Family<EngineLabels, U64Counter>,
     pub prefix_cache_hits: Family<EngineLabels, U64Counter>,
     pub external_prefix_cache_queries: Family<EngineLabels, U64Counter>,
     pub external_prefix_cache_hits: Family<EngineLabels, U64Counter>,
+
+    // Speculative decoding counters.
     pub spec_decode_num_drafts: Family<EngineLabels, U64Counter>,
     pub spec_decode_num_draft_tokens: Family<EngineLabels, U64Counter>,
     pub spec_decode_num_accepted_tokens: Family<EngineLabels, U64Counter>,
     pub spec_decode_num_accepted_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
+
+    // Per-engine performance / MFU counters.
     pub estimated_flops_per_gpu_total: Family<EngineLabels, U64Counter>,
     pub estimated_read_bytes_per_gpu_total: Family<EngineLabels, U64Counter>,
     pub estimated_write_bytes_per_gpu_total: Family<EngineLabels, U64Counter>,
+
+    // Sampled KV-cache residency histograms.
     pub kv_block_lifetime_seconds: HistogramFamily,
     pub kv_block_idle_before_evict_seconds: HistogramFamily,
     pub kv_block_reuse_gap_seconds: HistogramFamily,
