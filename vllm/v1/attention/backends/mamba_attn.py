@@ -159,13 +159,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         """
         m = common_attn_metadata
 
-        assert m.num_reqs <= self.decode_cudagraph_max_bs, (
+        assert (
+            m.max_query_len <= 1 + self.num_spec_tokens
+            and m.num_reqs <= self.decode_cudagraph_max_bs
+        ), (
             "Mamba only supports decode-only full CUDAGraph capture. "
             "Make sure all cudagraph capture sizes <= max_num_seq."
         )
 
-        if self.num_spec_tokens > 0:
-            assert m.max_query_len == 1 + self.num_spec_tokens  # decode-only
+        assert m.max_query_len == 1 + self.num_spec_tokens  # decode-only
 
         num_accepted_tokens = None
         if self.num_spec_tokens > 0:
@@ -187,7 +189,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         Subclasses (e.g., Mamba2) can override to add additional metadata.
         """
         return self._compute_common_metadata(
-            common_attn_metadata, num_accepted_tokens=num_accepted_tokens
+            common_attn_metadata,
+            num_accepted_tokens=num_accepted_tokens,
         )
 
     def _compute_chunk_metadata(
