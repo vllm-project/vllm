@@ -72,52 +72,38 @@ def test_machete_kernel_selected(act_type, weight_type, group_size, zero_points)
     )
 
 
-def test_machete_rejects_partitioned_g_idx():
-    """Verify Machete rejects act reordering with partitioned weights."""
+@pytest.mark.parametrize(
+    "full_shape,part_shape,weight_type,group_size,has_g_idx,expected_reason",
+    [
+        ((4096, 4096), (2048, 4096), scalar_types.uint4b8, 128, True, "Act reordering"),
+        (
+            (4096, 4096),
+            (4096, 4096),
+            scalar_types.float6_e3m2f,
+            128,
+            False,
+            "Quant type",
+        ),
+        ((4096, 4096), (4096, 4096), scalar_types.uint4b8, 32, False, "Group size"),
+    ],
+    ids=["partitioned-g_idx", "unsupported-quant-type", "unsupported-group-size"],
+)
+def test_machete_rejects_invalid_config(
+    full_shape, part_shape, weight_type, group_size, has_g_idx, expected_reason
+):
+    """Verify Machete rejects unsupported configurations."""
     config = MPLinearLayerConfig(
-        full_weight_shape=(4096, 4096),
-        partition_weight_shape=(2048, 4096),
+        full_weight_shape=full_shape,
+        partition_weight_shape=part_shape,
         act_type=torch.float16,
-        weight_type=scalar_types.uint4b8,
-        group_size=128,
+        weight_type=weight_type,
+        group_size=group_size,
         zero_points=False,
-        has_g_idx=True,
+        has_g_idx=has_g_idx,
     )
     can_impl, reason = MacheteLinearKernel.can_implement(config)
-    assert not can_impl, "Machete should reject partitioned g_idx"
-    assert "Act reordering" in reason
-
-
-def test_machete_rejects_unsupported_quant_type():
-    """Verify Machete rejects unsupported weight quantization types."""
-    config = MPLinearLayerConfig(
-        full_weight_shape=(4096, 4096),
-        partition_weight_shape=(4096, 4096),
-        act_type=torch.float16,
-        weight_type=scalar_types.float6_e3m2f,
-        group_size=128,
-        zero_points=False,
-        has_g_idx=False,
-    )
-    can_impl, reason = MacheteLinearKernel.can_implement(config)
-    assert not can_impl, "Machete should reject unsupported quant type"
-    assert "Quant type" in reason
-
-
-def test_machete_rejects_unsupported_group_size():
-    """Verify Machete rejects unsupported group sizes."""
-    config = MPLinearLayerConfig(
-        full_weight_shape=(4096, 4096),
-        partition_weight_shape=(4096, 4096),
-        act_type=torch.float16,
-        weight_type=scalar_types.uint4b8,
-        group_size=32,
-        zero_points=False,
-        has_g_idx=False,
-    )
-    can_impl, reason = MacheteLinearKernel.can_implement(config)
-    assert not can_impl, "Machete should reject unsupported group size"
-    assert "Group size" in reason
+    assert not can_impl
+    assert expected_reason in reason
 
 
 def test_kernel_selection_with_disabled_machete(monkeypatch):
@@ -170,9 +156,11 @@ def test_w4a16_machete_e2e(vllm_runner, model_name):
         assert len(output[0][1]) > 0
 
 
-def test_w4a16_machete_bfloat16(vllm_runner):
-    """Verify Machete works with bf16 activations."""
+def test_w4a16_machete_bfloat16_deterministic(vllm_runner):
+    """Verify Machete works with bf16 activations and is deterministic."""
     model_name = "nm-testing/tinyllama-oneshot-w4a16-channel-v2"
+    prompt = "The capital of France is"
+
     with vllm_runner(
         model_name,
         enforce_eager=True,
@@ -190,16 +178,6 @@ def test_w4a16_machete_bfloat16(vllm_runner):
 
         llm.apply_model(check_kernel_type)
 
-        output = llm.generate_greedy("1 2 3 4 5", max_tokens=5)
-        assert output
-
-
-def test_w4a16_machete_deterministic(vllm_runner):
-    """Verify Machete produces deterministic output across runs."""
-    model_name = "nm-testing/tinyllama-oneshot-w4a16-channel-v2"
-    prompt = "The capital of France is"
-
-    with vllm_runner(model_name, enforce_eager=True, gpu_memory_utilization=0.5) as llm:
         out1 = llm.generate_greedy(prompt, max_tokens=10)
         out2 = llm.generate_greedy(prompt, max_tokens=10)
         assert out1[0][1] == out2[0][1], (
