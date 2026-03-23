@@ -40,18 +40,20 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.spec_decode.utils import (
+from vllm.v1.spec_decode.spec_decode_pytorch_utils import (
     PADDING_SLOT_ID,
+    copy_and_expand_eagle_inputs_pytorch,
+    eagle_prepare_inputs_padded_pytorch,
+    eagle_prepare_next_token_padded_pytorch,
+    next_power_of_2,
+)
+from vllm.v1.spec_decode.utils import (
     compute_new_slot_mapping,
     copy_and_expand_eagle_inputs_kernel,
-    copy_and_expand_eagle_inputs_pytorch,
     eagle_prepare_inputs_padded_kernel,
-    eagle_prepare_inputs_padded_pytorch,
     eagle_prepare_next_token_padded_kernel,
-    eagle_prepare_next_token_padded_pytorch,
     eagle_step_update_slot_mapping_and_metadata,
     extend_all_queries_by_N,
-    next_power_of_2,
 )
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
