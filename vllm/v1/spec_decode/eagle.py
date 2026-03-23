@@ -37,7 +37,6 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -1622,7 +1621,7 @@ class SpecDecodeBaseProposer:
         )
 
         # Map each draft layer to its kv_cache_group.
-        layer_to_group: dict[str, tuple[int, KVCacheGroupSpec]] = {}
+        layer_to_group = {}
         for gid, group in enumerate(kv_cache_config.kv_cache_groups):
             for layer_name in group.layer_names:
                 if layer_name in self._draft_attn_layer_names:
