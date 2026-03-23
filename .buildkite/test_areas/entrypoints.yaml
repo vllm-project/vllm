@@ -26,7 +26,7 @@ steps:
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
 - label: Entrypoints Integration (API Server openai - Part 1)
-  timeout_in_minutes: 70
+  timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -43,7 +43,7 @@ steps:
 
 
 - label: Entrypoints Integration (API Server openai - Part 2)
-  timeout_in_minutes: 70
+  timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -51,6 +51,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
+  - pytest -v -s entrypoints/openai/speech_to_text/
   - pytest -v -s entrypoints/test_chat_utils.py
   mirror:
     amd:
@@ -59,14 +60,15 @@ steps:
       - image-build-amd
 
 - label: Entrypoints Integration (API Server openai - Part 3)
-  timeout_in_minutes: 70
+  timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/openai
+  - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
 
 - label: Entrypoints Integration (API Server 2)
   timeout_in_minutes: 130
