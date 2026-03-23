@@ -3,7 +3,9 @@
 
 import pytest
 
+from vllm.entrypoints.openai.engine.protocol import StreamOptions
 from vllm.entrypoints.utils import get_max_tokens, sanitize_message
+from vllm.entrypoints.utils import should_include_usage
 
 
 def test_sanitize_message():
@@ -11,6 +13,25 @@ def test_sanitize_message():
         sanitize_message("<_io.BytesIO object at 0x7a95e299e750>")
         == "<_io.BytesIO object>"
     )
+
+
+@pytest.mark.parametrize(
+    ("stream_options", "expected"),
+    [
+        (None, (True, True)),
+        (StreamOptions(include_usage=False), (True, True)),
+        (
+            StreamOptions(include_usage=False, continuous_usage_stats=False),
+            (True, True),
+        ),
+        (
+            StreamOptions(include_usage=True, continuous_usage_stats=False),
+            (True, True),
+        ),
+    ],
+)
+def test_should_include_usage_force_enables_continuous_usage(stream_options, expected):
+    assert should_include_usage(stream_options, True) == expected
 
 
 class TestGetMaxTokens:
