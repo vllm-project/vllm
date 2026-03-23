@@ -704,8 +704,8 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
         self.w8a8_block_fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=kFp8DynamicTokenSym,
-            weight_quant_key=kFp8StaticTokenSym,
+            activation_quant_key=self.activation_quant_key,
+            weight_quant_key=self.weight_quant_key,
             weight_shape=layer.weight.shape,
             input_dtype=self.input_dtype,
             out_dtype=self.out_dtype,
