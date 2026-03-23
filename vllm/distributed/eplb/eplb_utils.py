@@ -3,11 +3,46 @@
 """Utility functions for EPLB (Expert Parallel Load Balancing)."""
 
 import os
+import time
+
+import torch
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+class EventWrapper:
+    """
+    A CUDA event with a CPU-side flag that guards against calling
+    event.wait() before event.record() has been called (which would
+    be a no-op and break ordering guarantees).
+
+    Typical usage across two threads:
+
+      Producer thread (async worker):
+        event.wait()   # spins until consumer calls record(), then inserts
+                       # GPU-side dependency on the current CUDA stream
+
+      Consumer thread (main thread):
+        # ... consume the buffer ...
+        event.record() # records on the current CUDA stream, then sets flag
+    """
+
+    def __init__(self):
+        self.event = torch.cuda.Event()
+        self.record_call = False
+
+    def wait(self, stream: torch.cuda.Stream | None = None):
+        while self.record_call is False:
+            time.sleep(0)
+        self.event.wait(stream)
+        self.record_call = False
+
+    def record(self, stream: torch.cuda.Stream | None = None):
+        self.event.record(stream)
+        self.record_call = True
 
 
 def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:

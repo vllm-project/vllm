@@ -19,6 +19,7 @@ from torch.distributed import (
     get_global_rank,
 )
 
+from vllm.distributed.eplb.eplb_utils import EventWrapper
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
@@ -73,12 +74,11 @@ class AsyncEPLBLayerResult:
     """Per-physical-expert flag: weight was received on this rank."""
     recv_metadata: RecvMetadata
     """Metadata describing what was received during transfer_layer."""
-    consumed_event: torch.cuda.Event
+    consumed_event: EventWrapper
     """
-    Unrecorded CUDA event created by the async worker before publishing this
-    result.  The async worker's cuda_stream waits on it, so the main thread
-    must call consumed_event.record() after move_from_buffer() completes to
-    allow the next layer's transfer to begin.
+    Created by the async worker before publishing this result. The main thread
+    calls consumed_event.record() after move_from_buffer() completes, which
+    unblocks the async worker's consumed_event.wait() call.
     """
 
 
