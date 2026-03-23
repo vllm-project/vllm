@@ -25,6 +25,7 @@ validator.workspace = true
 vllm-chat.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
+vllm-metrics.workspace = true
 vllm-text.workspace = true
 
 [dev-dependencies]

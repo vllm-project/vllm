@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
+use vllm_metrics::stats::SchedulerStats;
 
 use crate::error::{Error, Result};
 
@@ -311,7 +312,7 @@ pub struct EngineCoreOutputs {
     #[serde(default)]
     pub outputs: Vec<EngineCoreOutput>,
     #[serde(default)]
-    pub scheduler_stats: Option<OpaqueValue>,
+    pub scheduler_stats: Option<Box<SchedulerStats>>,
     #[serde(default)]
     pub timestamp: f64,
     #[serde(default)]

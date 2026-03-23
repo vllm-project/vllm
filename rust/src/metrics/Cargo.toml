@@ -1,0 +1,12 @@
+[package]
+name = "vllm-metrics"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+prometheus-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -852,6 +852,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dtoa"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c3cf4824e2d5f025c7b531afcb2325364084a16806f6d47fbc1f5fbd9960590"
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2424,6 +2430,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "prometheus-client"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4500adecd7af8e0e9f4dbce15cfee07ce913fbf6ad605cc468b83f2d531ee94"
+dependencies = [
+ "dtoa",
+ "itoa",
+ "parking_lot",
+ "prometheus-client-derive-encode",
+]
+
+[[package]]
+name = "prometheus-client-derive-encode"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9adf1691c04c0a5ff46ff8f262b58beb07b0dbb61f96f9f54f6cbd82106ed87f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -4212,6 +4241,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "vllm-metrics",
  "zeromq",
 ]
 
@@ -4231,6 +4261,15 @@ dependencies = [
  "uuid",
  "vllm-engine-core-client",
  "zeromq",
+]
+
+[[package]]
+name = "vllm-metrics"
+version = "0.1.0"
+dependencies = [
+ "prometheus-client",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4260,6 +4299,7 @@ dependencies = [
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-metrics",
  "vllm-text",
  "zeromq",
 ]

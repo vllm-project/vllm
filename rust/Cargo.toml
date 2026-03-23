@@ -4,6 +4,7 @@ members = [
     "src/cmd",
     "src/engine-core-client",
     "src/llm",
+    "src/metrics",
     "src/openai-server",
     "src/text",
 ]
@@ -31,6 +32,7 @@ hf-hub = { version = "0.5.0", features = ["tokio"] }
 libc = "0.2.177"
 openai-protocol = { version = "1.4.0", features = ["axum"] }
 parking_lot = "0.12.5"
+prometheus-client = "0.24.0"
 reasoning-parser = "1.2.1"
 rmp-serde = "1.3.1"
 rmpv = { version = "1.3.0", features = ["with-serde"] }
@@ -63,6 +65,7 @@ validator = { version = "0.20.0", features = ["derive"] }
 vllm-chat = { path = "src/chat" }
 vllm-engine-core-client = { path = "src/engine-core-client" }
 vllm-llm = { path = "src/llm" }
+vllm-metrics = { path = "src/metrics" }
 vllm-openai-server = { path = "src/openai-server" }
 vllm-text = { path = "src/text" }
 zeromq = { version = "0.6.0-pre.1", default-features = false, features = [

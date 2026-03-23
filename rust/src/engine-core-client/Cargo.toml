@@ -19,6 +19,7 @@ thiserror-ext.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+vllm-metrics.workspace = true
 zeromq.workspace = true
 
 [dev-dependencies]

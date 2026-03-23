@@ -1,5 +1,6 @@
 mod chat_completions;
 mod completions;
+mod metrics;
 mod models;
 mod utils;
 
@@ -14,6 +15,7 @@ use crate::state::AppState;
 /// Build the minimal OpenAI-compatible router for one configured model.
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/metrics", get(metrics::scrape))
         .route("/v1/models", get(models::list_models))
         .route("/v1/completions", post(completions::completions))
         .route(

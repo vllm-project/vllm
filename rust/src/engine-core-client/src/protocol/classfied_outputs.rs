@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use enum_as_inner::EnumAsInner;
+use vllm_metrics::stats::SchedulerStats;
 
-use super::{EngineCoreOutput, EngineCoreOutputs, OpaqueValue, UtilityOutput};
+use super::{EngineCoreOutput, EngineCoreOutputs, UtilityOutput};
 
 /// Data-parallel control notifications multiplexed through `EngineCoreOutputs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,7 +16,7 @@ pub enum DpControlMessage {
 pub struct RequestBatchOutputs {
     pub engine_index: u32,
     pub outputs: Vec<EngineCoreOutput>,
-    pub scheduler_stats: Option<OpaqueValue>,
+    pub scheduler_stats: Option<Box<SchedulerStats>>,
     pub timestamp: f64,
     pub finished_requests: Option<BTreeSet<String>>,
 }
