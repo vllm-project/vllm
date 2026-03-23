@@ -7,7 +7,6 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final
 
 import partial_json_parser
@@ -71,7 +70,7 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import ParserManager
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams
-from vllm.sampling_params import BeamSearchParams, SamplingParams, StructuredOutputsParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
@@ -281,35 +280,13 @@ class OpenAIServingChat(OpenAIServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
-                # Prepare structured tag from json_schema/tools when using reasoning parser (same as Responses API).
-                if self.reasoning_parser is not None:
+                if self.reasoning_parser_cls is not None:
                     tokenizer = self.renderer.get_tokenizer()
-                    has_tools = len(request.tools or []) > 0
-                    struct_out = sampling_params.structured_outputs
-                    if isinstance(struct_out, StructuredOutputsParams) or has_tools:
-                        reasoning_parser = self.reasoning_parser(tokenizer)
-                        prepared = reasoning_parser.prepare_structured_tag(
-                            struct_out if isinstance(struct_out, StructuredOutputsParams) else None,
-                            None,
-                            sampling_params=sampling_params,
-                            tools=request.tools if request.tools else None,
-                            model_architecture=self._model_architecture(),
-                        )
-                        if prepared is not None:
-                            if isinstance(struct_out, StructuredOutputsParams):
-                                sampling_params.structured_outputs = replace(
-                                    struct_out,
-                                    json=None,
-                                    regex=None,
-                                    choice=None,
-                                    grammar=None,
-                                    json_object=None,
-                                    structural_tag=prepared,
-                                )
-                            else:
-                                sampling_params.structured_outputs = StructuredOutputsParams(
-                                    structural_tag=prepared
-                                )
+                    self.reasoning_parser_cls(tokenizer).apply_structured_outputs_for_chat(
+                        sampling_params,
+                        request,
+                        model_architecture=self._model_architecture(),
+                    )
 
             self._log_inputs(
                 sub_request_id,
