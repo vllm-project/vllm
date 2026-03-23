@@ -117,10 +117,10 @@ def apply_grammar_bitmask(
             # work with a tensor. If we copy the tensor ourselves here we can
             # do it in a non_blocking manner and there should be no cpu sync
             # within xgrammar.
-            indices = torch.tensor(
+            index_tensor = torch.tensor(
                 out_indices, dtype=torch.int32, device="cpu", pin_memory=True
             )
-            indices = indices.to(logits.device, non_blocking=True)
+            indices = index_tensor.to(logits.device, non_blocking=True)
 
     # Handle dtype conversion for CPU (older xgrammar CPU kernels require float32)
     # See: https://github.com/vllm-project/vllm/issues/31901
