@@ -5,6 +5,12 @@ from typing import TYPE_CHECKING
 
 import torch
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+try:
+    import vllm_xpu_kernels._C
+    import vllm_xpu_kernels._C_cache_ops
+    import vllm_xpu_kernels._xpu_C
+except ImportError:
+    pass
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -253,6 +259,16 @@ class xpu_ops:
         quant_block_size: int,
         scale_fmt: str | None,
     ) -> None:
+        if hasattr(torch.ops, "_C_cache_ops") and hasattr(
+            torch.ops._C_cache_ops, "indexer_k_quant_and_cache"
+        ):
+            if scale_fmt is None:
+                scale_fmt = "fp8e4m3"
+            torch.ops._C_cache_ops.indexer_k_quant_and_cache(
+                k, kv_cache, slot_mapping, quant_block_size, scale_fmt
+            )
+            return
+
         head_dim = k.shape[-1]
         k = k.view(-1, head_dim)  # [total_tokens, head_dim]
 
@@ -438,7 +454,22 @@ class xpu_ops:
         stride0: int,
         strdide1: int,
         topk_tokens: int,
-    ) -> torch.Tensor:
+    ) -> None:
+        if hasattr(torch.ops, "_C") and hasattr(
+            torch.ops._C, "top_k_per_row_prefill"
+        ):
+            torch.ops._C.top_k_per_row_prefill(
+                logits,
+                cu_seqlen_ks,
+                cu_seqlen_ke,
+                raw_topk_indices,
+                num_rows,
+                stride0,
+                strdide1,
+                topk_tokens,
+            )
+            return
+
         real_topk = min(topk_tokens, logits.shape[-1])
         topk_indices = logits.topk(real_topk, dim=-1)[1].to(torch.int32)
         topk_indices -= cu_seqlen_ks[:, None]
@@ -463,7 +494,22 @@ class xpu_ops:
         stride0: int,
         stride1: int,
         topk_tokens: int,
-    ) -> torch.Tensor:
+    ) -> None:
+        if hasattr(torch.ops, "_C") and hasattr(
+            torch.ops._C, "top_k_per_row_decode"
+        ):
+            torch.ops._C.top_k_per_row_decode(
+                logits,
+                next_n,
+                seq_lens,
+                raw_topk_indices,
+                num_rows,
+                stride0,
+                stride1,
+                topk_tokens,
+            )
+            return
+
         device = logits.device
         batch_size = seq_lens.size(0)
         # padded query len
