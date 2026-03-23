@@ -25,7 +25,10 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.v1.metrics.reader import Metric
-from vllm.v1.spec_decode.utils import create_vllm_config_for_draft_model
+from vllm.v1.spec_decode.utils import (
+    apply_draft_moe_backend,
+    create_vllm_config_for_draft_model,
+)
 
 MTP_SIMILARITY_RATE = 0.8
 
@@ -926,6 +929,79 @@ def test_draft_model_engine_args_tensor_parallelism():
     draft_vllm_config: VllmConfig = create_vllm_config_for_draft_model(tgt_vllm_config)
     assert draft_vllm_config.parallel_config.tensor_parallel_size == 1
     assert draft_vllm_config.quant_config is None
+
+
+@pytest.mark.parametrize(
+    [
+        "target_moe_backend",
+        "draft_moe_backend",
+        "expected_target",
+        "expected_draft",
+        "expected_applied",
+        "has_spec_config",
+    ],
+    [
+        # Draft overrides target
+        ("flashinfer_trtllm", "triton",
+         "flashinfer_trtllm", "triton", "triton", True),
+        # Draft inherits target when unset
+        ("flashinfer_cutlass", None,
+         "flashinfer_cutlass", "flashinfer_cutlass", "flashinfer_cutlass",
+         True),
+        # Both default to auto
+        ("auto", None, "auto", "auto", "auto", True),
+        # No speculative config at all
+        ("auto", None, "auto", None, "auto", False),
+    ],
+    ids=[
+        "draft_overrides",
+        "draft_inherits_target",
+        "both_default_auto",
+        "no_spec_config",
+    ],
+)
+def test_draft_moe_backend(
+    target_moe_backend: str,
+    draft_moe_backend: str | None,
+    expected_target: str,
+    expected_draft: str | None,
+    expected_applied: str,
+    has_spec_config: bool,
+):
+    """Both create_vllm_config_for_draft_model and apply_draft_moe_backend
+    must propagate (or inherit) moe_backend correctly."""
+    spec_cfg: dict[str, Any] | None = None
+    if has_spec_config:
+        spec_cfg = {
+            "model": "Qwen/Qwen3-0.6B",
+            "method": "draft_model",
+            "num_speculative_tokens": 3,
+        }
+        if draft_moe_backend is not None:
+            spec_cfg["moe_backend"] = draft_moe_backend
+
+    engine_args = EngineArgs(
+        model="Qwen/Qwen3-1.7B",
+        tensor_parallel_size=1,
+        moe_backend=target_moe_backend,
+        speculative_config=spec_cfg,
+    )
+    tgt_cfg: VllmConfig = engine_args.create_engine_config()
+    assert tgt_cfg.kernel_config.moe_backend == expected_target
+
+    # apply_draft_moe_backend (used by Eagle/MTP/Medusa)
+    applied = apply_draft_moe_backend(tgt_cfg)
+    assert applied.kernel_config.moe_backend == expected_applied
+    # Must never touch model_config / parallel_config
+    assert applied.model_config is tgt_cfg.model_config
+    assert applied.parallel_config is tgt_cfg.parallel_config
+    if draft_moe_backend is None:
+        assert applied is tgt_cfg  # no-op returns same object
+
+    # create_vllm_config_for_draft_model (used by DraftModelProposer)
+    if has_spec_config:
+        draft_cfg = create_vllm_config_for_draft_model(tgt_cfg)
+        assert draft_cfg.kernel_config.moe_backend == expected_draft
 
 
 def test_draft_model_engine_args_rejects_invalid_tp_argname():

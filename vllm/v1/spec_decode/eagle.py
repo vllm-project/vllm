@@ -1223,10 +1223,12 @@ class SpecDecodeBaseProposer:
         need to customize model loading.
         """
         from vllm.compilation.backends import set_model_tag
+        from vllm.v1.spec_decode.utils import apply_draft_moe_backend
 
+        draft_vllm_config = apply_draft_moe_backend(self.vllm_config)
         with set_model_tag("eagle_head"):
             model = get_model(
-                vllm_config=self.vllm_config,
+                vllm_config=draft_vllm_config,
                 model_config=self.speculative_config.draft_model_config,
                 load_config=self.speculative_config.draft_load_config,
             )

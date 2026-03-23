@@ -257,6 +257,19 @@ def compute_new_slot_mapping(
     return new_slot_mapping
 
 
+def apply_draft_moe_backend(vllm_config: VllmConfig) -> VllmConfig:
+    """Return a VllmConfig with kernel_config.moe_backend overridden by
+    speculative_config.moe_backend when the latter is set.
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is not None and spec_config.moe_backend is not None:
+        new_kernel_config = replace(
+            vllm_config.kernel_config, moe_backend=spec_config.moe_backend
+        )
+        return replace(vllm_config, kernel_config=new_kernel_config)
+    return vllm_config
+
+
 def create_vllm_config_for_draft_model(
     target_model_vllm_config: VllmConfig,
 ) -> VllmConfig:
@@ -273,18 +286,13 @@ def create_vllm_config_for_draft_model(
         old_spec_config.draft_parallel_config, rank=old.parallel_config.rank
     )
 
-    draft_moe_backend = old_spec_config.moe_backend
-    if draft_moe_backend is not None:
-        new_kernel_config = replace(old.kernel_config, moe_backend=draft_moe_backend)
-    else:
-        new_kernel_config = old.kernel_config
+    applied = apply_draft_moe_backend(old)
 
     new: VllmConfig = replace(
-        old,
+        applied,
         quant_config=None,
         parallel_config=new_parallel_config,
         model_config=old_spec_config.draft_model_config,
-        kernel_config=new_kernel_config,
     )
     return new
 
