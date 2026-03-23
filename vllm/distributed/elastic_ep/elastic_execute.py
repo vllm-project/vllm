@@ -405,10 +405,11 @@ class ElasticEPScalingExecutor:
             )
             # Force re-creation of the modular kernel (and all2all manager)
             # for the new EP size by resetting quant_method to base
+            # TODO(bnell): this is a hack and will not work for MKs created in
+            # the new style.
             for module in moe_modules:
                 if hasattr(module.quant_method, "old_quant_method"):
-                    module.quant_method = module.quant_method.old_quant_method
-                    module.runner = module._init_runner()
+                    module._replace_quant_method(module.quant_method.old_quant_method)
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
         if (
             self.worker.vllm_config.compilation_config.mode

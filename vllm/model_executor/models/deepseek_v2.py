@@ -338,7 +338,7 @@ class DeepseekV2MoE(nn.Module):
         # NOTE(dbari): Use BF16 if routing is not Deepseek, e.g. Mistral Large 3
         self.gate.set_out_dtype(
             torch.float32
-            if self.experts.quant_method.is_monolithic
+            if self.experts.is_monolithic
             and self.experts.routing_method_type == RoutingMethodType.DeepSeekV3
             else torch.bfloat16
         )

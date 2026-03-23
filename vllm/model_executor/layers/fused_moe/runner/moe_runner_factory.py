@@ -19,9 +19,6 @@ from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import (
     DefaultMoERunner,
 )
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
 
 
 def create_moe_runner(
@@ -30,7 +27,7 @@ def create_moe_runner(
     router: FusedMoERouter,
     routed_input_transform: torch.nn.Module | None,
     gate: torch.nn.Module | None,
-    shared_experts: SharedExperts | None,
+    shared_experts: torch.nn.Module | None,
     quant_method: FusedMoEMethodBase,
     enable_dbo: bool,
     routed_output_transform: torch.nn.Module | None = None,

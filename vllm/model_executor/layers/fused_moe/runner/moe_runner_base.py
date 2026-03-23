@@ -191,7 +191,7 @@ class MoERunnerBase(MoERunner):
         router: FusedMoERouter,
         routed_input_transform: torch.nn.Module | None,
         gate: torch.nn.Module | None,
-        shared_experts: SharedExperts | None,
+        shared_experts: torch.nn.Module | None,
         quant_method: FusedMoEMethodBase,
         enable_dbo: bool,
         routed_output_transform: torch.nn.Module | None = None,
@@ -203,8 +203,12 @@ class MoERunnerBase(MoERunner):
         self.router = router
         self.routed_input_transform = routed_input_transform
         self.gate = gate
-        self.shared_experts = shared_experts
-        self.quant_method = quant_method
+        self._shared_experts = SharedExperts(
+            shared_experts,
+            moe_config=moe_config,
+            mk_owns_shared_expert=quant_method.mk_owns_shared_expert,  # ?
+        )
+        self._quant_method = quant_method
         self.enable_dbo = enable_dbo
         self.enable_eplb = moe_config.moe_parallel_config.enable_eplb
         self.routed_output_transform = routed_output_transform
@@ -217,6 +221,26 @@ class MoERunnerBase(MoERunner):
         self.layer_name = layer.layer_name
 
         self._forward_entry = self._select_forward(layer)
+
+    @property
+    def is_internal_router(self) -> bool:
+        return self.gate is not None
+
+    @property
+    def quant_method(self) -> FusedMoEMethodBase:
+        return self._quant_method
+
+    @property
+    def shared_experts(self) -> SharedExperts | None:
+        return self._shared_experts
+
+    # TODO(bnell): Temporary hack. Get rid of this.
+    def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
+        self._quant_method = quant_method
+        if self._shared_experts is not None:
+            self._shared_experts._mk_owns_shared_expert = (
+                quant_method.mk_owns_shared_expert
+            )
 
     def _select_forward(self, layer: torch.nn.Module) -> Callable:
         if current_platform.is_tpu() or current_platform.is_cpu():
