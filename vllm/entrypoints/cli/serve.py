@@ -298,6 +298,7 @@ def run_multi_api_server(args: argparse.Namespace):
             if coordinator
             else None,
             tensor_queue=tensor_queue,
+            fault_tolerance_addresses=addresses.fault_tolerance_addresses,
         )
 
         # For dp ranks > 0 in external/hybrid DP LB modes, we must delay the
