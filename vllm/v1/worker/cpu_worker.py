@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import platform
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -52,6 +53,24 @@ class CPUWorker(Worker):
             )
 
     def init_device(self):
+        # Check whether critical libraries are loaded
+        def check_preloaded_libs(name: str):
+            ld_preload_list = os.environ.get("LD_PRELOAD", "")
+            if name not in ld_preload_list:
+                logger.warning(
+                    "%s is not found in LD_PRELOAD. "
+                    "For best performance, please follow the section "
+                    "`set LD_PRELOAD` in "
+                    "https://docs.vllm.ai/en/latest/getting_started/installation/cpu/ "
+                    "to setup required pre-loaded libraries.",
+                    name,
+                )
+
+        if sys.platform.startswith("linux"):
+            check_preloaded_libs("libtcmalloc")
+            if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
+                check_preloaded_libs("libiomp")
+
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
         # Under numa binding some cores reserved for kv transfer in nixl_connector.py

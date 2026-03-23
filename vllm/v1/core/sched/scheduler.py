@@ -52,7 +52,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -184,13 +184,11 @@ class Scheduler(SchedulerInterface):
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
-        self.supports_mm_inputs = mm_registry.supports_multimodal_inputs(
+        supports_mm_inputs = mm_registry.supports_multimodal_inputs(
             vllm_config.model_config
         )
-        self.mm_budget = mm_budget = (
-            MultiModalBudget(vllm_config, mm_registry)
-            if self.supports_mm_inputs
-            else None
+        mm_budget = (
+            MultiModalBudget(vllm_config, mm_registry) if supports_mm_inputs else None
         )
 
         # NOTE: Text-only encoder-decoder models are implemented as
@@ -259,9 +257,26 @@ class Scheduler(SchedulerInterface):
             assert len(kv_cache_config.kv_cache_groups) > 0, (
                 "enable_return_routed_experts requires at least one kv cache group"
             )
+            # Find the attention group for routed experts indexing.
+            self.routed_experts_attn_gid = 0
+            for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+                if isinstance(group.kv_cache_spec, AttentionSpec):
+                    self.routed_experts_attn_gid = gid
+                    break
+            min_block_size = min(
+                [
+                    group.kv_cache_spec.block_size
+                    for group in kv_cache_config.kv_cache_groups
+                ]
+            )
+            num_groups = len(kv_cache_config.kv_cache_groups)
             self.max_num_kv_tokens = (
-                kv_cache_config.num_blocks // len(kv_cache_config.kv_cache_groups) + 1
-            ) * self.block_size
+                kv_cache_config.num_blocks // num_groups
+            ) * min_block_size
+            dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
+            pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+            if pcp_size * dcp_size > 1:
+                self.max_num_kv_tokens *= pcp_size * dcp_size
 
             self.routed_experts_reader.attach_buffer(
                 max_num_kv_tokens=self.max_num_kv_tokens,
@@ -895,9 +910,7 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            meta: KVConnectorMetadata = self.connector.build_connector_meta(
-                scheduler_output
-            )
+            meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
         # Build the connector meta for ECConnector
@@ -910,6 +923,11 @@ class Scheduler(SchedulerInterface):
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
+
+    def _build_kv_connector_meta(
+        self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
+        return connector.build_connector_meta(scheduler_output)
 
     def _preempt_request(self, request: Request, timestamp: float) -> None:
         """Preempt a request and put it back to the waiting queue.
@@ -1561,13 +1579,14 @@ class Scheduler(SchedulerInterface):
             return None
 
         kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
-        block_ids = kv_blocks.get_block_ids()[0]
+        block_ids = kv_blocks.get_block_ids()[self.routed_experts_attn_gid]
         num_tokens = request.num_tokens - 1
 
-        # compute slot mapping
+        # compute slot mapping using attention group's block_size
         block_ids_array = np.array(block_ids, dtype=np.int32)
         num_blocks = len(block_ids)
-        block_size = self.block_size
+        attn_group = self.kv_cache_config.kv_cache_groups[self.routed_experts_attn_gid]
+        block_size = attn_group.kv_cache_spec.block_size
 
         # generate block offsets
         block_offsets = np.arange(0, block_size)

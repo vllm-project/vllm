@@ -3,23 +3,20 @@
 
 """Inference-only Kimi-Audio model compatible with HuggingFace weights."""
 
-import os
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, ClassVar, Literal
 
 import numpy as np
 import torch
 import torch.nn as nn
-from safetensors import safe_open
 from transformers import BatchFeature
 from transformers import WhisperConfig as HFWhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs.data import PromptType, TokensPrompt
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-)
+from vllm.model_executor.model_loader import DefaultModelLoader
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
@@ -47,13 +44,15 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
 )
-from vllm.multimodal.processing.processor import BaseMultiModalProcessor
+from vllm.multimodal.processing.processor import (
+    BaseMultiModalProcessor,
+    ProcessorInputs,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.kimi_audio import KimiAudioTokenizer
 from vllm.transformers_utils.processor import cached_feature_extractor_from_config
 from vllm.transformers_utils.processors.kimi_audio import KimiAudioProcessor
-from vllm.v1.sample.metadata import SamplingMetadata
 
 # Kimi-Audio constants
 KIMIA_WHISPER_SUBFOLDER = "whisper-large-v3"
@@ -79,7 +78,6 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
     # packed_modules_mapping for Q/K/V fusion during weight loading
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "kv_proj": ["k_proj", "v_proj"],
     }
 
     def __init__(
@@ -88,21 +86,51 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
         # Load Whisper config from subfolder (authoritative source)
         # Kimi-Audio stores Whisper config in whisper-large-v3/config.json
         model_path = vllm_config.model_config.model
-        whisper_config_path = os.path.join(model_path, KIMIA_WHISPER_SUBFOLDER)
 
         # Load WhisperConfig from the subfolder
-        whisper_config = HFWhisperConfig.from_pretrained(whisper_config_path)
-
-        # Temporarily replace hf_config for WhisperEncoder.__init__()
-        original_config = vllm_config.model_config.hf_config
-        vllm_config.model_config.hf_config = whisper_config
-
-        super().__init__(
-            vllm_config=vllm_config, prefix=prefix, init_in_fp32=init_in_fp32
+        whisper_config = HFWhisperConfig.from_pretrained(
+            model_path,
+            subfolder=KIMIA_WHISPER_SUBFOLDER,
         )
 
-        # Restore original config
-        vllm_config.model_config.hf_config = original_config
+        super().__init__(
+            vllm_config=vllm_config.with_hf_config(whisper_config),
+            prefix=prefix,
+            init_in_fp32=init_in_fp32,
+        )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 # -----------------------------------------------------------------------------
@@ -114,28 +142,18 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
 class KimiAudioProcessingInfo(BaseProcessingInfo):
     """Processing info for vLLM registry."""
 
-    def get_hf_config(self):
-        return self.ctx.model_config.hf_config
-
     def get_hf_processor(self, **kwargs: object) -> KimiAudioProcessor:
-        """Get KimiAudioProcessor with feature extractor and tokenizer."""
-        # Use vLLM's cached loader for feature extractor
         feature_extractor = cached_feature_extractor_from_config(
             self.ctx.model_config,
             subfolder=KIMIA_WHISPER_SUBFOLDER,
         )
 
-        # Use vLLM's standard tokenizer loading (respects tokenizer_mode)
-        tokenizer = self.get_tokenizer()
-
-        # Construct processor directly
         return KimiAudioProcessor(
             feature_extractor=feature_extractor,
-            tokenizer=tokenizer,
+            tokenizer=self.get_tokenizer(),
         )
 
     def get_feature_extractor(self, **kwargs: object):
-        """Get feature extractor using vLLM's cached loader."""
         return cached_feature_extractor_from_config(
             self.ctx.model_config, subfolder=KIMIA_WHISPER_SUBFOLDER
         )
@@ -144,26 +162,16 @@ class KimiAudioProcessingInfo(BaseProcessingInfo):
         return {"audio": 1}
 
     def get_data_parser(self) -> "KimiAudioMultiModalDataParser":
-        """Get data parser for audio inputs."""
+        feature_extractor = self.get_feature_extractor()
         return KimiAudioMultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
             expected_hidden_size=self._get_expected_hidden_size(),
         )
 
 
 class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo]):
-    """Dummy inputs builder for vLLM registry."""
-
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> list[int]:
-        """Return dummy text as token IDs directly."""
-        num_audios = mm_counts.get("audio", 0)
-        if num_audios == 0:
-            return [198]  # "Transcribe" tokenized
-        # Return as token IDs directly to avoid tokenizer issues
-        return [
-            KimiAudioProcessor.KIMIA_MEDIA_BEGIN,
-            KimiAudioProcessor.KIMIA_TEXT_BLANK,
-            KimiAudioProcessor.KIMIA_MEDIA_END,
-        ] * num_audios
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return ""
 
     def get_dummy_mm_data(
         self,
@@ -186,6 +194,29 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
             ),
         }
 
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions],
+    ) -> ProcessorInputs:
+        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+
+        num_audios = mm_counts.get("audio", 0)
+        dummy_tokens = (
+            [198]
+            if num_audios == 0
+            else [
+                KimiAudioProcessor.KIMIA_MEDIA_BEGIN,
+                KimiAudioProcessor.KIMIA_TEXT_BLANK,
+                KimiAudioProcessor.KIMIA_MEDIA_END,
+            ]
+            * num_audios
+        )
+
+        return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
+
 
 # Field config for Kimi-Audio multimodal data
 _KIMIAUDIO_FIELD_CONFIG = {
@@ -196,10 +227,6 @@ _KIMIAUDIO_FIELD_CONFIG = {
 
 class KimiAudioMultiModalDataParser(MultiModalDataParser):
     """Custom data parser for Kimi-Audio multimodal data."""
-
-    def __init__(self, **kwargs):
-        # Whisper expects 16kHz audio
-        super().__init__(target_sr=16000, **kwargs)
 
     def _parse_audio_data(
         self,
@@ -361,6 +388,8 @@ class KimiAudioForConditionalGeneration(
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            # audio tower
+            "model.encoder.": "audio_tower.",
             # Audio projector (VQ-Adaptor)
             "model.vq_adaptor.layers.0.": "multi_modal_projector.vq_adaptor_layers_0.",
             "model.vq_adaptor.layers.3.": "multi_modal_projector.vq_adaptor_layers_3.",
@@ -371,7 +400,11 @@ class KimiAudioForConditionalGeneration(
             "model.embed_tokens.": "language_model.model.embed_tokens.",
             "model.norm.": "language_model.model.norm.",
             "lm_head.": "language_model.lm_head.",
-        }
+        },
+        orig_to_new_substr={
+            ".fc1.": ".mlp.fc1.",
+            ".fc2.": ".mlp.fc2.",
+        },
     )
 
     # Audio placeholder token sequence
@@ -388,28 +421,32 @@ class KimiAudioForConditionalGeneration(
         self.multimodal_config = vllm_config.model_config.multimodal_config
         self.model_path = vllm_config.model_config.model
 
-        self.audio_tower = KimiAudioWhisperEncoder(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "audio_tower"),
-        )
+        self.secondary_weights = [
+            DefaultModelLoader.Source(
+                model_or_path=vllm_config.model_config.model,
+                subfolder="whisper-large-v3",
+                revision=None,
+            )
+        ]
 
-        self.multi_modal_projector = KimiAudioMultiModalProjector(
-            whisper_dim=getattr(self.config, "kimia_adaptor_input_dim", 5120),
-            llm_dim=self.config.hidden_size,
-            prefix=maybe_prefix(prefix, "multi_modal_projector"),
-        )
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.audio_tower = KimiAudioWhisperEncoder(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "audio_tower"),
+            )
+            self.multi_modal_projector = KimiAudioMultiModalProjector(
+                whisper_dim=getattr(self.config, "kimia_adaptor_input_dim", 5120),
+                llm_dim=self.config.hidden_size,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
+            )
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config.with_hf_config(
-                self.config, architectures=["Qwen2ForCausalLM"]
-            ),
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-
-        self.logits_processor = LogitsProcessor(
-            self.config.vocab_size,
-            self.config.vocab_size,
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config.with_hf_config(
+                    self.config, architectures=["Qwen2ForCausalLM"]
+                ),
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -471,7 +508,6 @@ class KimiAudioForConditionalGeneration(
         multimodal_embeddings: tuple[torch.Tensor, ...] | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         """Embed input IDs and fuse with audio embeddings.
 
@@ -553,110 +589,25 @@ class KimiAudioForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata | None = None,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(
-            self.language_model.lm_head, hidden_states, sampling_metadata
-        )
-        return logits
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights, skipping MIMO layers (TTS-only) for ASR."""
         # Filter out MIMO/TTS weights since we only do ASR (speech-to-text)
         skipped_patterns = [
+            # Audio tower
+            "model.",
+            # MIMO/TTS
             "mimo_layers.",
             "mimo_output.",
             "mimo_norm.",
-            "audio_decoder.",
-        ]
-
-        # Filter weights
-        filtered_weights = [
-            (name, param)
-            for name, param in weights
-            if not any(pattern in name for pattern in skipped_patterns)
-        ]
-
-        # Separate main weights (non-Whisper) from Whisper weights
-        main_weights = [
-            (name, param)
-            for name, param in filtered_weights
-            if not name.startswith("audio_tower.")
         ]
 
         # Load main model weights (LLM + projector) with mapper
-        loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(main_weights, mapper=self.hf_to_vllm_mapper)
-
-        # Load Whisper encoder weights from subfolder
-        whisper_path = os.path.join(
-            self.model_path, f"{KIMIA_WHISPER_SUBFOLDER}/model.safetensors"
-        )
-        if os.path.exists(whisper_path):
-            whisper_loaded = self._load_whisper_weights_from_file(whisper_path)
-            loaded.update(whisper_loaded)
-
+        loader = AutoWeightsLoader(self, skip_prefixes=skipped_patterns)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         return loaded
-
-    def _load_whisper_weights_from_file(self, whisper_path: str) -> set[str]:
-        """Load Whisper encoder weights from safetensors file with transformations."""
-        if not os.path.exists(whisper_path):
-            return set()
-
-        # Step 1: Load raw weights from safetensors file
-        whisper_weights = []
-        with safe_open(whisper_path, framework="pt") as f:
-            for key in f.keys():  # noqa: SIM118
-                if key.startswith("model.encoder.") and "embed_positions" not in key:
-                    new_key = key.replace("model.encoder.", "")
-                    whisper_weights.append((new_key, f.get_tensor(key)))
-
-        # Step 2: Apply fc → mlp mapping using WeightsMapper
-        fc_mapper = WeightsMapper(
-            orig_to_new_substr={".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."}
-        )
-        whisper_mapped = list(fc_mapper.apply(whisper_weights))
-
-        # Step 3: Apply Q/K/V fusion manually
-        stacked_params_mapping = [
-            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
-            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
-            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
-        ]
-
-        params_dict = dict(self.audio_tower.named_parameters())
-        whisper_loaded: set[str] = set()
-
-        for name, loaded_weight in whisper_mapped:
-            fused = False
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                fused_name = name.replace(weight_name, param_name)
-                if fused_name not in params_dict:
-                    continue
-
-                param = params_dict[fused_name]
-                param.weight_loader(param, loaded_weight, shard_id)
-                whisper_loaded.add(f"audio_tower.{fused_name}")
-                fused = True
-                break
-
-            if not fused:
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-                whisper_loaded.add(f"audio_tower.{name}")
-
-        # Add embed_positions which is initialized randomly
-        whisper_loaded.add("audio_tower.embed_positions.weight")
-
-        return whisper_loaded
 
     @classmethod
     def get_speech_to_text_config(

@@ -1,18 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, overload
 
 from mistral_common.protocol.instruct.request import (
     ChatCompletionRequest as MistralChatCompletionRequest,
 )
+from mistral_common.protocol.instruct.request import (
+    ReasoningEffort,
+)
 from mistral_common.protocol.instruct.tool_calls import Function, Tool
 from mistral_common.protocol.instruct.validator import ValidationMode
 from mistral_common.tokens.tokenizers.base import (
     SpecialTokenPolicy,
     SpecialTokens,
+    Tokenizer,
 )
-from mistral_common.tokens.tokenizers.instruct import InstructTokenizerV13
+from mistral_common.tokens.tokenizers.instruct import (
+    InstructTokenizerBase,
+    InstructTokenizerV13,
+)
+from mistral_common.tokens.tokenizers.mistral import (
+    MistralTokenizer as MistralCommonTokenizer,
+)
 from mistral_common.tokens.tokenizers.sentencepiece import (
     SentencePieceTokenizer,
 )
@@ -22,20 +33,19 @@ from pydantic import ValidationError
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
+from vllm.tokenizers.protocol import TokenizerLike
 
-from .protocol import TokenizerLike
+try:
+    # Transformers v5
+    from transformers.tokenization_mistral_common import MistralCommonBackend
+except ImportError:
+    # Transformers v4
+    from transformers.tokenization_mistral_common import (
+        MistralCommonTokenizer as MistralCommonBackend,
+    )
 
 if TYPE_CHECKING:
     from transformers import BatchEncoding
-
-    try:
-        # Transformers v5
-        from transformers.tokenization_mistral_common import MistralCommonBackend
-    except ImportError:
-        # Transformers v4
-        from transformers.tokenization_mistral_common import (
-            MistralCommonTokenizer as MistralCommonBackend,
-        )
 
 logger = init_logger(__name__)
 
@@ -191,6 +201,15 @@ def validate_request_params(request: "ChatCompletionRequest"):
     if request.chat_template is not None or request.chat_template_kwargs is not None:
         raise ValueError("chat_template is not supported for Mistral tokenizers.")
 
+    if request.reasoning_effort and request.reasoning_effort not in list(
+        ReasoningEffort
+    ):
+        raise ValueError(
+            f"reasoning_effort={request.reasoning_effort} is not supported by "
+            "Mistral models. Supported values are: "
+            f"{[e.value for e in ReasoningEffort]}."
+        )
+
 
 def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
     assert isinstance(tokenizer, Tekkenizer), type(tokenizer)
@@ -222,15 +241,6 @@ class MistralTokenizer(TokenizerLike):
         download_dir: str | None = None,
         **kwargs,
     ) -> "MistralTokenizer":
-        try:
-            # Transformers v5
-            from transformers.tokenization_mistral_common import MistralCommonBackend
-        except ImportError:
-            # Transformers v4
-            from transformers.tokenization_mistral_common import (
-                MistralCommonTokenizer as MistralCommonBackend,
-            )
-
         tokenizer = MistralCommonBackend.from_pretrained(
             path_or_repo_id,
             *args,
@@ -242,13 +252,13 @@ class MistralTokenizer(TokenizerLike):
 
         return cls(tokenizer)
 
-    def __init__(self, tokenizer: "MistralCommonBackend") -> None:
+    def __init__(self, tokenizer: MistralCommonBackend) -> None:
         super().__init__()
 
-        self.transformers_tokenizer = tokenizer
-        self.mistral = tokenizer.tokenizer
-        self.instruct = self.mistral.instruct_tokenizer
-        self.tokenizer = self.instruct.tokenizer
+        self.transformers_tokenizer: MistralCommonBackend = tokenizer
+        self.mistral: MistralCommonTokenizer = tokenizer.tokenizer
+        self.instruct: InstructTokenizerBase = self.mistral.instruct_tokenizer
+        self.tokenizer: Tokenizer = self.instruct.tokenizer
 
         mode = self.mistral._chat_completion_request_validator._mode
         if mode != ValidationMode.test:
@@ -418,6 +428,12 @@ class MistralTokenizer(TokenizerLike):
         truncation = kwargs.get("truncation", False)
         max_length = kwargs.get("max_length")
 
+        version_kwargs = {}
+        # NOTE: This is for backward compatibility.
+        # Transformers should be passed arguments it knows.
+        if self.version >= 15:
+            version_kwargs["reasoning_effort"] = kwargs.get("reasoning_effort")
+
         messages, tools = _prepare_apply_chat_template_tools_and_messages(
             messages, tools, continue_final_message, add_generation_prompt
         )
@@ -432,9 +448,12 @@ class MistralTokenizer(TokenizerLike):
             max_length=max_length,
             return_tensors=None,
             return_dict=False,
+            **version_kwargs,
         )
 
-    def decode(self, ids: list[int] | int, skip_special_tokens: bool = False) -> str:
+    def decode(
+        self, ids: Sequence[int] | int, skip_special_tokens: bool = False
+    ) -> str:
         # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
         # is in, directly call self.transformers_tokenizer.decode(...).
         if isinstance(ids, int):
@@ -461,7 +480,11 @@ class MistralTokenizer(TokenizerLike):
         return self.transformers_tokenizer.convert_tokens_to_ids(tokens)
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
-        to_decode_special_tokens = {SpecialTokens.tool_calls}
+        to_decode_special_tokens = {
+            SpecialTokens.tool_calls,
+            SpecialTokens.begin_think,
+            SpecialTokens.end_think,
+        }
         if self.is_tekken:
             assert isinstance(self.tokenizer, Tekkenizer), type(self.tokenizer)
             tokens = [
@@ -512,7 +535,7 @@ class MistralTokenizer(TokenizerLike):
 
     def convert_ids_to_tokens(
         self,
-        ids: list[int],
+        ids: Sequence[int],
         skip_special_tokens: bool = False,
     ) -> list[str]:
         if not skip_special_tokens:

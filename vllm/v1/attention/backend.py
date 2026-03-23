@@ -51,7 +51,11 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto", "bfloat16"]
+    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = [
+        "auto",
+        "float16",
+        "bfloat16",
+    ]
 
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
@@ -358,6 +362,11 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
+    is_prefilling: torch.Tensor | None = None
+    """(batch_size,) bool tensor: True if request is still in prefill phase
+    (num_computed_tokens < num_prompt_tokens). Used by some backends to
+    distinguish actual decodes from short extends."""
+
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
@@ -439,6 +448,7 @@ class CommonAttentionMetadata:
             encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
+            is_prefilling=maybe_slice_reqs(self.is_prefilling),
         )
 
 

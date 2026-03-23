@@ -498,6 +498,28 @@ class CompilationConfig:
     on selected platforms. Disabled by default until more models
     are supported/tested to work."""
 
+    # Vision encoder CUDA graph
+    cudagraph_mm_encoder: bool = False
+    """Enable CUDA graph capture for multimodal encoder (ViT).
+    When enabled, captures full encoder forward as CUDA graph
+    for each token budget level."""
+
+    encoder_cudagraph_token_budgets: list[int] = field(default_factory=list)
+    """Token budget levels for encoder CUDA graph capture.
+    Each budget defines a fixed token capacity. At runtime, images are greedy-packed
+    into the smallest fitting budget and the corresponding CUDA graph is replayed.
+    If empty (default), auto-inferred from model architecture as power-of-2
+    levels from the model's estimated min budget to max budget.
+    User-provided values override auto-inference.
+    Example: [2048, 4096, 8192, 13824]"""
+
+    encoder_cudagraph_max_images_per_batch: int = 0
+    """Maximum number of images per batch for encoder CUDA graph capture.
+    Determines the fixed batch size used during graph capture.
+    If 0 (default), auto-inferred as max_budget // min_budget from the
+    model's budget range. User-provided positive value overrides
+    auto-inference."""
+
     # Inductor capture
     compile_sizes: list[int | str] | None = None
     """Sizes to compile for inductor. In addition
@@ -915,14 +937,32 @@ class CompilationConfig:
                 f"Invalid backend for piecewise compilation: {self.backend}"
             )
 
+        # Validate encoder CUDA graph configuration
+        if (
+            self.cudagraph_mm_encoder
+            and self.encoder_cudagraph_max_images_per_batch < 0
+        ):
+            raise ValueError(
+                "encoder_cudagraph_max_images_per_batch must be "
+                "non-negative (0 = auto-infer)"
+            )
+
         if self.backend == "":
             self.backend = current_platform.get_compile_backend()
 
-    def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
+    def init_backend(
+        self,
+        vllm_config: "VllmConfig",
+        prefix: str = "",
+        is_encoder: bool = False,
+    ) -> str | Callable:
         """
         Initialize the backend for the compilation config from a vllm config.
         Arguments:
             vllm_config: The vllm config to initialize the backend from.
+            prefix: Cache directory prefix for this compiled module.
+            is_encoder: Whether this module is used in an encoder (as
+                opposed to a text backbone).
         Returns:
             The backend for the compilation config.
         """
@@ -952,9 +992,7 @@ class CompilationConfig:
 
         from vllm.compilation.backends import VllmBackend
 
-        # TODO[@lucaskabela]: See if we can forward prefix
-        # https://github.com/vllm-project/vllm/issues/27045
-        return VllmBackend(vllm_config)
+        return VllmBackend(vllm_config, prefix=prefix, is_encoder=is_encoder)
 
     def post_init_cudagraph_sizes(self) -> None:
         """To complete the initialization after cudagraph related
