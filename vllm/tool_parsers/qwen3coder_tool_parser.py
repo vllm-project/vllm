@@ -152,8 +152,9 @@ class Qwen3CoderToolParser(ToolParser):
     def _resolve_param_type(self, param_def: dict) -> str:
         """Resolve the effective type string from a parameter definition.
 
-        Handles direct "type" fields (including type-as-array) and
-        anyOf/oneOf schemas emitted by Pydantic v2 for Optional[T].
+        Handles direct "type" fields (including type-as-array),
+        anyOf/oneOf schemas emitted by Pydantic v2 for Optional[T],
+        and $ref schemas from Pydantic model inputs.
         """
         if "type" in param_def:
             resolved = self._first_non_null_type(param_def["type"])
@@ -167,6 +168,12 @@ class Qwen3CoderToolParser(ToolParser):
                 resolved = self._first_non_null_type(v.get("type"))
                 if resolved:
                     return resolved
+
+        # $ref points to a schema definition (e.g. a Pydantic model).
+        # The referenced type is almost always an object, so treat it
+        # as such to route through json.loads.
+        if "$ref" in param_def:
+            return "object"
 
         return "string"
 
