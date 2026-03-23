@@ -614,7 +614,7 @@ class FusedMoE(CustomOp):
         # we can move ownership of _gate and _shared_experts into the runner.
         self._gate = gate
         self._shared_experts = shared_experts
-        self.shared_experts = None
+        self.shared_experts: SharedExperts | None = None
         self.runner = self._init_runner()
 
     def _init_shared_experts(self):  # -> SharedExperts | None:
@@ -629,7 +629,7 @@ class FusedMoE(CustomOp):
         # UnquantizedFusedMoEMethod's handling of MK initialization
         # which should be fixed by #36732.
         if self.shared_experts is not None:
-            self.shared_experts.__init__(
+            self.shared_experts.__init__(  # type: ignore
                 self._shared_experts,
                 moe_config=self.moe_config,
                 # Note: For now we must pass quant_method along to SharedExperts so it
