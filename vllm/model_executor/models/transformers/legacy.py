@@ -64,7 +64,7 @@ class LegacyMixin:
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        if self.is_roberta:
+    if self.is_roberta:
             positions = positions + self.padding_idx + 1
         return super().forward(
             input_ids=input_ids,
