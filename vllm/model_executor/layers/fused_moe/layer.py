@@ -614,13 +614,35 @@ class FusedMoE(CustomOp):
         # we can move ownership of _gate and _shared_experts into the runner.
         self._gate = gate
         self._shared_experts = shared_experts
+        self.shared_experts = None
         self.runner = self._init_runner()
 
-    def _init_shared_experts(self) -> SharedExperts | None:
+    def _init_shared_experts(self):  # -> SharedExperts | None:
         if self._shared_experts is None:
-            return None
+            return
 
-        return SharedExperts(
+        # Note: If the SharedExperts already exist, we reinitialize
+        # them in place. This is because the MK might be holding a
+        # reference to the same SharedExperts object. If we create a
+        # new instance, the MK will still be holding onto the old one,
+        # including the old quant_method. This is a workaround for
+        # UnquantizedFusedMoEMethod's handling of MK initialization
+        # which should be fixed by #36732.
+        if self.shared_experts is not None:
+            self.shared_experts.__init__(
+                self._shared_experts,
+                moe_config=self.moe_config,
+                # Note: For now we must pass quant_method along to SharedExperts so it
+                # can property determine where the shared experts are supposed to be
+                # called, i.e. by a MK or by the MoERunner.
+                # Once the MK can be created upfront, we can just pass in the proper
+                # flags derived from the quant_method's MK.
+                reduce_results=self.reduce_results,
+                quant_method=self.quant_method,
+            )
+            return
+
+        self.shared_experts = SharedExperts(
             self._shared_experts,
             moe_config=self.moe_config,
             # Note: For now we must pass quant_method along to SharedExperts so it
@@ -636,7 +658,7 @@ class FusedMoE(CustomOp):
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
-        self.shared_experts = self._init_shared_experts()
+        self._init_shared_experts()
         return DefaultMoERunner(
             layer=self,
             moe_config=self.moe_config,
