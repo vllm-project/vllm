@@ -114,7 +114,7 @@ def normalize_tool_arguments_json(arguments: str | None) -> str | None:
         return None
     try:
         parsed = json.loads(arguments)
-    except Exception:
+    except json.JSONDecodeError:
         return normalize_pathlike_text(arguments)
     normalized = _normalize_jsonish(parsed)
     return json.dumps(normalized, ensure_ascii=False)
