@@ -145,9 +145,9 @@ class KVConnectorModelRunnerMixin:
             have the same page size.
         2. A KV connector is configured, and the KV connector instance prefers
             to use this layout (prefer_cross_layer_blocks() returns True)
-        2. The flash attention backend supports this layout
+        3. The attention backend supports this layout
             (get_kv_cache_stride_order(True) includes a placement for a
-            num_layers dimension)
+            num_layers dimension that is not the first dimension)
 
         Note that the actual placement of the num_layers dimensions
         in the unified layers tensors will be determined by the attention
