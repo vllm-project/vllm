@@ -617,9 +617,8 @@ def _per_token_group_quant_fp8(
     # Avoid to divide zero
     eps,
     # Information for float8
-    fp8_min,
-    fp8_max,
-    fp8_max_inv,  # 1.0 / fp8_max, pre-computed on host
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
     use_ue8m0: tl.constexpr,
     # Meta-parameters
     BLOCK: tl.constexpr,
@@ -655,7 +654,7 @@ def _per_token_group_quant_fp8(
     # divisors can introduce 1-ULP error that flips FP8 quantization at
     # representable-value boundaries).
     _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
-    scale_raw = _absmax * fp8_max_inv
+    scale_raw = _absmax * (1.0 / fp8_max)
     y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
@@ -674,9 +673,8 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     y_s_col_stride: tl.int64,
     # Information for float8
     eps,
-    fp8_min,
-    fp8_max,
-    fp8_max_inv,  # 1.0 / fp8_max, pre-computed on host
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
     use_ue8m0: tl.constexpr,
     # Meta-parameters
     GROUP_SIZE: tl.constexpr,
@@ -717,7 +715,7 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
 
     # quant
     _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
-    scale_raw = _absmax * fp8_max_inv
+    scale_raw = _absmax * (1.0 / fp8_max)
     y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
     y_s = tl.reshape(y_s, (BLOCK_M, 1))
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
@@ -792,7 +790,6 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
         eps,
         fp8_min,
         fp8_max,
-        1.0 / fp8_max,
         use_ue8m0,
         GROUP_SIZE,
         BLOCK_M,
@@ -817,9 +814,8 @@ def _per_token_group_quant_fp8_colmajor(
     # Avoid to divide zero
     eps,
     # Information for float8
-    fp8_min,
-    fp8_max,
-    fp8_max_inv,  # 1.0 / fp8_max, pre-computed on host
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
     use_ue8m0: tl.constexpr,
     # Meta-parameters
     BLOCK: tl.constexpr,
@@ -859,7 +855,7 @@ def _per_token_group_quant_fp8_colmajor(
     y = tl.load(y_ptr + cols, mask=mask, other=0.0).to(tl.float32)
     # Quant
     _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
-    scale_raw = _absmax * fp8_max_inv
+    scale_raw = _absmax * (1.0 / fp8_max)
     y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
@@ -969,7 +965,6 @@ def per_token_group_quant_fp8(
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
-            fp8_max_inv=1.0 / fp8_max,
             use_ue8m0=use_ue8m0,
             BLOCK=BLOCK,
             num_warps=num_warps,
@@ -986,7 +981,6 @@ def per_token_group_quant_fp8(
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
-            fp8_max_inv=1.0 / fp8_max,
             use_ue8m0=use_ue8m0,
             BLOCK=BLOCK,
             num_warps=num_warps,

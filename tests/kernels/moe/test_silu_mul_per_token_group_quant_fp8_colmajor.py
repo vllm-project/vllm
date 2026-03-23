@@ -51,7 +51,6 @@ def reference_quant(x: torch.Tensor, use_ue8m0: bool):
         eps=1e-10,
         fp8_min=fp8_min,
         fp8_max=fp8_max,
-        fp8_max_inv=1.0 / fp8_max,
         use_ue8m0=use_ue8m0,
         BLOCK=BLOCK,
         num_warps=num_warps,
