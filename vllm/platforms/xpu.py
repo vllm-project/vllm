@@ -159,12 +159,8 @@ class XPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
-        # in V1(or with chunked prefill) block_size is 64
-        if cache_config and not cache_config.user_specified_block_size:
-            cache_config.block_size = 64
 
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
@@ -228,9 +224,90 @@ class XPUPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        # TODO: XPU still sets block_size in check_and_update_config.
-        # Move that logic here so block_size is chosen by the backend.
-        pass
+        """
+        Ensure block_size is compatible with the attention backend.
+        """
+        from vllm.config.cache import CacheConfig
+        from vllm.v1.attention.backend import AttentionBackend
+
+        _DEFAULT_BLOCK_SIZE = 64
+
+        cache_config = vllm_config.cache_config
+        if cache_config.user_specified_block_size:
+            # User specified --block-size; keep it.
+            return
+
+        model_config = vllm_config.model_config
+        if model_config is None:
+            cache_config.block_size = _DEFAULT_BLOCK_SIZE
+            return
+
+        from vllm.config.vllm import (
+            get_layers_from_vllm_config,
+        )
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
+        from vllm.utils.math_utils import cdiv
+
+        attn_layers = get_layers_from_vllm_config(
+            vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+        if not attn_layers:
+            logger.info("Update no attn layers block size to %d", _DEFAULT_BLOCK_SIZE)
+            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
+            return
+
+        def get_backend_block_size(
+            backend_cls: type["AttentionBackend"], block_size: int
+        ):
+            if backend_cls.get_name() in (
+                AttentionBackendEnum.FLASH_ATTN.name,
+                AttentionBackendEnum.TRITON_ATTN.name,
+                AttentionBackendEnum.TORCH_SDPA.name,
+            ):
+                return _DEFAULT_BLOCK_SIZE
+            elif backend_cls.get_name() == AttentionBackendEnum.XPU_MLA_SPARSE.name:
+                return 128
+            else:
+                return block_size
+
+        if model_config.is_hybrid:
+            backend_cls_list = set([i.get_attn_backend() for i in attn_layers.values()])
+            block_size_list = [
+                get_backend_block_size(i, cache_config.block_size)
+                for i in backend_cls_list
+            ]
+            new_block_size = cdiv(max(block_size_list), min(block_size_list)) * min(
+                block_size_list
+            )
+            if cache_config.block_size == new_block_size:
+                return
+            logger.info("Update hybrid model block size to %d", new_block_size)
+            if cache_config.mamba_cache_mode == "align":
+                cache_config.mamba_block_size = new_block_size
+            if cache_config.mamba_page_size_padded is not None:
+                attn_page_size_1_token = (
+                    cache_config.mamba_page_size_padded // cache_config.block_size
+                )
+                cache_config.mamba_page_size_padded = (
+                    new_block_size * attn_page_size_1_token
+                )
+            cache_config.block_size = new_block_size
+            return
+
+        first_layer = next(iter(attn_layers.values()))
+        backend_cls = first_layer.get_attn_backend()
+
+        new_block_size = get_backend_block_size(backend_cls, cache_config.block_size)
+        if cache_config.block_size == new_block_size:
+            return
+        logger.info(
+            "Update %s block size to %d", backend_cls.get_name(), new_block_size
+        )
+        cache_config.block_size = new_block_size
+        return
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
