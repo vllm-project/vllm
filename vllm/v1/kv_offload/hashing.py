@@ -112,6 +112,12 @@ class HybridChunkBlockHashList:
             RequestBlockHashList(request, block_size, hash_function)
             for block_size in group_block_sizes
         )
+        # Cache of combined chunk hashes, grown lazily as indices are accessed.
+        # Mirrors the pattern used by RequestBlockHashList._hashes.  When the
+        # scheduler reuses this instance across steps (via _hybrid_hash_lists),
+        # previously-computed indices are served from here without invoking
+        # hash_function again.
+        self._chunk_hashes: list[BlockHash] = []
 
     def __len__(self) -> int:
         return max(
@@ -141,6 +147,8 @@ class HybridChunkBlockHashList:
             yield self._get_value_at(i)
 
     def _get_value_at(self, idx: int) -> BlockHash:
+        if idx < len(self._chunk_hashes):
+            return self._chunk_hashes[idx]
         chunk_end = (
             idx + 1 + self.first_hashable_chunk_idx
         ) * self.logical_chunk_size
@@ -148,4 +156,10 @@ class HybridChunkBlockHashList:
         for block_size, group_hashes in zip(self.group_block_sizes, self.group_hashes):
             num_full_blocks = chunk_end // block_size
             component_hashes.append(group_hashes[num_full_blocks - 1])
-        return BlockHash(self.hash_function(tuple(component_hashes)))
+        chunk_hash = BlockHash(self.hash_function(tuple(component_hashes)))
+        # Cache only next-in-sequence indices to keep the list dense.  The
+        # typical caller iterates sequentially via islice so this hit rate is
+        # high; out-of-order accesses skip caching to avoid leaving gaps.
+        if idx == len(self._chunk_hashes):
+            self._chunk_hashes.append(chunk_hash)
+        return chunk_hash
