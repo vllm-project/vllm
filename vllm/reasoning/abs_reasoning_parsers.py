@@ -14,9 +14,12 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
 
 if TYPE_CHECKING:
+    from openai.types.responses.tool import Tool
+
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.engine.protocol import DeltaMessage
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
     from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
@@ -152,8 +155,11 @@ class ReasoningParser:
 
     def prepare_structured_tag(
         self,
-        original_tag: str | None,
+        original_tag: str | StructuredOutputsParams | None,
         tool_server: ToolServer | None,
+        sampling_params: SamplingParams | None = None,
+        tools: list[Tool] | None = None,
+        model_architecture: str | None = None,
     ) -> str | None:
         """
         Instance method that is implemented for preparing the structured tag

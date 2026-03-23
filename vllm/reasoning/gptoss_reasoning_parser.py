@@ -182,6 +182,8 @@ class GptOssReasoningParser(ReasoningParser):
                     func_tag = json.dumps(no_func_reasoning_tag)
 
                 return func_tag
+        elif isinstance(original_tag, str):
+            return original_tag
         else:
             # There is potential risk for appending the tag to the original tag
-            return original_tag
+            return None
