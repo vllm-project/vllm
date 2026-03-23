@@ -88,6 +88,15 @@ IS_DENSE = False
 # See https://github.com/vllm-project/vllm/issues/25689.
 
 
+def enable_sp_and_async_tp(cfg: "VllmConfig") -> bool:
+    """Enable SP + async TP when TP > 1 on CUDA."""
+    from vllm.platforms import current_platform
+    return (
+        cfg.parallel_config.tensor_parallel_size > 1
+        and current_platform.is_cuda()
+    )
+
+
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable if either RMS norm or quant FP8 custom op is active;
     otherwise Inductor handles fusion."""
@@ -203,8 +212,8 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
-            "enable_sp": IS_DENSE,
-            "fuse_gemm_comms": IS_DENSE,
+            "enable_sp": enable_sp_and_async_tp,
+            "fuse_gemm_comms": enable_sp_and_async_tp,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
         },
@@ -222,8 +231,8 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
-            "enable_sp": IS_DENSE,
-            "fuse_gemm_comms": IS_DENSE,
+            "enable_sp": enable_sp_and_async_tp,
+            "fuse_gemm_comms": enable_sp_and_async_tp,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
         },

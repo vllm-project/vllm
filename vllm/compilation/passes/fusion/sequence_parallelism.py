@@ -29,14 +29,14 @@ logger = init_logger(__name__)
 # Min hidden size per device capability for sequence parallelism
 # Only apply sequence parallelism for models with hidden_size >= threshold
 SP_MIN_HIDDEN_SIZE: dict[int, int] = {
-    90: 8192,  # H100: only for models with hidden_size >= 8192
+    90: 1,
 }
 
 # Min size per GPU per device capability for sequence parallelism
 # Total min size = min_per_gpu_size * tp_size
 # This ensures the threshold scales appropriately with tensor parallelism
 SP_MIN_PER_GPU_SIZE_MB: dict[int, float] = {
-    90: 8,  # 8MB per GPU for H100
+    90: 0.001,
 }
 
 
@@ -417,11 +417,22 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         overhead is amortized. For small batches, the overhead of splitting
         and gathering tensors across TP ranks outweighs the benefits.
 
+        Additionally, when async_tp_min_tokens is set, skip SP for small
+        batch sizes.  SP without async TP is strictly worse (unfused RS/AG
+        has more kernel launches than unfused all_reduce), so both passes
+        must be skipped together.
+
         Returns False (SP disabled) when:
         - Using piecewise compilation with non-concrete or TP-indivisible sizes
         - min_token_num is None (SP disabled for this device/config)
         - The compile range starts below the minimum token threshold
+        - async_tp_min_tokens threshold is not met
         """
+        # Coarse-grained batch-size gating for async TP coupling
+        min_tokens = self.pass_config.async_tp_min_tokens
+        if min_tokens is not None and compile_range.end < min_tokens:
+            return False
+
         # For piecewise compilation (not using inductor graph partition),
         # we need concrete sizes that are divisible by TP for correct splitting
         if (
@@ -442,7 +453,156 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
+        # Record output shapes BEFORE SP pattern matching.
+        # After SP, some outputs change from [batch, hidden] to
+        # [batch/TP, hidden]. We need to AllGather these at the graph output
+        # to maintain compatibility with piecewise compilation submod
+        # boundaries.
+        output_node = None
+        for node in reversed(graph.nodes):
+            if node.op == "output":
+                output_node = node
+                break
+
+        pre_sp_output_info: dict[int, tuple[fx.Node, tuple]] = {}
+        if output_node is not None:
+            output_args = output_node.args[0]
+            if isinstance(output_args, (tuple, list)):
+                for i, out in enumerate(output_args):
+                    if isinstance(out, fx.Node):
+                        val = out.meta.get("val", None)
+                        if val is not None and hasattr(val, "shape"):
+                            pre_sp_output_info[i] = (out, tuple(val.shape))
+
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
+
+        if self.matched_count > 0:
+            self._remove_mismatched_epilogue_copies(graph)
+            self._fix_cross_submod_outputs(
+                graph, output_node, pre_sp_output_info
+            )
+
         # Clean up reshape nodes
         self.noop_cleanup(graph)
+
+    def _remove_mismatched_epilogue_copies(self, graph: fx.Graph) -> None:
+        """Remove epilogue copy_ nodes invalidated by SP shape changes.
+
+        AOT autograd inserts copy_(graph_input, mutated_value) nodes at the
+        end of the graph to write mutations back to graph inputs.  After SP
+        replaces AllReduce→RMSNorm with ReduceScatter→RMSNorm→AllGather, the
+        mutated residual shrinks from [batch, hidden] to [batch/TP, hidden],
+        but the graph input target keeps its original [batch, hidden] shape.
+        This shape mismatch crashes in incremental_update().
+
+        The copy_ is redundant after defunctionalization because the in-place
+        op already mutates the tensor through the slice view created by SP.
+        """
+        nodes_to_remove = []
+        for node in graph.nodes:
+            if (
+                node.op == "call_function"
+                and node.target is torch.ops.aten.copy_.default
+                and len(node.args) >= 2
+            ):
+                dst, src = node.args[0], node.args[1]
+                if dst.op != "placeholder":
+                    continue
+                dst_val = dst.meta.get("val", None)
+                src_val = src.meta.get("val", None)
+                if (
+                    dst_val is not None
+                    and src_val is not None
+                    and hasattr(dst_val, "shape")
+                    and hasattr(src_val, "shape")
+                    and dst_val.shape != src_val.shape
+                ):
+                    nodes_to_remove.append(node)
+
+        for node in nodes_to_remove:
+            # copy_ returns dst; replace any downstream users with dst
+            node.replace_all_uses_with(node.args[0])
+            graph.erase_node(node)
+
+        if nodes_to_remove:
+            logger.debug(
+                "Removed %d mismatched epilogue copy_ nodes after SP",
+                len(nodes_to_remove),
+            )
+
+    def _fix_cross_submod_outputs(
+        self,
+        graph: fx.Graph,
+        output_node: fx.Node | None,
+        pre_sp_output_info: dict[int, tuple[fx.Node, tuple]],
+    ) -> None:
+        """AllGather graph outputs whose shapes were reduced by SP.
+
+        With piecewise compilation, the model is split into submods.  Each
+        submod's graph outputs flow to the next submod's inputs.  SP changes
+        residual shapes from [batch, hidden] to [batch/TP, hidden].  If these
+        reduced outputs cross submod boundaries, the next submod's compiled
+        code expects the original [batch, hidden] shape and its
+        ``assert_size_stride`` check fails.
+
+        This method compares pre-SP and post-SP output shapes.  Any output
+        whose dim-0 was reduced (while other dims stayed the same) is wrapped
+        with an AllGather to restore the original shape.
+        """
+        if output_node is None or not pre_sp_output_info:
+            return
+
+        output_args = output_node.args[0]
+        if not isinstance(output_args, (tuple, list)):
+            return
+
+        new_outputs = list(output_args)
+        num_fixed = 0
+
+        for i, out in enumerate(output_args):
+            if not isinstance(out, fx.Node) or i not in pre_sp_output_info:
+                continue
+
+            _, pre_shape = pre_sp_output_info[i]
+            val = out.meta.get("val", None)
+            if val is None or not hasattr(val, "shape"):
+                continue
+
+            post_shape = tuple(val.shape)
+
+            # Check for SP-style dim-0 reduction: dim-0 changed, other dims
+            # stayed the same.
+            if (
+                len(pre_shape) == len(post_shape)
+                and len(pre_shape) >= 2
+                and pre_shape[0] != post_shape[0]
+                and all(
+                    pre_shape[j] == post_shape[j]
+                    for j in range(1, len(pre_shape))
+                )
+            ):
+                tp_size = get_tensor_model_parallel_world_size()
+                tp_group = get_tp_group()
+                with graph.inserting_before(output_node):
+                    all_gather = graph.call_function(
+                        torch.ops.vllm.all_gather.default,
+                        args=(
+                            out,
+                            0,
+                            tp_size,
+                            tp_group.unique_name,
+                        ),
+                    )
+                new_outputs[i] = all_gather
+                num_fixed += 1
+                logger.debug(
+                    "AllGather output[%d]: %s -> %s", i, post_shape, pre_shape
+                )
+
+        if num_fixed > 0:
+            output_node.args = (tuple(new_outputs),)
+            logger.debug(
+                "Inserted %d AllGather ops to fix cross-submod outputs",
+                num_fixed,
+            )

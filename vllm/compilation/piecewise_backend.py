@@ -364,4 +364,5 @@ class PiecewiseBackend:
             "PiecewiseBackend.__init__. "
             f"range_entry={range_entry.compile_range}"
         )
-        return range_entry.runnable(*args)
+        result = range_entry.runnable(*args)
+        return result
