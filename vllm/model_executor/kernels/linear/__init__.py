@@ -457,4 +457,5 @@ __all__ = [
     "XPUwNa16LinearKernel",
     "_KernelT",
     "DeepGemmFp8BlockScaledMMKernel",
+    "FlashInferFp8DeepGEMMDynamicBlockScaledKernel",
 ]

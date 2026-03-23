@@ -29,10 +29,10 @@ from vllm.config import (
 from vllm.model_executor.kernels.linear import (
     AiterFp8BlockScaledMMKernel,
     ChannelWiseTorchFP8ScaledMMLinearKernel,
-    CudaFp8BlockScaledMMKernel,
     CutlassFp8BlockScaledMMKernel,
     CutlassFP8ScaledMMLinearKernel,
     DeepGemmFp8BlockScaledMMKernel,
+    FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
     FlashInferFP8ScaledMMLinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
     ROCmFP8ScaledMMLinearKernel,
@@ -71,8 +71,7 @@ CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
     # ChannelWiseTorchFP8ScaledMMLinearKernel only supports per-token
     (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
     # Blockwise group shapes
-    (CudaFp8BlockScaledMMKernel, GroupShape(1, 128)),
-    (CudaFp8BlockScaledMMKernel, GroupShape(1, 64)),
+    (FlashInferFp8DeepGEMMDynamicBlockScaledKernel, GroupShape(1, 128)),
     (CutlassFp8BlockScaledMMKernel, GroupShape(1, 128)),
     (DeepGemmFp8BlockScaledMMKernel, GroupShape(1, 128)),
     (TritonFp8BlockScaledMMKernel, GroupShape(1, 128)),
