@@ -6,6 +6,7 @@ from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -16,9 +17,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
     MLACommonMetadataBuilder,
     QueryLenSupport,
-)
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
@@ -49,6 +47,7 @@ class FlashMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
         "fp8",
         "fp8_e4m3",
@@ -80,7 +79,7 @@ class FlashMLABackend(MLACommonBackend):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: CacheDType | None,
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -255,7 +254,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         q = reshape_query_for_spec_decode(q, num_decodes)
 
         scheduler_metadata = attn_metadata.decode.scheduler_metadata
-        if vllm_is_batch_invariant() and not self.kv_cache_dtype.startswith("fp8"):
+        if envs.VLLM_BATCH_INVARIANT and not self.kv_cache_dtype.startswith("fp8"):
             device = q.device
             dtype = torch.int32
 

@@ -40,8 +40,6 @@ EXCLUDE = [
     "vllm/v1/attention/ops",
     # TODO: Remove these entries after fixing mypy errors.
     "vllm/benchmarks",
-    "vllm/config",
-    "vllm/reasoning",
 ]
 
 
