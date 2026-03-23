@@ -167,6 +167,10 @@ steps:
     - pip install pytest-timeout pytest-forked
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+    - export VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat
+    - pytest -v -s v1/determinism/test_batch_invariance.py
+    - export VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8
+    - pytest -v -s v1/determinism/test_batch_invariance.py
   
 - label: Acceptance Length Test (Large Models) # optional
   timeout_in_minutes: 25
