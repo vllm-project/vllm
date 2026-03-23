@@ -16,7 +16,26 @@ class ResponsesStore(ABC):
     The event_store (used for background streaming coordination) is
     intentionally not part of this interface — it uses asyncio.Event
     and is inherently local to the instance.
+
+    Args:
+        use_harmony: When True, messages are deserialized as
+            OpenAIHarmonyMessage objects via ``Message.from_dict()``.
+            When False (default), messages are returned as plain dicts.
     """
+
+    def __init__(self, *, use_harmony: bool = False) -> None:
+        self._use_harmony = use_harmony
+
+    def _deserialize_messages(
+        self,
+        raw: list[dict],
+    ) -> "list[ChatCompletionMessageParam]":
+        """Convert stored dicts back to the appropriate message type."""
+        if not self._use_harmony:
+            return raw
+        from openai_harmony import Message as OpenAIHarmonyMessage
+
+        return [OpenAIHarmonyMessage.from_dict(m) for m in raw]
 
     @abstractmethod
     async def get_response(self, response_id: str) -> "ResponsesResponse | None":
@@ -46,6 +65,5 @@ class ResponsesStore(ABC):
         """Store messages associated with a response."""
         ...
 
-    async def close(self) -> None:
+    async def close(self) -> None:  # noqa: B027
         """Optional cleanup hook for backends that hold resources."""
-        pass

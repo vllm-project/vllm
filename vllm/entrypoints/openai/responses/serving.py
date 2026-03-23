@@ -253,7 +253,7 @@ class OpenAIServingResponses(OpenAIServing):
         self.enable_auto_tools = enable_auto_tools
 
         # Pluggable store for responses and messages.
-        self.store = create_responses_store()
+        self.store = create_responses_store(use_harmony=self.use_harmony)
         self.store_lock = asyncio.Lock()
 
         # Event store is intentionally kept in-memory — it coordinates

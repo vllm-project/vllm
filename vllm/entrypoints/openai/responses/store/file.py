@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import json
 import os
 import tempfile
@@ -35,7 +36,8 @@ class FileResponsesStore(ResponsesStore):
             └── ...
     """
 
-    def __init__(self, base_path: str) -> None:
+    def __init__(self, base_path: str, **kwargs) -> None:
+        super().__init__(**kwargs)
         self._base_path = Path(base_path)
         self._responses_dir = self._base_path / "responses"
         self._messages_dir = self._base_path / "messages"
@@ -69,10 +71,8 @@ class FileResponsesStore(ResponsesStore):
             os.rename(tmp_path, path)
         except BaseException:
             os.close(fd)
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
-            except OSError:
-                pass
             raise
 
     async def get_response(self, response_id: str) -> ResponsesResponse | None:
@@ -94,7 +94,7 @@ class FileResponsesStore(ResponsesStore):
         data = await asyncio.to_thread(self._read_file, path)
         if data is None:
             return None
-        return json.loads(data)
+        return self._deserialize_messages(json.loads(data))
 
     async def put_messages(
         self,

@@ -25,7 +25,8 @@ class RedisResponsesStore(ResponsesStore):
     server see writes immediately.
     """
 
-    def __init__(self, redis_url: str) -> None:
+    def __init__(self, redis_url: str, **kwargs) -> None:
+        super().__init__(**kwargs)
         try:
             import redis.asyncio as aioredis
         except ImportError as e:
@@ -56,7 +57,7 @@ class RedisResponsesStore(ResponsesStore):
         data = await self._redis.get(f"{_MESSAGES_PREFIX}{response_id}")
         if data is None:
             return None
-        return json.loads(data)
+        return self._deserialize_messages(json.loads(data))
 
     async def put_messages(
         self,

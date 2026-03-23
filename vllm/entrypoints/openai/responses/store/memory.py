@@ -8,9 +8,14 @@ from vllm.entrypoints.openai.responses.store.base import ResponsesStore
 
 class InMemoryResponsesStore(ResponsesStore):
     """In-memory store using plain dicts. This is the default backend
-    and matches the original behavior. Stored data is lost on restart."""
+    and matches the original behavior. Stored data is lost on restart.
 
-    def __init__(self) -> None:
+    Note: messages are kept as their original objects (which may be
+    OpenAIHarmonyMessage instances), so no deserialization is needed.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
         self._responses: dict[str, ResponsesResponse] = {}
         self._messages: dict[str, list[ChatCompletionMessageParam]] = {}
 
