@@ -41,6 +41,40 @@ repos:
     - id: pip-compile
       args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu129, --python-platform, x86_64-manylinux_2_28, --python-version, "3.12"]
       files: ^requirements/test\.(in|txt)$
+    - id: pip-compile
+      name: pip-compile rocm-test
+      args: [
+        requirements/rocm-test.in, -o, requirements/rocm-test.txt,
+        --index-strategy, unsafe-best-match,
+        -c, requirements/rocm.txt,
+        --python-platform, x86_64-manylinux_2_28,
+        --python-version, "3.12",
+        # Exclude torch and CUDA/NVIDIA packages (ROCm torch is installed separately via rocm.txt)
+        --no-emit-package, torch,
+        --no-emit-package, torchvision,
+        --no-emit-package, torchaudio,
+        --no-emit-package, triton,
+        --no-emit-package, cuda-bindings,
+        --no-emit-package, cuda-pathfinder,
+        --no-emit-package, cuda-toolkit,
+        --no-emit-package, cupy-cuda12x,
+        --no-emit-package, nvidia-cublas,
+        --no-emit-package, nvidia-cuda-cupti,
+        --no-emit-package, nvidia-cuda-nvrtc,
+        --no-emit-package, nvidia-cuda-runtime,
+        --no-emit-package, nvidia-cudnn-cu13,
+        --no-emit-package, nvidia-cufft,
+        --no-emit-package, nvidia-cufile,
+        --no-emit-package, nvidia-curand,
+        --no-emit-package, nvidia-cusolver,
+        --no-emit-package, nvidia-cusparse,
+        --no-emit-package, nvidia-cusparselt-cu13,
+        --no-emit-package, nvidia-nccl-cu13,
+        --no-emit-package, nvidia-nvjitlink,
+        --no-emit-package, nvidia-nvshmem-cu13,
+        --no-emit-package, nvidia-nvtx,
+      ]
+      files: ^requirements/rocm-test\.(in|txt)$
 - repo: local
   hooks:
   - id: format-torch-nightly-test
