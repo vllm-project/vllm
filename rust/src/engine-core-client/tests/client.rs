@@ -296,6 +296,8 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
         .unwrap()
         .unwrap()
         .unwrap();
+    assert_eq!(first_2.engine_index, 0);
+    assert_eq!(first_2.timestamp, 0.0);
     assert_eq!(first_2.request_id, "req-2");
     assert_eq!(first_2.new_token_ids, vec![22]);
 
@@ -304,6 +306,8 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
         .unwrap()
         .unwrap()
         .unwrap();
+    assert_eq!(first_1.engine_index, 0);
+    assert_eq!(first_1.timestamp, 0.0);
     assert_eq!(first_1.request_id, "req-1");
     assert_eq!(first_1.new_token_ids, vec![11]);
 

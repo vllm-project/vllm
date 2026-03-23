@@ -6,7 +6,9 @@ edition.workspace = true
 [dependencies]
 futures.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 vllm-engine-core-client.workspace = true
+vllm-metrics.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
@@ -17,6 +19,7 @@ rmp-serde.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+vllm-metrics.workspace = true
 zeromq.workspace = true
 
 [lints]

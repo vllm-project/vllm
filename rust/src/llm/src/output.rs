@@ -8,6 +8,7 @@ use vllm_engine_core_client::EngineCoreOutputStream;
 use vllm_engine_core_client::protocol::{EngineCoreOutput, RequestOutputKind};
 
 use crate::error::Result;
+use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
 
 /// Token-only output item returned by [`GenerateOutputStream`].
 ///
@@ -47,6 +48,7 @@ pub struct GenerateOutputStream {
     prompt_token_ids: Arc<[u32]>,
     raw_stream: EngineCoreOutputStream,
     cumulative_token_ids: Vec<u32>,
+    request_metrics: RequestMetricsTracker,
 }
 
 impl GenerateOutputStream {
@@ -55,12 +57,14 @@ impl GenerateOutputStream {
         output_kind: RequestOutputKind,
         prompt_token_ids: Arc<[u32]>,
         raw_stream: EngineCoreOutputStream,
+        request_metrics: RequestMetricsTracker,
     ) -> Self {
         Self {
             output_kind,
             prompt_token_ids,
             raw_stream,
             cumulative_token_ids: Vec::new(),
+            request_metrics,
         }
     }
 }
@@ -75,7 +79,18 @@ impl Stream for GenerateOutputStream {
                 Some(Err(error)) => return Poll::Ready(Some(Err(error.into()))),
                 None => return Poll::Ready(None),
             };
+
+            let received_at = current_unix_timestamp_secs();
+            self.request_metrics.observe_output(
+                raw.engine_index,
+                raw.timestamp,
+                received_at,
+                &raw.output,
+            );
+
+            let raw = raw.output;
             let finished = raw.finished();
+            let finish_reason = raw.finish_reason;
 
             let output = match self.output_kind {
                 RequestOutputKind::Delta => Some(GenerateOutput {
@@ -107,6 +122,12 @@ impl Stream for GenerateOutputStream {
                     })
                 }
             };
+
+            if let Some(finish_reason) = finish_reason {
+                assert!(finished, "only finished outputs can have finish reasons");
+                self.request_metrics
+                    .record_finished(received_at, finish_reason);
+            }
 
             if let Some(output) = output {
                 return Poll::Ready(Some(Ok(output)));

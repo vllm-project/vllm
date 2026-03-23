@@ -7,13 +7,15 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
-    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams, FinishReason,
-    RequestOutputKind,
+    EngineCoreEvent, EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
+    EngineCoreSamplingParams, FinishReason, RequestOutputKind,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::{Error, GenerateRequest, Llm};
+use vllm_metrics::METRICS;
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
@@ -43,6 +45,15 @@ fn request_output(
     new_token_ids: Vec<u32>,
     finish_reason: Option<FinishReason>,
 ) -> EngineCoreOutput {
+    request_output_with_events(request_id, new_token_ids, finish_reason, None)
+}
+
+fn request_output_with_events(
+    request_id: &str,
+    new_token_ids: Vec<u32>,
+    finish_reason: Option<FinishReason>,
+    events: Option<Vec<EngineCoreEvent>>,
+) -> EngineCoreOutput {
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
@@ -51,7 +62,7 @@ fn request_output(
         pooling_output: None,
         finish_reason,
         stop_reason: None,
-        events: None,
+        events,
         kv_transfer_params: None,
         trace_headers: None,
         num_cached_tokens: 0,
@@ -141,9 +152,17 @@ async fn setup_mock_engine(
 }
 
 async fn connect_async_llm(handshake_address: String, client_index: u32) -> Llm {
+    connect_async_llm_with_model(handshake_address, client_index, "test-model").await
+}
+
+async fn connect_async_llm_with_model(
+    handshake_address: String,
+    client_index: u32,
+    model_name: &str,
+) -> Llm {
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
-        model_name: "test-model".to_string(),
+        model_name: model_name.to_string(),
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_secs(2),
         client_index,
@@ -151,6 +170,10 @@ async fn connect_async_llm(handshake_address: String, client_index: u32) -> Llm 
     .await
     .unwrap();
     Llm::new(client)
+}
+
+fn request_metrics_model_name(prefix: &str) -> String {
+    format!("{prefix}-{}", Uuid::new_v4().simple())
 }
 
 fn init_tracing() {
@@ -525,4 +548,163 @@ async fn duplicate_request_ids_bubble_up_from_engine_core_client() {
 
     llm.shutdown().await.unwrap();
     engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generate_records_request_metrics_in_prometheus_output() {
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-metrics".to_vec();
+    let model_name = request_metrics_model_name("metrics-model");
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+
+            let add = recv_engine_message(&mut dealer).await;
+            assert_eq!(add[0].as_ref(), &[0x00]);
+
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    engine_index: 4,
+                    timestamp: 10.0,
+                    outputs: vec![request_output_with_events(
+                        "req-metrics",
+                        vec![1],
+                        None,
+                        Some(vec![
+                            EngineCoreEvent {
+                                r#type: EngineCoreEventType::Queued,
+                                timestamp: 8.0,
+                            },
+                            EngineCoreEvent {
+                                r#type: EngineCoreEventType::Scheduled,
+                                timestamp: 9.0,
+                            },
+                        ]),
+                    )],
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    engine_index: 4,
+                    timestamp: 11.5,
+                    outputs: vec![request_output(
+                        "req-metrics",
+                        vec![2, 3],
+                        Some(FinishReason::Length),
+                    )],
+                    finished_requests: Some(BTreeSet::from(["req-metrics".to_string()])),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    });
+
+    let llm = connect_async_llm_with_model(handshake_address, 0, &model_name).await;
+    let mut request = sample_generate_request("req-metrics", RequestOutputKind::Delta, 8);
+    request.arrival_time = None;
+    let mut stream = llm.generate(request).await.unwrap();
+
+    assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![1]);
+    let final_output = stream.next().await.unwrap().unwrap();
+    assert_eq!(final_output.token_ids, vec![2, 3]);
+    assert_eq!(final_output.raw.finish_reason, Some(FinishReason::Length));
+    assert!(stream.next().await.is_none());
+
+    let rendered = METRICS.render().unwrap();
+    assert!(rendered.contains(&format!(
+        "vllm:request_success_total{{model_name=\"{model_name}\",engine=\"4\",finish_reason=\"length\"}} 1"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:time_to_first_token_seconds_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:inter_token_latency_seconds_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:e2e_request_latency_seconds_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:request_prompt_tokens_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:request_generation_tokens_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:request_prefill_kv_computed_tokens_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+    )));
+
+    llm.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_stream_does_not_fabricate_terminal_request_metrics() {
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-metrics-drop".to_vec();
+    let model_name = request_metrics_model_name("metrics-drop-model");
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+
+            let add = recv_engine_message(&mut dealer).await;
+            assert_eq!(add[0].as_ref(), &[0x00]);
+
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    engine_index: 5,
+                    timestamp: 10.0,
+                    outputs: vec![request_output_with_events(
+                        "req-metrics-drop",
+                        vec![99],
+                        None,
+                        Some(vec![
+                            EngineCoreEvent {
+                                r#type: EngineCoreEventType::Queued,
+                                timestamp: 8.0,
+                            },
+                            EngineCoreEvent {
+                                r#type: EngineCoreEventType::Scheduled,
+                                timestamp: 9.0,
+                            },
+                        ]),
+                    )],
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let abort = timeout(Duration::from_secs(1), recv_engine_message(&mut dealer))
+                .await
+                .unwrap();
+            assert_eq!(abort[0].as_ref(), &[0x01]);
+        }
+    });
+
+    let llm = connect_async_llm_with_model(handshake_address, 0, &model_name).await;
+    let mut request = sample_generate_request("req-metrics-drop", RequestOutputKind::Delta, 8);
+    request.arrival_time = None;
+    let mut stream = llm.generate(request).await.unwrap();
+    assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![99]);
+    drop(stream);
+
+    engine_task.await.unwrap();
+    let rendered = METRICS.render().unwrap();
+    assert!(!rendered.contains(&format!(
+        "vllm:request_success_total{{model_name=\"{model_name}\""
+    )));
+
+    llm.shutdown().await.unwrap();
 }

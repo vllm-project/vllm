@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -19,11 +20,27 @@ enum State {
     UnexpectedClose,
 }
 
+/// One request-scoped engine-core output plus the enclosing batch metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineCoreStreamOutput {
+    pub engine_index: u32,
+    pub timestamp: f64,
+    pub output: EngineCoreOutput,
+}
+
+impl Deref for EngineCoreStreamOutput {
+    type Target = EngineCoreOutput;
+
+    fn deref(&self) -> &Self::Target {
+        &self.output
+    }
+}
+
 /// Stream of raw engine-core outputs for one request.
 ///
-/// The stream yields only [`EngineCoreOutput`] values whose `request_id` matches the originating
-/// `add_request()` call. Normal request completion is expected to include a final output object
-/// whose `finish_reason` is non-`None`.
+/// The stream yields only [`EngineCoreStreamOutput`] values whose embedded output `request_id`
+/// matches the originating `add_request()` call. Normal request completion is expected to include a
+/// final output object whose `finish_reason` is non-`None`.
 pub struct EngineCoreOutputStream {
     request_id: String,
     abort_tx: mpsc::UnboundedSender<String>,
@@ -52,7 +69,7 @@ impl EngineCoreOutputStream {
 }
 
 impl Stream for EngineCoreOutputStream {
-    type Item = Result<EngineCoreOutput>;
+    type Item = Result<EngineCoreStreamOutput>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.is_terminated() {

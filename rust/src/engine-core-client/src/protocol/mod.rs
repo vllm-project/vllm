@@ -77,10 +77,45 @@ pub enum FinishReason {
     Repetition = 4,
 }
 
+impl FinishReason {
+    /// Returns a human-readable string for this finish reason, used for metrics and reporting.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Length => "length",
+            Self::Abort => "abort",
+            Self::Error => "error",
+            Self::Repetition => "repetition",
+        }
+    }
+}
+
+/// Event types emitted by engine-core for one request.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L113-L118>
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(u8)]
+pub enum EngineCoreEventType {
+    Queued = 1,
+    Scheduled = 2,
+    Preempted = 3,
+}
+
+/// A timestamped engine-core event associated with one request.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L121-L130>
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
+pub struct EngineCoreEvent {
+    pub r#type: EngineCoreEventType,
+    pub timestamp: f64,
+}
+
 /// Controls how intermediate outputs are returned to the frontend.
 ///
 /// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L146-152>
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L146-L152>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum RequestOutputKind {
@@ -262,7 +297,7 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub stop_reason: Option<StopReason>,
     #[serde(default)]
-    pub events: Option<OpaqueValue>,
+    pub events: Option<Vec<EngineCoreEvent>>,
     #[serde(default)]
     pub kv_transfer_params: Option<OpaqueValue>,
     #[serde(default)]

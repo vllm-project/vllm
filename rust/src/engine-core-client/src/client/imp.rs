@@ -9,6 +9,7 @@ use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
 
 use crate::client::state::{ClientClosedState, OutputReceiver, RequestRegistry};
+use crate::client::stream::EngineCoreStreamOutput;
 use crate::metrics::record_scheduler_stats;
 use crate::protocol::{
     ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequestType,
@@ -59,7 +60,7 @@ impl ClientInner {
     pub fn take_sender_for_output(
         &self,
         output: &EngineCoreOutput,
-    ) -> Option<mpsc::UnboundedSender<Result<EngineCoreOutput>>> {
+    ) -> Option<mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>> {
         self.request_reg.lock().sender_for_output(output)
     }
 
@@ -67,7 +68,7 @@ impl ClientInner {
     pub fn finish_requests<'a>(
         &self,
         request_ids: impl IntoIterator<Item = &'a String>,
-    ) -> Vec<mpsc::UnboundedSender<Result<EngineCoreOutput>>> {
+    ) -> Vec<mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>> {
         self.request_reg.lock().finish_many(request_ids)
     }
 
@@ -188,7 +189,12 @@ pub(crate) async fn run_output_dispatcher_loop(
                         continue;
                     };
 
-                    if sender.send(Ok(output)).is_err() {
+                    let wrapped_output = EngineCoreStreamOutput {
+                        engine_index: batch.engine_index,
+                        timestamp: batch.timestamp,
+                        output,
+                    };
+                    if sender.send(Ok(wrapped_output)).is_err() {
                         debug!(request_id, "request output stream receiver dropped");
                     }
                 }

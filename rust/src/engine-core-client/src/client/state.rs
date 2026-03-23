@@ -2,11 +2,12 @@ use std::collections::BTreeMap;
 
 use tokio::sync::mpsc;
 
+use crate::client::stream::EngineCoreStreamOutput;
 use crate::error::{Error, Result};
 use crate::protocol::EngineCoreOutput;
 
-pub type OutputSender = mpsc::UnboundedSender<Result<EngineCoreOutput>>;
-pub type OutputReceiver = mpsc::UnboundedReceiver<Result<EngineCoreOutput>>;
+pub type OutputSender = mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>;
+pub type OutputReceiver = mpsc::UnboundedReceiver<Result<EngineCoreStreamOutput>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientClosedState {

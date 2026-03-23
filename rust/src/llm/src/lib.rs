@@ -3,10 +3,13 @@ use vllm_engine_core_client::EngineCoreClient;
 mod error;
 mod output;
 mod request;
+mod request_metrics;
 
 pub use error::{Error, Result};
 pub use output::{GenerateOutput, GenerateOutputStream};
 pub use request::GenerateRequest;
+
+use crate::request_metrics::RequestMetricsTracker;
 
 /// Thin generate-only facade over [`EngineCoreClient`].
 ///
@@ -28,11 +31,20 @@ impl Llm {
         let output_kind = prepared.output_kind();
         let prompt_token_ids = prepared.prompt_token_ids().into();
 
+        let request_metrics = RequestMetricsTracker::new(
+            self.client.model_name().to_string(),
+            prepared.engine_request.arrival_time,
+            prepared.prompt_token_ids().len() as u32,
+            (prepared.engine_request.sampling_params.as_ref()).map(|p| p.max_tokens),
+            1,
+        );
         let stream = self.client.call(prepared.engine_request).await?;
+
         Ok(GenerateOutputStream::new(
             output_kind,
             prompt_token_ids,
             stream,
+            request_metrics,
         ))
     }
 

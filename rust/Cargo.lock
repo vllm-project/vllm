@@ -4260,6 +4260,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vllm-engine-core-client",
+ "vllm-metrics",
  "zeromq",
 ]
 

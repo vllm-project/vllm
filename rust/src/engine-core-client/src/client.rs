@@ -15,7 +15,7 @@ mod imp;
 mod state;
 mod stream;
 
-pub use stream::EngineCoreOutputStream;
+pub use stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 
 /// Configuration for connecting a Rust frontend client to an already running Python
 /// `EngineCoreProc`.
@@ -122,6 +122,10 @@ impl EngineCoreClient {
 
     pub fn engine_identity(&self) -> &[u8] {
         &self.engine_identity
+    }
+
+    pub fn model_name(&self) -> &str {
+        self.inner.model_name()
     }
 }
 
