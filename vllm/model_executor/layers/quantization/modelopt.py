@@ -934,6 +934,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -950,6 +951,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_replay_out=routing_replay_out,
         )
 
     def apply(
@@ -1417,6 +1419,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -1433,6 +1436,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_replay_out=routing_replay_out,
         )
 
     def apply(
@@ -1959,6 +1963,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from flashinfer.fused_moe.core import (
             ActivationType,
@@ -2004,6 +2009,10 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             is_sf_swizzled_layout=False,
         )
 
+        # Slice routing_replay_out to match num_tokens (FlashInfer validates)
+        if routing_replay_out is not None:
+            routing_replay_out = routing_replay_out[:x.shape[0]]
+
         kwargs: dict = dict(
             routing_logits=router_logits,
             routing_bias=layer.e_score_correction_bias,
@@ -2028,6 +2037,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             weight_layout=0,
             fp8_quantization_type=Fp8QuantizationType.MxFp8,
             activation_type=fi_activation_type,
+            routing_replay_out=routing_replay_out,
         )
 
         return flashinfer_trtllm_fp8_block_scale_moe(**kwargs)

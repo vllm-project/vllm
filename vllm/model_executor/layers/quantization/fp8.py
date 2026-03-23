@@ -961,6 +961,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -977,6 +978,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_replay_out=routing_replay_out,
         )
 
     def apply(

@@ -254,15 +254,8 @@ class BaseRouter(FusedMoERouter):
             hidden_states, router_logits, indices_type
         )
 
-        # Capture logical ids before EPLB mapping.
-        # Uses registered custom op so torch.compile traces through cleanly.
-        if self._capture_buffer is not None:
-            torch.ops.vllm.capture_routing(
-                self._capture_buffer,
-                topk_ids,
-                self._capture_layer_id,
-                topk_ids.shape[0],
-            )
+        # Routing capture handled by FlashInfer routing_replay_out
+        # parameter (passed via layer._routing_replay_out).
 
         # Step 4: Apply EPLB mapping
         topk_ids = self._apply_eplb_mapping(topk_ids)

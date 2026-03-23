@@ -568,10 +568,23 @@ def bind_routing_capture_to_model(model) -> None:
         return  # routing capture not enabled
 
     buffer = device_cache.buffer
+
+    # Mark the buffer so CUDA graphs do NOT snapshot/restore its contents.
+    if hasattr(torch.compiler, "cudagraph_mark_tensor_static"):
+        torch.compiler.cudagraph_mark_tensor_static(buffer)
+    elif hasattr(torch._C, "_set_static_address_tag"):
+        torch._C._set_static_address_tag(buffer, True)
+    try:
+        torch._dynamo.mark_static_address(buffer)
+    except Exception:
+        pass
+
     bound = 0
     for module in model.modules():
         if isinstance(module, FusedMoE):
-            module.router.set_capture_buffer(buffer, module.moe_layer_id)
+            layer_id = module.moe_layer_id
+            module.router.set_capture_buffer(buffer, layer_id)
+            module._routing_replay_out = buffer[layer_id]  # (N_max, K)
             bound += 1
 
     logger.info(

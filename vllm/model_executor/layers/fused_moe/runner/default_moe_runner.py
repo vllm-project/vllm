@@ -505,19 +505,13 @@ class DefaultMoERunner(MoERunner):
             # Matrix multiply.
             if self.quant_method.is_monolithic:
                 assert has_separate_shared_experts or self.shared_experts is None
+                routing_replay_out = getattr(layer, '_routing_replay_out', None)
                 final_hidden_states = self.quant_method.apply_monolithic(
                     layer=layer,
                     x=staged_hidden_states,
                     router_logits=staged_router_logits,
+                    routing_replay_out=routing_replay_out,
                 )
-                # The monolithic kernel bypasses select_experts, so the
-                # routing custom op is never invoked.  Run routing
-                # separately to populate the routed-experts device cache.
-                if self.router.has_routing_capture:
-                    self.router.select_experts(
-                        hidden_states=staged_hidden_states,
-                        router_logits=staged_router_logits,
-                    )
             else:
                 topk_weights, topk_ids = self.router.select_experts(
                     hidden_states=staged_hidden_states,
@@ -683,16 +677,13 @@ class DefaultMoERunner(MoERunner):
 
             # Matrix multiply.
             if self.quant_method.is_monolithic:
+                routing_replay_out = getattr(layer, '_routing_replay_out', None)
                 final_hidden_states = self.quant_method.apply_monolithic(
                     layer=layer,
                     x=hidden_states,
                     router_logits=router_logits,
+                    routing_replay_out=routing_replay_out,
                 )
-                if self.router.has_routing_capture:
-                    self.router.select_experts(
-                        hidden_states=hidden_states,
-                        router_logits=router_logits,
-                    )
             else:
                 topk_weights, topk_ids = self.router.select_experts(
                     hidden_states=hidden_states,

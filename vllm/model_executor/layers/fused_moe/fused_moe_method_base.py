@@ -133,5 +133,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError

@@ -169,6 +169,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Delay import for non-CUDA.
         import flashinfer
@@ -194,6 +195,10 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         assert a1q_scale is not None
         a1q_scale_t = a1q_scale.t().contiguous()
 
+        # Slice routing_replay_out to match num_tokens (FlashInfer validates)
+        if routing_replay_out is not None:
+            routing_replay_out = routing_replay_out[:hidden_states.shape[0]]
+
         return flashinfer.fused_moe.trtllm_fp8_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
@@ -213,6 +218,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
             use_shuffled_weight=False,
+            routing_replay_out=routing_replay_out,
         )
 
     def _apply_per_tensor(
@@ -231,6 +237,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Delay import for non-CUDA.
         import flashinfer
@@ -289,6 +296,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.quant_config.block_shape is not None:
             return self._apply_per_block(
@@ -305,6 +313,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
                 e_score_correction_bias=e_score_correction_bias,
                 routed_scaling_factor=routed_scaling_factor,
                 topk_group=topk_group,
+                routing_replay_out=routing_replay_out,
             )
         elif self.quant_config.is_per_tensor:
             return self._apply_per_tensor(
