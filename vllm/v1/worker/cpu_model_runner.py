@@ -34,9 +34,9 @@ class CPUModelRunner(GPUModelRunner):
         def replace_tensor(obj: Any, cpu_attr_name: str, device_attr_name) -> None:
             cpu_tensor = getattr(obj, cpu_attr_name, None)
             device_tensor = getattr(obj, device_attr_name, None)
-            if cpu_tensor is not None and device_tensor is not None:
-                assert isinstance(cpu_tensor, torch.Tensor)
-                assert isinstance(device_tensor, torch.Tensor)
+            if isinstance(cpu_tensor, torch.Tensor) and isinstance(
+                device_tensor, torch.Tensor
+            ):
                 setattr(obj, device_attr_name, cpu_tensor)
 
         for v in vars(self).values():
@@ -86,6 +86,11 @@ class CPUModelRunner(GPUModelRunner):
         pass
 
     def _sync_device(self) -> None:
+        pass
+
+    def _zero_block_ids(self, block_ids: list[int]) -> None:
+        # CPU attention assigns -INF to logits at invalid positions,
+        # so stale KV cache data never affects computation.
         pass
 
     def get_dp_padding(self, num_tokens: int) -> tuple[int, torch.Tensor | None]:

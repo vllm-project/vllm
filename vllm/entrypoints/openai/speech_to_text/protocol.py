@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import (
+    BeamSearchParams,
     RequestOutputKind,
     SamplingParams,
 )
@@ -106,7 +107,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     stream_include_usage: bool | None = False
     stream_continuous_usage_stats: bool | None = False
 
-    vllm_xargs: dict[str, str | int | float] | None = Field(
+    vllm_xargs: dict[str, str | int | float | bool] | None = Field(
         default=None,
         description=(
             "Additional request parameters with string or "
@@ -123,6 +124,18 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     # --8<-- [start:transcription-sampling-params]
+    use_beam_search: bool = False
+    """Whether or not beam search should be used."""
+
+    n: int = 1
+    """The number of beams to be used in beam search."""
+
+    length_penalty: float = 1.0
+    """Length penalty to be used for beam search."""
+
+    include_stop_str_in_output: bool = False
+    """Whether to include the stop strings in output text."""
+
     temperature: float = Field(default=0.0)
     """The sampling temperature, between 0 and 1.
 
@@ -169,6 +182,29 @@ class TranscriptionRequest(OpenAIBaseModel):
         "top_k": 0,
         "min_p": 0.0,
     }
+
+    def to_beam_search_params(
+        self,
+        default_max_tokens: int,
+        default_sampling_params: dict | None = None,
+    ) -> BeamSearchParams:
+        if default_sampling_params is None:
+            default_sampling_params = {}
+
+        max_tokens = default_max_tokens
+        n = self.n if self.n is not None else 1
+
+        # NOTE: Temp 0 is a different fallback than completions
+        if (temperature := self.temperature) is None:
+            temperature = default_sampling_params.get("temperature", 0)
+
+        return BeamSearchParams(
+            beam_width=n,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            length_penalty=self.length_penalty,
+            include_stop_str_in_output=self.include_stop_str_in_output,
+        )
 
     def to_sampling_params(
         self, default_max_tokens: int, default_sampling_params: dict | None = None
@@ -376,6 +412,18 @@ class TranslationRequest(OpenAIBaseModel):
 
     # TODO support additional sampling parameters
     # --8<-- [start:translation-sampling-params]
+    use_beam_search: bool = False
+    """Whether or not beam search should be used."""
+
+    n: int = 1
+    """The number of beams to be used in beam search."""
+
+    length_penalty: float = 1.0
+    """Length penalty to be used for beam search."""
+
+    include_stop_str_in_output: bool = False
+    """Whether to include the stop strings in output text."""
+
     seed: int | None = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     """The seed to use for sampling."""
 
@@ -423,6 +471,29 @@ class TranslationRequest(OpenAIBaseModel):
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "temperature": 0,
     }
+
+    def to_beam_search_params(
+        self,
+        default_max_tokens: int,
+        default_sampling_params: dict | None = None,
+    ) -> BeamSearchParams:
+        if default_sampling_params is None:
+            default_sampling_params = {}
+
+        max_tokens = default_max_tokens
+        n = self.n if self.n is not None else 1
+
+        # NOTE: Temp 0 is a different fallback than completions
+        if (temperature := self.temperature) is None:
+            temperature = default_sampling_params.get("temperature", 0)
+
+        return BeamSearchParams(
+            beam_width=n,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            length_penalty=self.length_penalty,
+            include_stop_str_in_output=self.include_stop_str_in_output,
+        )
 
     def to_sampling_params(
         self, default_max_tokens: int, default_sampling_params: dict | None = None
