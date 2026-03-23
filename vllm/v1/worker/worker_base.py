@@ -116,6 +116,99 @@ class WorkerBase:
         """Apply a function on the model inside this worker."""
         return fn(self.get_model())
 
+    def _steerable_layers(self) -> dict:
+        """Return ``{layer_idx: module}`` for layers with steering buffers.
+
+        Works with any model runner that exposes ``get_model()``,
+        including the V2 runner.
+        """
+        mr = self.model_runner
+        if mr is None or not hasattr(mr, "get_model"):
+            return {}
+        layers: dict = {}
+        for mod in mr.get_model().modules():
+            if hasattr(mod, "steering_vector") and hasattr(mod, "layer_idx"):
+                layers[mod.layer_idx] = mod
+        return layers
+
+    def set_steering_vectors(
+        self,
+        vectors_data: dict[int, list[float]],
+        validate_only: bool = False,
+    ) -> list[int]:
+        """Set activation steering vectors from plain Python data.
+
+        Only the layers present in *vectors_data* are modified; other
+        layers keep their current steering state.  Use
+        :meth:`clear_steering_vectors` to zero everything first when a
+        full replacement is intended.
+
+        All requested vectors are validated (layer existence and
+        hidden-size match) **before** any buffer is touched.  When
+        *validate_only* is ``True`` the method returns after validation
+        without copying any data — the router uses this to verify all
+        pipeline-parallel stages before committing the update.
+
+        Returns:
+            Sorted list of layer indices that were actually updated (or
+            *would* be updated when *validate_only*) on this worker.
+            The router unions these across workers.
+        """
+        import torch
+
+        steerable = self._steerable_layers()
+        if not steerable:
+            return []
+
+        # Determine which requested layers this worker owns.
+        valid_indices = set(vectors_data.keys()) & set(steerable.keys())
+        if not valid_indices:
+            return []
+
+        # Validate vector sizes and values before any mutation.
+        import math
+
+        for idx in sorted(valid_indices):
+            vec = vectors_data[idx]
+            expected = steerable[idx].steering_vector.shape[1]
+            if len(vec) != expected:
+                raise ValueError(
+                    f"Layer {idx}: expected vector of size {expected}, "
+                    f"got {len(vec)}"
+                )
+            if not all(math.isfinite(v) for v in vec):
+                raise ValueError(
+                    f"Layer {idx}: steering vector contains non-finite "
+                    f"values (NaN or Infinity)"
+                )
+
+        if validate_only:
+            return sorted(valid_indices)
+
+        # All checks passed — apply.
+        for idx in valid_indices:
+            vec = torch.tensor(
+                vectors_data[idx], dtype=torch.float32
+            ).unsqueeze(0)
+            buf = steerable[idx].steering_vector
+            buf.copy_(vec.to(device=buf.device, dtype=buf.dtype))
+
+        return sorted(valid_indices)
+
+    def clear_steering_vectors(self) -> None:
+        """Zero all steering-vector buffers."""
+        for mod in self._steerable_layers().values():
+            mod.steering_vector.zero_()
+
+    def get_steering_status(self) -> dict:
+        """Return ``{layer_idx: {"norm": float}}`` for active layers."""
+        result: dict = {}
+        for idx, mod in self._steerable_layers().items():
+            norm = mod.steering_vector.norm().item()
+            if norm > 0.0:
+                result[idx] = {"norm": round(norm, 6)}
+        return result
+
     def get_model_inspection(self) -> str:
         """Return a transformers-style hierarchical view of the model."""
         from vllm.model_inspection import format_model_inspection
