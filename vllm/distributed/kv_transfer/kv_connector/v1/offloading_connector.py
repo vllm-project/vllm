@@ -43,6 +43,26 @@ from vllm.v1.request import Request
 
 
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
+    @staticmethod
+    def _coerce_metadata(
+        metadata: KVConnectorMetadata,
+    ) -> OffloadingConnectorMetadata:
+        if isinstance(metadata, OffloadingConnectorMetadata):
+            return metadata
+        if all(
+            hasattr(metadata, field)
+            for field in ("reqs_to_load", "reqs_to_store", "reqs_to_flush")
+        ):
+            return OffloadingConnectorMetadata(
+                reqs_to_load=metadata.reqs_to_load,
+                reqs_to_store=metadata.reqs_to_store,
+                reqs_to_flush=metadata.reqs_to_flush,
+            )
+        raise TypeError(
+            "OffloadingConnector requires metadata with reqs_to_load, "
+            "reqs_to_store, and reqs_to_flush fields."
+        )
+
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         return True
@@ -77,13 +97,15 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
         assert self.connector_worker is not None
-        assert isinstance(kv_connector_metadata, OffloadingConnectorMetadata)
-        self.connector_worker.handle_preemptions(kv_connector_metadata)
+        self.connector_worker.handle_preemptions(
+            self._coerce_metadata(kv_connector_metadata)
+        )
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
-        self.connector_worker.start_kv_transfers(self._connector_metadata)
+        self.connector_worker.start_kv_transfers(
+            self._coerce_metadata(self._get_connector_metadata())
+        )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass
@@ -99,8 +121,9 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
 
     def wait_for_save(self):
         assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
-        self.connector_worker.prepare_store_kv(self._connector_metadata)
+        self.connector_worker.prepare_store_kv(
+            self._coerce_metadata(self._get_connector_metadata())
+        )
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None

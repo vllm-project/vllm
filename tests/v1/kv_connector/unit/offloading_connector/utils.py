@@ -152,6 +152,13 @@ class TransferSummary:
     offload_addresses: list[Any]
 
 
+@dataclass
+class CompatibleOffloadingMetadata:
+    reqs_to_load: dict[str, TransferSpec]
+    reqs_to_store: dict[str, TransferSpec]
+    reqs_to_flush: set[str] | None = None
+
+
 class RequestRunner:
     def __init__(
         self,
@@ -849,6 +856,27 @@ def test_scheduler_hybrid_hits_return_common_prefix_tokens():
 def test_scheduler_hybrid_uses_chunk_boundaries_for_existing_tokens():
         request, num_computed_tokens=15840
     assert (num_hit_tokens, is_async) == (16896, True)
+
+def test_offloading_connector_accepts_structurally_compatible_metadata():
+    connector = OffloadingConnector(
+        create_hybrid_vllm_config(hybrid_chunk_size=16384),
+        KVConnectorRole.WORKER,
+        create_hybrid_kv_cache_config(num_mamba_groups=1),
+    )
+    connector_worker = connector.connector_worker
+    assert connector_worker is not None
+    connector_worker.handle_preemptions = MagicMock()
+    connector_worker.start_kv_transfers = MagicMock()
+    connector_worker.prepare_store_kv = MagicMock()
+    metadata = CompatibleOffloadingMetadata({}, {}, {"req-1"})
+    connector.handle_preemptions(metadata)
+    connector.bind_connector_metadata(metadata)
+    connector.start_load_kv(MagicMock(spec=ForwardContext))
+    connector.wait_for_save()
+    expected = OffloadingConnectorMetadata({}, {}, {"req-1"})
+    connector_worker.handle_preemptions.assert_called_once_with(expected)
+    connector_worker.start_kv_transfers.assert_called_once_with(expected)
+    connector_worker.prepare_store_kv.assert_called_once_with(expected)
 class TestOffloadingConnectorStats:
     """Tests for OffloadingConnector stats reconstruction and operations."""
     def test_build_kv_connector_stats_with_none(self):
