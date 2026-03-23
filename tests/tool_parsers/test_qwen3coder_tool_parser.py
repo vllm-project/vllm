@@ -429,6 +429,94 @@ hello world
     assert args["obj_param"] == {"key": "value"}
 
 
+def test_extract_tool_calls_anyof_type_conversion(qwen3_tool_parser_parametrized):
+    """Test type conversion for anyOf/oneOf nullable schemas (Pydantic v2).
+
+    Pydantic v2 emits anyOf for Optional[T] fields, e.g.:
+        Optional[int] -> {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+    The parser must extract the non-null type and apply the correct
+    conversion (int(), float(), etc.) instead of returning a raw string.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "test_anyof",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "anyof_int": {
+                            "anyOf": [
+                                {"type": "integer"},
+                                {"type": "null"},
+                            ],
+                            "default": 5,
+                        },
+                        "anyof_str": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "anyof_array": {
+                            "anyOf": [
+                                {"type": "array", "items": {"type": "string"}},
+                                {"type": "null"},
+                            ],
+                        },
+                        "anyof_obj": {
+                            "anyOf": [
+                                {"type": "object"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "type_as_array": {
+                            "type": ["integer", "null"],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = """<tool_call>
+<function=test_anyof>
+<parameter=anyof_int>
+5
+</parameter>
+<parameter=anyof_str>
+hello
+</parameter>
+<parameter=anyof_array>
+["a", "b", "c"]
+</parameter>
+<parameter=anyof_obj>
+{"key": "value"}
+</parameter>
+<parameter=type_as_array>
+42
+</parameter>
+</function>
+</tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    extracted = qwen3_tool_parser_parametrized.extract_tool_calls(
+        model_output, request=request
+    )
+
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args["anyof_int"] == 5
+    assert isinstance(args["anyof_int"], int)
+    assert args["anyof_str"] == "hello"
+    assert isinstance(args["anyof_str"], str)
+    assert args["anyof_array"] == ["a", "b", "c"]
+    assert isinstance(args["anyof_array"], list)
+    assert args["anyof_obj"] == {"key": "value"}
+    assert isinstance(args["anyof_obj"], dict)
+    assert args["type_as_array"] == 42
+    assert isinstance(args["type_as_array"], int)
+
+
 @pytest.mark.parametrize(
     ids=[
         "no_tools",

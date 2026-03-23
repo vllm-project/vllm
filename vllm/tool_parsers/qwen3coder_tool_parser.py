@@ -153,7 +153,18 @@ class Qwen3CoderToolParser(ToolParser):
         if isinstance(param_config[param_name], dict):
             param_def = param_config[param_name]
             if "type" in param_def:
-                param_type = str(param_def["type"]).strip().lower()
+                raw_type = param_def["type"]
+                # Handle type-as-array at top level,
+                # e.g. {"type": ["integer", "null"]}
+                if isinstance(raw_type, list):
+                    actual = next(
+                        (t for t in raw_type
+                         if t is not None and str(t).lower() != "null"),
+                        None)
+                    param_type = str(actual).strip().lower() if actual \
+                        else "string"
+                else:
+                    param_type = str(raw_type).strip().lower()
             elif "anyOf" in param_def or "oneOf" in param_def:
                 # Extract the first non-null type from anyOf/oneOf variants.
                 # Pydantic v2 emits anyOf for Optional[T] (e.g. int | None),
