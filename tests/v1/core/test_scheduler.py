@@ -526,9 +526,7 @@ def test_update_draft_token_ids_in_output():
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
-    draft_token_ids = DraftTokenIds(
-        [request.request_id], [[10, 11, 12, 13, 14]]
-    )
+    draft_token_ids = DraftTokenIds([request.request_id], [[10, 11, 12, 13, 14]])
 
     scheduler.update_draft_token_ids_in_output(draft_token_ids, scheduler_output)
 

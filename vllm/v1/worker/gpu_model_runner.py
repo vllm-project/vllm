@@ -2506,11 +2506,7 @@ class GPUModelRunner(
                 continue
 
             effective_num_draft_tokens_i = next(
-                (
-                    i
-                    for i, token_id in enumerate(spec_token_ids)
-                    if token_id == -1
-                ),
+                (i for i, token_id in enumerate(spec_token_ids) if token_id == -1),
                 len(spec_token_ids),
             )
             effective_num_draft_tokens_i = min(

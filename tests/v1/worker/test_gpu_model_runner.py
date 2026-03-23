@@ -462,13 +462,19 @@ def test_clip_spec_decode_metadata_for_transition(model_runner, dist_init):
 
     device = model_runner.device
     spec_decode_metadata = SpecDecodeMetadata(
-        draft_token_ids=torch.tensor([11, 12, 21, 31, 32, 33], dtype=torch.int32, device=device),
+        draft_token_ids=torch.tensor(
+            [11, 12, 21, 31, 32, 33], dtype=torch.int32, device=device
+        ),
         num_draft_tokens=[2, 1, 3],
         cu_num_draft_tokens=torch.tensor([2, 3, 6], dtype=torch.int32, device=device),
         cu_num_sampled_tokens=torch.tensor([3, 5, 9], dtype=torch.int32, device=device),
-        target_logits_indices=torch.tensor([0, 1, 2, 3, 4, 5], dtype=torch.int32, device=device),
+        target_logits_indices=torch.tensor(
+            [0, 1, 2, 3, 4, 5], dtype=torch.int32, device=device
+        ),
         bonus_logits_indices=torch.tensor([6, 7, 8], dtype=torch.int32, device=device),
-        logits_indices=torch.tensor([0, 1, 6, 2, 7, 3, 4, 5, 8], dtype=torch.int32, device=device),
+        logits_indices=torch.tensor(
+            [0, 1, 6, 2, 7, 3, 4, 5, 8], dtype=torch.int32, device=device
+        ),
     )
 
     scheduler_output.num_invalid_spec_tokens = {"req_1": 1, "req_2": 2}
