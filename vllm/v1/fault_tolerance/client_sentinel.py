@@ -94,6 +94,22 @@ class ClientSentinel(BaseSentinel):
         await asyncio.sleep(self.ft_config.engine_recovery_timeout_sec)
         self.instance_shutdown_callback()
 
+    async def scale_elastic_ep(self, new_data_parallel_size: int):
+        # Update the engine status dict and publish the new status.
+        for engine, status in self.engine_status_dict.items():
+            if status["status"] != "healthy":
+                msg = f"Cannot scale elastic EP because engine {engine} is not healthy."
+                self.logger(msg, level="error")
+                raise RuntimeError(msg)
+
+        # TODO: Elastic EP currently supports only Ray + internal LB.
+        # Refresh behavior should be revisited after MP and other LB modes are supported
+        self.engine_status_dict = {
+            engine_index: {"status": "healthy"}
+            for engine_index in range(new_data_parallel_size)
+        }
+        await self._pub_engine_status()
+
     def shutdown(self):
         close_sockets([self.fault_receiver_socket, self.fault_state_pub_socket])
         self.ctx_async.term()
