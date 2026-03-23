@@ -1197,6 +1197,8 @@ class GPUModelRunner(
                 scheduler_output,
                 self.input_batch.req_id_to_index,
             )
+        if self.use_async_spec_decode:
+            self.prev_num_draft_tokens.np.fill(0)
 
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
@@ -1232,6 +1234,16 @@ class GPUModelRunner(
                     deferred_spec_decode_corrections.append(
                         (req_id, optimistic_num_accepted, req_state)
                     )
+
+                    prev_req_index = (
+                        self.input_batch.prev_req_id_to_index.get(req_id)
+                        if self.input_batch.prev_req_id_to_index
+                        else None
+                    )
+                    if prev_req_index is not None:
+                        self.prev_num_draft_tokens.np[prev_req_index] = (
+                            optimistic_num_accepted
+                        )
 
                     if is_ngram_gpu and optimistic_num_accepted > 0:
                         self.input_batch.num_tokens_no_spec[req_index] += (
@@ -1273,18 +1285,6 @@ class GPUModelRunner(
                         + num_output_tokens
                     )
                     self.input_batch.num_tokens_no_spec[req_index] = end_idx
-                    # The reset above undoes the optimistic increment
-                    # applied earlier for async spec decode. Re-add it
-                    # so the deferred correction callback can subtract
-                    # the right delta later.
-                    if (
-                        is_ngram_gpu
-                        and self.use_async_scheduling
-                        and req_state.prev_num_draft_len
-                    ):
-                        self.input_batch.num_tokens_no_spec[req_index] += (
-                            req_state.prev_num_draft_len
-                        )
 
             # Update the block IDs.
             if not resumed_from_preemption:
@@ -1945,6 +1945,7 @@ class GPUModelRunner(
             and prev_req_id_to_index
         ):
             self.prev_positions.copy_to_gpu(num_reqs)
+            self.prev_num_draft_tokens.copy_to_gpu()
             cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
                 device=self.device, non_blocking=True
             )
@@ -2037,12 +2038,13 @@ class GPUModelRunner(
                 draft_token_ids,
             ) in scheduler_output.scheduled_spec_decode_tokens.items():
                 req_idx = self.input_batch.req_id_to_index[req_id]
-                num_draft_tokens[req_idx] = len(draft_token_ids)
+                draft_len = len(draft_token_ids)
+                num_draft_tokens[req_idx] = draft_len
                 if (
                     self.input_batch.num_computed_tokens_cpu[req_idx]
                     >= self.input_batch.num_prompt_tokens[req_idx]
                 ):
-                    num_decode_draft_tokens[req_idx] = len(draft_token_ids)
+                    num_decode_draft_tokens[req_idx] = draft_len
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens
             )
@@ -2052,13 +2054,6 @@ class GPUModelRunner(
             self.num_decode_draft_tokens.np[:num_reqs] = num_decode_draft_tokens
             self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
             self.num_decode_draft_tokens.copy_to_gpu()
-
-        if self.use_async_spec_decode:
-            if use_spec_decode:
-                self.prev_num_draft_tokens.np[:num_reqs] = num_draft_tokens
-            else:
-                self.prev_num_draft_tokens.np[:num_reqs].fill(0)
-            self.prev_num_draft_tokens.copy_to_gpu(num_reqs)
 
         # Hot-Swap lora model
         if self.lora_config:
