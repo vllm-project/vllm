@@ -150,17 +150,32 @@ class Qwen3CoderToolParser(ToolParser):
                 )
             return param_value
 
-        if (
-            isinstance(param_config[param_name], dict)
-            and "type" in param_config[param_name]
-        ):
-            param_type = str(param_config[param_name]["type"]).strip().lower()
-        elif (
-            isinstance(param_config[param_name], dict)
-            and "anyOf" in param_config[param_name]
-        ):
-            # anyOf has no top-level "type"; treat as object to trigger json.loads.
-            param_type = "object"
+        if isinstance(param_config[param_name], dict):
+            param_def = param_config[param_name]
+            if "type" in param_def:
+                param_type = str(param_def["type"]).strip().lower()
+            elif "anyOf" in param_def or "oneOf" in param_def:
+                # Extract the first non-null type from anyOf/oneOf variants.
+                # Pydantic v2 emits anyOf for Optional[T] (e.g. int | None),
+                # which has no top-level "type" key. The previous fix (#36032)
+                # hardcoded "object" here, but that breaks integer, string,
+                # and array nullable params — they need their actual type
+                # to hit the correct conversion branch (int(), float(), etc.).
+                variants = param_def.get(
+                    "anyOf") or param_def.get("oneOf", [])
+                non_null_types = [
+                    v for v in variants
+                    if isinstance(v, dict)
+                    and v.get("type") is not None
+                    and str(v["type"]).lower() != "null"
+                ]
+                if non_null_types:
+                    param_type = str(
+                        non_null_types[0]["type"]).strip().lower()
+                else:
+                    param_type = "string"
+            else:
+                param_type = "string"
         else:
             param_type = "string"
         if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
