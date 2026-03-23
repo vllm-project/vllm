@@ -10,7 +10,6 @@ on HuggingFace model repository.
 """
 
 import argparse
-from dataclasses import asdict
 from pathlib import Path
 
 from PIL.Image import Image
@@ -34,7 +33,7 @@ def run_clip(seed: int):
         limit_mm_per_prompt={"image": 1},
     )
 
-    llm = LLM(**asdict(engine_args) | {"seed": seed})
+    llm = LLM(**vars(engine_args) | {"seed": seed})
 
     print("Text embedding output:")
     outputs = llm.embed(text, use_tqdm=False)
@@ -60,7 +59,7 @@ def run_e5_v(seed: int):
         limit_mm_per_prompt={"image": 1},
     )
 
-    llm = LLM(**asdict(engine_args) | {"seed": seed})
+    llm = LLM(**vars(engine_args) | {"seed": seed})
 
     llama3_template = "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n"  # noqa: E501
 
@@ -121,7 +120,7 @@ def run_qwen3_vl(seed: int):
     prompt_image = f"<|im_start|>system\n{default_instruction}<|im_end|>\n<|im_start|>user\n{image_placeholder}<|im_end|>\n<|im_start|>assistant\n"
     prompt_image_text = f"<|im_start|>system\n{default_instruction}<|im_end|>\n<|im_start|>user\n{image_placeholder}{text}<|im_end|>\n<|im_start|>assistant\n"
 
-    llm = LLM(**asdict(engine_args) | {"seed": seed})
+    llm = LLM(**vars(engine_args) | {"seed": seed})
 
     print("Text embedding output:")
     outputs = llm.embed(prompt_text, use_tqdm=False)
@@ -155,7 +154,7 @@ def run_siglip(seed: int):
         limit_mm_per_prompt={"image": 1},
     )
 
-    llm = LLM(**asdict(engine_args) | {"seed": seed})
+    llm = LLM(**vars(engine_args) | {"seed": seed})
 
     print("Text embedding output:")
     outputs = llm.embed(text, use_tqdm=False)
@@ -183,7 +182,7 @@ def run_vlm2vec_phi3v(seed: int):
         limit_mm_per_prompt={"image": 1},
     )
 
-    llm = LLM(**asdict(engine_args) | {"seed": seed})
+    llm = LLM(**vars(engine_args) | {"seed": seed})
     image_token = "<|image_1|>"
 
     print("Text embedding output:")
@@ -270,7 +269,7 @@ def run_vlm2vec_qwen2vl(seed: int):
         limit_mm_per_prompt={"image": 1},
     )
 
-    llm = LLM(**asdict(engine_args) | {"seed": seed})
+    llm = LLM(**vars(engine_args) | {"seed": seed})
     image_token = "<|image_pad|>"
 
     print("Text embedding output:")

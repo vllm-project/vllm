@@ -10,7 +10,6 @@ multimodal documents (text + images/videos).
 
 from argparse import Namespace
 from collections.abc import Callable
-from dataclasses import asdict
 from pathlib import Path
 from typing import NamedTuple
 
@@ -125,7 +124,7 @@ def main(args: Namespace):
     model_request = model_example_map[args.model_name]()
     engine_args = model_request.engine_args
 
-    llm = LLM(**asdict(engine_args))
+    llm = LLM(**vars(engine_args))
 
     print("Query: string & Document: string")
     outputs = llm.score(query, document)

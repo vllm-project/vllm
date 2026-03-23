@@ -6,7 +6,6 @@ import argparse
 import json
 import random
 import time
-from dataclasses import fields
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -79,7 +78,7 @@ def run_vllm(
 ) -> float:
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
+    llm = LLM(**vars(engine_args))
 
     assert all(
         llm.llm_engine.model_config.max_model_len >= (request[1] + request[2])

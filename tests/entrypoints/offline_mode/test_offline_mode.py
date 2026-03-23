@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for HF_HUB_OFFLINE mode"""
 
-import dataclasses
 import importlib
 import sys
 
@@ -156,7 +155,7 @@ def test_model_from_huggingface_offline(monkeypatch: pytest.MonkeyPatch):
             # and friends to set up offline mode
             _re_import_modules()
             engine_args = EngineArgs(model="facebook/opt-125m")
-            LLM(**dataclasses.asdict(engine_args))
+            LLM(**engine_args.dict())
         finally:
             # Reset the environment after the test
             # NB: Assuming tests are run in online mode

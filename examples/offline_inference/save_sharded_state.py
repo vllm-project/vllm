@@ -21,7 +21,6 @@ llm = LLM(
 )
 """
 
-import dataclasses
 import os
 import shutil
 from pathlib import Path
@@ -60,7 +59,7 @@ def main(args):
     if not Path(model_path).is_dir():
         raise ValueError("model path must be a local directory")
     # Create LLM instance from arguments
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM(**vars(engine_args))
     # Prepare output directory
     Path(args.output).mkdir(exist_ok=True)
     # Dump worker states to output directory

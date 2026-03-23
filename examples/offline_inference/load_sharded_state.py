@@ -20,8 +20,6 @@ python load_sharded_state.py \
     --max-tokens 50
 """
 
-import dataclasses
-
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -64,7 +62,7 @@ def main():
     print(f"Tensor parallel size: {engine_args.tensor_parallel_size}")
 
     # Load the model using engine args
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM(**vars(engine_args))
 
     # Prepare sampling parameters
     sampling_params = SamplingParams(

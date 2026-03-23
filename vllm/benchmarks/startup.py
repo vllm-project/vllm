@@ -16,7 +16,6 @@ import shutil
 import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import fields
 from typing import Any
 
 import numpy as np
@@ -67,7 +66,7 @@ def run_startup_in_subprocess(engine_args, result_queue):
         # Measure total startup time
         start_time = time.perf_counter()
 
-        llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
+        llm = LLM(**vars(engine_args))
 
         total_startup_time = time.perf_counter() - start_time
 
