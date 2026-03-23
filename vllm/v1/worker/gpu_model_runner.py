@@ -37,6 +37,7 @@ from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.v1.base import CanonicalKVCaches
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -130,7 +131,6 @@ from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CanonicalKVCaches,
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -6465,7 +6465,15 @@ class GPUModelRunner(
 
         # Try creating KV caches optimized for kv-connector transfers
         cache_dtype = self.cache_config.cache_dtype
-        if self.use_uniform_kv_cache(self.attn_groups, cache_dtype):
+        if self.use_canonical_kv_caches(kv_cache_config, self.attn_groups, cache_dtype):
+            kv_caches, self.canonical_kv_caches = self.allocate_canonical_kv_caches(
+                kv_cache_config,
+                self.attn_groups,
+                cache_dtype,
+                self.device,
+                kernel_block_sizes,
+            )
+        elif self.use_uniform_kv_cache(self.attn_groups, cache_dtype):
             kv_caches, cross_layers_kv_cache, attn_backend = (
                 self.allocate_uniform_kv_caches(
                     kv_cache_config,
@@ -6477,16 +6485,6 @@ class GPUModelRunner(
             )
             self.cross_layers_kv_cache = cross_layers_kv_cache
             self.cross_layers_attn_backend = attn_backend
-        elif self.use_canonical_kv_caches(
-            kv_cache_config, self.attn_groups, cache_dtype
-        ):
-            kv_caches, self.canonical_kv_caches = self.allocate_canonical_kv_caches(
-                kv_cache_config,
-                self.attn_groups,
-                cache_dtype,
-                self.device,
-                kernel_block_sizes,
-            )
         else:
             # Fallback to the general case
             # Initialize the memory buffer for KV cache
@@ -6584,7 +6582,17 @@ class GPUModelRunner(
 
         if has_kv_transfer_group():
             kv_transfer_group = get_kv_transfer_group()
-            if self.cross_layers_kv_cache is not None:
+            if self.canonical_kv_caches is not None:
+                from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+                    WorkerConnectorInitializationData,
+                )
+
+                kv_transfer_group.initialize_worker_connector(
+                    WorkerConnectorInitializationData(
+                        canonical_kv_caches=self.canonical_kv_caches,
+                    )
+                )
+            elif self.cross_layers_kv_cache is not None:
                 assert self.cross_layers_attn_backend is not None
                 kv_transfer_group.register_cross_layers_kv_cache(
                     self.cross_layers_kv_cache, self.cross_layers_attn_backend
@@ -6592,16 +6600,6 @@ class GPUModelRunner(
             else:
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
-
-            from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-                WorkerConnectorInitializationData,
-            )
-
-            kv_transfer_group.initialize_worker_connector(
-                WorkerConnectorInitializationData(
-                    canonical_kv_caches=self.canonical_kv_caches,
-                )
-            )
 
     def _get_attention_kv_cache_gid(self) -> int:
         """Find the KV cache group index for attention layers."""
