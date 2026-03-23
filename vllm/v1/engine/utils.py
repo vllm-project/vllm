@@ -826,10 +826,24 @@ class CoreEngineActorManager:
             pg = self.created_placement_groups.pop()
             is_local = self.placement_group_is_local.pop()
             if is_local:
-                actor = self.local_engine_actors.pop()
+                self.local_engine_actors.pop()
             else:
-                actor = self.remote_engine_actors.pop()
+                self.remote_engine_actors.pop()
             ray.util.remove_placement_group(pg)
+
+    def remove_run_refs_for_scale_down(self, removed_dp_size: int) -> None:
+        if removed_dp_size <= 0:
+            return
+        flags = self.placement_group_is_local[-removed_dp_size:]
+        li = len(self.local_engine_actors) - 1
+        ri = len(self.remote_engine_actors) - 1
+        for is_local in reversed(flags):
+            if is_local:
+                actor = self.local_engine_actors[li]
+                li -= 1
+            else:
+                actor = self.remote_engine_actors[ri]
+                ri -= 1
             ref = self.actor_run_ref_dict.pop(actor)
             self.run_refs.remove(ref)
 

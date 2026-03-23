@@ -1619,6 +1619,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         parallel_config = self.vllm_config.parallel_config
         ip, coord_store_port = self._setup_elastic_ep_reconfig_bootstrap()
 
+        removed_dp_size = cur_data_parallel_size - new_data_parallel_size
+        assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
+        self.resources.engine_manager.remove_run_refs_for_scale_down(removed_dp_size)
         reconfig_futures = []
         for cur_dp_rank, engine in enumerate(self.core_engines):
             reconfig_request = ReconfigureDistributedRequest(
