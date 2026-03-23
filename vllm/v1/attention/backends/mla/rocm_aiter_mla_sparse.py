@@ -147,8 +147,6 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
     block_size: int = 1
     topk_tokens: int = 2048
 
-    # Prefill/decode split (required by dispatch logic in mla_attention.py).
-    # ROCm treats all tokens as decode (MQA), so forward_mha is never called.
     num_decodes: int = 0
     num_prefills: int = 0
     num_decode_tokens: int = 0
@@ -250,7 +248,6 @@ class ROCMAiterMLASparseMetadataBuilder(
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
-            # Treat all tokens as decode so forward_mha is never called
             num_decodes=common_attn_metadata.num_reqs,
             num_prefills=0,
             num_decode_tokens=num_tokens,

@@ -557,6 +557,60 @@ def split_decodes_and_prefills(
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
+@dataclass
+class SparsePrefillMetadata:
+    """Shared prefill/decode split metadata for sparse MLA backends."""
+
+    num_decodes: int
+    num_prefills: int
+    num_decode_tokens: int
+    prefill_query_start_loc: torch.Tensor | None
+    prefill_max_query_len: int
+    has_context: bool
+
+
+def build_sparse_prefill_metadata(
+    cm: "CommonAttentionMetadata",
+    decode_threshold: int = 1,
+) -> SparsePrefillMetadata:
+    """Build prefill metadata needed by SparseMLACommonImpl.forward_mha.
+
+    Shared by all sparse MLA metadata builders.
+    """
+    num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
+        cm,
+        decode_threshold=decode_threshold,
+    )
+
+    prefill_query_start_loc = None
+    prefill_max_query_len = 0
+    has_context = False
+
+    if num_prefills > 0:
+        offset = cm.query_start_loc[num_decodes]
+        prefill_query_start_loc = cm.query_start_loc[num_decodes:] - offset
+
+        qsl_cpu = cm.query_start_loc_cpu
+        prefill_qlens = qsl_cpu[num_decodes + 1 :] - qsl_cpu[num_decodes:-1]
+        prefill_max_query_len = int(prefill_qlens.max().item())
+
+        seq_lens_cpu = cm.seq_lens.cpu()
+        for i in range(num_prefills):
+            idx = num_decodes + i
+            if seq_lens_cpu[idx] > qsl_cpu[idx + 1] - qsl_cpu[idx]:
+                has_context = True
+                break
+
+    return SparsePrefillMetadata(
+        num_decodes=num_decodes,
+        num_prefills=num_prefills,
+        num_decode_tokens=num_decode_tokens,
+        prefill_query_start_loc=prefill_query_start_loc,
+        prefill_max_query_len=prefill_max_query_len,
+        has_context=has_context,
+    )
+
+
 def split_prefill_chunks(
     seq_lens_cpu: torch.Tensor, workspace_size: int, request_offset: int = 0
 ) -> list[tuple[int, int]]:

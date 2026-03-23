@@ -32,6 +32,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.utils import (
+    build_sparse_prefill_metadata,
     reshape_attn_output_for_spec_decode,
     reshape_query_for_spec_decode,
     split_decodes_and_prefills,
@@ -151,15 +152,10 @@ class FlashMLASparseMetadata(AttentionMetadata):
     block_size: int = 64
     topk_tokens: int = 2048
 
-    # Prefill/decode split (required by dispatch logic in mla_attention.py)
     num_decodes: int = 0
     num_prefills: int = 0
     num_decode_tokens: int = 0
-
-    # Sequence lengths for all requests (context + query)
     seq_lens: torch.Tensor | None = None
-
-    # MHA prefill metadata (used by SparseMLACommonImpl.forward_mha)
     prefill_query_start_loc: torch.Tensor | None = None
     prefill_max_query_len: int = 0
     has_context: bool = False
@@ -526,40 +522,10 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             else:
                 fp8_extra_metadata = self._build_fp8_separate_prefill_decode(cm)
 
-        # Compute prefill/decode split for the dispatch logic in
-        # mla_attention.py and SparseMLACommonImpl.forward_mha().
-        (num_decodes, num_prefills, num_decode_tokens, _num_prefill_tokens) = (
-            split_decodes_and_prefills(
-                cm,
-                decode_threshold=self.reorder_batch_threshold or 1,
-            )
+        pm = build_sparse_prefill_metadata(
+            cm,
+            decode_threshold=self.reorder_batch_threshold or 1,
         )
-
-        # Build prefill-specific metadata for forward_mha
-        prefill_query_start_loc = None
-        prefill_max_query_len = 0
-        has_context = False
-        if num_prefills > 0:
-            # Derive prefill cu_seqlens from the full query_start_loc.
-            # Decodes come first in the batch, prefills follow.
-            offset = cm.query_start_loc[num_decodes]
-            prefill_query_start_loc = cm.query_start_loc[num_decodes:] - offset
-
-            query_start_loc_cpu = cm.query_start_loc_cpu
-            prefill_qlens = (
-                query_start_loc_cpu[num_decodes + 1 :]
-                - query_start_loc_cpu[num_decodes:-1]
-            )
-            prefill_max_query_len = int(prefill_qlens.max().item())
-
-            # has_context: any prefill request has cached tokens (seq_len > query_len)
-            seq_lens_cpu = cm.seq_lens.cpu()
-            for i in range(num_prefills):
-                req_idx = num_decodes + i
-                qlen = query_start_loc_cpu[req_idx + 1] - query_start_loc_cpu[req_idx]
-                if seq_lens_cpu[req_idx] > qlen:
-                    has_context = True
-                    break
 
         metadata = FlashMLASparseMetadata(
             num_reqs=cm.num_reqs,
@@ -572,13 +538,13 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
-            num_decodes=num_decodes,
-            num_prefills=num_prefills,
-            num_decode_tokens=num_decode_tokens,
+            num_decodes=pm.num_decodes,
+            num_prefills=pm.num_prefills,
+            num_decode_tokens=pm.num_decode_tokens,
             seq_lens=cm.seq_lens,
-            prefill_query_start_loc=prefill_query_start_loc,
-            prefill_max_query_len=prefill_max_query_len,
-            has_context=has_context,
+            prefill_query_start_loc=pm.prefill_query_start_loc,
+            prefill_max_query_len=pm.prefill_max_query_len,
+            has_context=pm.has_context,
             fp8_extra_metadata=fp8_extra_metadata,
             fp8_use_mixed_batch=fp8_use_mixed_batch,
         )

@@ -1,15 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Common implementation for sparse MLA attention prefill (forward_mha).
-
-Parallel to MLACommonImpl (in mla_attention.py) which provides forward_mha for
-non-sparse MLA backends, this module provides SparseMLACommonImpl which gives
-all sparse MLA backends a shared forward_mha implementation.
-
-Decode (forward_mqa) is left abstract for each sparse backend to implement
-with its own sparse decode kernel.
-"""
+"""Shared forward_mha implementation for sparse MLA backends."""
 
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -39,9 +30,9 @@ T = TypeVar("T", bound=AttentionMetadata)
 
 @triton.jit
 def _scatter_topk_kernel(
-    mask_ptr,  # (B, max_Q, max_S) int32 output
-    topk_ptr,  # (total_topk_rows, topk_stride) int32 packed topk indices
-    cu_q_lens_ptr,  # (B+1,) int32 cumulative query lengths
+    mask_ptr,
+    topk_ptr,
+    cu_q_lens_ptr,
     max_seq_len: tl.constexpr,
     topk: tl.constexpr,
     topk_stride: tl.constexpr,
@@ -49,14 +40,9 @@ def _scatter_topk_kernel(
     BLOCK_TOPK: tl.constexpr,
     NUM_REQS: tl.constexpr,
 ):
-    """Write 1 at each valid topk position in the mask.
-
-    Grid: (total_topk_rows,) where total_topk_rows = sum(q_lens).
-    Each program handles one query token's topk entries.
-    """
+    """Scatter 1s at topk positions. Grid: (sum(q_lens),)."""
     row_idx = tl.program_id(0)
 
-    # Find batch index: count how many cu_q_lens boundaries are <= row_idx.
     b: tl.int32 = 0
     for i in tl.static_range(NUM_REQS):
         next_start = tl.load(cu_q_lens_ptr + i + 1)
@@ -65,13 +51,11 @@ def _scatter_topk_kernel(
     q_start = tl.load(cu_q_lens_ptr + b)
     q_local = row_idx - q_start
 
-    # Load topk indices for this query token
     topk_row_ptr = topk_ptr + row_idx * topk_stride
     offsets = tl.arange(0, BLOCK_TOPK)
     in_range = offsets < topk
     indices = tl.load(topk_row_ptr + offsets, mask=in_range, other=-1)
 
-    # Only write valid indices (-1 marks invalid/padding)
     valid = in_range & (indices >= 0)
     mask_row_ptr = mask_ptr + (b * max_q_len + q_local) * max_seq_len
     tl.store(mask_row_ptr + indices, tl.where(valid, 1, 0), mask=valid)
@@ -84,10 +68,7 @@ def _build_topk_mask(
     max_seq_len: int,
     device: torch.device,
 ) -> torch.Tensor:
-    """Build a dense (B, max_Q, max_S) int32 mask from topk indices.
-
-    Uses a single Triton kernel to scatter 1s at each valid topk position.
-    """
+    """Build a dense (B, max_Q, max_S) int32 mask from topk indices."""
     B = len(q_lens)
     mask = torch.zeros(B, max_q_len, max_seq_len, dtype=torch.int32, device=device)
 
@@ -95,7 +76,7 @@ def _build_topk_mask(
     if total_q == 0:
         return mask
 
-    topk_packed = torch.cat(topk_indices_per_req, dim=0)  # (total_q, topk)
+    topk_packed = torch.cat(topk_indices_per_req, dim=0)
     topk_k = topk_packed.shape[1]
 
     q_lens_t = torch.tensor(q_lens, dtype=torch.int32, device=device)
@@ -119,10 +100,7 @@ def _build_topk_mask(
 
 
 class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
-    """Common sparse MLA implementation providing forward_mha for prefill.
-
-    Subclasses must implement forward_mqa() for decode.
-    """
+    """Shared forward_mha for sparse MLA. Subclasses implement forward_mqa."""
 
     def __init__(
         self,
@@ -136,7 +114,7 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         logits_soft_cap: float | None,
         attn_type: str,
         kv_sharing_target_layer_name: str | None,
-        # MLA Specific Arguments
+        # MLA-specific
         q_lora_rank: int | None,
         kv_lora_rank: int,
         qk_nope_head_dim: int,
@@ -165,11 +143,9 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             indexer, "topk_indices_buffer", None
         )
 
-        # FA4 is required for mask_mod in forward_mha.
         fa_version = get_flash_attn_version(head_size=qk_head_dim)
         self._fa4_available = fa_version is not None and fa_version >= 4
 
-        # DCP (context parallelism) — lazily initialized by the caller.
         self.dcp_world_size: int = -1
         self.cp_kv_cache_interleave_size: int = (
             get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
@@ -178,7 +154,6 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
     ) -> torch.Tensor:
-        """Concatenate k_nope and k_pe along the last dimension."""
         k = torch.empty(
             (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
             dtype=k_nope.dtype,
@@ -187,10 +162,6 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         k[..., : k_nope.shape[-1]] = k_nope
         k[..., k_nope.shape[-1] :] = k_pe
         return k
-
-    # ------------------------------------------------------------------
-    # Context gathering helpers
-    # ------------------------------------------------------------------
 
     def _gather_and_decompress_all(
         self,
@@ -201,34 +172,10 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         total_tokens: int,
         k_scale: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Gather all positions from paged cache and decompress.
-
-        Uses the same fused CUDA gather kernel as standard MLA prefill.
-
-        Returns:
-            k: (total_tokens, num_heads, qk_head_dim)
-            v: (total_tokens, num_heads, v_head_dim)
-        """
+        """Gather all positions from paged cache and decompress to (k, v)."""
         device = kv_c_and_k_pe_cache.device
         head_size = kv_c_and_k_pe_cache.shape[-1]
         num_reqs = seq_lens_t.shape[0]
-
-        if total_tokens == 0:
-            empty_k = torch.empty(
-                0,
-                self.num_heads,
-                self.qk_head_dim,
-                dtype=kv_c_and_k_pe_cache.dtype,
-                device=device,
-            )
-            empty_v = torch.empty(
-                0,
-                self.num_heads,
-                self.v_head_dim,
-                dtype=kv_c_and_k_pe_cache.dtype,
-                device=device,
-            )
-            return empty_k, empty_v
 
         workspace = torch.empty(
             total_tokens,
@@ -265,10 +212,6 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
 
         return k, v
 
-    # ------------------------------------------------------------------
-    # forward_mha — FA4 masked MHA over topk positions
-    # ------------------------------------------------------------------
-
     def forward_mha(
         self,
         q: torch.Tensor,
@@ -299,7 +242,6 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         )
 
         if not has_context:
-            # No cached context — decompress new tokens and run causal FA4.
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
@@ -325,7 +267,6 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             output.copy_(attn_out.flatten(start_dim=-2))
             return
 
-        # ----- Has cached context -----
         num_decodes: int = getattr(attn_metadata, "num_decodes", 0)
         num_prefills: int = getattr(attn_metadata, "num_prefills", 0)
         num_decode_tokens: int = getattr(attn_metadata, "num_decode_tokens", 0)
@@ -334,7 +275,6 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         assert all_seq_lens is not None
         prefill_seq_lens = all_seq_lens[num_decodes : num_decodes + num_prefills]
 
-        # Per-request query and sequence lengths
         prefill_qsl_cpu = prefill_qsl.cpu()
         q_lens = [
             (prefill_qsl_cpu[i + 1] - prefill_qsl_cpu[i]).item()
@@ -342,14 +282,12 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         ]
         max_q_len = max(q_lens) if q_lens else 0
 
-        # Build cu_seqlens_k from seq_lens
         seq_lens_t = prefill_seq_lens.to(torch.int32)
         cu_seqlens_k = torch.zeros(num_prefills + 1, dtype=torch.int32, device=device)
         torch.cumsum(seq_lens_t, dim=0, out=cu_seqlens_k[1:])
         total_kv_tokens = cu_seqlens_k[-1].item()
         max_kv_len = seq_lens_t.max().item() if num_prefills > 0 else 0
 
-        # Gather all positions from cache and decompress
         block_table = getattr(attn_metadata, "block_table", None)
         assert block_table is not None
         prefill_block_table = block_table[num_decodes : num_decodes + num_prefills]
@@ -363,8 +301,6 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             k_scale,
         )
 
-        # When all seq_lens <= topk, every position is attended to.
-        # Skip the mask and use standard causal FA4.
         assert self.topk_indices_buffer is not None
         topk = self.topk_indices_buffer.shape[1]
         all_within_topk = bool(seq_lens_t.max().item() <= topk)
@@ -384,7 +320,6 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                 fa_version=4,
             )
         else:
-            # Sparse context: build topk mask for FA4 block-sparse attention
             from vllm.vllm_flash_attn.cute.topk_mask import (
                 dense_mask_mod,
                 dense_mask_to_block_sparse,
@@ -409,7 +344,6 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                 device,
             )
 
-            # SM100+: m_block=128, q_stage=2 → tile_m=256; tile_n=128
             block_sparse_tensors = dense_mask_to_block_sparse(
                 dense_mask,
                 max_q_len,

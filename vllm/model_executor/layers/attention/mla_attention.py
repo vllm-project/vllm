@@ -601,18 +601,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         num_mqa_tokens = attn_metadata.num_decode_tokens
         num_mha_tokens = q.size(0) - num_mqa_tokens
 
-        # For sparse MLA, route prefill tokens to MHA only when:
-        #   1. No cached context (pure prefill), AND
-        #   2. Sequence length is in the MHA sweet spot (~160 to ~6k tokens)
-        _SPARSE_MHA_SEQ_LEN_RANGE = (128, 8192)
+        # Sparse MLA: use MHA only for pure prefill in the sweet spot.
+        # Outside this range or with cached context, MQA is faster.
         if is_sparse_impl and num_mha_tokens > 0:
-            has_context = getattr(attn_metadata, "has_context", False)
             max_seq_len = getattr(attn_metadata, "max_seq_len", 0)
             use_mha = (
-                not has_context
-                and _SPARSE_MHA_SEQ_LEN_RANGE[0]
-                <= max_seq_len
-                <= _SPARSE_MHA_SEQ_LEN_RANGE[1]
+                not getattr(attn_metadata, "has_context", False)
+                and 128 <= max_seq_len <= 8192
                 and not self._vllm_config.attention_config.sparse_mla_force_mqa
             )
             if not use_mha:

@@ -43,7 +43,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 )
 from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
-    split_decodes_and_prefills,
+    build_sparse_prefill_metadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -171,12 +171,9 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
     block_size: int = 64
     topk_tokens: int = 2048
 
-    # Prefill/decode split (required by dispatch logic in mla_attention.py)
     num_decodes: int = 0
     num_prefills: int = 0
     num_decode_tokens: int = 0
-
-    # MHA prefill metadata (used by SparseMLACommonImpl.forward_mha)
     prefill_query_start_loc: torch.Tensor | None = None
     prefill_max_query_len: int = 0
     has_context: bool = False
@@ -234,33 +231,7 @@ class FlashInferMLASparseMetadataBuilder(
         )
         req_id_per_token_tensor = self.req_id_per_token_buffer[:num_tokens]
 
-        # Compute prefill/decode split
-        (num_decodes, num_prefills, num_decode_tokens, _num_prefill_tokens) = (
-            split_decodes_and_prefills(cm)
-        )
-
-        # Build prefill-specific metadata for forward_mha
-        prefill_query_start_loc = None
-        prefill_max_query_len = 0
-        has_context = False
-        if num_prefills > 0:
-            offset = cm.query_start_loc[num_decodes]
-            prefill_query_start_loc = cm.query_start_loc[num_decodes:] - offset
-
-            query_start_loc_cpu = cm.query_start_loc_cpu
-            prefill_qlens = (
-                query_start_loc_cpu[num_decodes + 1 :]
-                - query_start_loc_cpu[num_decodes:-1]
-            )
-            prefill_max_query_len = int(prefill_qlens.max().item())
-
-            seq_lens_cpu = cm.seq_lens.cpu()
-            for i in range(num_prefills):
-                req_idx = num_decodes + i
-                qlen = query_start_loc_cpu[req_idx + 1] - query_start_loc_cpu[req_idx]
-                if seq_lens_cpu[req_idx] > qlen:
-                    has_context = True
-                    break
+        pm = build_sparse_prefill_metadata(cm)
 
         return FlashInferMLASparseMetadata(
             num_reqs=cm.num_reqs,
@@ -274,12 +245,12 @@ class FlashInferMLASparseMetadataBuilder(
             seq_lens=cm.seq_lens,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
-            num_decodes=num_decodes,
-            num_prefills=num_prefills,
-            num_decode_tokens=num_decode_tokens,
-            prefill_query_start_loc=prefill_query_start_loc,
-            prefill_max_query_len=prefill_max_query_len,
-            has_context=has_context,
+            num_decodes=pm.num_decodes,
+            num_prefills=pm.num_prefills,
+            num_decode_tokens=pm.num_decode_tokens,
+            prefill_query_start_loc=pm.prefill_query_start_loc,
+            prefill_max_query_len=pm.prefill_max_query_len,
+            has_context=pm.has_context,
         )
 
 

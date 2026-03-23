@@ -870,12 +870,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
 
 
 class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
-    """Sparse MLA attention implementation with forward_mqa and forward_mha.
-
-    Has the same interface as MLAAttentionImpl. Sparse impls should inherit
-    from SparseMLACommonImpl (in sparse_mla_attention.py) which provides a
-    concrete forward_mha() implementation.
-    """
+    """Sparse MLA attention. Subclass SparseMLACommonImpl for forward_mha."""
 
     @abstractmethod
     def __init__(
