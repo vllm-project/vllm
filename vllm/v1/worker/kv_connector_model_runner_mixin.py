@@ -19,15 +19,17 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.distributed.kv_transfer.kv_connector.v1.base import supports_hma
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    CanonicalKVCaches,
+    KVCacheBlockDataRef,
+    KVCacheBlockTensor,
+    supports_hma,
+)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    CanonicalKVCaches,
-    KVCacheBlockDataRef,
-    KVCacheBlockTensor,
     KVCacheConfig,
 )
 from vllm.v1.outputs import (
@@ -336,10 +338,11 @@ class KVConnectorModelRunnerMixin:
         # The connector must support HMA
         if not supports_hma(get_kv_transfer_group()):
             return False
-        if len(kv_cache_config.kv_cache_groups) <= 1:
+        if len(kv_cache_config.kv_cache_groups) < 1:
             return False
 
-        # All groups must use AttentionSpec with uniform page size
+        # Currently, all groups must use AttentionSpec with uniform page size
+        # We plan to gradually relax this requirement to support other cases
         page_sizes: set[int] = set()
         for group in kv_cache_config.kv_cache_groups:
             if not isinstance(group.kv_cache_spec, AttentionSpec):
@@ -349,13 +352,12 @@ class KVConnectorModelRunnerMixin:
             return False
 
         # all backends must agree on the same stride order
-        spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
-        assert isinstance(spec, AttentionSpec)
-
         common_stride_order: tuple[int, ...] | None = None
         for groups in attn_groups:
             for attn_group in groups:
                 attn_backend = attn_group.backend
+                spec = attn_group.kv_cache_spec
+                assert isinstance(spec, AttentionSpec)
                 kv_cache_shape = attn_backend.get_kv_cache_shape(
                     1234,
                     spec.block_size,
