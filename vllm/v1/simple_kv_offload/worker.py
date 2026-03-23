@@ -87,7 +87,7 @@ class SimpleCPUOffloadWorker:
         # for Mamba layers it is a list of tensors that all share the same
         # underlying raw storage, so we take the first one.
         def _repr_tensor(v: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
-            assert isinstance(v, torch.Tensor | list[torch.Tensor])
+            assert isinstance(v, torch.Tensor | list)
             return v if isinstance(v, torch.Tensor) else v[0]
 
         any_tensor = _repr_tensor(next(iter(kv_caches.values())))

@@ -82,8 +82,7 @@ class SimpleCPUOffloadScheduler:
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
 
         logger.info(
-            "SimpleCPUOffloadScheduler: Allocating %d CPU blocks "
-            "(%.2f GB capacity, mode=%s)",
+            "SimpleCPUOffloadScheduler: Allocating %d CPU blocks (%.2f GB, mode=%s)",
             self.num_cpu_blocks,
             cpu_capacity_bytes / (1024**3),
             "lazy" if lazy_offload else "eager",
@@ -116,9 +115,10 @@ class SimpleCPUOffloadScheduler:
 
         # Store metadata
         self._lazy_mode = lazy_offload
-        # Lazy mode: cursor-based offloading
+        # Lazy mode: use a cursor to track the last scanned block in the GPU free queue.
         self._cursor: KVCacheBlock | None = None
         if self._lazy_mode and kv_cache_config is not None:
+            # Estimate the number of blocks to offload per step based on max allocation.
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             target = 0
             for g in kv_cache_config.kv_cache_groups:
@@ -197,9 +197,8 @@ class SimpleCPUOffloadScheduler:
         return 0, False
 
     # TODO (yifan): this function now assumes eager offloading and only matches
-    # the suffix part of the prefix cache. Another interface is needed for lazy
-    # offloading, which should check prefix cache hits in GPU block pool and CPU
-    # block pool in a single pass.
+    # the suffix part of the prefix cache. A better interface can check prefix
+    # cache hits in GPU block pool and CPU block pool in a single pass.
     def update_state_after_alloc(
         self,
         request: "Request",
@@ -545,11 +544,9 @@ class SimpleCPUOffloadScheduler:
             reports finished_sending with the event index, and the scheduler should
             update request metadata accordingly.
 
-        The connector emits event-index sentinels (__load_done_N,
-        __store_done_N). We translate those back to req_ids using our
-        inverse maps, process completions, and mutate
-        connector_output.finished_recving with real req_ids for the
-        scheduler.
+        The connector emits event-index sentinels (__load_done_N, __store_done_N).
+        We translate those back to req_ids using our inverse maps, process completions,
+        and mutate finished_recving with real req_ids for the scheduler.
         """
         if (
             not connector_output.finished_recving
