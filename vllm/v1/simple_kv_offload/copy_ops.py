@@ -3,7 +3,7 @@
 """GPU kernels for efficient GPU<->CPU block transfers."""
 
 import ctypes
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 import torch
@@ -41,7 +41,7 @@ _BATCH_MEMCPY_FUNC_TYPE = ctypes.CFUNCTYPE(
 
 
 # Resolved lazily on first use.
-_batch_memcpy_fn = None
+_batch_memcpy_fn: Any = None
 
 
 def _resolve_batch_memcpy():

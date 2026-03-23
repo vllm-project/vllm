@@ -76,6 +76,7 @@ class SimpleCPUOffloadScheduler:
         # NOTE: We use the same block size for both GPU and CPU.
         self.block_size = vllm_config.cache_config.block_size
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
+        assert kv_cache_config is not None
         self.cpu_kv_cache_config = self._derive_cpu_config(
             kv_cache_config, cpu_capacity_bytes
         )
@@ -416,8 +417,8 @@ class SimpleCPUOffloadScheduler:
         if gpu_ids:
             cpu_blocks = cpu_pool.get_new_blocks(len(gpu_ids))
             cpu_ids = [blk.block_id for blk in cpu_blocks]
-            for cpu_blk, bhash in zip(cpu_blocks, block_hashes):
-                cpu_blk._block_hash = bhash
+            for cpu_blk, bhash in zip(cpu_blocks, block_hashes):  # type: ignore[assignment]
+                cpu_blk._block_hash = bhash  # type: ignore[assignment]
             # Touch GPU blocks to prevent eviction during async copy.
             gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
         else:
@@ -507,7 +508,7 @@ class SimpleCPUOffloadScheduler:
                 cpu_blocks_alloc = cpu_block_pool.get_new_blocks(n_to_alloc)
                 cpu_block_ids = [blk.block_id for blk in cpu_blocks_alloc]
                 for cpu_blk, bhash in zip(cpu_blocks_alloc, block_hashes_to_store):
-                    cpu_blk._block_hash = bhash
+                    cpu_blk._block_hash = bhash  # type: ignore[assignment]
             else:
                 cpu_block_ids = []
 

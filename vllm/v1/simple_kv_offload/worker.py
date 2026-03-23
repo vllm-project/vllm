@@ -13,6 +13,7 @@ from vllm.v1.simple_kv_offload.copy_backend import CopyBackend, get_copy_backend
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
@@ -267,7 +268,7 @@ class SimpleCPUOffloadWorker:
 
         return finished_sending, finished_recving
 
-    def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
+    def handle_preemptions(self, kv_connector_metadata: "KVConnectorMetadata") -> None:
         """Sync all in-flight transfers before preempted blocks are reused."""
         self._flush_and_sync_all()
 

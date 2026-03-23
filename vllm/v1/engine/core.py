@@ -586,7 +586,7 @@ class EngineCore:
 
     def _drain_connector_transfers(self) -> None:
         """Flush worker-side connector transfers and process completions."""
-        connector = self.scheduler.connector
+        connector = self.scheduler.get_kv_connector()
         if (
             connector is None
             or not hasattr(connector, "has_pending_transfers")

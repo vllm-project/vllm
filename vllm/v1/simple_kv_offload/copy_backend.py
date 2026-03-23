@@ -7,8 +7,13 @@ from __future__ import annotations
 import queue
 import threading
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.v1.simple_kv_offload.copy_ops import BatchMemcpyParams
+    from vllm.v1.simple_kv_offload.copy_ops_kernel import LaunchParams
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -53,8 +58,8 @@ class KernelCopyBackend(CopyBackend):
     """Triton kernel copy backend (non-blocking, no thread)."""
 
     def __init__(self) -> None:
-        self._store_params = None  # LaunchParams for gpu->cpu
-        self._load_params = None  # LaunchParams for cpu->gpu
+        self._store_params: LaunchParams | None = None
+        self._load_params: LaunchParams | None = None
         self._gpu_caches: dict[str, torch.Tensor] | None = None
         self._cpu_caches: dict[str, torch.Tensor] | None = None
         self._device: torch.device | None = None
@@ -135,8 +140,8 @@ class DmaCopyBackend(CopyBackend):
     """cuMemcpyBatchAsync copy backend (background thread)."""
 
     def __init__(self) -> None:
-        self._store_params = None  # BatchMemcpyParams for gpu->cpu
-        self._load_params = None  # BatchMemcpyParams for cpu->gpu
+        self._store_params: BatchMemcpyParams | None = None
+        self._load_params: BatchMemcpyParams | None = None
         self._load_stream: torch.cuda.Stream | None = None
         self._store_stream: torch.cuda.Stream | None = None
         self._queue: queue.SimpleQueue | None = None

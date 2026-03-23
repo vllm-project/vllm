@@ -114,9 +114,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         if self.worker_handler is not None:
             self.worker_handler.clear_connector_metadata()
 
-    def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
         if self.worker_handler is not None:
-            self.worker_handler.handle_preemptions(preempted_req_ids)
+            self.worker_handler.handle_preemptions(kv_connector_metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         pass  # Launch loads ops in get_finished() after launching model execution
