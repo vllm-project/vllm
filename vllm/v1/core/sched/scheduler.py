@@ -720,7 +720,7 @@ class Scheduler(SchedulerInterface):
                             break
 
                 if self.need_mamba_block_aligned_split:
-                    num_new_tokens = self._mamba_block_aligned_split(  # TODO: HERE SPLIT should know the FA length and break there first
+                    num_new_tokens = self._mamba_block_aligned_split(
                         request,
                         num_new_tokens,
                         num_new_local_computed_tokens,
