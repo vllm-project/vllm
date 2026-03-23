@@ -43,6 +43,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -63,7 +64,7 @@ if TYPE_CHECKING:
     )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_interface import CanonicalKVCaches, KVCacheConfig
     from vllm.v1.request import Request
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
@@ -165,6 +166,18 @@ class KVConnectorWorkerMetadata(ABC):
         Aggregate metadata with another `KVConnectorWorkerMetadata` object.
         """
         pass
+
+
+@dataclass
+class WorkerConnectorInitializationData:
+    """Data passed to initialize_worker_connector().
+
+    Designed to be extended without breaking existing connectors: new optional
+    fields can be added here and connectors that don't need them simply ignore
+    the extra data.
+    """
+
+    canonical_kv_caches: "CanonicalKVCaches | None" = field(default=None)
 
 
 class KVConnectorBase_V1(ABC):
@@ -285,6 +298,24 @@ class KVConnectorBase_V1(ABC):
         """
         Set the xPU-specific ops for copying KV between host and device.
         Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
+        """
+        return
+
+    def initialize_worker_connector(
+        self,
+        initialization_data: WorkerConnectorInitializationData,
+    ) -> None:
+        """
+        Initialize per-worker connector state after model loading.
+
+        Called once by the GPU model runner after the model and KV caches
+        are ready. The default implementation is a no-op; connectors that
+        need additional initialization should override this method.
+
+        Args:
+            initialization_data: data bag containing optional fields such
+                as ``canonical_kv_caches``. New fields may be added in
+                future versions without breaking existing connectors.
         """
         return
 
