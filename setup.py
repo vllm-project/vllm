@@ -54,6 +54,9 @@ elif sys.platform.startswith("linux") and os.getenv("VLLM_TARGET_DEVICE") is Non
     if torch.version.hip is not None:
         VLLM_TARGET_DEVICE = "rocm"
         logger.info("Auto-detected ROCm")
+    elif torch.version.xpu is not None:
+        VLLM_TARGET_DEVICE = "xpu"
+        logger.info("Auto-detected XPU")
     elif torch.version.cuda is not None:
         VLLM_TARGET_DEVICE = "cuda"
         logger.info("Auto-detected CUDA")
@@ -984,11 +987,11 @@ setup(
         "instanttensor": ["instanttensor >= 0.1.5"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
-            "librosa",
+            "av",
+            "resampy",
             "scipy",
             "soundfile",
             "mistral_common[audio]",
-            "av",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         "flashinfer": [],  # Kept for backwards compatibility

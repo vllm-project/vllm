@@ -290,7 +290,7 @@ def run_multi_api_server(args: argparse.Namespace):
 
     with launch_core_engines(
         vllm_config, executor_class, log_stats, addresses, num_api_servers
-    ) as (local_engine_manager, coordinator, addresses):
+    ) as (local_engine_manager, coordinator, addresses, tensor_queue):
         # Construct common args for the APIServerProcessManager up-front.
         api_server_manager_kwargs = dict(
             target_server_fn=run_api_server_worker_proc,
@@ -303,6 +303,7 @@ def run_multi_api_server(args: argparse.Namespace):
             stats_update_address=coordinator.get_stats_publish_address()
             if coordinator
             else None,
+            tensor_queue=tensor_queue,
         )
 
         # For dp ranks > 0 in external/hybrid DP LB modes, we must delay the

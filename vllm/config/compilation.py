@@ -116,29 +116,29 @@ class PassConfig:
     """
 
     # New flags
-    fuse_norm_quant: bool = Field(default=None)
+    fuse_norm_quant: bool | None = Field(default=None)
     """Fuse the custom RMSNorm + quant ops."""
-    fuse_act_quant: bool = Field(default=None)
+    fuse_act_quant: bool | None = Field(default=None)
     """Fuse the custom SiluMul + quant ops."""
-    fuse_attn_quant: bool = Field(default=None)
+    fuse_attn_quant: bool | None = Field(default=None)
     """Fuse the custom attention + quant ops."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
-    enable_sp: bool = Field(default=None)
+    enable_sp: bool | None = Field(default=None)
     """Enable sequence parallelism. Requires TP>1. Automatically disabled
     if the model's hidden_size is too small for SP to be beneficial
     (threshold is device-capability dependent)."""
-    fuse_gemm_comms: bool = Field(default=None)
+    fuse_gemm_comms: bool | None = Field(default=None)
     """Enable async TP."""
-    fuse_allreduce_rms: bool = Field(default=None)
+    fuse_allreduce_rms: bool | None = Field(default=None)
     """Enable flashinfer allreduce fusion."""
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
 
     # ROCm/AITER specific fusions
-    fuse_act_padding: bool = Field(default=None)
+    fuse_act_padding: bool | None = Field(default=None)
     """Fuse the custom RMSNorm + padding ops."""
-    fuse_rope_kvcache: bool = Field(default=None)
+    fuse_rope_kvcache: bool | None = Field(default=None)
     """Fuse the QK rope + KV cache ops."""
 
     rope_kvcache_fusion_max_token_num: int = 256
@@ -198,9 +198,10 @@ class PassConfig:
 
         if not current_platform.is_cuda():
             return {}
-        return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(
-            current_platform.get_device_capability().to_int(), {}
-        )
+        capability = current_platform.get_device_capability()
+        if capability is None:
+            return {}
+        return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(capability.to_int(), {})
 
     def compute_hash(self) -> str:
         """
@@ -350,7 +351,7 @@ class DynamicShapesConfig:
 
         from vllm.config.utils import get_hash_factors, hash_factors
 
-        factors = get_hash_factors(self, {})
+        factors = get_hash_factors(self, set())
         return hash_factors(factors)
 
 
@@ -404,7 +405,7 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    mode: CompilationMode = Field(default=None)
+    mode: CompilationMode = Field(default=None)  # type: ignore[assignment]
     """The compilation approach used for torch.compile-based compilation of the
     model.
 
@@ -489,6 +490,28 @@ class CompilationConfig:
     on selected platforms. Disabled by default until more models
     are supported/tested to work."""
 
+    # Vision encoder CUDA graph
+    cudagraph_mm_encoder: bool = False
+    """Enable CUDA graph capture for multimodal encoder (ViT).
+    When enabled, captures full encoder forward as CUDA graph
+    for each token budget level."""
+
+    encoder_cudagraph_token_budgets: list[int] = field(default_factory=list)
+    """Token budget levels for encoder CUDA graph capture.
+    Each budget defines a fixed token capacity. At runtime, images are greedy-packed
+    into the smallest fitting budget and the corresponding CUDA graph is replayed.
+    If empty (default), auto-inferred from model architecture as power-of-2
+    levels from the model's estimated min budget to max budget.
+    User-provided values override auto-inference.
+    Example: [2048, 4096, 8192, 13824]"""
+
+    encoder_cudagraph_max_images_per_batch: int = 0
+    """Maximum number of images per batch for encoder CUDA graph capture.
+    Determines the fixed batch size used during graph capture.
+    If 0 (default), auto-inferred as max_budget // min_budget from the
+    model's budget range. User-provided positive value overrides
+    auto-inference."""
+
     # Inductor capture
     compile_sizes: list[int | str] | None = None
     """Sizes to compile for inductor. In addition
@@ -522,7 +545,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: CUDAGraphMode = Field(default=None)
+    cudagraph_mode: CUDAGraphMode = Field(default=None)  # type: ignore[assignment]
     """
     The mode of the cudagraph:
 
@@ -584,7 +607,7 @@ class CompilationConfig:
     When `enable_lora` is False, this option has no effect.
     """
 
-    use_inductor_graph_partition: bool = Field(default=None)
+    use_inductor_graph_partition: bool = Field(default=None)  # type: ignore[assignment]
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
@@ -607,7 +630,7 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    max_cudagraph_capture_size: int = field(default=None)
+    max_cudagraph_capture_size: int | None = field(default=None)
     """The maximum cudagraph capture size.
 
     If cudagraph_capture_sizes is specified, this will be set to the largest
@@ -747,7 +770,9 @@ class CompilationConfig:
             exclude["pass_config"] = pass_config_exclude
 
         config = TypeAdapter(CompilationConfig).dump_python(
-            self, exclude=exclude, exclude_unset=True
+            self,
+            exclude=exclude,  # type: ignore[arg-type]
+            exclude_unset=True,
         )
 
         return str(config)
@@ -906,6 +931,16 @@ class CompilationConfig:
                 f"Invalid backend for piecewise compilation: {self.backend}"
             )
 
+        # Validate encoder CUDA graph configuration
+        if (
+            self.cudagraph_mm_encoder
+            and self.encoder_cudagraph_max_images_per_batch < 0
+        ):
+            raise ValueError(
+                "encoder_cudagraph_max_images_per_batch must be "
+                "non-negative (0 = auto-infer)"
+            )
+
         if self.backend == "":
             self.backend = current_platform.get_compile_backend()
 
@@ -959,7 +994,7 @@ class CompilationConfig:
         - initialize compile_sizes
         """
 
-        computed_compile_sizes = []
+        computed_compile_sizes: list[int] = []
         if self.compile_sizes is not None:
             # de-duplicate the sizes provided by the config
             self.compile_sizes = list(set(self.compile_sizes))
@@ -969,6 +1004,7 @@ class CompilationConfig:
                         "Unrecognized size type in compile_sizes, "
                         f"expect 'cudagraph_capture_sizes', got {x}"
                     )
+                    assert self.cudagraph_capture_sizes is not None
                     computed_compile_sizes.extend(self.cudagraph_capture_sizes)
                 else:
                     assert isinstance(x, int)
@@ -976,6 +1012,7 @@ class CompilationConfig:
         self.compile_sizes = computed_compile_sizes  # type: ignore
 
         # make sure the sizes are in ascending order
+        assert self.cudagraph_capture_sizes is not None
         self.cudagraph_capture_sizes.sort()
         if self.cudagraph_capture_sizes:
             assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
@@ -1067,6 +1104,7 @@ class CompilationConfig:
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.fuse_attn_quant
+        assert self.cudagraph_mode is not None
         if self.splitting_ops is None:
             self.splitting_ops = []
             if self.cudagraph_mode.has_piecewise_cudagraphs():
@@ -1258,6 +1296,4 @@ class CompilationConfig:
         if self.compile_ranges_endpoints is None:
             return []
         endpoints = sorted(set(self.compile_ranges_endpoints))
-        return [
-            Range(start=s + 1, end=e) for s, e in zip([0] + endpoints[:-1], endpoints)
-        ]
+        return [Range(s + 1, e) for s, e in zip([0] + endpoints[:-1], endpoints)]
