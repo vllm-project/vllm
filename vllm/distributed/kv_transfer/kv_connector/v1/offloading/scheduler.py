@@ -416,27 +416,50 @@ class OffloadingConnectorScheduler:
                         )
                     )
 
-                flat_src_block_ids: list[int] = []
-                flat_block_offsets: list[int] = []
-                flat_block_counts: list[int] = []
+                # Accumulate per-group, then flatten.  Each
+                # src_spec_part's flat arrays are ordered by group
+                # (group_0 entries, group_1 entries, ...), but when
+                # we combine *multiple* spec parts we must keep all
+                # of group_0's entries contiguous, then group_1's,
+                # etc.  The old code appended chunk-by-chunk which
+                # interleaved groups and caused mamba sub-block
+                # offsets to bleed into attention-group entries.
+                per_group_ids: list[list[int]] = [
+                    [] for _ in range(self.num_kv_groups)
+                ]
+                per_group_offsets: list[list[int]] = [
+                    [] for _ in range(self.num_kv_groups)
+                ]
+                per_group_counts: list[list[int]] = [
+                    [] for _ in range(self.num_kv_groups)
+                ]
                 group_sizes = [0] * self.num_kv_groups
                 for src_spec_part in src_specs:
                     start = 0
-                    for group_index, group_size in enumerate(src_spec_part.group_sizes):
+                    for group_index, group_size in enumerate(
+                        src_spec_part.group_sizes
+                    ):
                         end = start + group_size
-                        flat_src_block_ids.extend(
+                        per_group_ids[group_index].extend(
                             src_spec_part.block_ids[start:end].tolist()
                         )
                         assert src_spec_part.block_offsets is not None
                         assert src_spec_part.block_counts is not None
-                        flat_block_offsets.extend(
+                        per_group_offsets[group_index].extend(
                             src_spec_part.block_offsets[start:end].tolist()
                         )
-                        flat_block_counts.extend(
+                        per_group_counts[group_index].extend(
                             src_spec_part.block_counts[start:end].tolist()
                         )
                         group_sizes[group_index] += group_size
                         start = end
+                flat_src_block_ids: list[int] = []
+                flat_block_offsets: list[int] = []
+                flat_block_counts: list[int] = []
+                for gi in range(self.num_kv_groups):
+                    flat_src_block_ids.extend(per_group_ids[gi])
+                    flat_block_offsets.extend(per_group_offsets[gi])
+                    flat_block_counts.extend(per_group_counts[gi])
                 src_spec = GPULoadStoreSpec(
                     flat_src_block_ids,
                     group_sizes=tuple(group_sizes),
