@@ -71,8 +71,7 @@ def _bicubic_from_ndarray(
     array: npt.NDArray[Any], *, size: tuple[int, int]
 ) -> torch.Tensor:
     """
-    Convert a 4D NHWC uint8 ndarray batch to NCHW float and interpolate with
-    bicubic.
+    Convert a 4D NHWC ndarray to NCHW and interpolate with bicubic.
     Suppresses PyTorch's non-writable NumPy warning because interpolate copies,
     and torch.from_numpy(array) is discarded at the end of function scope.
     """
