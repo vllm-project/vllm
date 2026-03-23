@@ -415,23 +415,22 @@ class KVConnectorModelRunnerMixin:
                 canonical_kv_caches is the CanonicalKVCaches wrapping
                     for the connector.
         """
-        attn_backend = attn_groups[0][0].backend
-        kv_cache_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
-        assert isinstance(kv_cache_spec, AttentionSpec)
-
+        # all tensors have the same size (validated by use_canonical_kv_caches)
         tensor_sizes = set(t.size for t in kv_cache_config.kv_cache_tensors)
         assert len(tensor_sizes) == 1
         tensor_size = tensor_sizes.pop()
 
+        kv_cache_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        assert isinstance(kv_cache_spec, AttentionSpec)
         page_size = kv_cache_spec.page_size_bytes
         assert tensor_size % page_size == 0
         num_blocks = tensor_size // page_size
         group_size = len(kv_cache_config.kv_cache_tensors)
         total_size = tensor_size * group_size
 
-        unique_kernel_bs = set(kernel_block_sizes)
-        assert len(unique_kernel_bs) == 1
-        kernel_block_size = unique_kernel_bs.pop()
+        # use the first backend's stride order to determine physical layout
+        attn_backend = attn_groups[0][0].backend
+        kernel_block_size = kernel_block_sizes[0]
         num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
         kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
@@ -474,13 +473,8 @@ class KVConnectorModelRunnerMixin:
         ]
         permuted = contiguous_buffer.permute(*inv_order)
 
-        kv_caches: dict[str, torch.Tensor] = {}
-        for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
-            tensor = permuted[i]
-            for layer_name in kv_cache_tensor.shared_by:
-                kv_caches[layer_name] = tensor
-
-        # build CanonicalKVCaches for the connector
+        # build kv_caches, block tensors, and layer-to-position map
+        # in a single pass over positions
         block_dim = attn_backend.get_kv_cache_block_dim(
             kernel_block_size,
             kv_cache_spec.num_kv_heads,
@@ -488,21 +482,32 @@ class KVConnectorModelRunnerMixin:
             cache_dtype_str=cache_dtype,
         )
 
-        # split each position's tensor so num_blocks is the leading dim
+        kv_caches: dict[str, torch.Tensor] = {}
         block_tensors: list[KVCacheBlockTensor] = []
-        sample = permuted[0]
-        num_splits = 1
-        for d in range(block_dim):
-            num_splits *= sample.shape[d]
+        layer_to_position: dict[str, int] = {}
+        num_splits: int | None = None
 
-        for i in range(group_size):
+        for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             layer_tensor = permuted[i]
+
+            # populate kv_caches for attention kernels
+            for layer_name in kv_cache_tensor.shared_by:
+                kv_caches[layer_name] = layer_tensor
+                layer_to_position[layer_name] = i
+
+            # split along dims before block_dim so num_blocks is leading
             if block_dim == 0:
                 page_bytes = layer_tensor.stride(0) * layer_tensor.element_size()
                 block_tensors.append(
                     KVCacheBlockTensor(tensor=layer_tensor, page_size_bytes=page_bytes)
                 )
+                num_splits = 1
             else:
+                cur_splits = 1
+                for d in range(block_dim):
+                    cur_splits *= layer_tensor.shape[d]
+                num_splits = cur_splits
+
                 for j in range(num_splits):
                     idx = []
                     rem = j
@@ -518,11 +523,9 @@ class KVConnectorModelRunnerMixin:
                         )
                     )
 
-        layer_to_position: dict[str, int] = {}
-        for pos, kv_tensor in enumerate(kv_cache_config.kv_cache_tensors):
-            for layer_name in kv_tensor.shared_by:
-                layer_to_position[layer_name] = pos
+        assert num_splits is not None
 
+        # build group_data_refs
         group_data_refs: list[list[KVCacheBlockDataRef]] = []
         for group in kv_cache_config.kv_cache_groups:
             refs: list[KVCacheBlockDataRef] = []
