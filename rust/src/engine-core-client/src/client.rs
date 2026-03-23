@@ -23,6 +23,8 @@ pub use stream::EngineCoreOutputStream;
 pub struct EngineCoreClientConfig {
     /// Startup handshake address that the Python engine connects to first.
     pub handshake_address: String,
+    /// Model name used for frontend-side metrics labels.
+    pub model_name: String,
     /// Local host/interface used when allocating the frontend input/output addresses.
     pub local_host: String,
     /// Timeout while waiting for each step of the startup handshake.
@@ -35,6 +37,7 @@ impl EngineCoreClientConfig {
     pub fn new(handshake_address: impl Into<String>) -> Self {
         Self {
             handshake_address: handshake_address.into(),
+            model_name: String::new(),
             local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(30),
             client_index: 0,
@@ -76,7 +79,10 @@ impl EngineCoreClient {
     ) -> Result<Self> {
         let (output_tx, output_rx) = mpsc::channel(64);
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
-        let inner = Arc::new(ClientInner::new(connected.input_send));
+        let inner = Arc::new(ClientInner::new(
+            connected.input_send,
+            config.model_name.clone(),
+        ));
         let engine_identity = connected.engine_identity;
         let output_task = AbortOnDropHandle::new(tokio::spawn(transport::run_output_loop(
             connected.output_socket,

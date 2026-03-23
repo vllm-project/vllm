@@ -272,6 +272,7 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
 
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
+        model_name: "test-model".to_string(),
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_secs(2),
         client_index: 7,
@@ -380,6 +381,7 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
 
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
+        model_name: "test-model".to_string(),
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_secs(2),
         client_index: 0,
@@ -447,6 +449,7 @@ async fn finished_requests_without_final_output_is_treated_as_unexpected_close()
 
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
+        model_name: "test-model".to_string(),
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_secs(2),
         client_index: 0,
@@ -509,6 +512,7 @@ async fn dropping_a_live_stream_triggers_abort() {
 
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
+        model_name: "test-model".to_string(),
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_secs(2),
         client_index: 0,
@@ -550,6 +554,7 @@ async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
 
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
+        model_name: "test-model".to_string(),
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_secs(2),
         client_index: 0,
@@ -610,6 +615,7 @@ async fn connect_times_out_without_ready_message() {
 
     let result = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
+        model_name: "test-model".to_string(),
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_millis(100),
         client_index: 0,

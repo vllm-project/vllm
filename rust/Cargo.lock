@@ -4268,6 +4268,7 @@ name = "vllm-metrics"
 version = "0.1.0"
 dependencies = [
  "prometheus-client",
+ "prometheus-client-derive-encode",
  "serde",
  "serde_json",
 ]

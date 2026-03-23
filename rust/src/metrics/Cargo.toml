@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 prometheus-client.workspace = true
+prometheus-client-derive-encode.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

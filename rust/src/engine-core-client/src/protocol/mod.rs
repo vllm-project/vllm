@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
-use vllm_metrics::stats::SchedulerStats;
 
 use crate::error::{Error, Result};
+use crate::protocol::stats::SchedulerStats;
 
 // TODO: This module currently mixes reusable frontend-facing semantic types
 // (for example `FinishReason`, `StopReason`, `RequestOutputKind`, and future
@@ -25,6 +25,7 @@ pub type OpaqueValue = Value;
 
 mod classfied_outputs;
 pub mod handshake;
+pub mod stats;
 pub use classfied_outputs::{
     ClassifiedEngineCoreOutputs, DpControlMessage, OtherEngineCoreOutputs, RequestBatchOutputs,
 };

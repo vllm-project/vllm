@@ -128,6 +128,7 @@ async fn setup_mock_engine(
 async fn connect_chat_llm(handshake_address: String, backend: Arc<dyn ChatTextBackend>) -> ChatLlm {
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
+        model_name: "test-model".to_string(),
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_secs(2),
         client_index: 0,

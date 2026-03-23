@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+
+use crate::protocol::OpaqueValue;
 
 /// Stores cache hit statistics.
 ///
@@ -151,7 +152,7 @@ pub struct SchedulerStats {
     /// Speculative decoding scheduler stats, when enabled.
     pub spec_decoding_stats: Option<SpecDecodingStats>,
     /// Connector-specific KV transfer stats, kept opaque for now.
-    pub kv_connector_stats: Option<BTreeMap<String, Value>>,
+    pub kv_connector_stats: Option<BTreeMap<String, OpaqueValue>>,
     /// Waiting request counts per LoRA adapter.
     pub waiting_lora_adapters: BTreeMap<String, u64>,
     /// Running request counts per LoRA adapter.

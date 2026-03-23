@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
 use enum_as_inner::EnumAsInner;
-use vllm_metrics::stats::SchedulerStats;
 
 use super::{EngineCoreOutput, EngineCoreOutputs, UtilityOutput};
+use crate::protocol::stats::SchedulerStats;
 
 /// Data-parallel control notifications multiplexed through `EngineCoreOutputs`.
 #[derive(Debug, Clone, PartialEq, Eq)]

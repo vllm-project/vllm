@@ -105,6 +105,7 @@ async fn main() -> Result<()> {
     let request_id = unique_request_id();
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address: args.handshake_address.clone(),
+        model_name: args.model.clone(),
         local_host: args.host.clone(),
         ready_timeout,
         client_index: args.client_index,

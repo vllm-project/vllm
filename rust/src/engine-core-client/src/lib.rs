@@ -1,5 +1,6 @@
 mod client;
 mod error;
+mod metrics;
 pub mod protocol;
 mod transport;
 

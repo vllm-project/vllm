@@ -279,6 +279,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
 
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address,
+        model_name: "test-model".to_string(),
         local_host: "127.0.0.1".to_string(),
         ready_timeout: Duration::from_secs(2),
         client_index: 0,

@@ -5,9 +5,11 @@ use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tracing::{debug, info, trace, warn};
+use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
 
 use crate::client::state::{ClientClosedState, OutputReceiver, RequestRegistry};
+use crate::metrics::record_scheduler_stats;
 use crate::protocol::{
     ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequestType,
     encode_msgpack,
@@ -16,16 +18,23 @@ use crate::{Error, Result, transport};
 
 pub(crate) struct ClientInner {
     input_send: AsyncMutex<Option<RouterSendHalf>>,
+    model_name: String,
     request_reg: Mutex<RequestRegistry>,
 }
 
 impl ClientInner {
     /// Create a new instance with the given input send half after the startup handshake completes.
-    pub fn new(input_send: RouterSendHalf) -> Self {
+    pub fn new(input_send: RouterSendHalf, model_name: String) -> Self {
         Self {
             input_send: AsyncMutex::new(Some(input_send)),
+            model_name,
             request_reg: Mutex::new(RequestRegistry::default()),
         }
+    }
+
+    /// Get the model name associated with this client used for metrics labeling.
+    pub fn model_name(&self) -> &str {
+        &self.model_name
     }
 
     /// Register a newly added request. Return the per-request output channel bound to its
@@ -194,8 +203,13 @@ pub(crate) async fn run_output_dispatcher_loop(
                     drop(inner.finish_requests(finished_requests));
                 }
 
-                if batch.scheduler_stats.is_some() {
-                    trace!("ignoring scheduler stats in request batch");
+                if let Some(scheduler_stats) = batch.scheduler_stats.as_ref() {
+                    record_scheduler_stats(
+                        &METRICS,
+                        inner.model_name(),
+                        batch.engine_index,
+                        scheduler_stats,
+                    );
                 }
             }
             ClassifiedEngineCoreOutputs::Other(other) => {

@@ -29,6 +29,7 @@ use crate::state::AppState;
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         handshake_address: config.handshake_address.clone(),
+        model_name: config.model.clone(),
         local_host: config.engine_local_host.clone(),
         ready_timeout: config.ready_timeout,
         client_index: 0,
