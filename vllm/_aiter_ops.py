@@ -161,6 +161,10 @@ def _rocm_aiter_fused_moe_fake(
     a2_scale: torch.Tensor | None = None,
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
+    hidden_pad: int = 0,
+    intermediate_pad: int = 0,
+    bias1: torch.Tensor | None = None,
+    bias2: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -1770,7 +1774,7 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
-    def triton_fp4_gemm_dynamic_qaunt(
+    def triton_fp4_gemm_dynamic_quant(
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
