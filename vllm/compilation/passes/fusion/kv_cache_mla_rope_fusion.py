@@ -45,7 +45,6 @@ def fused_concat_and_cache_mla_rope_impl(
         f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
     )
     layer_slot_mapping = slot_mapping.get(layer_name)
-    # if layer_slot_mapping is not None:
     ops.concat_and_cache_mla_rope_fused(
         positions,
         q_pe,
@@ -59,18 +58,6 @@ def fused_concat_and_cache_mla_rope_impl(
         kv_cache_scale,
         layer_slot_mapping is not None,
     )
-    # else:
-    #     # if slot mapping is not available, kv update is not performed,
-    #     # run only RoPE instead
-    #     RotaryEmbedding.forward_static(
-    #         positions,
-    #         q_pe,
-    #         k_pe,
-    #         q_pe.shape[2],
-    #         q_pe.shape[2],
-    #         cos_sin_cache,
-    #         is_neox,
-    #     )
 
 
 def fused_concat_and_cache_mla_rope_fake(
@@ -224,17 +211,6 @@ class KVCacheMLARoPEDeepseekScalingFusionPattern:
         self.qk_nope_head_dim = layer.qk_nope_head_dim
         self.is_neox = is_neox
 
-        # print(self.qk_rope_head_dim, self.num_heads, self.num_kv_heads)
-        # print(
-        #     ">>>",
-        #     self.num_heads,
-        #     self.kv_lora_rank,
-        #     self.qk_rope_head_dim,
-        #     self.qk_nope_head_dim,
-        # )
-
-        # Match DeepseekScalingRotaryEmbedding.forward_static(pos, q, k, head_size,
-        # rotary_dim, ...): head_size is full per-head dim; rotary_dim is the rope band.
         self.rope_matcher = MatcherDeepseekScalingRotaryEmbedding(
             is_neox=self.is_neox,
             head_size=self.qk_rope_head_dim,
@@ -243,26 +219,16 @@ class KVCacheMLARoPEDeepseekScalingFusionPattern:
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
-        # Sample inputs to help pattern tracing (no standalone q: rope input is slice of mm).
         T = 5
         L = 163840
         k_pe = empty_bf16(T, 1, self.qk_rope_head_dim)
         kv_c_normed = empty_bf16(T, self.kv_lora_rank)
-        mm = empty_bf16(T, self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
+        mm = empty_bf16(
+            T, self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim)
+        )
         cos_sin_cache = empty_bf16(L, self.qk_rope_head_dim)
         positions = empty_i64(T)
         k_scale = torch.empty(0, device=k_pe.device, dtype=torch.float32)
-        # Old: included unused q placeholder for pattern tracing.
-        # q = empty_bf16(T, self.num_heads, self.qk_rope_head_dim)
-        # return [
-        #     q,
-        #     k_pe,
-        #     kv_c_normed,
-        #     mm,
-        #     positions,
-        #     cos_sin_cache,
-        #     k_scale,
-        # ]
         return [
             k_pe,
             kv_c_normed,
@@ -274,7 +240,6 @@ class KVCacheMLARoPEDeepseekScalingFusionPattern:
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
-            # q: torch.Tensor,
             k_pe: torch.Tensor,
             kv_c_normed: torch.Tensor,
             mm: torch.Tensor,
@@ -282,82 +247,16 @@ class KVCacheMLARoPEDeepseekScalingFusionPattern:
             cos_sin_cache: torch.Tensor,
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            #     # # # TODO just do the slicing the same way as in the original function?
-            #     v1 = mm.reshape(
-            #         -1, self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim,
-            #     )
-            #     v2 = mm.reshape(
-            #         -1, self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim,
-            #     )
-            #     s2 = torch.ops.aten.slice.Tensor(
-            #         v2, 2, self.qk_nope_head_dim, 9223372036854775807
-            #     )
-            #     query, key = self.rope_matcher(positions, s2, k_pe, cos_sin_cache)
-            #     dummy = torch.ops.vllm.unified_mla_kv_cache_update(
-            #         kv_c_normed, key, self.layer_name, self.kv_cache_dtype, k_scale
-            #     )
-            #     return dummy, query, key
-            #
-            # def pattern_0():
-            #     index_Tensor = CallFunction(aten.index.Tensor, KeywordArg('cos_sin_cache'), [KeywordArg('positions')])
-            #     split_Tensor = CallFunction(aten.split.Tensor, index_Tensor, Ignored(), Ignored(), _users=2)
-            #     operator_getitem = CallFunction(operator.getitem, split_Tensor, 0)
-            #     unsqueeze_default = CallFunction(aten.unsqueeze.default, operator_getitem, Ignored())
-            #     expand_default = CallFunction(aten.expand.default, unsqueeze_default, Ignored())
-            #     clone_default = CallFunction(aten.clone.default, expand_default, memory_format=torch.contiguous_format)
-            #     reshape_default = CallFunction(aten.reshape.default, clone_default, Ignored())
-            #     unsqueeze_default_1 = CallFunction(aten.unsqueeze.default, reshape_default, Ignored(), _users=2)
-            #     mul_Tensor = CallFunction(aten.mul.Tensor, KeywordArg('k_pe'), unsqueeze_default_1)
-            #     cat_default = CallFunction(aten.cat.default, [CallFunction(aten.unsqueeze.default, CallFunction(aten.neg.default, CallFunction(aten.slice.Tensor, KeywordArg('k_pe'), *, *, *, *)), *), CallFunction(aten.unsqueeze.default, CallFunction(aten.slice.Tensor, KeywordArg('k_pe'), *, *, *, *), *)], Ignored())
-            #     reshape_default_1 = CallFunction(aten.reshape.default, cat_default, Ignored())
-            #     operator_getitem_1 = CallFunction(operator.getitem, split_Tensor, 1)
-            #     unsqueeze_default_2 = CallFunction(aten.unsqueeze.default, operator_getitem_1, Ignored())
-            #     expand_default_1 = CallFunction(aten.expand.default, unsqueeze_default_2, Ignored())
-            #     clone_default_1 = CallFunction(aten.clone.default, expand_default_1, memory_format=torch.contiguous_format)
-            #     reshape_default_2 = CallFunction(aten.reshape.default, clone_default_1, Ignored())
-            #     unsqueeze_default_3 = CallFunction(aten.unsqueeze.default, reshape_default_2, Ignored(), _users=2)
-            #     mul_Tensor_1 = CallFunction(aten.mul.Tensor, reshape_default_1, unsqueeze_default_3)
-            #     add_Tensor = CallFunction(aten.add.Tensor, mul_Tensor, mul_Tensor_1, _users=2)
-            #     vllm_unified_mla_kv_cache_update_default = CallFunction(vllm.unified_mla_kv_cache_update.default, KeywordArg('kv_c_normed'), add_Tensor, 'model.layers.0.self_attn.attn', 'auto', KeywordArg('k_scale'))
-            #     mul_Tensor_2 = CallFunction(aten.mul.Tensor, KeywordArg('q'), unsqueeze_default_1)
-            #     cat_default_1 = CallFunction(aten.cat.default, [CallFunction(aten.unsqueeze.default, CallFunction(aten.neg.default, CallFunction(aten.slice.Tensor, KeywordArg('q'), *, *, *, *)), *), CallFunction(aten.unsqueeze.default, CallFunction(aten.slice.Tensor, KeywordArg('q'), *, *, *, *), *)], Ignored())
-            #     reshape_default_3 = CallFunction(aten.reshape.default, cat_default_1, Ignored())
-            #     mul_Tensor_3 = CallFunction(aten.mul.Tensor, reshape_default_3, unsqueeze_default_3)
-            #     add_Tensor_1 = CallFunction(aten.add.Tensor, mul_Tensor_2, mul_Tensor_3)
-            #     return MultiOutputPattern([vllm_unified_mla_kv_cache_update_default,
-            #       add_Tensor_1,
-            #       add_Tensor
-            #     ])
-            #
-            # query, key = self.rope_matcher(positions, q, k_pe, cos_sin_cache)
-            # dummy = torch.ops.vllm.unified_mla_kv_cache_update(
-            #     kv_c_normed, key, self.layer_name, self.kv_cache_dtype, k_scale
-            # )
-            # return dummy, query, key
-            # --- end previous pattern ---
             h = self.qk_nope_head_dim + self.qk_rope_head_dim
             v1 = mm.reshape(-1, self.num_heads, h)
             v2 = mm.reshape(-1, self.num_heads, h)
-            # Two identical slices from v2 (rope input vs copy dst) — matches lowered MLA.
             s_r = torch.ops.aten.slice.Tensor(
                 v2, 2, self.qk_nope_head_dim, _ATEN_SLICE_TO_END
             )
             s_w = torch.ops.aten.slice.Tensor(
                 v2, 2, self.qk_nope_head_dim, _ATEN_SLICE_TO_END
             )
-            # print("positions shape:", positions.shape)
-            # print("s_r shape:", s_r.shape)
-            # print("k_pe shape:", k_pe.shape)
-            # print("cos_sin_cache shape:", cos_sin_cache.shape)
             query, key = self.rope_matcher(positions, s_r, k_pe, cos_sin_cache)
-            # print("query shape:", query.shape)
-            # print("key shape:", key.shape)
-            # print("s_w shape:", s_w.shape)
-            # print("is_neox:", self.is_neox)
-            # print("*")
-            # forward_static can return query with last dim == head_size (qk_head_dim) when
-            # rotary_dim < head_size and the RoPE input carries both parts; s_w is only the
-            # rope band [..., qk_rope_head_dim]. Align widths before aten.copy.
             query_rope = query[..., : self.qk_rope_head_dim]
             copy_out = torch.ops.aten.copy.default(s_w, query_rope)
             q_full = torch.ops.aten.slice_scatter.default(
@@ -368,35 +267,6 @@ class KVCacheMLARoPEDeepseekScalingFusionPattern:
             )
             return dummy, q_full, key
 
-        # --- previous replacement (unused q, no write-back in return) ---
-        # def replacement(
-        #     q: torch.Tensor,
-        #     k_pe: torch.Tensor,
-        #     kv_c_normed: torch.Tensor,
-        #     mm: torch.Tensor,
-        #     positions: torch.Tensor,
-        #     cos_sin_cache: torch.Tensor,
-        #     k_scale: torch.Tensor,
-        # ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        #     dummy = torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
-        #     # k_pe_squeezed = k_pe.squeeze(1)
-        #     print("replace deepseek scaling")
-        #     self.FUSED_OP(
-        #         dummy=dummy,
-        #         positions=positions,
-        #         q_pe=q,
-        #         k_pe=k_pe,
-        #         kv_c=kv_c_normed,
-        #         cos_sin_cache=cos_sin_cache.to(q.dtype),
-        #         is_neox=self.is_neox,
-        #         kv_cache_dtype=self.kv_cache_dtype,
-        #         kv_cache_scale=k_scale,
-        #         layer_name=self.layer_name,
-        #     )
-        #     return dummy, q, k_pe
-        #     # return dummy, q, k_pe_squeezed.unsqueeze(1)
-        # --- end previous replacement ---
-
         def replacement(
             k_pe: torch.Tensor,
             kv_c_normed: torch.Tensor,
@@ -405,18 +275,13 @@ class KVCacheMLARoPEDeepseekScalingFusionPattern:
             cos_sin_cache: torch.Tensor,
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            print("replace deepseek scaling")
             dummy = torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
             h = self.qk_nope_head_dim + self.qk_rope_head_dim
-            # v1 = mm.reshape(-1, self.num_heads, h)
             v2 = mm.reshape(-1, self.num_heads, h)
-            # s_rope = torch.ops.aten.slice.Tensor(
-            #     v2, 2, self.qk_nope_head_dim, _ATEN_SLICE_TO_END
-            # )
             self.FUSED_OP(
                 dummy=dummy,
                 positions=positions,
-                q_pe=v2[..., self.qk_nope_head_dim:],
+                q_pe=v2[..., self.qk_nope_head_dim :],
                 k_pe=k_pe,
                 kv_c=kv_c_normed,
                 cos_sin_cache=cos_sin_cache.to(mm.dtype),
@@ -425,10 +290,6 @@ class KVCacheMLARoPEDeepseekScalingFusionPattern:
                 kv_cache_scale=k_scale,
                 layer_name=self.layer_name,
             )
-            # Fused kernel mutates q_pe / k_pe in place; mirror write-back for downstream q.
-            # q_full = torch.ops.aten.slice_scatter.default(
-            #     v2, s_rope, 2, self.qk_nope_head_dim, _ATEN_SLICE_TO_END
-            # )
             return dummy, v2, k_pe
 
         # NOTE: use view_to_reshape to unify view/reshape to simplify
@@ -454,19 +315,20 @@ class KVCacheMLARoPEFusionPass(VllmPatternMatcherPass):
         attn_layers = get_layers_from_vllm_config(config, MLAAttention)
 
         for _, layer in attn_layers.items():
-            for is_neox in [False]: #do only false for now
-                # if RotaryEmbedding.enabled():
-                #     for use_flashinfer in [False, True]:
-                #         KVCacheMLARoPEFusionPattern(
-                #             layer,
-                #             is_neox,
-                #             use_flashinfer,
-                #         ).register(self.patterns)
-                # else:
-                #     KVCacheMLARoPEFusionPattern(
-                #         layer,
-                #         is_neox,
-                #     ).register(self.patterns)
+            # is_neox == True causes shape issues when deleting shuffles
+            for is_neox in [False]:
+                if RotaryEmbedding.enabled():
+                    for use_flashinfer in [False, True]:
+                        KVCacheMLARoPEFusionPattern(
+                            layer,
+                            is_neox,
+                            use_flashinfer,
+                        ).register(self.patterns)
+                else:
+                    KVCacheMLARoPEFusionPattern(
+                        layer,
+                        is_neox,
+                    ).register(self.patterns)
 
                 KVCacheMLARoPEDeepseekScalingFusionPattern(
                     layer,

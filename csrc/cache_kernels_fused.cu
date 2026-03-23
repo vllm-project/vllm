@@ -212,8 +212,15 @@ void concat_and_cache_mla_rope_fused(
         kv_cache_slot_mapping,  // [num_tokens] or [num_actual_tokens]
     torch::Tensor&
         kv_cache,  // [num_blocks, block_size, (kv_lora_rank + rot_dim)]
-    const std::string& kv_cache_dtype, torch::Tensor& kv_cache_quant_scale) {
-  const int64_t num_tokens = q_pe.size(0);
+    const std::string& kv_cache_dtype, torch::Tensor& kv_cache_quant_scale,
+    bool has_slot_mapping) {
+  if (!has_slot_mapping) {
+    return;
+  }
+  const int64_t num_tokens = kv_cache_slot_mapping.size(0);
+
+  // std:: cout << "num_tokens: " << num_tokens << ", q_pe.size(0): " <<
+  // q_pe.size(0) << "\n";
 
   const int num_q_heads = q_pe.size(1);
   const int rot_dim = q_pe.size(2);
@@ -225,17 +232,17 @@ void concat_and_cache_mla_rope_fused(
   TORCH_CHECK_EQ(positions.scalar_type(), c10::ScalarType::Long);
 
   TORCH_CHECK_EQ(q_pe.dim(), 3);
-  TORCH_CHECK_EQ(q_pe.size(0), num_tokens);
+  TORCH_CHECK_GE(q_pe.size(0), num_tokens);
   TORCH_CHECK_EQ(q_pe.size(1), num_q_heads);
   TORCH_CHECK_EQ(q_pe.size(2), rot_dim);
 
-  TORCH_CHECK_EQ(k_pe.dim(), 2);
-  TORCH_CHECK_EQ(k_pe.size(0), num_tokens);
-  TORCH_CHECK_EQ(k_pe.size(1), rot_dim);
+  TORCH_CHECK_EQ(k_pe.dim(), 3);
+  TORCH_CHECK_EQ(k_pe.size(0), q_pe.size(0));
+  TORCH_CHECK_EQ(k_pe.size(2), rot_dim);
   TORCH_CHECK_EQ(k_pe.scalar_type(), q_pe.scalar_type());
 
   TORCH_CHECK_EQ(kv_c.dim(), 2);
-  TORCH_CHECK_EQ(kv_c.size(0), num_tokens);
+  TORCH_CHECK_EQ(kv_c.size(0), q_pe.size(0));
   TORCH_CHECK_EQ(kv_c.size(1), kv_lora_rank);
   TORCH_CHECK_EQ(kv_c.scalar_type(), q_pe.scalar_type());
   TORCH_CHECK_EQ(kv_c.dtype(), q_pe.dtype());
