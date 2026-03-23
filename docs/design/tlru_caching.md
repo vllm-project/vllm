@@ -70,8 +70,11 @@ vllm serve meta-llama/Llama-3-8B \
 
 - **ξ (`--tlru-xi-tokens`)**: Set this to your latency SLA expressed in tokens.
   For example, if your SLA is 200 ms and your model processes ~20 tokens/ms, set `ξ = 4000`.
-  When ξ is very large relative to conversation lengths, T-LRU degenerates gracefully to standard
-  LRU (no blocks are TEL-safe, so `tel_safe_queue` stays empty).
+  When ξ is very small (tight SLA), `B = max(0, H + Q̂ − ξ)` is large, so few blocks are
+  TEL-safe and T-LRU behaves like standard LRU.  When ξ is large (loose SLA), `B` approaches
+  0, meaning all blocks are TEL-safe and are preferentially evicted before any cached prefix —
+  this is intentional: a large SLA means the system can afford to recompute everything and
+  should free the cache aggressively.
 - **Q̂ (`--tlru-qhat-tokens`)**: Set this to the expected next-query length. The default of 200
   tokens works well for typical chat workloads. If your users tend to send long follow-up queries,
   increase this value to protect more of each conversation's prefix.
