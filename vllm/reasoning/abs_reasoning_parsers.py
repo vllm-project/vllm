@@ -7,7 +7,7 @@ from abc import abstractmethod
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.logger import init_logger
@@ -197,41 +197,50 @@ class ReasoningParser:
                 structural_tag=prepared
             )
 
-    def apply_structured_outputs_for_chat(
+    def adjust_structured_outputs_for_reasoning(
         self,
         sampling_params: SamplingParams,
-        request: "ChatCompletionRequest",
         *,
+        mode: Literal["chat", "responses"],
+        request: "ChatCompletionRequest | None" = None,
+        tool_server: ToolServer | None = None,
         model_architecture: str | None = None,
     ) -> None:
-        """Merge a reasoning structural tag into ``sampling_params`` for chat completions."""
+        """Merge reasoning structural tags into ``sampling_params.structured_outputs``.
+
+        ``mode="chat"``: runs when structured outputs are set or tools are present;
+        clears non-tag constraints when applying a prepared tag.
+
+        ``mode="responses"``: runs only when constraints are structural-tag-only;
+        always sets ``structural_tag`` from ``prepare_structured_tag`` (may be None).
+        """
         struct_out = sampling_params.structured_outputs
-        has_tools = len(request.tools or []) > 0
-        if not (isinstance(struct_out, StructuredOutputsParams) or has_tools):
+
+        if mode == "chat":
+            if request is None:
+                raise ValueError("request is required when mode='chat'")
+            has_tools = len(request.tools or []) > 0
+            if not (isinstance(struct_out, StructuredOutputsParams) or has_tools):
+                return
+
+            original = (
+                struct_out if isinstance(struct_out, StructuredOutputsParams) else None
+            )
+            prepared = self.prepare_structured_tag(
+                original,
+                None,
+                sampling_params=sampling_params,
+                tools=request.tools if request.tools else None,
+                model_architecture=model_architecture,
+            )
+            self._merge_reasoning_structural_tag_into_sampling_params(
+                sampling_params,
+                struct_out if isinstance(struct_out, StructuredOutputsParams) else None,
+                prepared,
+            )
             return
 
-        original = struct_out if isinstance(struct_out, StructuredOutputsParams) else None
-        prepared = self.prepare_structured_tag(
-            original,
-            None,
-            sampling_params=sampling_params,
-            tools=request.tools if request.tools else None,
-            model_architecture=model_architecture,
-        )
-        self._merge_reasoning_structural_tag_into_sampling_params(
-            sampling_params,
-            struct_out if isinstance(struct_out, StructuredOutputsParams) else None,
-            prepared,
-        )
-
-    def apply_structured_outputs_for_responses(
-        self,
-        sampling_params: SamplingParams,
-        *,
-        tool_server: ToolServer | None,
-    ) -> None:
-        """Update ``structural_tag`` when only structural-tag constraints are in use."""
-        struct_out = sampling_params.structured_outputs
+        # mode == "responses"
         if not (
             isinstance(struct_out, StructuredOutputsParams)
             and struct_out.all_non_structural_tag_constraints_none()

@@ -282,9 +282,10 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 if self.reasoning_parser_cls is not None:
                     tokenizer = self.renderer.get_tokenizer()
-                    self.reasoning_parser_cls(tokenizer).apply_structured_outputs_for_chat(
+                    self.reasoning_parser_cls(tokenizer).adjust_structured_outputs_for_reasoning(
                         sampling_params,
-                        request,
+                        mode="chat",
+                        request=request,
                         model_architecture=self._model_architecture(),
                     )
 
