@@ -43,16 +43,14 @@ class SharedMmapRegion:
     """
 
     def __init__(
-        self,
-        instance_id: str,
-        total_size_bytes: int,
+        self, instance_id: str, total_size_bytes: int, num_blocks: int
     ) -> None:
         self.page_size = mmap.PAGESIZE
         self.total_size_bytes = _page_align(total_size_bytes, self.page_size)
         self.mmap_path = f"/dev/shm/vllm_offload_{instance_id}.mmap"
         self._alloc_offset = 0  # bytes consumed so far
         self._creator = False  # set True only if this worker creates the file
-
+        self.num_blocks = num_blocks
         try:
             # Exclusive create — only one worker succeeds
             self.fd = os.open(
@@ -78,8 +76,15 @@ class SharedMmapRegion:
         )
         atexit.register(self.cleanup)
 
-    def alloc_tensor(self, shape: tuple, dtype: torch.dtype) -> torch.Tensor:
-        """Allocate the next tensor sequentially from the mmap buffer."""
+    def alloc_tensor(
+        self, shape: tuple, dtype: torch.dtype, split_kv: bool = False
+    ) -> torch.Tensor:
+        """Allocate the next tensor sequentially from the mmap buffer.
+
+        If split_kv=True the shape is expected to have a leading dimension of 2
+        (K and V) and the tensor is reshaped to (2, num_blocks, -1) so that
+        unbind(0) yields the K and V slabs separately.
+        """
         num_elements = math.prod(shape)
         tensor_bytes = num_elements * torch.tensor([], dtype=dtype).element_size()
         assert self._alloc_offset + tensor_bytes <= self.total_size_bytes, (
@@ -88,7 +93,12 @@ class SharedMmapRegion:
         )
         start = self._alloc_offset
         mv = memoryview(self.mmap_obj)[start : start + tensor_bytes]
-        tensor = torch.frombuffer(mv, dtype=dtype, count=num_elements).reshape(shape)
+        flat = torch.frombuffer(mv, dtype=dtype, count=num_elements)
+        tensor = (
+            flat.reshape(2, self.num_blocks, -1)
+            if split_kv
+            else flat.reshape(self.num_blocks, -1)
+        )
         self._alloc_offset += tensor_bytes
         return tensor
 

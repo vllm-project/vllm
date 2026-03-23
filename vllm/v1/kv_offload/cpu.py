@@ -118,6 +118,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             mmap_region = SharedMmapRegion(
                 instance_id=self.vllm_config.instance_id,
                 total_size_bytes=int(self.extra_config["cpu_bytes_to_use"]),
+                num_blocks=self.num_blocks,
             )
             self._handlers = CpuGpuOffloadingHandlers(
                 attn_backends=attn_backends,
