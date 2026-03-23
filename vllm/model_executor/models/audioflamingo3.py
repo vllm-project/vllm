@@ -69,10 +69,7 @@ from .utils import (
     maybe_prefix,
 )
 
-MAX_AUDIO_LEN = 10 * 60
 
-
-# === Audio Inputs === #
 class AudioFlamingo3FeatureInputs(TensorSchema):
     """
     Dimensions:
@@ -127,14 +124,12 @@ class AudioFlamingo3Encoder(Qwen2AudioEncoder):
     ):
         super().__init__(config)
         self.avg_pooler = nn.AvgPool1d(kernel_size=2, stride=2)
-        # self.layer_norm is already initialized in super().__init__
 
     def forward(
         self,
         input_features: torch.Tensor | list[torch.Tensor],
         attention_mask: torch.Tensor = None,
     ):
-        # input_features: (batch, num_mel_bins, seq_len)
         if isinstance(input_features, list):
             input_features = torch.stack(input_features)
 
@@ -146,17 +141,14 @@ class AudioFlamingo3Encoder(Qwen2AudioEncoder):
         ).to(hidden_states.dtype)
 
         for layer in self.layers:
-            # Qwen2AudioEncoderLayer expects layer_head_mask as third arg.
-            layer_outputs = layer(hidden_states, attention_mask, None)
-            hidden_states = layer_outputs[0]
+            layer_outputs = layer(hidden_states, attention_mask)
+            hidden_states = (
+                layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
+            )
 
-        # AvgPool (time/2) + LayerNorm
-        # hidden_states: (batch, seq_len, hidden_size)
-        hidden_states = hidden_states.permute(0, 2, 1)  # (batch, hidden_size, seq_len)
+        hidden_states = hidden_states.permute(0, 2, 1)
         hidden_states = self.avg_pooler(hidden_states)
-        hidden_states = hidden_states.permute(
-            0, 2, 1
-        )  # (batch, seq_len/2, hidden_size)
+        hidden_states = hidden_states.permute(0, 2, 1)
         hidden_states = self.layer_norm(hidden_states)
 
         return hidden_states
@@ -193,22 +185,6 @@ class AudioFlamingo3MultiModalProjector(nn.Module):
         return hidden_states
 
 
-class AudioFlamingo3MultiModalDataParser(MultiModalDataParser):
-    def _parse_audio_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[Any],
-    ) -> ModalityDataItems[Any, Any] | None:
-        if isinstance(data, dict):
-            return DictEmbeddingItems(
-                data,
-                modality="audio",
-                required_fields={"audio_embeds"},
-                fields_factory=_audioflamingo3_field_config,
-            )
-
-        return super()._parse_audio_data(data)
-
-
 class AudioFlamingo3ProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(AudioFlamingo3Config)
@@ -217,20 +193,17 @@ class AudioFlamingo3ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_processor(AudioFlamingo3Processor, **kwargs)
 
     def get_feature_extractor(self, **kwargs: object):
-        hf_processor = self.get_hf_processor(**kwargs)
-        feature_extractor = hf_processor.feature_extractor
-        return feature_extractor
+        return self.get_hf_processor(**kwargs).feature_extractor
 
-    def get_data_parser(self):
+    def get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.get_feature_extractor()
-
         return AudioFlamingo3MultiModalDataParser(
             target_sr=feature_extractor.sampling_rate,
             expected_hidden_size=self._get_expected_hidden_size(),
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"audio": 1}
+        return {"audio": None}
 
 
 class AudioFlamingo3DummyInputsBuilder(
@@ -248,9 +221,10 @@ class AudioFlamingo3DummyInputsBuilder(
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
+        hf_processor = self.info.get_hf_processor()
         feature_extractor = self.info.get_feature_extractor()
         sampling_rate = feature_extractor.sampling_rate
-        audio_len = MAX_AUDIO_LEN * sampling_rate
+        audio_len = int(hf_processor.max_audio_len * sampling_rate)
         num_audios = mm_counts.get("audio", 0)
         audio_overrides = mm_options.get("audio")
 
@@ -284,6 +258,118 @@ def _audioflamingo3_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     )
 
 
+def _get_audio_post_pool_output_lengths(input_lengths: torch.Tensor) -> torch.Tensor:
+    conv_lengths = (input_lengths - 1) // 2 + 1
+    return (conv_lengths - 2) // 2 + 1
+
+
+def _build_audio_encoder_attention_mask(
+    feature_attention_mask: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    input_lengths = feature_attention_mask.sum(-1).to(torch.long)
+    conv_lengths = (input_lengths - 1) // 2 + 1
+
+    batch_size, max_mel_seq_len = feature_attention_mask.shape
+    max_seq_len = (max_mel_seq_len - 1) // 2 + 1
+
+    seq_range = (
+        torch.arange(
+            max_seq_len,
+            dtype=conv_lengths.dtype,
+            device=conv_lengths.device,
+        )
+        .unsqueeze(0)
+        .expand(batch_size, max_seq_len)
+    )
+    padding_mask = seq_range >= conv_lengths[:, None]
+
+    attention_mask = padding_mask.view(batch_size, 1, 1, max_seq_len).expand(
+        batch_size, 1, max_seq_len, max_seq_len
+    )
+    attention_mask = attention_mask.to(dtype=dtype, device=device)
+    attention_mask.masked_fill_(padding_mask[:, None, None, :], float("-inf"))
+
+    return attention_mask
+
+
+def _flatten_valid_audio_embeddings(
+    audio_embeddings: torch.Tensor,
+    feature_attention_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    input_lengths = feature_attention_mask.sum(-1).to(torch.long)
+    output_lengths = _get_audio_post_pool_output_lengths(input_lengths)
+    valid_mask = (
+        torch.arange(audio_embeddings.shape[1], device=output_lengths.device)[None, :]
+        < output_lengths[:, None]
+    )
+
+    return audio_embeddings[valid_mask], output_lengths
+
+
+def _count_audio_tokens_from_mask(
+    feature_attention_mask: torch.Tensor | list[torch.Tensor],
+    chunk_counts: torch.Tensor | list[torch.Tensor] | list[int] | None,
+    item_idx: int,
+) -> int:
+    if chunk_counts is not None:
+        if isinstance(chunk_counts, torch.Tensor):
+            counts = chunk_counts.tolist()
+        elif chunk_counts and isinstance(chunk_counts[0], torch.Tensor):
+            counts = [count.item() for count in chunk_counts]
+        else:
+            counts = chunk_counts
+
+        start_idx = sum(counts[:item_idx])
+        count = counts[item_idx]
+        end_idx = start_idx + count
+
+        if isinstance(feature_attention_mask, list):
+            sample_mask = feature_attention_mask[start_idx:end_idx]
+            if len(sample_mask) == 0:
+                raise ValueError("Expected non-empty audio mask slice.")
+            if isinstance(sample_mask[0], torch.Tensor):
+                sample_mask = torch.stack(sample_mask)
+            else:
+                sample_mask = torch.tensor(sample_mask)
+        else:
+            sample_mask = feature_attention_mask[start_idx:end_idx]
+    else:
+        if isinstance(feature_attention_mask, list):
+            sample_mask = feature_attention_mask[item_idx]
+        else:
+            sample_mask = feature_attention_mask[item_idx]
+
+    if sample_mask.ndim == 1:
+        sample_input_lengths = sample_mask.sum().unsqueeze(0)
+    else:
+        # Match the HF processor, which derives placeholder lengths from the
+        # total pre-encoder feature length for each original audio sample.
+        sample_input_lengths = sample_mask.sum().reshape(1)
+
+    post_lengths = _get_audio_post_pool_output_lengths(
+        sample_input_lengths.to(torch.long)
+    )
+    return int(post_lengths[0].item())
+
+
+class AudioFlamingo3MultiModalDataParser(MultiModalDataParser):
+    def _parse_audio_data(
+        self,
+        data: dict[str, torch.Tensor] | ModalityData[Any],
+    ) -> ModalityDataItems[Any, Any] | None:
+        if isinstance(data, dict):
+            return DictEmbeddingItems(
+                data,
+                modality="audio",
+                required_fields={"audio_embeds"},
+                fields_factory=_audioflamingo3_field_config,
+            )
+        return super()._parse_audio_data(data)
+
+
 class AudioFlamingo3MultiModalProcessor(
     BaseMultiModalProcessor[AudioFlamingo3ProcessingInfo]
 ):
@@ -303,13 +389,13 @@ class AudioFlamingo3MultiModalProcessor(
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+        processor = self.info.get_hf_processor(**mm_kwargs)
+        feature_extractor = processor.feature_extractor
         mm_kwargs = dict(
             **mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
         )
 
-        # Calculate chunk counts
         audio_list = mm_data.get("audio")
         if not isinstance(audio_list, list):
             audio_list = [audio_list]
@@ -318,8 +404,7 @@ class AudioFlamingo3MultiModalProcessor(
         sampling_rate = feature_extractor.sampling_rate
         chunk_length = feature_extractor.chunk_length
         window_size = int(sampling_rate * chunk_length)
-        # MAX_AUDIO_LEN is 10 * 60 in HF processor.
-        max_windows = int(MAX_AUDIO_LEN // chunk_length)
+        max_windows = int(processor.max_audio_len // chunk_length)
 
         for audio in audio_list:
             # audio is numpy array or list
@@ -364,7 +449,6 @@ class AudioFlamingo3MultiModalProcessor(
         audio_token = getattr(processor, "audio_token", "<sound>")
         audio_token_id = vocab.get(audio_token)
         if audio_token_id is None:
-            # Fallback if not found, though it should be there
             audio_token_id = processor.audio_token_id
 
         out_mm_data = out_mm_kwargs.get_data()
@@ -373,38 +457,11 @@ class AudioFlamingo3MultiModalProcessor(
 
         def get_replacement_audioflamingo3(item_idx: int):
             if feature_attention_mask is not None:
-                if chunk_counts is not None:
-                    counts = (
-                        chunk_counts.tolist()
-                        if isinstance(chunk_counts, torch.Tensor)
-                        else chunk_counts
-                    )
-                    start_idx = sum(counts[:item_idx])
-                    count = counts[item_idx]
-                    end_idx = start_idx + count
-
-                    if isinstance(feature_attention_mask, list):
-                        mask_list = feature_attention_mask[start_idx:end_idx]
-                        if len(mask_list) > 0 and isinstance(
-                            mask_list[0], torch.Tensor
-                        ):
-                            mask = torch.stack(mask_list)
-                        else:
-                            mask = torch.tensor(mask_list)
-                    else:
-                        mask = feature_attention_mask[start_idx:end_idx]
-                else:
-                    # feature_attention_mask is list[Tensor] or Tensor
-                    if isinstance(feature_attention_mask, list):
-                        mask = feature_attention_mask[item_idx]
-                    else:
-                        mask = feature_attention_mask[item_idx].unsqueeze(0)
-
-                # mask shape: (num_chunks, 3000)
-                input_lengths = mask.sum(-1)
-                conv_lengths = (input_lengths - 1) // 2 + 1
-                audio_output_lengths = (conv_lengths - 2) // 2 + 1
-                num_features = audio_output_lengths.sum().item()
+                num_features = _count_audio_tokens_from_mask(
+                    feature_attention_mask,
+                    chunk_counts,
+                    item_idx,
+                )
             else:
                 audio_embeds = out_mm_data["audio_embeds"][item_idx]
                 num_features = audio_embeds.shape[0]
@@ -435,13 +492,6 @@ class AudioFlamingo3MultiModalProcessor(
 class AudioFlamingo3ForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
 ):
-    """
-    AudioFlamingo3 model for conditional generation.
-
-    This model integrates a Whisper-based audio encoder with a Qwen2 language model.
-    It supports multi-chunk audio processing.
-    """
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -517,6 +567,25 @@ class AudioFlamingo3ForConditionalGeneration(
             audio_embeds = audio_input["audio_embeds"]
             return tuple(audio_embeds)
 
+        (
+            input_features,
+            feature_attention_mask,
+            chunk_counts,
+        ) = self._normalize_audio_feature_inputs(audio_input)
+        audio_hidden_states = self._encode_audio_features(
+            input_features,
+            feature_attention_mask,
+        )
+        audio_features = self.multi_modal_projector(audio_hidden_states)
+        return self._group_audio_embeddings(
+            audio_features,
+            feature_attention_mask,
+            chunk_counts,
+        )
+
+    def _normalize_audio_feature_inputs(
+        self, audio_input: AudioFlamingo3FeatureInputs
+    ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
         input_features = audio_input["input_features"]
         feature_attention_mask = audio_input["feature_attention_mask"]
         chunk_counts = audio_input.get("chunk_counts")
@@ -534,66 +603,36 @@ class AudioFlamingo3ForConditionalGeneration(
             and chunk_counts
             and isinstance(chunk_counts[0], torch.Tensor)
         ):
-            chunk_counts = [c.item() for c in chunk_counts]
+            chunk_counts = [count.item() for count in chunk_counts]
 
-        # Calculate output lengths
-        input_lengths = feature_attention_mask.sum(-1)
-        # Conv downsampling
-        conv_lengths = (input_lengths - 1) // 2 + 1
-        # AvgPool downsampling
-        audio_output_lengths = (conv_lengths - 2) // 2 + 1
+        return input_features, feature_attention_mask, chunk_counts
 
-        batch_size, _, max_mel_seq_len = input_features.shape
-
-        # Calculate max_seq_len after convs (before pooling) for attention mask
-        max_seq_len = (max_mel_seq_len - 1) // 2 + 1
-
-        # Create a sequence tensor of shape (batch_size, max_seq_len)
-        seq_range = (
-            torch.arange(
-                0,
-                max_seq_len,
-                dtype=conv_lengths.dtype,
-                device=conv_lengths.device,
-            )
-            .unsqueeze(0)
-            .expand(batch_size, max_seq_len)
-        )
-        lengths_expand = conv_lengths.unsqueeze(-1).expand(batch_size, max_seq_len)
-        # Create mask
-        padding_mask = seq_range >= lengths_expand
-
-        audio_attention_mask_ = padding_mask.view(batch_size, 1, 1, max_seq_len).expand(
-            batch_size, 1, max_seq_len, max_seq_len
-        )
-        audio_attention_mask = audio_attention_mask_.to(
+    def _encode_audio_features(
+        self,
+        input_features: torch.Tensor,
+        feature_attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        audio_attention_mask = _build_audio_encoder_attention_mask(
+            feature_attention_mask,
             dtype=self.audio_tower.conv1.weight.dtype,
             device=self.audio_tower.conv1.weight.device,
         )
-        audio_attention_mask[audio_attention_mask_] = float("-inf")
 
-        # Forward pass
-        audio_features = self.audio_tower(
-            input_features, attention_mask=audio_attention_mask
+        return self.audio_tower(input_features, attention_mask=audio_attention_mask)
+
+    def _group_audio_embeddings(
+        self,
+        audio_features: torch.Tensor,
+        feature_attention_mask: torch.Tensor,
+        chunk_counts: list[int],
+    ) -> tuple[torch.Tensor, ...]:
+        masked_audio_features, audio_output_lengths = _flatten_valid_audio_embeddings(
+            audio_features,
+            feature_attention_mask,
         )
-
-        # Project
-        audio_features = self.multi_modal_projector(audio_features)
-
-        # Masking after pooling
-        num_audios, max_audio_tokens, embed_dim = audio_features.shape
-        audio_output_lengths = audio_output_lengths.unsqueeze(1)
-        audio_features_mask = (
-            torch.arange(max_audio_tokens)
-            .expand(num_audios, max_audio_tokens)
-            .to(audio_output_lengths.device)
-            < audio_output_lengths
-        )
-        masked_audio_features = audio_features[audio_features_mask].view(-1, embed_dim)
-
-        # Split to tuple of embeddings for individual audio input.
         chunk_embeddings = torch.split(
-            masked_audio_features, audio_output_lengths.flatten().tolist()
+            masked_audio_features,
+            audio_output_lengths.tolist(),
         )
 
         grouped_embeddings = []
@@ -613,7 +652,7 @@ class AudioFlamingo3ForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor | None,
+        input_ids: torch.Tensor,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
