@@ -846,9 +846,9 @@ class EplbState:
             ep_rank=ep_group.rank(),
         )
 
-        # Unblock the async worker
-        result.consumed_event.record()
+        # Reset pending_result before ublocking the async worker
         model_state.pending_result = None
+        result.consumed_event.record()
 
         self._update_layer_mapping_from_new(model_state, result)
         logger.debug(
