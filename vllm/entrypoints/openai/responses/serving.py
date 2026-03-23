@@ -44,7 +44,6 @@ from vllm import envs
 from vllm.config.utils import replace
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     get_tool_call_id_type,
 )
@@ -96,6 +95,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseUsage,
     StreamingResponsesResponse,
 )
+from vllm.entrypoints.openai.responses.store import create_responses_store
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
     emit_content_delta_events,
@@ -216,16 +216,22 @@ class OpenAIServingResponses(OpenAIServing):
         )
 
         # If False (default), the "store" option is (silently) ignored and the
-        # response is not stored. If True, the response is stored in memory.
+        # response is not stored. If True, the response is stored using the
+        # configured backend.
         # NOTE(woosuk): This may not be intuitive for users, as the default
         # behavior in OpenAI's Responses API is to store the response, but
         # vLLM's default behavior is not.
-        self.enable_store = envs.VLLM_ENABLE_RESPONSES_API_STORE
-        if self.enable_store:
+        store_backend = envs.VLLM_RESPONSES_STORE_BACKEND
+        self.enable_store = (
+            envs.VLLM_ENABLE_RESPONSES_API_STORE or store_backend != "memory"
+        )
+        if self.enable_store and store_backend == "memory":
             logger.warning_once(
-                "`VLLM_ENABLE_RESPONSES_API_STORE` is enabled. This may "
-                "cause a memory leak since we never remove responses from "
-                "the store."
+                "`VLLM_ENABLE_RESPONSES_API_STORE` is enabled with the "
+                "in-memory backend. Stored responses are never removed "
+                "and will be lost when the server shuts down. Consider "
+                "setting VLLM_RESPONSES_STORE_BACKEND to 'file' or "
+                "'redis' for persistence."
             )
 
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
@@ -245,20 +251,14 @@ class OpenAIServingResponses(OpenAIServing):
         self.tool_call_id_type = get_tool_call_id_type(self.model_config)
 
         self.enable_auto_tools = enable_auto_tools
-        # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove responses from the store.
-        self.response_store: dict[str, ResponsesResponse] = {}
-        self.response_store_lock = asyncio.Lock()
 
-        # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove messages from the store.
-        self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
+        # Pluggable store for responses and messages.
+        self.store = create_responses_store()
+        self.store_lock = asyncio.Lock()
 
-        # HACK(wuhang): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove events from the store.
+        # Event store is intentionally kept in-memory — it coordinates
+        # streaming between a background task and its SSE connection,
+        # both of which must live on the same instance.
         self.event_store: dict[
             str, tuple[deque[StreamingResponsesResponse], asyncio.Event]
         ] = {}
@@ -358,8 +358,8 @@ class OpenAIServingResponses(OpenAIServing):
         # Handle the previous response ID.
         prev_response_id = request.previous_response_id
         if prev_response_id is not None:
-            async with self.response_store_lock:
-                prev_response = self.response_store.get(prev_response_id)
+            async with self.store_lock:
+                prev_response = await self.store.get_response(prev_response_id)
             if prev_response is None:
                 return self._make_not_found_error(prev_response_id)
         else:
@@ -369,7 +369,7 @@ class OpenAIServingResponses(OpenAIServing):
         model_name = self.models.model_name(lora_request)
 
         if self.use_harmony:
-            messages, engine_prompts = self._make_request_with_harmony(
+            messages, engine_prompts = await self._make_request_with_harmony(
                 request, prev_response
             )
         else:
@@ -494,7 +494,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Store the input messages.
         if request.store:
-            self.msg_store[request.request_id] = messages
+            await self.store.put_messages(request.request_id, messages)
 
         if request.background:
             created_time = int(time.time())
@@ -507,8 +507,8 @@ class OpenAIServingResponses(OpenAIServing):
                 status="queued",
                 usage=None,
             )
-            async with self.response_store_lock:
-                self.response_store[response.id] = response
+            async with self.store_lock:
+                await self.store.put_response(response.id, response)
 
             # Run the request in the background.
             if request.stream:
@@ -582,7 +582,9 @@ class OpenAIServingResponses(OpenAIServing):
         messages = construct_input_messages(
             request_instructions=request.instructions,
             request_input=request.input,
-            prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
+            prev_msg=await self.store.get_messages(prev_response.id)
+            if prev_response
+            else None,
             prev_response_output=prev_response.output if prev_response else None,
         )
 
@@ -700,7 +702,7 @@ class OpenAIServingResponses(OpenAIServing):
             priority = orig_priority - 1
             sub_request += 1
 
-    def _make_request_with_harmony(
+    async def _make_request_with_harmony(
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
@@ -710,7 +712,9 @@ class OpenAIServingResponses(OpenAIServing):
                 "Only 'auto' tool_choice is supported in response API with Harmony"
             )
 
-        messages = self._construct_input_messages_with_harmony(request, prev_response)
+        messages = await self._construct_input_messages_with_harmony(
+            request, prev_response
+        )
         prompt_token_ids = render_for_completion(messages)
         engine_prompt = token_inputs(prompt_token_ids)
 
@@ -877,11 +881,11 @@ class OpenAIServingResponses(OpenAIServing):
         )
 
         if request.store:
-            async with self.response_store_lock:
-                stored_response = self.response_store.get(response.id)
+            async with self.store_lock:
+                stored_response = await self.store.get_response(response.id)
                 # If the response is already cancelled, don't update it.
                 if stored_response is None or stored_response.status != "cancelled":
-                    self.response_store[response.id] = response
+                    await self.store.put_response(response.id, response)
         return response
 
     def _topk_logprobs(
@@ -1122,7 +1126,7 @@ class OpenAIServingResponses(OpenAIServing):
         )
         return sys_msg
 
-    def _construct_input_messages_with_harmony(
+    async def _construct_input_messages_with_harmony(
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
@@ -1148,7 +1152,10 @@ class OpenAIServingResponses(OpenAIServing):
             # Continue the previous conversation.
             # FIXME(woosuk): Currently, request params like reasoning and
             # instructions are ignored.
-            prev_msgs = self.msg_store[prev_response.id]
+            prev_msgs = await self.store.get_messages(prev_response.id)
+            assert prev_msgs is not None, (
+                f"Messages not found for response {prev_response.id}"
+            )
 
             # FIXME(woosuk): The slice-delete-reappend cycle below is
             # currently a no-op --- it removes messages then puts them all
@@ -1229,11 +1236,12 @@ class OpenAIServingResponses(OpenAIServing):
         if isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".
             response_id = request.request_id
-            async with self.response_store_lock:
-                stored_response = self.response_store.get(response_id)
+            async with self.store_lock:
+                stored_response = await self.store.get_response(response_id)
                 assert stored_response is not None
                 if stored_response.status not in ("completed", "cancelled"):
                     stored_response.status = "failed"
+                    await self.store.put_response(response_id, stored_response)
 
     async def responses_background_stream_generator(
         self,
@@ -1274,8 +1282,8 @@ class OpenAIServingResponses(OpenAIServing):
         | ResponsesResponse
         | AsyncGenerator[StreamingResponsesResponse, None]
     ):
-        async with self.response_store_lock:
-            response = self.response_store.get(response_id)
+        async with self.store_lock:
+            response = await self.store.get_response(response_id)
 
         if response is None:
             return self._make_not_found_error(response_id)
@@ -1291,8 +1299,8 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         response_id: str,
     ) -> ErrorResponse | ResponsesResponse:
-        async with self.response_store_lock:
-            response = self.response_store.get(response_id)
+        async with self.store_lock:
+            response = await self.store.get_response(response_id)
             if response is None:
                 return self._make_not_found_error(response_id)
 
@@ -1306,6 +1314,7 @@ class OpenAIServingResponses(OpenAIServing):
 
             # Update the status to "cancelled".
             response.status = "cancelled"
+            await self.store.put_response(response_id, response)
 
         # Abort the request.
         if task := self.background_tasks.get(response_id):
