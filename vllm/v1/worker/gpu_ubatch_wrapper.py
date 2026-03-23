@@ -396,9 +396,13 @@ class UBatchWrapper:
             sliced_positions = positions[:, tokens_slice]
         else:
             sliced_positions = positions[tokens_slice]
-        sliced_inputs_embeds = inputs_embeds[tokens_slice] if inputs_embeds is not None else None
+        sliced_inputs_embeds = (
+            inputs_embeds[tokens_slice] if inputs_embeds is not None else None
+        )
         sliced_intermediate_tensors = (
-            intermediate_tensors[tokens_slice] if intermediate_tensors else None
+            intermediate_tensors[tokens_slice]
+            if intermediate_tensors is not None
+            else None
         )
 
         return (
