@@ -10,7 +10,7 @@ NUM_TOKENS = [1, 4, 16, 64, 128]
 NUM_HEADS = [128]
 NOPE_DIM = [512]
 ROPE_DIM = [64]
-DTYPES = [torch.bfloat16, torch.float16]
+DTYPES = [torch.bfloat16, torch.float16, torch.float32]
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
