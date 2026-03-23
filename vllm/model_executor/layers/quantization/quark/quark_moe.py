@@ -819,6 +819,15 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             "unpadded_hidden_size", hidden_size
         )
 
+        # On GFX950, the GFX950MXScaleLayout swizzle requires
+        # hidden_size to be a multiple of 256 (SCALE_K = hidden_size / 32
+        # must be divisible by 8). Pad hidden_size for weight/scale
+        # allocation; the original value is preserved in unpadded_hidden_size.
+        # Note: on ROCm this class is only instantiated on GFX950
+        # (gated by supports_mx()).
+        if self.model_type == "gpt_oss" and current_platform.is_rocm():
+            hidden_size = round_up(hidden_size, 256)
+
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
             torch.empty(
