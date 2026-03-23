@@ -579,7 +579,10 @@ _riy_server_lock = threading.Lock()
 
 
 def ensure_riy_server(port: int = 8019):
-    """Start RIY HTTP server once (idempotent)."""
+    """Start RIY HTTP server once (idempotent).
+
+    Also auto-starts stats collection if not already collecting.
+    """
     global _riy_server_started
     if _riy_server_started:
         return
@@ -587,6 +590,10 @@ def ensure_riy_server(port: int = 8019):
         if _riy_server_started:
             return
         _riy_server_started = True
+        # Auto-start collection if monitor is active but not yet collecting
+        riy = get_riy_state()
+        if not riy._collecting:
+            riy.start_collection()
         t = threading.Thread(
             target=_start_riy_server, args=(port,), daemon=True)
         t.start()
