@@ -167,6 +167,39 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
 
+        # Per-connector load weights for weighted selection.
+        # Higher weight means a connector's hit is preferred even if
+        # another offers more tokens (e.g. fast CPU cache vs slow disk).
+        # Configured via "load_weight" in each connector's config.
+        assert vllm_config.kv_transfer_config is not None
+        connectors_cfg = (
+            vllm_config.kv_transfer_config.kv_connector_extra_config
+            .get("connectors", [])
+        )
+        self._load_weights: list[float] = [
+            float(cfg.get("kv_connector_extra_config", {})
+                      .get("load_weight", 1.0))
+            for cfg in connectors_cfg
+        ]
+        # Pad if config is shorter than connectors (shouldn't happen)
+        while len(self._load_weights) < len(self._connectors):
+            self._load_weights.append(1.0)
+
+        # Validate HMA: MultiConnector advertises SupportsHMA, but this
+        # only works if all children also support it.
+        if not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+            non_hma = [
+                type(c).__name__ for c in self._connectors
+                if not isinstance(c, SupportsHMA)
+            ]
+            if non_hma:
+                raise TypeError(
+                    f"MultiConnector has HMA enabled but these child "
+                    f"connectors do not support it: {non_hma}. Either "
+                    f"use --disable-hybrid-kv-cache-manager or replace "
+                    f"the non-HMA connectors."
+                )
+
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
         self._requests_to_connector: dict[str, int] = {}
@@ -353,21 +386,32 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
-        to_return = (0, False)
+        # Weighted selection: each connector's hit is scored as
+        # tokens * load_weight.  The connector with the highest
+        # weighted score wins.  This lets a fast CPU cache (high
+        # weight) beat a slow disk cache unless the disk hit is
+        # substantially larger.
+        best_idx = -1
+        best_score = 0.0
+        best_result: tuple[int, bool] = (0, False)
+
         for i, c in enumerate(self._connectors):
             toks, load_async = c.get_num_new_matched_tokens(
                 request, num_computed_tokens
             )
-            # If there is a connector still looking up the matches,
-            # we return None to indicate that we are not done yet.
+            # If any connector is still resolving, defer the decision.
             if toks is None:
                 return (None, False)
-            # The first connector that has new matched tokens will be assigned
-            # to this request.
-            if to_return[0] == 0 and toks > 0:
-                self._requests_to_connector[request.request_id] = i
-                to_return = (toks, load_async)
-        return to_return
+            if toks > 0:
+                score = toks * self._load_weights[i]
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
+                    best_result = (toks, load_async)
+
+        if best_idx >= 0:
+            self._requests_to_connector[request.request_id] = best_idx
+        return best_result
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
