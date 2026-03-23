@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
+from prometheus_client import Counter, Gauge
 
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
@@ -39,6 +40,38 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Per-connector Prometheus metrics (updated in get_num_new_matched_tokens)
+# ---------------------------------------------------------------------------
+_MC_QUERIES = Counter(
+    "vllm_kv_connector_queries_total",
+    "Total number of cache-lookup queries issued to each child connector "
+    "by MultiConnector.",
+    ["connector"],
+)
+_MC_HITS = Counter(
+    "vllm_kv_connector_hits_total",
+    "Number of times each child connector won the weighted selection "
+    "and will serve the load.",
+    ["connector"],
+)
+_MC_HIT_TOKENS = Counter(
+    "vllm_kv_connector_hit_tokens_total",
+    "Total tokens matched by the winning child connector.",
+    ["connector"],
+)
+_MC_MISS = Counter(
+    "vllm_kv_connector_misses_total",
+    "Number of requests where no child connector had a cache hit.",
+    ["connector"],
+)
+_MC_PENDING = Gauge(
+    "vllm_kv_connector_pending_loads",
+    "Number of requests currently assigned to each child connector "
+    "for an in-progress external load.",
+    ["connector"],
+)
 
 
 @dataclass
@@ -199,6 +232,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                     f"use --disable-hybrid-kv-cache-manager or replace "
                     f"the non-HMA connectors."
                 )
+
+        # Human-readable names for per-connector Prometheus labels.
+        self._connector_names: list[str] = [
+            type(c).__name__ for c in self._connectors
+        ]
 
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
@@ -410,13 +448,17 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         best_score = 0.0
         best_result: tuple[int, bool] = (0, False)
 
+        per_connector_results: list[tuple[int, bool]] = []
         for i, c in enumerate(self._connectors):
+            name = self._connector_names[i]
             toks, load_async = c.get_num_new_matched_tokens(
                 request, num_computed_tokens
             )
             # If any connector is still resolving, defer the decision.
             if toks is None:
                 return (None, False)
+            _MC_QUERIES.labels(connector=name).inc()
+            per_connector_results.append((toks, load_async))
             if toks > 0:
                 score = toks * self._load_weights[i]
                 if score > best_score:
@@ -425,7 +467,22 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                     best_result = (toks, load_async)
 
         if best_idx >= 0:
+            winner_name = self._connector_names[best_idx]
             self._requests_to_connector[request.request_id] = best_idx
+            _MC_HITS.labels(connector=winner_name).inc()
+            _MC_HIT_TOKENS.labels(connector=winner_name).inc(best_result[0])
+            _MC_PENDING.labels(connector=winner_name).inc()
+            # Record misses for non-winning connectors that had no tokens
+            for i, (toks, _) in enumerate(per_connector_results):
+                if i != best_idx and toks == 0:
+                    _MC_MISS.labels(
+                        connector=self._connector_names[i]
+                    ).inc()
+        else:
+            # No connector had a hit
+            for i, name in enumerate(self._connector_names):
+                _MC_MISS.labels(connector=name).inc()
+
         return best_result
 
     def update_state_after_alloc(
@@ -437,6 +494,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             if i == chosen_connector:
                 # Forward call to the chosen connector (if any).
                 c.update_state_after_alloc(request, blocks, num_external_tokens)
+                # Load has been dispatched — decrement pending gauge.
+                _MC_PENDING.labels(
+                    connector=self._connector_names[i]
+                ).dec()
             else:
                 # Call with empty blocks for other connectors.
                 c.update_state_after_alloc(request, empty_blocks, 0)
