@@ -14,22 +14,6 @@ logger = init_logger(__name__)
 
 
 class EPLBEvent:
-    """
-    A CUDA event with a CPU-side flag that guards against calling
-    event.wait() before event.record() has been called (which would
-    be a no-op and break ordering guarantees).
-
-    Typical usage across two threads:
-
-      Producer thread (async worker):
-        event.wait()   # spins until consumer calls record(), then inserts
-                       # GPU-side dependency on the current CUDA stream
-
-      Consumer thread (main thread):
-        # ... consume the buffer ...
-        event.record() # records on the current CUDA stream, then sets flag
-    """
-
     def __init__(self):
         self._event = torch.cuda.Event()
         self._recorded = threading.Event()
@@ -40,6 +24,7 @@ class EPLBEvent:
         self._recorded.clear()
 
     def record(self, stream: torch.cuda.Stream | None = None):
+        assert not self._recorded.is_set()
         self._event.record(stream)
         self._recorded.set()
 
