@@ -39,7 +39,7 @@ aws ecr-public get-login-password --region us-east-1 | docker login --username A
 docker pull "$BASE_ORIG_TAG"
 docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:"$ORIG_TAG"
 
-# Tag for Docker Hub (base-nightly and nightly-base, nightly and nightly-<commit>)
+# Tag for Docker Hub (base-nightly and base-nightly-<commit>, nightly and nightly-<commit>)
 docker tag "$BASE_ORIG_TAG" vllm/vllm-openai-rocm:"$BASE_TAG_NAME"
 docker tag "$BASE_ORIG_TAG" vllm/vllm-openai-rocm:"$BASE_TAG_NAME_COMMIT"
 docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:"$ORIG_TAG" vllm/vllm-openai-rocm:"$TAG_NAME"
