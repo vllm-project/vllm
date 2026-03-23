@@ -9,7 +9,7 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
-from vllm.v1.kv_offload.cpu_manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
 from vllm.v1.kv_offload.spec import OffloadingSpec

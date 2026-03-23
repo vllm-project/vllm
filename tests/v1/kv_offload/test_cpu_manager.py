@@ -12,7 +12,8 @@ from vllm.v1.kv_offload.abstract import (
     OffloadingEvent,
     PrepareStoreOutput,
 )
-from vllm.v1.kv_offload.cpu_manager import ARCCachePolicy, CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 
 
