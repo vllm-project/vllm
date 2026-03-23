@@ -6,7 +6,7 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample, tl_rand64
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -211,12 +211,12 @@ def _probabilistic_rejection_kernel(
             else:
                 target_prob = tl.load(
                     target_probs_ptr + logit_idx * target_probs_stride + draft_sampled
-                )
+                ).to(tl.float64)
                 draft_prob = tl.load(
                     draft_probs_ptr + logit_idx * draft_probs_stride + draft_sampled
-                )
+                ).to(tl.float64)
                 pos = tl.load(pos_ptr + logit_idx)
-                u = tl.sum(tl.rand(seed, pos + tl.arange(0, 1)))
+                u = tl_rand64(seed, pos, includes_zero=False)
                 accepted &= target_prob > u * draft_prob
             tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
             rejected_step += accepted
