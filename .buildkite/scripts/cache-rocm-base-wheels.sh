@@ -43,7 +43,6 @@ generate_cache_key() {
     # Include key build args that affect the output
     local args_string="${PYTHON_VERSION:-$DEFAULT_PYTHON_VERSION}|${PYTORCH_ROCM_ARCH:-$DEFAULT_PYTORCH_ROCM_ARCH}"
     local args_hash=$(echo "$args_string" | sha256sum | cut -c1-8)
-    
     echo "${dockerfile_hash}-${args_hash}"
 }
 
@@ -106,7 +105,6 @@ case "${1:-}" in
         echo "Cache key: ${CACHE_KEY}"
         echo "Cache path: ${CACHE_PATH}"
         echo ""
-        
         mkdir -p artifacts/rocm-base-wheels
         
         # Use sync with include/exclude to only download .whl files
@@ -117,7 +115,6 @@ case "${1:-}" in
         echo ""
         echo "Downloaded wheels:"
         find artifacts/rocm-base-wheels -maxdepth 1 -name '*.whl' -exec ls -lh {} \;
-        
         WHEEL_COUNT=$(find artifacts/rocm-base-wheels -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)
         echo ""
         echo "Total: $WHEEL_COUNT wheels"

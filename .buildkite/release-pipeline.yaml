@@ -77,7 +77,6 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
-
       - label: "Build wheel - x86_64 - CPU"
         depends_on: ~
         id: build-wheel-x86-cpu
@@ -90,7 +89,6 @@ steps:
           - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_35"
         env:
           DOCKER_BUILDKIT: "1"
-
 
   - group: "Build release Docker images"
     key: "build-release-images"
@@ -146,7 +144,6 @@ steps:
         key: block-cpu-release-image-build
         depends_on: ~
 
-
       - label: "Build release image - x86_64 - CPU"
         depends_on:
           - block-cpu-release-image-build
@@ -160,7 +157,6 @@ steps:
           - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$(buildkite-agent meta-data get release-version)"
         env:
           DOCKER_BUILDKIT: "1"
-
 
       - block: "Build release image for arm64 CPU"
         key: block-arm64-cpu-release-image-build
@@ -330,23 +326,23 @@ steps:
         if [ "$${ROCM_FORCE_REBUILD}" != "true" ]; then
           if docker manifest inspect "$${ECR_CACHE_TAG}" > /dev/null 2>&1; then
             IMAGE_EXISTS=true
-            echo "✅ ECR image cache HIT"
+            echo "ECR image cache HIT"
           fi
           
           # Check S3 for wheels
           WHEEL_CACHE_STATUS=$(.buildkite/scripts/cache-rocm-base-wheels.sh check)
           if [ "$${WHEEL_CACHE_STATUS}" = "hit" ]; then
             WHEELS_EXIST=true
-            echo "✅ S3 wheels cache HIT"
+            echo "S3 wheels cache HIT"
           fi
         else
-          echo "⚠️  Force rebuild requested, skipping cache checks"
+          echo "Force rebuild requested, skipping cache checks"
         fi
         
         # Scenario 1: Both cached (best case)
         if [ "$${IMAGE_EXISTS}" = "true" ] && [ "$${WHEELS_EXIST}" = "true" ]; then
           echo ""
-          echo "🎉 FULL CACHE HIT - Reusing both image and wheels"
+          echo "FULL CACHE HIT - Reusing both image and wheels"
           echo ""
 
           # Download wheels
@@ -358,7 +354,7 @@ steps:
         # Scenario 2: Image cached but wheels missing
         elif [ "$${IMAGE_EXISTS}" = "true" ] && [ "$${WHEELS_EXIST}" = "false" ]; then
           echo ""
-          echo "⚠️  PARTIAL CACHE - Image exists, extracting wheels..."
+          echo "PARTIAL CACHE - Image exists, extracting wheels..."
           echo ""
           
           docker pull "$${ECR_CACHE_TAG}"
@@ -391,7 +387,7 @@ steps:
         # Scenario 3: Full rebuild needed
         else
           echo ""
-          echo "❌ CACHE MISS - Building from scratch..."
+          echo " CACHE MISS - Building from scratch..."
           echo ""
           
           # Build full base image and push to ECR
@@ -435,7 +431,7 @@ steps:
           buildkite-agent meta-data set "rocm-base-image-tag" "$${ECR_CACHE_TAG}"
           
           echo ""
-          echo "✅ Build complete - Image and wheels cached"
+          echo " Build complete - Image and wheels cached"
         fi
         
     artifact_paths:
@@ -457,6 +453,7 @@ steps:
       # Download artifacts and prepare Docker image
       - |
         set -euo pipefail
+
         # Ensure git tags are up-to-date (Buildkite's default fetch doesn't update tags)
         # This fixes version detection when tags are moved/force-pushed
         echo "Fetching latest tags from origin..."
@@ -475,11 +472,11 @@ steps:
         pip install -q setuptools_scm 2>/dev/null || true
         python3 -c "import setuptools_scm; print('  Detected version:', setuptools_scm.get_version())" 2>/dev/null || echo "  (setuptools_scm not available in this environment)"
         echo "========================================"
-        
+
         # Download wheel artifacts from current build
         echo "Downloading wheel artifacts from current build"
         buildkite-agent artifact download "artifacts/rocm-base-wheels/*.whl" .
-        
+
         # Get ECR image tag from metadata (set by build-rocm-base-wheels)
         ECR_IMAGE_TAG="$$(buildkite-agent meta-data get rocm-base-image-tag 2>/dev/null || echo '')"
         if [ -z "$${ECR_IMAGE_TAG}" ]; then
@@ -503,7 +500,6 @@ steps:
         mkdir -p docker/context/base-wheels
         touch docker/context/base-wheels/.keep
         cp artifacts/rocm-base-wheels/*.whl docker/context/base-wheels/
-        
         echo "Base wheels for vLLM build:"
         ls -lh docker/context/base-wheels/
         
@@ -517,7 +513,7 @@ steps:
         echo "  PYTORCH_ROCM_ARCH: $${PYTORCH_ROCM_ARCH}"
         echo "  BASE_IMAGE: $${ECR_IMAGE_TAG}"
         echo "========================================"
-        
+
         # Build vLLM wheel using local checkout (REMOTE_VLLM=0)
         DOCKER_BUILDKIT=1 docker build \
           --file docker/Dockerfile.rocm \
@@ -532,14 +528,11 @@ steps:
           --build-arg SCCACHE_REGION_NAME=us-west-2 \
           --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
           .
-        
         echo "Built vLLM wheel:"
         ls -lh rocm-dist/*.whl
-        
         # Copy wheel to artifacts directory
         mkdir -p artifacts/rocm-vllm-wheel
         cp rocm-dist/*.whl artifacts/rocm-vllm-wheel/
-        
         echo "Final vLLM wheel:"
         ls -lh artifacts/rocm-vllm-wheel/
     artifact_paths:
@@ -571,7 +564,7 @@ steps:
         bash .buildkite/scripts/upload-rocm-wheels.sh
     env:
       DOCKER_BUILDKIT: "1"
-      S3_BUCKET: "vllm-wheels-dev"
+      S3_BUCKET: "vllm-wheels"
 
   # ROCm Job 4: Annotate ROCm Wheel Release
   - label: ":memo: Annotate ROCm wheel release"
@@ -669,7 +662,7 @@ steps:
         docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm
         
         echo ""
-        echo "✅ Successfully built and pushed ROCm release image"
+        echo " Successfully built and pushed ROCm release image"
         echo "   Image: public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm"
         echo ""
     env:
