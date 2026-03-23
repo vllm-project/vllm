@@ -1595,13 +1595,12 @@ class SpecDecodeBaseProposer:
                 mamba_gids.add(gid)
             for layer_name in kv_cache_group.layer_names:
                 kv_cache_groups[layer_name] = gid
-        non_mamba_gids = (
+        attn_gids = (
             set(kv_cache_groups[name] for name in self._draft_attn_layer_names)
             - mamba_gids
         )
-        assert len(non_mamba_gids) <= 1, (
-            "All draft attention layers should belong to the same "
-            f"kv cache group, but found groups: {non_mamba_gids}"
+        assert len(attn_gids) <= 1, (
+            "All draft attention layers should belong to the same kv cache group"
         )
 
     def initialize_attn_backend(
