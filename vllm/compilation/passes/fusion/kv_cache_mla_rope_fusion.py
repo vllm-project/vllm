@@ -26,7 +26,6 @@ _ATEN_SLICE_TO_END: int = 9223372036854775807
 
 
 def fused_concat_and_cache_mla_rope_impl(
-    dummy: torch.Tensor,
     positions: torch.Tensor,
     q_pe: torch.Tensor,
     k_pe: torch.Tensor,
@@ -36,7 +35,7 @@ def fused_concat_and_cache_mla_rope_impl(
     kv_cache_dtype: str,
     kv_cache_scale: torch.Tensor,
     layer_name: str,
-) -> None:
+) -> torch.Tensor:
     forward_context = get_forward_context()
     attn_layer = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache[0]
@@ -58,10 +57,10 @@ def fused_concat_and_cache_mla_rope_impl(
         kv_cache_scale,
         layer_slot_mapping is not None,
     )
+    return torch.empty(0, device=kv_c.device, dtype=kv_c.dtype)
 
 
 def fused_concat_and_cache_mla_rope_fake(
-    dummy: torch.Tensor,
     positions: torch.Tensor,
     q_pe: torch.Tensor,
     k_pe: torch.Tensor,
@@ -71,15 +70,15 @@ def fused_concat_and_cache_mla_rope_fake(
     kv_cache_dtype: str,
     kv_cache_scale: torch.Tensor,
     layer_name: str,
-) -> None:
-    pass
+) -> torch.Tensor:
+    return torch.empty(0, device=kv_c.device, dtype=kv_c.dtype)
 
 
 direct_register_custom_op(
     op_name="fused_concat_and_cache_mla_rope",
     op_func=fused_concat_and_cache_mla_rope_impl,
     fake_impl=fused_concat_and_cache_mla_rope_fake,
-    mutates_args=["dummy", "q_pe", "k_pe"],
+    mutates_args=["q_pe", "k_pe"],
 )
 
 
@@ -164,9 +163,7 @@ class KVCacheMLARoPEFusionPattern:
             cos_sin_cache: torch.Tensor,
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            dummy = torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
-            self.FUSED_OP(
-                dummy=dummy,
+            dummy = self.FUSED_OP(
                 positions=positions,
                 q_pe=q,
                 k_pe=k_pe,
@@ -273,11 +270,9 @@ class KVCacheMLARoPEDeepseekScalingFusionPattern:
             cos_sin_cache: torch.Tensor,
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            dummy = torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
             h = self.qk_nope_head_dim + self.qk_rope_head_dim
             v2 = mm.reshape(-1, self.num_heads, h)
-            self.FUSED_OP(
-                dummy=dummy,
+            dummy = self.FUSED_OP(
                 positions=positions,
                 q_pe=v2[..., self.qk_nope_head_dim :],
                 k_pe=k_pe,
