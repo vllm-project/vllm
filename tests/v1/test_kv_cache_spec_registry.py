@@ -120,12 +120,12 @@ class TestKVCacheSpecRegistry:
     """Test the core registry functionality."""
 
     def test_builtin_kvcache_specs_registered(self):
+        assert len(_REGISTRY_KVCACHESPEC_LIST) == len(spec_manager_map)
         for spec, manager in spec_manager_map.items():
             assert (
                 KVCacheSpecRegistry.get_manager_class(spec(**(spec_args_map[spec])))
                 is manager
             )
-            assert len(_REGISTRY_KVCACHESPEC_LIST) == len(spec_manager_map)
 
     def test_custom_spec_register(self):
         """A decorated custom spec resolves to the declared manager."""
@@ -202,7 +202,8 @@ class TestKVCacheSpecRegistry:
         )
         with pytest.raises(
             AssertionError,
-            match="Please specify a target_kv_cache_spec_cls when override",
+            match="Please specify a target_kv_cache_spec_cls when override a"
+            " KVCacheSpec",
         ):
 
             @register_kv_cache_spec(
