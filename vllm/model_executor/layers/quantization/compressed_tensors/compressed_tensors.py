@@ -105,7 +105,6 @@ class CompressedTensorsConfig(QuantizationConfig):
             self.transform_config = TransformConfig.model_validate(transform_config)
         else:
             self.transform_config = None
-        self._add_fused_moe_to_target_scheme_map()
 
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
@@ -199,7 +198,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             return
         if "FusedMoE" not in self.target_scheme_map:
             self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
-        for ds_target in ["DeepSeekV2FusedQkvAProj", "DeepSeekV3FusedQkvAProj"]:
+        for ds_target in ["DeepseekV2MoE"]:
             if ds_target not in self.target_scheme_map:
                 self.target_scheme_map[ds_target] = self.target_scheme_map["Linear"]
 
