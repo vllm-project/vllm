@@ -198,8 +198,10 @@ class MambaMixer(MambaBase, PluggableLayer):
         # must not inflate their own state — set to 0 for draft models.
         vllm_config: VllmConfig = get_current_vllm_config()
         spec_cfg = vllm_config.speculative_config
-        is_draft = (spec_cfg is not None
-                    and vllm_config.model_config is spec_cfg.draft_model_config)
+        is_draft = (
+            spec_cfg is not None
+            and vllm_config.model_config is spec_cfg.draft_model_config
+        )
         self.num_spec = 0 if is_draft else vllm_config.num_speculative_tokens
 
     def _ssm_transform(

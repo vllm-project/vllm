@@ -362,10 +362,9 @@ class SpecDecodeBaseProposer:
         result: dict[int, CommonAttentionMetadata] = {}
         batch_size = common_attn_metadata.batch_size()
         for gid in self._mamba_kv_cache_gids:
-            mamba_block_table = (
-                self.runner.input_batch.block_table[gid]
-                .get_device_tensor(batch_size)
-            )
+            mamba_block_table = self.runner.input_batch.block_table[
+                gid
+            ].get_device_tensor(batch_size)
             result[gid] = common_attn_metadata.replace(
                 block_table_tensor=mamba_block_table,
             )
@@ -398,8 +397,7 @@ class SpecDecodeBaseProposer:
 
         view = self._slot_mapping_buffer[:num_tokens]
         # Only attention layers use slot_mapping; mamba layers do not.
-        layer_names = (self._draft_attn_only_layer_names
-                       or self._draft_attn_layer_names)
+        layer_names = self._draft_attn_only_layer_names or self._draft_attn_layer_names
         return {name: view for name in layer_names}
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -471,13 +469,13 @@ class SpecDecodeBaseProposer:
 
         # Build mamba CAMs once; they share seq_lens with the attention CAM
         # so in-place updates in the autoregressive loop propagate.
-        mamba_cams = self._build_mamba_common_attn_metadata(
-            common_attn_metadata)
+        mamba_cams = self._build_mamba_common_attn_metadata(common_attn_metadata)
 
         per_layer_attn_metadata: dict[str, object] = {}
         for attn_group in self.draft_attn_groups:
             group_cam = self._get_group_cam(
-                attn_group, common_attn_metadata, mamba_cams)
+                attn_group, common_attn_metadata, mamba_cams
+            )
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
                 common_attn_metadata=group_cam, draft_index=0
             )
@@ -589,8 +587,7 @@ class SpecDecodeBaseProposer:
             mamba_cam.num_actual_tokens = common_attn_metadata.num_actual_tokens
             mamba_cam.max_query_len = common_attn_metadata.max_query_len
             mamba_cam.query_start_loc = common_attn_metadata.query_start_loc
-            mamba_cam.query_start_loc_cpu = (
-                common_attn_metadata.query_start_loc_cpu)
+            mamba_cam.query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
             mamba_cam.is_prefilling = common_attn_metadata.is_prefilling
 
         # In padded drafter batch, we need to adjust the sequence lengths
@@ -665,7 +662,8 @@ class SpecDecodeBaseProposer:
             # Rebuild attention metadata
             for attn_group in self.draft_attn_groups:
                 group_cam = self._get_group_cam(
-                    attn_group, common_attn_metadata, mamba_cams)
+                    attn_group, common_attn_metadata, mamba_cams
+                )
                 attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
                     common_attn_metadata=group_cam,
                     draft_index=token_index + 1,
@@ -1629,8 +1627,7 @@ class SpecDecodeBaseProposer:
             spec = gid_to_spec[gid]
             if isinstance(spec, MambaSpec) or (
                 isinstance(spec, UniformTypeKVCacheSpecs)
-                and any(isinstance(s, MambaSpec)
-                        for s in spec.kv_cache_specs.values())
+                and any(isinstance(s, MambaSpec) for s in spec.kv_cache_specs.values())
             ):
                 mamba_gids.add(gid)
             else:
@@ -1665,8 +1662,7 @@ class SpecDecodeBaseProposer:
             spec = group.kv_cache_spec
             is_mamba = isinstance(spec, MambaSpec) or (
                 isinstance(spec, UniformTypeKVCacheSpecs)
-                and any(isinstance(s, MambaSpec)
-                        for s in spec.kv_cache_specs.values())
+                and any(isinstance(s, MambaSpec) for s in spec.kv_cache_specs.values())
             )
             gid_is_mamba[gid] = is_mamba
             for layer_name in group.layer_names:
@@ -1694,8 +1690,7 @@ class SpecDecodeBaseProposer:
             group = kv_cache_config.kv_cache_groups[gid]
             group_spec = group.kv_cache_spec
             draft_layers_in_group = [
-                ln for ln in self._draft_attn_layer_names
-                if layer_gid.get(ln) == gid
+                ln for ln in self._draft_attn_layer_names if layer_gid.get(ln) == gid
             ]
             for layer_name in draft_layers_in_group:
                 attn_backend = all_attn_layers[layer_name].get_attn_backend()
@@ -1703,9 +1698,9 @@ class SpecDecodeBaseProposer:
                 if backend_key not in attention_groups:
                     layer_kv_cache_spec = group_spec
                     if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                        layer_kv_cache_spec = (
-                            layer_kv_cache_spec.kv_cache_specs[layer_name]
-                        )
+                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[
+                            layer_name
+                        ]
                     kernel_block_size = (
                         kernel_block_sizes[gid]
                         if kernel_block_sizes is not None
@@ -1731,9 +1726,7 @@ class SpecDecodeBaseProposer:
         # block_size comes from the attention group (used for slot mapping).
         for ag in self.draft_attn_groups:
             if ag.kv_cache_group_id == self.kv_cache_gid:
-                self.block_size = (
-                    ag.get_metadata_builder().kv_cache_spec.block_size
-                )
+                self.block_size = ag.get_metadata_builder().kv_cache_spec.block_size
                 break
         logger.debug("Using block size %d for drafting layers", self.block_size)
 

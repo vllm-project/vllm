@@ -60,5 +60,5 @@ class MambaBase(AttentionLayerBase):
     @property
     def num_speculative_tokens(self) -> int:
         """Number of speculative token 0 for draft models that are mamba based,
-          N for target models with spec decode."""
+        N for target models with spec decode."""
         return getattr(self, "num_spec", 0)

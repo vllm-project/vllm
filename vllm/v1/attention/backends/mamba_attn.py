@@ -192,9 +192,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         """
         num_accepted_tokens = None
         if self.num_spec_tokens > 0:
-            num_accepted_tokens = torch.diff(
-                common_attn_metadata.query_start_loc
-            )
+            num_accepted_tokens = torch.diff(common_attn_metadata.query_start_loc)
         return self.build(
             0,
             common_attn_metadata,
@@ -543,9 +541,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 )
                 # Pad remaining entries with 1-token-per-request pattern
                 if metadata.num_decodes < padded_bs:
-                    last_val = self.decode_query_start_loc_d[
-                        metadata.num_decodes
-                    ]
+                    last_val = self.decode_query_start_loc_d[metadata.num_decodes]
                     self.decode_query_start_loc_d[
                         metadata.num_decodes + 1 : padded_bs + 1
                     ] = last_val + torch.arange(
@@ -554,9 +550,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                         device=query_start_loc_d.device,
                         dtype=query_start_loc_d.dtype,
                     )
-                query_start_loc_d = self.decode_query_start_loc_d[
-                    : padded_bs + 1
-                ]
+                query_start_loc_d = self.decode_query_start_loc_d[: padded_bs + 1]
                 self.decode_num_accepted_tokens[: metadata.num_decodes].copy_(
                     num_accepted_tokens, non_blocking=True
                 )
