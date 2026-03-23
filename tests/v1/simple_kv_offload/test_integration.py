@@ -26,16 +26,13 @@ PERF_MODELS = [
 ]
 
 
-def _make_llm(
-    model: str, lazy: bool, cpu_bytes_to_use: int, copy_backend: str = "kernel"
-) -> LLM:
+def _make_llm(model: str, lazy: bool, cpu_bytes_to_use: int) -> LLM:
     kv_transfer_config = KVTransferConfig(
         kv_connector="SimpleCPUOffloadConnector",
         kv_role="kv_both",
         kv_connector_extra_config={
             "cpu_bytes_to_use": cpu_bytes_to_use,
             "lazy_offload": lazy,
-            "copy_backend": copy_backend,
         },
     )
     return LLM(
@@ -145,10 +142,9 @@ def _latency_test(llm: LLM, lazy: bool = False):
 
 @pytest.mark.slow_test
 @pytest.mark.parametrize("model", SMALL_MODELS)
-@pytest.mark.parametrize("copy_backend", ["dma"])
-def test_simple_cpu_offload_accuracy(model: str, copy_backend: str):
+def test_simple_cpu_offload_accuracy(model: str):
     """Store to CPU, reset GPU, load from CPU; verify output matches baseline."""
-    llm = _make_llm(model, False, 1 << 30, copy_backend=copy_backend)  # 1GB
+    llm = _make_llm(model, False, 1 << 30)  # 1GB
     try:
         _accuracy_test(llm, lazy=False)
     finally:
@@ -158,10 +154,9 @@ def test_simple_cpu_offload_accuracy(model: str, copy_backend: str):
 @pytest.mark.optional
 @pytest.mark.slow_test
 @pytest.mark.parametrize("model", PERF_MODELS)
-@pytest.mark.parametrize("copy_backend", ["dma"])
-def test_simple_cpu_offload_perf_latency(model: str, copy_backend: str):
+def test_simple_cpu_offload_perf_latency(model: str):
     """CPU KV hit should beat cold prefill on long context (large models only)."""
-    llm = _make_llm(model, False, 10 << 30, copy_backend=copy_backend)  # 10GB
+    llm = _make_llm(model, False, 10 << 30)  # 10GB
     try:
         _latency_test(llm, lazy=False)
     finally:
@@ -171,11 +166,10 @@ def test_simple_cpu_offload_perf_latency(model: str, copy_backend: str):
 @pytest.mark.optional
 @pytest.mark.slow_test
 @pytest.mark.parametrize("model", SMALL_MODELS)
-@pytest.mark.parametrize("copy_backend", ["dma"])
-def test_simple_cpu_offload_accuracy_lazy(model: str, copy_backend: str):
+def test_simple_cpu_offload_accuracy_lazy(model: str):
     """Lazy mode: flush GPU cache to trigger CPU offload, then verify hit."""
     # CPU must be larger than GPU KV cache to avoid evicting offloaded blocks.
-    llm = _make_llm(model, True, 80 << 30, copy_backend=copy_backend)  # 80GB
+    llm = _make_llm(model, True, 80 << 30)  # 80GB
     try:
         _accuracy_test(llm, lazy=True)
     finally:
@@ -185,11 +179,10 @@ def test_simple_cpu_offload_accuracy_lazy(model: str, copy_backend: str):
 @pytest.mark.optional
 @pytest.mark.slow_test
 @pytest.mark.parametrize("model", PERF_MODELS)
-@pytest.mark.parametrize("copy_backend", ["dma"])
-def test_simple_cpu_offload_perf_latency_lazy(model: str, copy_backend: str):
+def test_simple_cpu_offload_perf_latency_lazy(model: str):
     """Lazy mode: CPU KV hit should beat cold prefill (large models only)."""
     # CPU must be larger than GPU KV cache to avoid evicting offloaded blocks.
-    llm = _make_llm(model, True, 80 << 30, copy_backend=copy_backend)  # 80GB
+    llm = _make_llm(model, True, 80 << 30)  # 80GB
     try:
         _latency_test(llm, lazy=True)
     finally:

@@ -59,7 +59,6 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             extra_config.get("cpu_bytes_to_use", DEFAULT_CPU_CAPACITY_BYTES)
         )
         lazy_offload = bool(extra_config.get("lazy_offload", False))
-        copy_backend = str(extra_config.get("copy_backend", "dma"))
 
         self.scheduler_manager: SimpleCPUOffloadScheduler | None = None
         self.worker_handler: SimpleCPUOffloadWorker | None = None
@@ -91,7 +90,6 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_config,
                 kv_cache_config,
                 cpu_capacity_bytes,
-                copy_backend=copy_backend,
             )
 
     # --- Worker-side methods ---
