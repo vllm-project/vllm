@@ -173,7 +173,7 @@ class SchedulerConfig:
         logger.warning_once(
             "Using custom scheduler class %s. This scheduler interface is "
             "not public and compatibility may not be maintained.",
-            self.scheduler_cls,
+            self.scheduler_cls,  # type: ignore[arg-type]
         )
         if not isinstance(self.scheduler_cls, str):
             return cast(type["SchedulerInterface"], self.scheduler_cls)

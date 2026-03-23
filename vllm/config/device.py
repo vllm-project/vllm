@@ -13,8 +13,8 @@ from vllm.utils.hashing import safe_hash
 Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 
 
-@config(config=ConfigDict(arbitrary_types_allowed=True))
-class DeviceConfig:
+@config(config=ConfigDict(arbitrary_types_allowed=True))  # type: ignore[arg-type,misc]
+class DeviceConfig:  # type: ignore[misc]
     """Configuration for the device to use for vLLM execution."""
 
     device: SkipValidation[Device | torch.device | None] = "auto"

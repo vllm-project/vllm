@@ -26,7 +26,7 @@ MoEBackend = Literal[
 class KernelConfig:
     """Configuration for kernel selection and warmup behavior."""
 
-    enable_flashinfer_autotune: bool = Field(default=None)
+    enable_flashinfer_autotune: bool | None = Field(default=None)
     """If True, run FlashInfer autotuning during kernel warmup."""
 
     moe_backend: MoEBackend = "auto"

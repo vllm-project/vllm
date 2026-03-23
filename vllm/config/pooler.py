@@ -108,14 +108,14 @@ class PoolerConfig:
                     pooling_type,
                     pooling_type,
                 )
-                self.seq_pooling_type = pooling_type
+                self.seq_pooling_type = pooling_type  # type: ignore[assignment]
             elif pooling_type in TOK_POOLING_TYPES:
                 logger.debug(
                     "Resolved `pooling_type=%r` to `tok_pooling_type=%r`.",
                     pooling_type,
                     pooling_type,
                 )
-                self.tok_pooling_type = pooling_type
+                self.tok_pooling_type = pooling_type  # type: ignore[assignment]
             else:
                 raise NotImplementedError(pooling_type)
 
