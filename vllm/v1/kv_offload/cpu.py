@@ -40,7 +40,6 @@ class CPUOffloadingSpec(OffloadingSpec):
         kv_bytes_per_block = (
             page_size_bytes
             * len(kv_cache_config.kv_cache_tensors)
-            * vllm_config.parallel_config.world_size
         )
 
         kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factor
