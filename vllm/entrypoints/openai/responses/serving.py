@@ -710,9 +710,11 @@ class OpenAIServingResponses(OpenAIServing):
                 "Only 'auto' tool_choice is supported in response API with Harmony"
             )
 
+        arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
         engine_prompt = token_inputs(prompt_token_ids)
+        engine_prompt["arrival_time"] = arrival_time
 
         # Add cache_salt if provided in the request
         if request.cache_salt is not None:
