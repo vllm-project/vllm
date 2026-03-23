@@ -239,6 +239,19 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
+from vllm.model_executor.models.nan_check_helper import mark_attn as _nan_mark_mla
+from vllm.model_executor.models.nan_check_helper import (
+    mark_fwd_mqa_real as _nan_mark_fwd_mqa_real,
+)
+from vllm.model_executor.models.nan_check_helper import (
+    report_batch_info as _nan_report_batch,
+)
+from vllm.model_executor.models.nan_check_helper import (
+    report_scales as _nan_report_scales,
+)
+from vllm.model_executor.models.nan_check_helper import (
+    stash_if_nan as _nan_stash_if_nan,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_down
@@ -363,6 +376,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.indexer = indexer
+
+        # Extract layer index for NaN debugging
+        try:
+            self._nan_layer_idx = int(prefix.split(".")[-3])
+        except (ValueError, IndexError):
+            self._nan_layer_idx = -1
 
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
@@ -570,6 +589,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.kv_cache_dtype,
                 self._k_scale,
             )
+            _nan_mark_mla(
+                kv_c_normed, 6, self._nan_layer_idx
+            )  # after kv_cache_update (input unchanged)
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
             self.forward_impl(
                 q,
@@ -589,6 +611,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.kv_cache_dtype,
                 self._k_scale,
             )
+            _nan_mark_mla(
+                kv_c_normed, 6, self._nan_layer_idx
+            )  # after kv_cache_update (input unchanged)
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
             torch.ops.vllm.unified_mla_attention_with_output(
                 q,
@@ -687,7 +712,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mqa_tokens = attn_metadata.num_decode_tokens
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
+        _nan_mark_mla(
+            kv_cache, 11, self._nan_layer_idx, skip_filter=True
+        )  # kv_cache bf16 (skipped if FP8)
+
         if num_mha_tokens > 0:
+            _nan_mark_mla(q[num_mqa_tokens:], 14, self._nan_layer_idx)  # mha q input
+            _nan_mark_mla(
+                k_c_normed[num_mqa_tokens:], 15, self._nan_layer_idx
+            )  # mha kv_c_normed input
+            _nan_mark_mla(
+                k_pe[num_mqa_tokens:], 16, self._nan_layer_idx
+            )  # mha k_pe input
             self.impl.forward_mha(  # type: ignore[attr-defined]
                 q[num_mqa_tokens:],
                 k_c_normed[num_mqa_tokens:],
@@ -697,10 +733,26 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._k_scale,
                 output=output[num_mqa_tokens:],
             )
+            _nan_mark_mla(
+                output[num_mqa_tokens:], 10, self._nan_layer_idx
+            )  # after fwd_mha
 
         if num_mqa_tokens > 0:
             mqa_q = q[:num_mqa_tokens]
             mqa_output_slice = output[:num_mqa_tokens]
+            _decode_seq_lens = (
+                attn_metadata.decode.seq_lens
+                if attn_metadata.decode is not None
+                else None
+            )
+            # Check kv_c_normed for decode tokens with seq_lens
+            # filter (reliable during graph replay)
+            _nan_mark_mla(
+                k_c_normed[:num_mqa_tokens],
+                17,
+                self._nan_layer_idx,
+                seq_lens=_decode_seq_lens,
+            )
 
             mqa_q_nope, mqa_q_pe = mqa_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
@@ -753,6 +805,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
+            _nan_mark_mla(
+                mqa_ql_nope, 7, self._nan_layer_idx, seq_lens=_decode_seq_lens
+            )  # after W_UK bmm
+
+            # Save refs to bf16 tensors for stash_if_nan (called after fwd_mqa)
+            _nan_q_input = mqa_q
+            _nan_q_nope_post_bmm = mqa_ql_nope
+            _nan_q_pe = mqa_q_pe
+
             if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
@@ -771,7 +832,52 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # call decode attn
             if not is_sparse_impl:
                 assert attn_metadata.decode is not None
+            if isinstance(mqa_q, tuple):
+                _nan_mark_mla(
+                    mqa_q[0], 12, self._nan_layer_idx, seq_lens=_decode_seq_lens
+                )  # mqa_q_nope before fwd_mqa
+            else:
+                _nan_mark_mla(
+                    mqa_q, 12, self._nan_layer_idx, seq_lens=_decode_seq_lens
+                )  # mqa_q before fwd_mqa
             attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
+            _nan_mark_mla(
+                attn_out, 8, self._nan_layer_idx, seq_lens=_decode_seq_lens
+            )  # after fwd_mqa
+            assert attn_metadata.decode is not None
+            _nan_mark_fwd_mqa_real(
+                attn_out, self._nan_layer_idx, attn_metadata.decode.seq_lens
+            )
+            if lse is not None:
+                _nan_mark_mla(
+                    lse, 13, self._nan_layer_idx, seq_lens=_decode_seq_lens
+                )  # lse after fwd_mqa
+            _nan_report_scales(
+                self._nan_layer_idx,
+                scale=self.scale,
+                q_scale=getattr(self, "_q_scale_float", None),
+                k_scale=getattr(self, "_k_scale_float", None),
+                bmm1_scale=getattr(self.impl, "bmm1_scale", None),
+                bmm2_scale=getattr(self.impl, "bmm2_scale", None),
+            )
+            _nan_report_batch(
+                self._nan_layer_idx,
+                num_actual_toks=num_actual_toks,
+                padded_size=output_padded.shape[0],
+                num_decode_tokens=num_mqa_tokens,
+                num_mha_tokens=num_mha_tokens,
+            )
+            _nan_stash_if_nan(
+                self._nan_layer_idx,
+                q_input=_nan_q_input,
+                q_nope_post_bmm=_nan_q_nope_post_bmm,
+                q_pe=_nan_q_pe,
+                mqa_q=mqa_q,
+                kv_cache=kv_cache,
+                block_table=attn_metadata.decode.block_table,
+                seq_lens=attn_metadata.decode.seq_lens,
+                num_actual_toks=num_actual_toks,
+            )
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
@@ -792,6 +898,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
+            _nan_mark_mla(
+                mqa_output_slice, 9, self._nan_layer_idx, seq_lens=_decode_seq_lens
+            )  # after v_up_proj
 
         if quant_key is not None:
             # Quantize the BF16 computation result into the quantized output
