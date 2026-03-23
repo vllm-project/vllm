@@ -103,7 +103,7 @@ class LRUCachePolicy(CachePolicy):
 
     def touch(self, block_hashes: Iterable[BlockHash]) -> None:
         for block_hash in reversed(list(block_hashes)):
-            if self.blocks.get(block_hash):
+            if block_hash in self.blocks:
                 self.blocks.move_to_end(block_hash)
 
     def evict(
