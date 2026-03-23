@@ -102,6 +102,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
+    _emit_channel_done_events,
     emit_content_delta_events,
     emit_previous_item_done_events,
     emit_tool_action_events,
@@ -1878,9 +1879,7 @@ class OpenAIServingResponses(OpenAIServing):
                                     id=current_item_id,
                                     call_id=current_tool_call_id,
                                     name=current_tool_call_name,
-                                    arguments=delta_message.tool_calls[
-                                        0
-                                    ].function.arguments,
+                                    arguments="",
                                     status="in_progress",
                                 ),
                             )
@@ -2333,9 +2332,8 @@ class OpenAIServingResponses(OpenAIServing):
             self._raise_if_error(ctx.finish_reason, request.request_id)
 
             if ctx.is_expecting_start():
-                if len(ctx.parser.messages) > 0:
-                    previous_item = ctx.parser.messages[-1]
-                    for event in emit_previous_item_done_events(previous_item, state):
+                if state.sent_output_item_added and state.last_channel is not None:
+                    for event in _emit_channel_done_events(state):
                         yield _increment_sequence_number_and_return(event)
                 state.reset_for_new_item()
 

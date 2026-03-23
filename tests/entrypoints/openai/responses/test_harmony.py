@@ -507,8 +507,7 @@ async def test_web_search(client: OpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_code_interpreter(client: OpenAI, model_name: str):
-    timeout_value = client.timeout * 3
-    client_with_timeout = client.with_options(timeout=timeout_value)
+    client_with_timeout = client.with_options(timeout=1800.0)
 
     response = await client_with_timeout.responses.create(
         model=model_name,
@@ -1007,16 +1006,16 @@ async def test_mcp_tool_multi_turn(client: OpenAI, model_name: str, server):
         for msg in response1.output_messages
     )
     tool_response_found = any(
-        msg.get("author", {}).get("role") == "tool"
-        and (msg.get("author", {}).get("name") or "").startswith("python")
+        msg.get("role") == "tool" and (msg.get("name") or "").startswith("python")
         for msg in response1.output_messages
     )
     assert tool_call_found, "MCP tool call not found in output_messages"
     assert tool_response_found, "MCP tool response not found in output_messages"
 
     # No developer messages expected for elevated tools
+    # Message.to_dict() flattens author fields to top level
     developer_msgs = [
-        msg for msg in response1.input_messages if msg["author"]["role"] == "developer"
+        msg for msg in response1.input_messages if msg.get("role") == "developer"
     ]
     assert len(developer_msgs) == 0, "No developer message expected for elevated tools"
 
