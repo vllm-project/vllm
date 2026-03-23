@@ -1,11 +1,9 @@
+use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 
-use crate::{
-    EngineLabels, FinishedReasonCounterFamily, HistogramFamily, PromptTokenSourceCounterFamily,
-    U64Counter,
-};
+use crate::{EngineLabels, HistogramFamily, U64Counter};
 
 const TTFT_BUCKETS: [f64; 22] = [
     0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
@@ -63,6 +61,23 @@ fn request_count_histogram() -> Histogram {
 fn request_params_n_histogram() -> Histogram {
     Histogram::new(REQUEST_PARAMS_N_BUCKETS.iter().copied())
 }
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct FinishedReasonLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub finished_reason: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct PromptTokenSourceLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub source: &'static str,
+}
+
+pub(crate) type FinishedReasonCounterFamily = Family<FinishedReasonLabels, U64Counter>;
+pub(crate) type PromptTokenSourceCounterFamily = Family<PromptTokenSourceLabels, U64Counter>;
 
 /// Request-lifecycle Prometheus families exported from the `llm` layer.
 pub struct RequestMetrics {

@@ -35,6 +35,7 @@ bytes.workspace = true
 clap.workspace = true
 expect-test.workspace = true
 rmp-serde.workspace = true
+serial_test = "3.2.0"
 tower.workspace = true
 zeromq.workspace = true
 

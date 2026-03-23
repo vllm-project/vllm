@@ -8,6 +8,7 @@ use axum::http::{Request, StatusCode};
 use bytes::Bytes;
 use futures::StreamExt as _;
 use serde_json::json;
+use serial_test::serial;
 use tower::util::ServiceExt as _;
 use vllm_chat::{
     ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatRequest, ChatRole, ChatTextBackend,
@@ -19,6 +20,7 @@ use vllm_engine_core_client::protocol::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
+use vllm_metrics::METRICS;
 use vllm_text::TextBackend;
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
@@ -359,7 +361,49 @@ async fn test_chat_with_engine_handle() -> (ChatLlm, tokio::task::JoinHandle<()>
     test_chat_with_engine_outputs(b"engine-openai-chat", default_stream_output_specs()).await
 }
 
+fn metric_value(rendered: &str, metric: &str, labels: Option<&str>) -> Option<f64> {
+    rendered.lines().find_map(|line| {
+        let Some(rest) = line.strip_prefix(metric) else {
+            return None;
+        };
+
+        match labels {
+            Some(labels) => {
+                let Some((encoded_labels, value)) = rest.split_once("} ") else {
+                    return None;
+                };
+                if !encoded_labels.starts_with('{') {
+                    return None;
+                }
+                let expected_parts = labels.split(',');
+                if expected_parts
+                    .into_iter()
+                    .all(|part| encoded_labels.contains(part))
+                {
+                    value.parse::<f64>().ok()
+                } else {
+                    None
+                }
+            }
+            None => rest
+                .strip_prefix(' ')
+                .and_then(|value| value.parse::<f64>().ok()),
+        }
+    })
+}
+
+fn metric_delta(
+    rendered_before: &str,
+    rendered_after: &str,
+    metric: &str,
+    labels: Option<&str>,
+) -> f64 {
+    metric_value(rendered_after, metric, labels).unwrap_or(0.0)
+        - metric_value(rendered_before, metric, labels).unwrap_or(0.0)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn list_models_returns_configured_model() {
     let app = test_app().await;
     let response = app
@@ -381,6 +425,56 @@ async fn list_models_returns_configured_model() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn http_metrics_record_list_models_requests() {
+    let app = test_app().await;
+    let before = METRICS.render().unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let after = METRICS.render().unwrap();
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"GET\",status=\"2xx\",handler=\"/v1/models\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_seconds_count",
+            Some("method=\"GET\",handler=\"/v1/models\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_highr_seconds_count",
+            None,
+        ),
+        1.0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn wrong_model_returns_not_found() {
     let app = test_app().await;
     let response = app
@@ -406,6 +500,7 @@ async fn wrong_model_returns_not_found() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn invalid_request_returns_openai_error() {
     let app = test_app().await;
     let response = app
@@ -436,8 +531,10 @@ async fn invalid_request_returns_openai_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn happy_path_returns_sse_stream() {
     let (app, engine_task) = test_app_with_engine_handle().await;
+    let before = METRICS.render().unwrap();
     let response = app
         .clone()
         .oneshot(
@@ -472,12 +569,127 @@ async fn happy_path_returns_sse_stream() {
         .expect("read body");
     engine_task.await.expect("mock engine task");
     let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let after = METRICS.render().unwrap();
 
     assert!(text.contains("\"role\":\"assistant\""), "{text}");
     assert!(text.starts_with("data: "), "{text}");
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"POST\",status=\"2xx\",handler=\"/v1/chat/completions\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_seconds_count",
+            Some("method=\"POST\",handler=\"/v1/chat/completions\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_highr_seconds_count",
+            None,
+        ),
+        1.0
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn http_metrics_exclude_metrics_route() {
+    let app = test_app().await;
+    let before = METRICS.render().unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/metrics")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let after = METRICS.render().unwrap();
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_highr_seconds_count",
+            None,
+        ),
+        0.0
+    );
+    assert_eq!(
+        metric_value(
+            &after,
+            "http_requests_total",
+            Some("method=\"GET\",status=\"2xx\",handler=\"/metrics\""),
+        ),
+        None
+    );
+    assert_eq!(
+        metric_value(
+            &after,
+            "http_request_duration_seconds_count",
+            Some("method=\"GET\",handler=\"/metrics\""),
+        ),
+        None
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn http_metrics_group_error_statuses() {
+    let app = test_app().await;
+    let before = METRICS.render().unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let after = METRICS.render().unwrap();
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"POST\",status=\"4xx\",handler=\"/v1/chat/completions\""),
+        ),
+        1.0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn stream_error_is_returned_as_openai_error_sse() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FailingDecodeChatBackend),
@@ -524,6 +736,7 @@ async fn stream_error_is_returned_as_openai_error_sse() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
     let (app, engine_task) =
         test_app_with_stream_output_specs(vec![(vec![], Some(FinishReason::Error))]).await;
@@ -567,6 +780,7 @@ async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn include_usage_adds_final_usage_chunk_before_done() {
     let (app, engine_task) = test_app_with_stream_output_specs(default_stream_output_specs()).await;
     let response = app
@@ -624,6 +838,7 @@ async fn include_usage_adds_final_usage_chunk_before_done() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn stream_without_include_usage_keeps_existing_shape() {
     let (app, engine_task) = test_app_with_stream_output_specs(default_stream_output_specs()).await;
     let response = app
@@ -660,6 +875,7 @@ async fn stream_without_include_usage_keeps_existing_shape() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn completions_invalid_request_returns_openai_error() {
     let app = test_app().await;
     let response = app
@@ -690,6 +906,7 @@ async fn completions_invalid_request_returns_openai_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn completions_happy_path_returns_sse_stream() {
     let (app, engine_task) = test_app_with_engine_handle().await;
     let response = app
@@ -758,6 +975,7 @@ async fn completions_happy_path_returns_sse_stream() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn chat_harness_streams_text_events() {
     let (chat, engine_task) = test_chat_with_engine_handle().await;
     let mut stream = chat
@@ -800,6 +1018,7 @@ async fn chat_harness_streams_text_events() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn prepared_openai_request_streams_text_events() {
     let (chat, engine_task) = test_chat_with_engine_handle().await;
     let prepared = prepare_chat_request(
@@ -842,6 +1061,7 @@ async fn prepared_openai_request_streams_text_events() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn reasoning_blocks_are_mapped_to_reasoning_content_sse_chunks() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
@@ -887,6 +1107,7 @@ async fn reasoning_blocks_are_mapped_to_reasoning_content_sse_chunks() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),

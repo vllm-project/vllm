@@ -1,8 +1,9 @@
+use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 
-use crate::{EngineLabels, EnginePositionLabels, F64Gauge, HistogramFamily, U64Counter, U64Gauge};
+use crate::{F64Gauge, HistogramFamily, U64Counter, U64Gauge};
 
 const KV_CACHE_RESIDENCY_BUCKETS: [f64; 21] = [
     0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0,
@@ -19,6 +20,19 @@ fn kv_block_idle_before_evict_histogram() -> Histogram {
 
 fn kv_block_reuse_gap_histogram() -> Histogram {
     Histogram::new(KV_CACHE_RESIDENCY_BUCKETS.iter().copied())
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct EngineLabels {
+    pub model_name: String,
+    pub engine: u32,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct EnginePositionLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub position: u32,
 }
 
 /// Scheduler/batch-scoped Prometheus families exported from `SchedulerStats`.

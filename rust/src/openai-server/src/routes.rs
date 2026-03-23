@@ -7,6 +7,7 @@ mod utils;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::middleware::from_fn;
 use axum::routing::{get, post};
 use tower_http::trace::TraceLayer;
 
@@ -23,6 +24,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(chat_completions::chat_completions),
         )
         .with_state(state)
+        .layer(from_fn(crate::metrics::track_http_metrics))
         .layer(TraceLayer::new_for_http())
 }
 

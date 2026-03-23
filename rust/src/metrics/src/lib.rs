@@ -8,47 +8,19 @@ use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
-use prometheus_client_derive_encode::EncodeLabelSet;
 
+mod api_server;
 mod request;
 mod scheduler;
 
-pub use request::RequestMetrics;
-pub use scheduler::SchedulerMetrics;
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct EngineLabels {
-    pub model_name: String,
-    pub engine: u32,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct EnginePositionLabels {
-    pub model_name: String,
-    pub engine: u32,
-    pub position: u32,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct FinishedReasonLabels {
-    pub model_name: String,
-    pub engine: u32,
-    pub finished_reason: &'static str,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct PromptTokenSourceLabels {
-    pub model_name: String,
-    pub engine: u32,
-    pub source: &'static str,
-}
+pub use api_server::*;
+pub use request::*;
+pub use scheduler::*;
 
 pub(crate) type U64Counter = Counter<u64, AtomicU64>;
 pub(crate) type U64Gauge = Gauge<u64, AtomicU64>;
 pub(crate) type F64Gauge = Gauge<f64, AtomicU64>;
 pub(crate) type HistogramFamily = Family<EngineLabels, Histogram, fn() -> Histogram>;
-pub(crate) type FinishedReasonCounterFamily = Family<FinishedReasonLabels, U64Counter>;
-pub(crate) type PromptTokenSourceCounterFamily = Family<PromptTokenSourceLabels, U64Counter>;
 
 /// Shared Prometheus registry for frontend metrics.
 ///
@@ -58,6 +30,7 @@ pub struct Metrics {
     registry: Registry,
     pub scheduler: SchedulerMetrics,
     pub request: RequestMetrics,
+    pub api_server: ApiServerMetrics,
 }
 
 impl Metrics {
@@ -66,11 +39,13 @@ impl Metrics {
         let mut registry = Registry::default();
         let scheduler = SchedulerMetrics::register(&mut registry);
         let request = RequestMetrics::register(&mut registry);
+        let api_server = ApiServerMetrics::register(&mut registry);
 
         Self {
             registry,
             scheduler,
             request,
+            api_server,
         }
     }
 
