@@ -169,8 +169,10 @@ def test_gptoss_reasoning_end_index(
 
     output_ids_len = len(output_ids)
     if ASSISTANT_CONTENT in output:
-        output_ids_len -= len(gpt_oss_tokenizer.convert_tokens_to_ids(
-            gpt_oss_tokenizer.tokenize(ASSISTANT_CONTENT))
+        output_ids_len -= len(
+            gpt_oss_tokenizer.convert_tokens_to_ids(
+                gpt_oss_tokenizer.tokenize(ASSISTANT_CONTENT)
+            )
         )
 
     ans = -1 if not is_reasoning_end else output_ids_len - 1
@@ -192,14 +194,16 @@ def test_gptoss_reasoning_end_delta_index(
     output_tokens = output_tokens[:-10]
 
     parser: ReasoningParser = GptOssReasoningParser(gpt_oss_tokenizer)
-    
+
     output_ids = gpt_oss_tokenizer.convert_tokens_to_ids(output_tokens)
     delta_ids = gpt_oss_tokenizer.convert_tokens_to_ids(delta_tokens)
 
     delta_ids_len = len(delta_tokens)
     if ASSISTANT_CONTENT in output:
-        delta_ids_len -= len(gpt_oss_tokenizer.convert_tokens_to_ids(
-            gpt_oss_tokenizer.tokenize(ASSISTANT_CONTENT))
+        delta_ids_len -= len(
+            gpt_oss_tokenizer.convert_tokens_to_ids(
+                gpt_oss_tokenizer.tokenize(ASSISTANT_CONTENT)
+            )
         )
 
     ans = -1 if not is_reasoning_end else delta_ids_len - 1
