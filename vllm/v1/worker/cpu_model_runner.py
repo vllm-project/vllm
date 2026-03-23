@@ -89,13 +89,9 @@ class CPUModelRunner(GPUModelRunner):
         pass
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
-        """Zero KV cache blocks using PyTorch ops (CPU-safe, no Triton)."""
-        if not block_ids:
-            return
-        for kv_cache in self.kv_caches:
-            # CPU attention backend shape: (2, num_blocks, heads, block_sz, head_sz)
-            # block_dim = 1
-            kv_cache[:, block_ids].zero_()
+        # CPU attention assigns -INF to logits at invalid positions,
+        # so stale KV cache data never affects computation.
+        pass
 
     def get_dp_padding(self, num_tokens: int) -> tuple[int, torch.Tensor | None]:
         # Note: For CPU backend, dp padding is not required for now.
