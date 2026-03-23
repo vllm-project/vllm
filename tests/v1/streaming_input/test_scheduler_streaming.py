@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
+from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.structured_output import StructuredOutputManager
 
 STOP_TOKEN = 128001
@@ -572,3 +573,56 @@ class TestStreamingScheduler(unittest.TestCase):
             cached_state_cycle1["prompt_token_ids"]
             is not cached_state_cycle3["prompt_token_ids"]
         ), "Cached states from different cycles should be independent objects."
+
+    def test_update_request_as_session_max_tokens_affects_check_stop(self):
+        """Test that updated max_tokens is used by check_stop().
+
+        When a streaming session receives a new chunk with a different
+        max_tokens, check_stop() must use the updated value — not the
+        initial one. Without the fix, session.max_tokens stays stale
+        and output is truncated at the wrong length.
+        """
+        scheduler = create_scheduler()
+
+        # Create session with initial max_tokens=5
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[1, 2, 3],
+            max_tokens=5,
+        )
+        session.num_computed_tokens = len(session.prompt_token_ids)
+
+        # Simulate generating 5 output tokens — reaches initial limit
+        for tok in [10, 11, 12, 13, 14]:
+            session.append_output_token_ids([tok])
+        assert session.num_output_tokens == 5
+        assert check_stop(session, max_model_len=1024) is True
+        assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+        # New streaming chunk arrives with larger max_tokens=20
+        session.status = RequestStatus.WAITING
+        new_request = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[4, 5, 6],
+            max_tokens=20,
+        )
+        update = StreamingUpdate.from_request(new_request)
+        scheduler._update_request_as_session(session, update)
+
+        # After update, output tokens are cleared and max_tokens = 20
+        assert session.max_tokens == 20
+        assert session.num_output_tokens == 0
+
+        # Generate 7 tokens — under the new limit of 20
+        for tok in [20, 21, 22, 23, 24, 25, 26]:
+            session.append_output_token_ids([tok])
+        assert session.num_output_tokens == 7
+        session.status = RequestStatus.RUNNING
+        assert check_stop(session, max_model_len=1024) is False
+
+        # Generate up to 20 tokens — should hit the new limit
+        for tok in range(27, 40):
+            session.append_output_token_ids([tok])
+        assert session.num_output_tokens == 20
+        assert check_stop(session, max_model_len=1024) is True
+        assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
