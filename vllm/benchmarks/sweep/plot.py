@@ -324,6 +324,11 @@ def _plot_fig(
     df = filter_by.apply(df)
     df = bin_by.apply(df)
 
+    if len(df) == 0:
+        print(f"No data to plot. Filters: {filter_by}")
+        print("[END FIGURE]")
+        return
+
     # Sort by curve_by columns alphabetically for consistent legend ordering
     if curve_by:
         df = df.sort_values(by=curve_by)
@@ -494,7 +499,7 @@ class SweepPlotArgs:
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
-        output_dir = Path(args.OUTPUT_DIR)
+        output_dir = Path(args.EXPERIMENT_DIR)
         if not output_dir.exists():
             raise ValueError(f"No parameter sweep results under {output_dir}")
 
@@ -526,11 +531,9 @@ class SweepPlotArgs:
     @classmethod
     def add_cli_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         parser.add_argument(
-            "OUTPUT_DIR",
+            "EXPERIMENT_DIR",
             type=str,
-            default="results",
-            help="The directory containing the results to plot, "
-            "i.e., the `--output-dir` argument to the parameter sweep script.",
+            help="The directory containing the sweep results to plot.",
         )
         parser.add_argument(
             "--fig-dir",
@@ -570,13 +573,13 @@ class SweepPlotArgs:
         parser.add_argument(
             "--var-x",
             type=str,
-            default="request_throughput",
+            default="total_token_throughput",
             help="The variable for the x-axis.",
         )
         parser.add_argument(
             "--var-y",
             type=str,
-            default="p99_ttft_ms",
+            default="median_ttft_ms",
             help="The variable for the y-axis",
         )
         parser.add_argument(

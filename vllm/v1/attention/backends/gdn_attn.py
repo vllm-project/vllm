@@ -87,14 +87,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.num_spec: int = self.speculative_config.num_speculative_tokens
         else:
             self.num_spec = 0
-        self.use_spec_decode = self.num_spec > 0
+        self.use_spec_decode: bool = self.num_spec > 0
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
-        self.use_full_cuda_graph = (
+        self.use_full_cuda_graph: bool = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
 
-        self.decode_cudagraph_max_bs = (
+        self.decode_cudagraph_max_bs: int = (
             self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1)
         )
         if self.compilation_config.max_cudagraph_capture_size is not None:
@@ -103,42 +103,42 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 self.compilation_config.max_cudagraph_capture_size,
             )
 
-        self.spec_state_indices_tensor = torch.empty(
+        self.spec_state_indices_tensor: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs, self.num_spec + 1),
             dtype=torch.int32,
             device=device,
         )
-        self.non_spec_state_indices_tensor = torch.empty(
+        self.non_spec_state_indices_tensor: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs,),
             dtype=torch.int32,
             device=device,
         )
-        self.spec_sequence_masks = torch.empty(
+        self.spec_sequence_masks: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs,),
             dtype=torch.bool,
             device=device,
         )
-        self.spec_token_indx = torch.empty(
+        self.spec_token_indx: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs * (self.num_spec + 1),),
             dtype=torch.int32,
             device=device,
         )
-        self.non_spec_token_indx = torch.empty(
+        self.non_spec_token_indx: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs * (self.num_spec + 1),),
             dtype=torch.int32,
             device=device,
         )
-        self.spec_query_start_loc = torch.empty(
+        self.spec_query_start_loc: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs + 1,),
             dtype=torch.int32,
             device=device,
         )
-        self.non_spec_query_start_loc = torch.empty(
+        self.non_spec_query_start_loc: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs + 1,),
             dtype=torch.int32,
             device=device,
         )
-        self.num_accepted_tokens = torch.empty(
+        self.num_accepted_tokens: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs,),
             dtype=torch.int32,
             device=device,
@@ -218,6 +218,16 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decode_tokens = (
                 query_lens_cpu.sum().item() - num_prefill_tokens - num_decode_tokens
             )
+
+            # num_decodes and num_spec_decodes are mutually exclusive.
+            # Reclassify non-spec decodes as prefills when spec decodes
+            # exist — the prefill kernel handles 1-token sequences with
+            # initial state correctly, producing identical results.
+            if num_decodes > 0 and num_spec_decodes > 0:
+                num_prefills += num_decodes
+                num_prefill_tokens += num_decode_tokens
+                num_decodes = 0
+                num_decode_tokens = 0
 
             if num_prefills == 0 and num_decodes == 0:
                 spec_token_size = min(
@@ -321,6 +331,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_spec_decodes <= self.decode_cudagraph_max_bs
             and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
         ):
+            assert spec_sequence_masks is not None
             self.spec_state_indices_tensor[:num_spec_decodes].copy_(
                 spec_state_indices_tensor, non_blocking=True
             )

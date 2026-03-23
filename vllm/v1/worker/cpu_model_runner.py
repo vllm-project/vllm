@@ -34,9 +34,9 @@ class CPUModelRunner(GPUModelRunner):
         def replace_tensor(obj: Any, cpu_attr_name: str, device_attr_name) -> None:
             cpu_tensor = getattr(obj, cpu_attr_name, None)
             device_tensor = getattr(obj, device_attr_name, None)
-            if cpu_tensor is not None and device_tensor is not None:
-                assert isinstance(cpu_tensor, torch.Tensor)
-                assert isinstance(device_tensor, torch.Tensor)
+            if isinstance(cpu_tensor, torch.Tensor) and isinstance(
+                device_tensor, torch.Tensor
+            ):
                 setattr(obj, device_attr_name, cpu_tensor)
 
         for v in vars(self).values():
@@ -53,7 +53,12 @@ class CPUModelRunner(GPUModelRunner):
                     v.gpu = v.cpu
 
     @instrument(span_name="Loading (CPU)")
-    def load_model(self, eep_scale_up: bool = False) -> None:
+    def load_model(self, load_dummy_weights: bool = False) -> None:
+        if load_dummy_weights:
+            raise ValueError(
+                "Loading dummy weights (needed for elastic EP scale-up) "
+                "Is not supported by the CPU Model Runner."
+            )
         logger.info("Starting to load model %s...", self.model_config.model)
         self.model = get_model(vllm_config=self.vllm_config)
 
@@ -81,6 +86,11 @@ class CPUModelRunner(GPUModelRunner):
         pass
 
     def _sync_device(self) -> None:
+        pass
+
+    def _zero_block_ids(self, block_ids: list[int]) -> None:
+        # CPU attention assigns -INF to logits at invalid positions,
+        # so stale KV cache data never affects computation.
         pass
 
     def get_dp_padding(self, num_tokens: int) -> tuple[int, torch.Tensor | None]:

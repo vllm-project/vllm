@@ -24,7 +24,6 @@ logger = init_logger(__name__)
 
 def start_async_worker(
     state: "EplbState",
-    rank_mapping: dict[int, int] | None = None,
     is_profile: bool = False,
 ) -> threading.Thread:
     eplb_group = get_eplb_group().device_group
@@ -34,7 +33,7 @@ def start_async_worker(
 
     def thread_target() -> None:
         assert device_index is not None
-        torch.cuda.set_device(device_index)
+        torch.accelerator.set_device_index(device_index)
         cuda_stream = torch.cuda.Stream(device=device_index)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -45,7 +44,6 @@ def start_async_worker(
                     eplb_group=eplb_group,
                     cuda_stream=cuda_stream,
                     is_profile=is_profile,
-                    rank_mapping=rank_mapping,
                 )
             )
         except Exception as exc:  # pragma: no cover - diagnostic path
@@ -75,11 +73,7 @@ def run_rebalance_experts(
     # Move the global expert load window to CPU for computation.
     global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
     # Compute new expert mappings for the model
-    (
-        new_physical_to_logical_map,
-        new_logical_to_physical_map,
-        new_logical_replica_count,
-    ) = eplb_state.policy.rebalance_experts(
+    new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
         global_expert_load_window,
         eplb_stats.num_replicas,
         eplb_stats.num_groups,
@@ -91,23 +85,12 @@ def run_rebalance_experts(
 
     model_state.new_physical_to_logical_map = new_physical_to_logical_map
 
-    max_slots = model_state.logical_to_physical_map.shape[-1]
-    padded_logical = torch.nn.functional.pad(
-        new_logical_to_physical_map,
-        (0, max(0, max_slots - new_logical_to_physical_map.shape[-1])),
-        value=-1,
-    ).to(model_state.logical_to_physical_map.device)
-    new_replica = new_logical_replica_count.to(model_state.logical_replica_count.device)
-    model_state.new_logical_to_physical_map = padded_logical
-    model_state.new_logical_replica_count = new_replica
-
 
 async def transfer_run_periodically(
     state: "EplbState",
     eplb_group: ProcessGroup,
     cuda_stream: torch.cuda.Stream,
     is_profile: bool = False,
-    rank_mapping: dict[int, int] | None = None,
 ) -> None:
     while True:
         await asyncio.to_thread(state.rearrange_event.wait)
@@ -176,7 +159,6 @@ async def transfer_run_periodically(
                             ep_group=eplb_group,
                             is_profile=is_profile,
                             cuda_stream=cuda_stream,
-                            rank_mapping=rank_mapping,
                         )
                         event = torch.cuda.Event(blocking=False)
                         cuda_stream.record_event(event)
