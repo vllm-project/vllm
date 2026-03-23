@@ -89,15 +89,15 @@ pub(crate) fn record_scheduler_stats(
             || perf_stats.num_write_bytes_per_gpu != 0)
     {
         metrics
-            .estimated_flops_per_gpu_total
+            .estimated_flops_per_gpu
             .get_or_create(&labels)
             .inc_by(perf_stats.num_flops_per_gpu);
         metrics
-            .estimated_read_bytes_per_gpu_total
+            .estimated_read_bytes_per_gpu
             .get_or_create(&labels)
             .inc_by(perf_stats.num_read_bytes_per_gpu);
         metrics
-            .estimated_write_bytes_per_gpu_total
+            .estimated_write_bytes_per_gpu
             .get_or_create(&labels)
             .inc_by(perf_stats.num_write_bytes_per_gpu);
     }

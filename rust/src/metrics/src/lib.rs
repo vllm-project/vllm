@@ -17,6 +17,9 @@ pub use api_server::*;
 pub use request::*;
 pub use scheduler::*;
 
+// Note: `prometheus-client` appends the `_total` suffix automatically when encoding counters, so
+// all counter family registration names in this crate must use the base metric name without a
+// trailing `_total`.
 pub(crate) type U64Counter = Counter<u64, AtomicU64>;
 pub(crate) type U64Gauge = Gauge<u64, AtomicU64>;
 pub(crate) type F64Gauge = Gauge<f64, AtomicU64>;

@@ -55,9 +55,9 @@ pub struct SchedulerMetrics {
     pub spec_decode_num_accepted_tokens_per_pos: Family<EnginePositionLabels, U64Counter>,
 
     // Per-engine performance / MFU counters.
-    pub estimated_flops_per_gpu_total: Family<EngineLabels, U64Counter>,
-    pub estimated_read_bytes_per_gpu_total: Family<EngineLabels, U64Counter>,
-    pub estimated_write_bytes_per_gpu_total: Family<EngineLabels, U64Counter>,
+    pub estimated_flops_per_gpu: Family<EngineLabels, U64Counter>,
+    pub estimated_read_bytes_per_gpu: Family<EngineLabels, U64Counter>,
+    pub estimated_write_bytes_per_gpu: Family<EngineLabels, U64Counter>,
 
     // Sampled KV-cache residency histograms.
     pub kv_block_lifetime_seconds: HistogramFamily,
@@ -149,25 +149,25 @@ impl SchedulerMetrics {
         );
 
         // Per-engine performance / MFU counters.
-        let estimated_flops_per_gpu_total = Family::default();
+        let estimated_flops_per_gpu = Family::default();
         registry.register(
-            "vllm:estimated_flops_per_gpu_total",
+            "vllm:estimated_flops_per_gpu",
             "Estimated number of floating point operations per GPU (for Model Flops Utilization calculations).",
-            estimated_flops_per_gpu_total.clone(),
+            estimated_flops_per_gpu.clone(),
         );
 
-        let estimated_read_bytes_per_gpu_total = Family::default();
+        let estimated_read_bytes_per_gpu = Family::default();
         registry.register(
-            "vllm:estimated_read_bytes_per_gpu_total",
+            "vllm:estimated_read_bytes_per_gpu",
             "Estimated number of bytes read from memory per GPU (for Model Flops Utilization calculations).",
-            estimated_read_bytes_per_gpu_total.clone(),
+            estimated_read_bytes_per_gpu.clone(),
         );
 
-        let estimated_write_bytes_per_gpu_total = Family::default();
+        let estimated_write_bytes_per_gpu = Family::default();
         registry.register(
-            "vllm:estimated_write_bytes_per_gpu_total",
+            "vllm:estimated_write_bytes_per_gpu",
             "Estimated number of bytes written to memory per GPU (for Model Flops Utilization calculations).",
-            estimated_write_bytes_per_gpu_total.clone(),
+            estimated_write_bytes_per_gpu.clone(),
         );
 
         // Sampled KV-cache residency histograms.
@@ -207,12 +207,58 @@ impl SchedulerMetrics {
             spec_decode_num_draft_tokens,
             spec_decode_num_accepted_tokens,
             spec_decode_num_accepted_tokens_per_pos,
-            estimated_flops_per_gpu_total,
-            estimated_read_bytes_per_gpu_total,
-            estimated_write_bytes_per_gpu_total,
+            estimated_flops_per_gpu,
+            estimated_read_bytes_per_gpu,
+            estimated_write_bytes_per_gpu,
             kv_block_lifetime_seconds,
             kv_block_idle_before_evict_seconds,
             kv_block_reuse_gap_seconds,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{EngineLabels, Metrics};
+
+    #[test]
+    fn perf_counters_render_with_a_single_total_suffix() {
+        let metrics = Metrics::new();
+        let labels = EngineLabels {
+            model_name: "model".to_string(),
+            engine: 0,
+        };
+
+        metrics
+            .scheduler
+            .estimated_flops_per_gpu
+            .get_or_create(&labels)
+            .inc();
+        metrics
+            .scheduler
+            .estimated_read_bytes_per_gpu
+            .get_or_create(&labels)
+            .inc();
+        metrics
+            .scheduler
+            .estimated_write_bytes_per_gpu
+            .get_or_create(&labels)
+            .inc();
+
+        let rendered = metrics.render().unwrap();
+        assert!(
+            rendered.contains(
+                "vllm:estimated_flops_per_gpu_total{model_name=\"model\",engine=\"0\"} 1"
+            )
+        );
+        assert!(rendered.contains(
+            "vllm:estimated_read_bytes_per_gpu_total{model_name=\"model\",engine=\"0\"} 1"
+        ));
+        assert!(rendered.contains(
+            "vllm:estimated_write_bytes_per_gpu_total{model_name=\"model\",engine=\"0\"} 1"
+        ));
+        assert!(!rendered.contains("vllm:estimated_flops_per_gpu_total_total"));
+        assert!(!rendered.contains("vllm:estimated_read_bytes_per_gpu_total_total"));
+        assert!(!rendered.contains("vllm:estimated_write_bytes_per_gpu_total_total"));
     }
 }
