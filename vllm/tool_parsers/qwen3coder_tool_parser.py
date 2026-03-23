@@ -165,12 +165,24 @@ class Qwen3CoderToolParser(ToolParser):
                 # to hit the correct conversion branch (int(), float(), etc.).
                 variants = param_def.get(
                     "anyOf") or param_def.get("oneOf", [])
-                non_null_types = [
-                    v for v in variants
-                    if isinstance(v, dict)
-                    and v.get("type") is not None
-                    and str(v["type"]).lower() != "null"
-                ]
+                non_null_types = []
+                for v in variants:
+                    if not isinstance(v, dict):
+                        continue
+                    schema_type = v.get("type")
+                    if schema_type is None:
+                        continue
+                    # Handle type-as-array, e.g. {"type": ["integer", "null"]}
+                    if isinstance(schema_type, list):
+                        actual = next(
+                            (t for t in schema_type
+                             if t is not None
+                             and str(t).lower() != "null"),
+                            None)
+                        if actual:
+                            non_null_types.append({"type": actual})
+                    elif str(schema_type).lower() != "null":
+                        non_null_types.append(v)
                 if non_null_types:
                     param_type = str(
                         non_null_types[0]["type"]).strip().lower()
