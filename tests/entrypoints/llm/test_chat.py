@@ -4,14 +4,18 @@ import weakref
 
 import pytest
 
-from tests.entrypoints.openai.chat_completion.test_vision import TEST_IMAGE_ASSETS
+from tests.entrypoints.openai.chat_completion.test_audio import (
+    TEST_AUDIO_URLS,
+    dummy_messages_from_audio_url,
+)
+from tests.entrypoints.openai.chat_completion.test_vision import (
+    TEST_IMAGE_ASSETS,
+    dummy_messages_from_image_url,
+)
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-
-from ..openai.test_audio import TEST_AUDIO_URLS, dummy_messages_from_audio_url
-from ..openai.test_vision import TEST_IMAGE_ASSETS, dummy_messages_from_image_url
 
 
 @pytest.fixture(scope="function")
