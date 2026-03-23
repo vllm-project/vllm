@@ -349,36 +349,28 @@ class SpecDecodeBaseProposer:
                 positions = positions[0]
             self.positions[:num_tokens] = positions
 
-    def _build_mamba_common_attn_metadata(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-    ) -> dict[int, CommonAttentionMetadata]:
-        """Build CommonAttentionMetadata for each mamba KV cache group.
-
-        Call once at the start of propose_tokens; the returned objects
-        share seq_lens with the attention CAM so in-place updates
-        propagate automatically.
-        """
-        result: dict[int, CommonAttentionMetadata] = {}
-        batch_size = common_attn_metadata.batch_size()
-        for gid in self._mamba_kv_cache_gids:
-            mamba_block_table = self.runner.input_batch.block_table[
-                gid
-            ].get_device_tensor(batch_size)
-            result[gid] = common_attn_metadata.replace(
-                block_table_tensor=mamba_block_table,
-            )
-        return result
-
-    def _get_group_cam(
+    def _get_common_attn_metadata_for_group(
         self,
         attn_group: AttentionGroup,
         common_attn_metadata: CommonAttentionMetadata,
-        mamba_cams: dict[int, CommonAttentionMetadata],
     ) -> CommonAttentionMetadata:
-        """Return the correct CommonAttentionMetadata for the given group."""
+        """Return the CommonAttentionMetadata for the given group.
+
+        Hybrid draft models may have layers in different KV cache groups,
+        each with its own block table.  For non-primary groups, build a
+        CAM with the correct block_table_tensor.
+        """
         gid = attn_group.kv_cache_group_id
-        return mamba_cams.get(gid, common_attn_metadata)
+        if gid not in self._mamba_kv_cache_gids:
+            return common_attn_metadata
+
+        block_table = self.runner.input_batch.block_table[gid].get_device_tensor(
+            common_attn_metadata.batch_size()
+        )
+
+        return common_attn_metadata.replace(
+            block_table_tensor=block_table,
+        )
 
     def _get_slot_mapping(
         self,
@@ -467,15 +459,9 @@ class SpecDecodeBaseProposer:
 
         assert self.runner is not None
 
-        # Build mamba CAMs once; they share seq_lens with the attention CAM
-        # so in-place updates in the autoregressive loop propagate.
-        mamba_cams = self._build_mamba_common_attn_metadata(common_attn_metadata)
-
         per_layer_attn_metadata: dict[str, object] = {}
         for attn_group in self.draft_attn_groups:
-            group_cam = self._get_group_cam(
-                attn_group, common_attn_metadata, mamba_cams
-            )
+            group_cam = self._get_common_attn_metadata_for_group(attn_group, common_attn_metadata)
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
                 common_attn_metadata=group_cam, draft_index=0
             )
@@ -579,17 +565,6 @@ class SpecDecodeBaseProposer:
             self.token_arange_np[: batch_size + 1]
         ).clone()
 
-        # Propagate the updated decode-phase metadata to mamba CAMs.
-        # The mamba CAMs were created via .replace() and share seq_lens
-        # (in-place updates propagate), but scalar/tensor rebindings above
-        # do not propagate automatically.
-        for mamba_cam in mamba_cams.values():
-            mamba_cam.num_actual_tokens = common_attn_metadata.num_actual_tokens
-            mamba_cam.max_query_len = common_attn_metadata.max_query_len
-            mamba_cam.query_start_loc = common_attn_metadata.query_start_loc
-            mamba_cam.query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-            mamba_cam.is_prefilling = common_attn_metadata.is_prefilling
-
         # In padded drafter batch, we need to adjust the sequence lengths
         # to remove the "padding" (i.e. rejected tokens).
         # Only apply this adjustment when we have rejected tokens
@@ -599,11 +574,6 @@ class SpecDecodeBaseProposer:
             # Invalidate the CPU-side shadows to avoid H<>D sync.
             common_attn_metadata._seq_lens_cpu = None
             common_attn_metadata._num_computed_tokens_cpu = None
-            # seq_lens is shared (in-place -= propagates), but
-            # the CPU shadow invalidation must be explicit.
-            for mamba_cam in mamba_cams.values():
-                mamba_cam._seq_lens_cpu = None
-                mamba_cam._num_computed_tokens_cpu = None
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
@@ -661,9 +631,7 @@ class SpecDecodeBaseProposer:
 
             # Rebuild attention metadata
             for attn_group in self.draft_attn_groups:
-                group_cam = self._get_group_cam(
-                    attn_group, common_attn_metadata, mamba_cams
-                )
+                group_cam = self._get_common_attn_metadata_for_group(attn_group, common_attn_metadata)
                 attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
                     common_attn_metadata=group_cam,
                     draft_index=token_index + 1,
