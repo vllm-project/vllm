@@ -97,7 +97,7 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
     block_size = 256
     cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     manager = CPUOffloadingManager(
-        cpu_backend, eviction_policy=eviction_policy, enable_events=True
+        cpu_backend, cache_policy=eviction_policy, enable_events=True
     )
 
     # store [1, 2] and complete
@@ -136,7 +136,7 @@ def test_cpu_manager():
     block_size = 256
     cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     cpu_manager = CPUOffloadingManager(
-        cpu_backend, eviction_policy="lru", enable_events=True
+        cpu_backend, cache_policy="lru", enable_events=True
     )
 
     # prepare store [1, 2]
@@ -250,7 +250,7 @@ def test_arc_manager_basic():
     block_size = 256
     cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, eviction_policy="arc", enable_events=True
+        cpu_backend, cache_policy="arc", enable_events=True
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -296,7 +296,7 @@ def test_arc_manager_t1_to_t2_promotion():
     block_size = 256
     cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, eviction_policy="arc", enable_events=False
+        cpu_backend, cache_policy="arc", enable_events=False
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -325,7 +325,7 @@ def test_arc_manager_eviction_with_load():
     block_size = 256
     cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, eviction_policy="arc", enable_events=True
+        cpu_backend, cache_policy="arc", enable_events=True
     )
 
     # prepare and complete store [1, 2, 3, 4]
@@ -368,7 +368,7 @@ def test_arc_manager_adaptive_target():
     block_size = 256
     cpu_backend = CPUBackend(block_size=block_size, num_blocks=2)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, eviction_policy="arc", enable_events=False
+        cpu_backend, cache_policy="arc", enable_events=False
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -402,7 +402,7 @@ def test_arc_manager_t1_t2_eviction_policy():
     block_size = 256
     cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, eviction_policy="arc", enable_events=False
+        cpu_backend, cache_policy="arc", enable_events=False
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -443,7 +443,7 @@ def test_arc_manager_ghost_list_bounds():
     block_size = 256
     cpu_backend = CPUBackend(block_size=block_size, num_blocks=2)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, eviction_policy="arc", enable_events=False
+        cpu_backend, cache_policy="arc", enable_events=False
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -470,7 +470,7 @@ def test_arc_manager_touch_ordering():
     block_size = 256
     cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, eviction_policy="arc", enable_events=True
+        cpu_backend, cache_policy="arc", enable_events=True
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -510,7 +510,7 @@ def test_arc_manager_failed_store():
     block_size = 256
     cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, eviction_policy="arc", enable_events=True
+        cpu_backend, cache_policy="arc", enable_events=True
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -546,7 +546,7 @@ def test_arc_manager_full_scenario():
     block_size = 256
     cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     arc_manager = CPUOffloadingManager(
-        cpu_backend, eviction_policy="arc", enable_events=True
+        cpu_backend, cache_policy="arc", enable_events=True
     )
     arc_policy = arc_manager._policy
     assert isinstance(arc_policy, ARCCachePolicy)
@@ -589,7 +589,7 @@ def test_filter_reused_manager():
     block_size = 256
     cpu_backend = CPUBackend(block_size=block_size, num_blocks=4)
     lru_manager = CPUOffloadingManager(
-        cpu_backend, eviction_policy="lru", enable_events=True
+        cpu_backend, cache_policy="lru", enable_events=True
     )
 
     from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager

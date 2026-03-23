@@ -74,7 +74,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             self._manager = CPUOffloadingManager(
                 backend=backend,
-                eviction_policy=cast(Literal["lru", "arc"], self.eviction_policy),
+                cache_policy=cast(Literal["lru", "arc"], self.eviction_policy),
                 enable_events=enable_events,
             )
 

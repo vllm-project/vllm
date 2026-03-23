@@ -265,15 +265,15 @@ class CPUOffloadingManager(OffloadingManager):
     def __init__(
         self,
         backend: Backend,
-        eviction_policy: Literal["lru", "arc"] = "lru",
+        cache_policy: Literal["lru", "arc"] = "lru",
         enable_events: bool = False,
     ):
         self.backend: Backend = backend
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
-        policy_cls = _CACHE_POLICIES.get(eviction_policy)
+        policy_cls = _CACHE_POLICIES.get(cache_policy)
         if policy_cls is None:
             raise ValueError(
-                f"Unknown eviction policy: {eviction_policy!r}. "
+                f"Unknown cache policy: {cache_policy!r}. "
                 f"Supported: {list(_CACHE_POLICIES)}"
             )
         cache_capacity = backend.get_num_free_blocks()
