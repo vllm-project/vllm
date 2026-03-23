@@ -3,7 +3,7 @@
 """Utility functions for EPLB (Expert Parallel Load Balancing)."""
 
 import os
-import time
+import threading
 
 import torch
 
@@ -31,18 +31,17 @@ class EventWrapper:
     """
 
     def __init__(self):
-        self.event = torch.cuda.Event()
-        self.record_call = False
+        self._event = torch.cuda.Event()
+        self._recorded = threading.Event()
 
     def wait(self, stream: torch.cuda.Stream | None = None):
-        while self.record_call is False:
-            time.sleep(0)
-        self.event.wait(stream)
-        self.record_call = False
+        self._recorded.wait()
+        self._event.wait(stream)
+        self._recorded.clear()
 
     def record(self, stream: torch.cuda.Stream | None = None):
-        self.event.record(stream)
-        self.record_call = True
+        self._event.record(stream)
+        self._recorded.set()
 
 
 def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
