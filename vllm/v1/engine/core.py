@@ -1044,9 +1044,7 @@ class EngineCoreProc(EngineCore):
                 # position) over local_dp_rank from CoreEngineProcManager
                 # (which is always 0 when each launcher manages 1 engine).
                 if envs.VLLM_DP_RANK_LOCAL >= 0:
-                    parallel_config.data_parallel_rank_local = (
-                        envs.VLLM_DP_RANK_LOCAL
-                    )
+                    parallel_config.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
                 else:
                     parallel_config.data_parallel_rank_local = local_dp_rank
                 process_title = f"EngineCore_DP{dp_rank}"

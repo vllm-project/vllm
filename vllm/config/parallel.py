@@ -683,13 +683,9 @@ class ParallelConfig:
                         # from data_parallel_rpc_port (coordinated across
                         # all DP replicas by the launcher). +1 to avoid
                         # the rpc_port itself (bound by ZMQ over TCP).
-                        self.data_parallel_master_port = (
-                            self.data_parallel_rpc_port + 1
-                        )
+                        self.data_parallel_master_port = self.data_parallel_rpc_port + 1
                     else:
-                        self._data_parallel_master_port_list = (
-                            get_open_ports_list(5)
-                        )
+                        self._data_parallel_master_port_list = get_open_ports_list(5)
                 if self._data_parallel_master_port_list:
                     self.data_parallel_master_port = (
                         self._data_parallel_master_port_list.pop()
