@@ -7,6 +7,7 @@ import torch
 from torch.nn import Module
 from torch.utils._python_dispatch import TorchDispatchMode
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
@@ -17,9 +18,6 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm import MarlinFP8ScaledMMLinearKernel
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -431,7 +429,7 @@ class Fp8LinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         # if batch invariant mode is enabled, prefer DeepGEMM FP8 path
         # we will use BF16 dequant when DeepGEMM is not supported.
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             if self.block_quant:
                 assert self.weight_block_size is not None
                 return self.fp8_linear.apply_weights(

@@ -245,10 +245,8 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
         return input_2d.shape[0] < 32
 
     def apply_weights(self, layer, x, bias=None, **kwargs):
-        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
-
         # if bacth_invariant run deepgemm only.
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             return self.fallback.apply_weights(layer, x, bias, **kwargs)
 
         return super().apply_weights(layer, x, bias, **kwargs)
