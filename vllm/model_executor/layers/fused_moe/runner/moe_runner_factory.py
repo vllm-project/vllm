@@ -48,5 +48,18 @@ def create_moe_runner(
         routed_scaling_factor=routed_scaling_factor,
     )
     if moe_config.moe_parallel_config.use_dp_chunking:
-        return ChunkingMoERunner(runner)
+        return ChunkingMoERunner(
+            inner=runner,
+            layer=layer,
+            moe_config=moe_config,
+            router=router,
+            routed_input_transform=routed_input_transform,
+            gate=gate,
+            shared_experts=shared_experts,
+            quant_method=quant_method,
+            enable_dbo=enable_dbo,
+            routed_output_transform=routed_output_transform,
+            apply_scale_to_output=apply_scale_to_output,
+            routed_scaling_factor=routed_scaling_factor,
+        )
     return runner

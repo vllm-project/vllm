@@ -34,7 +34,9 @@ class ChunkingMoERunner(MoERunnerBase):
     - Processes chunks via inner._forward_impl per chunk
     """
 
-    def __init__(self, inner: MoERunnerBase):
+    def __init__(self, inner: MoERunnerBase, **kwargs):
+        super().__init__(**kwargs)
+
         # Assert that _maybe_dispatch/_maybe_combine will be nops.
         assert inner.moe_config.pcp_size == 1
 
@@ -48,11 +50,11 @@ class ChunkingMoERunner(MoERunnerBase):
             self._init_dp_chunking()
         )
 
-    def __getattr__(self, name):
-        # Delegate attribute access to the inner runner. This is only
-        # called when normal lookup (instance __dict__, class MRO) fails,
-        # so ChunkingMoERunner's own attributes and methods take priority.
-        return getattr(self._inner, name)
+    # def __getattr__(self, name):
+    #    # Delegate attribute access to the inner runner. This is only
+    #    # called when normal lookup (instance __dict__, class MRO) fails,
+    #    # so ChunkingMoERunner's own attributes and methods take priority.
+    #    return getattr(self._inner, name)
 
     def _init_dp_chunking(self) -> list[torch.Tensor]:
         states_shape: tuple[int, ...]

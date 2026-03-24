@@ -1417,6 +1417,7 @@ class FusedMoE(CustomOp):
         weights = list(self.named_parameters())
         # This doesn't work
         # weights = weights + list(self._runner.quant_method.named_parameters())
+
         weights = [(name, _maybe_make_contiguous(name, p)) for name, p in weights]
 
         # `w13_input_scale` and `w2_input_scale` are global per-tensor
@@ -1429,16 +1430,32 @@ class FusedMoE(CustomOp):
             "w2_input_scale",
         }
 
+        # for name, weight in weights:
+        #    print(f"NAME = {name}")
+
         assert all(
             weight.is_contiguous()
             for name, weight in weights
-            if name not in NON_EXPERT_WEIGHTS
+            if not (
+                "_shared_experts." in name
+                or "_gate." in name
+                or "_routed_input_transform." in name
+                or "_routed_output_transform." in name
+            )
+            and name not in NON_EXPERT_WEIGHTS
         )
 
         return [
             weight.view(self.local_num_experts, -1)
             for name, weight in weights
-            if name not in NON_EXPERT_WEIGHTS and weight.shape != torch.Size([])
+            if name not in NON_EXPERT_WEIGHTS
+            and weight.shape != torch.Size([])
+            and "_shared_experts." not in name
+            # exclude parameters from non-expert submodules,
+            # e.g. gate/shared/transforms.
+            and "_gate." not in name
+            and "_routed_input_transform." not in name
+            and "_routed_output_transform." not in name
         ]
 
     def set_eplb_state(

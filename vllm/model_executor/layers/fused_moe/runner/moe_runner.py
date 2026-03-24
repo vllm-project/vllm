@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 
 import torch
 
@@ -12,7 +12,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 )
 
 
-class MoERunner(ABC):
+class MoERunner(torch.nn.Module):
     """
     Abstract base class for Mixture of Experts (MoE) runners.
 
@@ -20,6 +20,11 @@ class MoERunner(ABC):
     MoE runners are responsible for executing the forward pass of MoE layers, handling
     expert routing, and managing tensor parallel operations.
     """
+
+    def __init__(self):
+        super().__init__()
+        # HACK
+        self._already_called_process_weights_after_loading = True
 
     @abstractmethod
     def forward(
