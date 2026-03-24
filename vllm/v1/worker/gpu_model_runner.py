@@ -1348,8 +1348,10 @@ class GPUModelRunner(
                     req_state.prev_num_draft_len = orig
 
             # Jump-forward: write grammar-forced tokens to the buffer.
+            # Only on last rank — non-last ranks already received ff_tokens
+            # via req_data.new_token_ids from the scheduler.
             ff_tokens = scheduler_output.jump_forward_tokens.get(req_id)
-            if ff_tokens:
+            if ff_tokens and is_last_rank:
                 start_idx = self.input_batch.num_tokens_no_spec[req_index]
                 end_idx = start_idx + len(ff_tokens)
                 self.input_batch.token_ids_cpu[req_index, start_idx:end_idx] = ff_tokens
