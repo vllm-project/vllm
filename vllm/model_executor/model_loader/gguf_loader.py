@@ -354,12 +354,10 @@ class GGUFModelLoader(BaseModelLoader):
             for name, weight_type in weight_type_map.items()
             if weight_type in ("F32", "F16", "BF16") and name.endswith(".weight")
         ]
-        logger.debug(
-            "GGUF unquantized modules: %s",
-            unquant_names,
-        )
-        quant_config = cast(GGUFConfig, vllm_config.quant_config)
-        quant_config.unquantized_modules.extend(unquant_names)
+        logger.debug("GGUF unquantized modules: %s", unquant_names)
+        if TYPE_CHECKING:
+            vllm_config.quant_config = cast(GGUFConfig, vllm_config.quant_config)
+        vllm_config.quant_config.unquantized_modules.extend(unquant_names)
 
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
