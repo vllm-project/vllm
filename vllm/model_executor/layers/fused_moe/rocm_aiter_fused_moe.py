@@ -17,9 +17,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    CK_MXFP4_MOE_DIM_ALIGNMENT,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -296,8 +293,8 @@ def rocm_aiter_fused_experts(
             doweight_stage1=apply_router_weight_on_input,
             num_local_tokens=num_local_tokens,
             output_dtype=output_dtype,
-            hidden_pad=quant_config.hidden_pad // 128 * 128,
-            intermediate_pad=quant_config.intermediate_pad // 64 * 64 * 2,
+            hidden_pad=quant_config.hidden_pad,
+            intermediate_pad=quant_config.intermediate_pad,
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
         )
@@ -368,23 +365,15 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         )
         if not supported:
             return supported, reason
-        # CK MXFP4 MoE kernels are only supported on gfx950 and require
-        # intermediate_size aligned to CK_MXFP4_MOE_DIM_ALIGNMENT (256).
+        # CK MXFP4 MoE kernels are only supported on gfx950.
+        # Dimension alignment is handled later by
+        # mxfp4_round_up_hidden_size_and_intermediate_size, so we only
+        # gate on the hardware here.
         if weight_key == kMxfp4Static:
             from vllm.platforms.rocm import on_gfx950
 
             if not on_gfx950():
                 return False, ("kernel does not support MXFP4 on non-gfx950 ROCm")
-            if (
-                moe_config.intermediate_size_per_partition % CK_MXFP4_MOE_DIM_ALIGNMENT
-                != 0
-            ):
-                return False, (
-                    f"kernel does not support "
-                    f"intermediate_size_per_partition="
-                    f"{moe_config.intermediate_size_per_partition} "
-                    f"(not a multiple of {CK_MXFP4_MOE_DIM_ALIGNMENT})"
-                )
         return True, None
 
     def supports_expert_map(self):
