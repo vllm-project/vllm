@@ -26,6 +26,7 @@ import time
 
 try:
     import grpc
+    from grpc_health.v1 import health_pb2, health_pb2_grpc
     from grpc_reflection.v1alpha import reflection
     from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
     from smg_grpc_servicer.vllm.servicer import VllmEngineServicer
@@ -46,6 +47,62 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+
+class VllmHealthServicer(health_pb2_grpc.HealthServicer):
+    """Standard gRPC health check service for Kubernetes probes.
+
+    Implements grpc.health.v1.Health protocol by checking engine health
+    via AsyncLLM.check_health() on each request.
+    """
+
+    OVERALL_SERVER = ""
+    VLLM_SERVICE = "vllm.grpc.engine.VllmEngine"
+
+    def __init__(self, async_llm: "AsyncLLM"):
+        self.async_llm = async_llm
+        self._shutting_down = False
+
+    def set_not_serving(self):
+        """Mark all services as NOT_SERVING during graceful shutdown."""
+        self._shutting_down = True
+
+    async def Check(
+        self,
+        request: health_pb2.HealthCheckRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> health_pb2.HealthCheckResponse:
+        service_name = request.service
+
+        if self._shutting_down:
+            return health_pb2.HealthCheckResponse(
+                status=health_pb2.HealthCheckResponse.NOT_SERVING
+            )
+
+        if service_name in (self.OVERALL_SERVER, self.VLLM_SERVICE):
+            try:
+                await self.async_llm.check_health()
+                return health_pb2.HealthCheckResponse(
+                    status=health_pb2.HealthCheckResponse.SERVING
+                )
+            except Exception:
+                return health_pb2.HealthCheckResponse(
+                    status=health_pb2.HealthCheckResponse.NOT_SERVING
+                )
+
+        context.set_code(grpc.StatusCode.NOT_FOUND)
+        context.set_details(f"Unknown service: {service_name}")
+        return health_pb2.HealthCheckResponse(
+            status=health_pb2.HealthCheckResponse.SERVICE_UNKNOWN
+        )
+
+    async def Watch(
+        self,
+        request: health_pb2.HealthCheckRequest,
+        context: grpc.aio.ServicerContext,
+    ):
+        response = await self.Check(request, context)
+        yield response
 
 
 async def serve_grpc(args: argparse.Namespace):
@@ -95,9 +152,14 @@ async def serve_grpc(args: argparse.Namespace):
     # Add servicer to server
     vllm_engine_pb2_grpc.add_VllmEngineServicer_to_server(servicer, server)
 
+    # Add standard gRPC health service for Kubernetes probes
+    health_servicer = VllmHealthServicer(async_llm)
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+
     # Enable reflection for grpcurl and other tools
     service_names = (
         vllm_engine_pb2.DESCRIPTOR.services_by_name["VllmEngine"].full_name,
+        "grpc.health.v1.Health",
         reflection.SERVICE_NAME,
     )
     reflection.enable_server_reflection(service_names, server)
@@ -130,6 +192,7 @@ async def serve_grpc(args: argparse.Namespace):
             logger.info("Interrupted by user")
     finally:
         logger.info("Shutting down vLLM gRPC server...")
+        health_servicer.set_not_serving()
         await server.stop(grace=5.0)
         logger.info("gRPC server stopped")
         async_llm.shutdown()
