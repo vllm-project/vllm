@@ -56,6 +56,7 @@ def translation(request: Request) -> OpenAIServingTranslation:
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.UNPROCESSABLE_ENTITY.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
     },
 )
 @with_cancellation
@@ -89,6 +90,7 @@ async def create_transcriptions(
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.UNPROCESSABLE_ENTITY.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
     },
 )
 @with_cancellation
