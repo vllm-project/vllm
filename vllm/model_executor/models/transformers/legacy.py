@@ -65,8 +65,10 @@ class LegacyMixin:
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if self.is_roberta:
-            # RoBERTa-specific positions padding
-            positions += self.padding_idx + 1
+            # RoBERTa positions start at padding_idx + 1.
+            # Non-in-place add to avoid mutating the persistent GPU buffer --
+            # in-place += would accumulate on CUDA graph padding slots.
+            positions = positions + self.padding_idx + 1
         return super().forward(
             input_ids=input_ids,
             positions=positions,
