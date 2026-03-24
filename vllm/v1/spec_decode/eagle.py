@@ -1620,8 +1620,17 @@ class SpecDecodeBaseProposer:
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
 
-        # Find which kv_cache_groups the draft layers belong to.
-        # Hybrid models (e.g. Jamba) may span multiple groups.
+        # Hybrid models have draft layers spanning multiple
+        # kv_cache_groups (attention + mamba); skip single-group validation.
+        is_hybrid = any(
+            self._is_mamba_spec(group.kv_cache_spec)
+            for group in kv_cache_config.kv_cache_groups
+            if self._draft_attn_layer_names & set(group.layer_names)
+        )
+        if not is_hybrid:
+            self.validate_same_kv_cache_group(kv_cache_config)
+
+        # Map each draft layer to its kv_cache_group and spec.
         self._mamba_kv_cache_gids = []
         layer_gid: dict[str, int] = {}
         layer_spec = {}
@@ -1639,9 +1648,6 @@ class SpecDecodeBaseProposer:
                     if isinstance(spec, UniformTypeKVCacheSpecs):
                         spec = spec.kv_cache_specs[layer_name]
                     layer_spec[layer_name] = spec
-
-        if not self._mamba_kv_cache_gids:
-            self.validate_same_kv_cache_group(kv_cache_config)
 
         attention_groups: dict[str, AttentionGroup] = {}
         for layer_name in self._draft_attn_layer_names:
