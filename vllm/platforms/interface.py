@@ -491,12 +491,12 @@ class Platform:
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-        from vllm.v1.attention.backend import MultipleOf
         from vllm.v1.kv_cache_interface import (
             FullAttentionSpec,
             MambaSpec,
             MLAAttentionSpec,
         )
+        from vllm.v1.worker.utils import select_common_block_size
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -524,9 +524,8 @@ class Platform:
             ).page_size_bytes
 
         # Get kernel block alignment from the backend's supported sizes
-        supported_sizes = backend_cls.get_supported_kernel_block_sizes()
-        kernel_block_alignment_size = min(
-            s.base if isinstance(s, MultipleOf) else s for s in supported_sizes
+        kernel_block_alignment_size = select_common_block_size(
+            cache_config.block_size, [backend_cls]
         )
 
         # Compute mamba page size
@@ -552,6 +551,7 @@ class Platform:
             # easily by changing the way we layout chunks in the
             # mamba2 kernels.
             base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
+            assert base_chunk_size is not None
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
             attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
