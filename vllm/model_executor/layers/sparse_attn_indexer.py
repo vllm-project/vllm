@@ -368,7 +368,7 @@ class SparseAttnIndexer(CustomOp):
         return torch.ops.vllm.sparse_attn_indexer(
             hidden_states,
             self.k_cache.prefix,
-            self.k_cache.kv_cache[0],
+            self.k_cache.kv_cache,
             q_fp8,
             k,
             weights,
@@ -392,7 +392,7 @@ class SparseAttnIndexer(CustomOp):
             return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
                 hidden_states,
                 self.k_cache.prefix,
-                self.k_cache.kv_cache[0],
+                self.k_cache.kv_cache,
                 q_fp8,
                 k,
                 weights,
