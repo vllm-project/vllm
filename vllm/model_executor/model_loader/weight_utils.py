@@ -257,6 +257,8 @@ def convert_bin_to_safetensor_file(
 def get_quant_config(
     model_config: ModelConfig, load_config: LoadConfig
 ) -> QuantizationConfig:
+    if model_config.quantization is None:
+        raise ValueError("Model quantization method is not specified in the config.")
     quant_cls = get_quantization_config(model_config.quantization)
 
     # GGUF doesn't have config file
@@ -307,6 +309,11 @@ def get_quant_config(
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
     hf_overrides = model_config.hf_overrides
+    if not isinstance(hf_overrides, dict):
+        raise ValueError(
+            "hf_overrides must be a dict for get_quant_config "
+            "to get the quantization config from it."
+        )
     quantization_config_file = hf_overrides.get("quantization_config_file", None)
     if quantization_config_file is not None:
         if hasattr(quant_cls, "from_config_file"):
@@ -1087,7 +1094,7 @@ def multi_thread_pt_weights_iterator(
 
 
 def get_gguf_extra_tensor_names(
-    gguf_file: str, gguf_to_hf_name_map: dict[str, str]
+    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
 ) -> list[str]:
     reader = gguf.GGUFReader(gguf_file)
     expected_gguf_keys = set(gguf_to_hf_name_map.keys())
@@ -1097,7 +1104,7 @@ def get_gguf_extra_tensor_names(
 
 
 def get_gguf_weight_type_map(
-    gguf_file: str, gguf_to_hf_name_map: dict[str, str]
+    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
 ) -> dict[str, str]:
     """
     Return GGUF mapped weight's name and its quant type
@@ -1111,7 +1118,7 @@ def get_gguf_weight_type_map(
 
 
 def gguf_quant_weights_iterator(
-    gguf_file: str, gguf_to_hf_name_map: dict[str, str]
+    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """
     Iterate over the quant weights in the model gguf files and convert
