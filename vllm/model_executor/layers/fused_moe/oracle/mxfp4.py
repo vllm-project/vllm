@@ -141,7 +141,10 @@ def backend_to_kernel_cls(
         return [AiterExperts]
 
     elif backend == Mxfp4MoeBackend.XPU:
-        raise NotImplementedError("XPU backend uses XpuMxfp4MoEMethod directly.")
+        from vllm.model_executor.layers.fused_moe.xpu_fused_moe import XPUExpertsMXFp4
+
+        return [XPUExpertsMXFp4]
+
     else:
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
@@ -156,6 +159,7 @@ def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
         "triton": Mxfp4MoeBackend.TRITON,
         "marlin": Mxfp4MoeBackend.MARLIN,
         "ck": Mxfp4MoeBackend.CK,
+        "xpu": Mxfp4MoeBackend.XPU,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -178,6 +182,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.TRITON_UNFUSED,
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
+        Mxfp4MoeBackend.XPU,
     ]
     return _AVAILABLE_BACKENDS
 
@@ -359,7 +364,13 @@ def select_mxfp4_moe_backend(
     if current_platform.is_xpu():
         backend = Mxfp4MoeBackend.XPU
         logger.info_once(_make_log_backend(backend))
-        return backend, None
+        return _return_or_raise(
+            Mxfp4MoeBackend.XPU,
+            config,
+            kMxfp4Static,
+            None,
+            activation_format,
+        )
 
     if current_platform.is_cuda() or current_platform.is_rocm():
         raise NotImplementedError(
@@ -746,6 +757,16 @@ def convert_to_mxfp4_moe_kernel_format(
             w2_weight,
             w13_precision_config,
             w2_precision_config,
+            w13_bias,
+            w2_bias,
+        )
+    elif mxfp4_backend == Mxfp4MoeBackend.XPU:
+        # No additional transformation needed for XPU backend
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
             w13_bias,
             w2_bias,
         )

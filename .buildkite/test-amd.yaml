@@ -1435,7 +1435,7 @@ steps:
   - pytest -v -s entrypoints/offline_mode
 
 
-- label: Entrypoints Integration (API Server 1) # 1h 7m
+- label: Entrypoints Integration (API Server openai - Part 1) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
@@ -1448,8 +1448,41 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
+
+
+- label: Entrypoints Integration (API Server openai - Part 2) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
+  fast_check: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/openai
+  - tests/entrypoints/test_chat_utils
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
+  - pytest -v -s entrypoints/openai/speech_to_text/
   - pytest -v -s entrypoints/test_chat_utils.py
+
+
+- label: Entrypoints Integration (API Server openai - Part 3) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
+  fast_check: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/openai
+  - tests/entrypoints/test_chat_utils
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
 
 
 - label: Entrypoints Integration (API Server 2) #26.9m
@@ -2942,7 +2975,7 @@ steps:
 #                                                                                                                                   #
 #####################################################################################################################################
 
-- label: Entrypoints Integration (API Server 1) # TBD
+- label: Entrypoints Integration (API Server openai - Part 1) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
@@ -2955,8 +2988,41 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
+
+
+- label: Entrypoints Integration (API Server openai - Part 2) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  fast_check: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/openai
+  - tests/entrypoints/test_chat_utils
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
+  - pytest -v -s entrypoints/openai/speech_to_text/
   - pytest -v -s entrypoints/test_chat_utils.py
+
+
+- label: Entrypoints Integration (API Server openai - Part 3) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  fast_check: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/openai
+  - tests/entrypoints/test_chat_utils
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
 
 
 - label: Entrypoints Integration (API Server 2) # TBD
