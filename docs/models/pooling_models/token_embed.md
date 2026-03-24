@@ -13,6 +13,12 @@ The difference between the (sequence) embedding task and the token embedding tas
 
 Many embedding models support both (sequence) embedding and token embedding. For further details on (sequence) embedding, please refer to [this page](embed.md).
 
+!!! note
+
+    Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task (embed) is not 
+    what you want, you need to manually specify it via `PoolerConfig(pooling_task="token_embed")` offline or 
+    `--pooler-config {"pooling_task": "token_embed"}` online.
+
 ## Typical Use Cases
 
 ### Multi-Vector Retrieval

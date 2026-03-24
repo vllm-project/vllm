@@ -1,7 +1,8 @@
 # Pooling Models
 
 !!! note
-    We currently support pooling models primarily for convenience. This is not guaranteed to provide any performance improvements over using Hugging Face Transformers or Sentence Transformers directly.
+    We currently support pooling models primarily for convenience. This is not guaranteed to provide any performance 
+improvements over using Hugging Face Transformers or Sentence Transformers directly.
 
     We plan to optimize pooling models in vLLM. Please comment on <https://github.com/vllm-project/vllm/issues/21796> if you have any suggestions!
 
@@ -12,22 +13,38 @@ Natural Language Processing (NLP) can be primarily divided into the following tw
 - Natural Language Understanding (NLU)
 - Natural Language Generation (NLG)
 
-The generative models supported by vLLM cover a variety of task types, such as the large language models (LLMs) we are familiar with, multimodal models (VLM) that handle multimodal inputs like images, videos, and audio, speech-to-text transcription models, and real-time models that support streaming input. Their common feature is the ability to generate text. Taking it a step further, vLLM-Omni supports the generation of multimodal content, including images, videos, and audio.
+The generative models supported by vLLM cover a variety of task types, such as the large language models (LLMs) we are 
+familiar with, multimodal models (VLM) that handle multimodal inputs like images, videos, and audio, speech-to-text 
+transcription models, and real-time models that support streaming input. Their common feature is the ability to generate 
+text. Taking it a step further, vLLM-Omni supports the generation of multimodal content, including images, videos, and audio.
 
-As the capabilities of generative models continue to improve, the boundaries of these models are also constantly expanding. However, certain application scenarios still require specialized small language models to efficiently complete specific tasks. These models typically have the following characteristics:
+As the capabilities of generative models continue to improve, the boundaries of these models are also constantly expanding. 
+However, certain application scenarios still require specialized small language models to efficiently complete specific tasks. 
+These models typically have the following characteristics:
 
 - They do not require content generation.
 - They only need to perform very limited functions, without requiring strong generalization, creativity, or high intelligence.
 - They demand extremely low latency and may operate on cost-constrained hardware.
 - Text-only models typically have fewer than 1 billion parameters, while multimodal models generally have fewer than 10 billion parameters.
 
-Although these models are relatively small in scale, they are still based on the Transformer architecture, similar or even identical to the most advanced large language models today. Many recently released pooling models are also fine-tuned from large language models, allowing them to benefit from the continuous improvements in large models. This architecture similarity enables them to reuse much of vLLM’s infrastructure. If compatible, we would be happy to help them leverage the latest features of vLLM as well.
+Although these models are relatively small in scale, they are still based on the Transformer architecture, similar or 
+even identical to the most advanced large language models today. Many recently released pooling models are also fine-tuned 
+from large language models, allowing them to benefit from the continuous improvements in large models. This architecture 
+similarity enables them to reuse much of vLLM’s infrastructure. If compatible, we would be happy to help them leverage 
+the latest features of vLLM as well.
 
 ### Sequence-wise Task and Token-wise Task
 
-The key distinction between sequence-wise task and token-wise task lies in their output granularity: sequence-wise task produces a single result for an entire input sequence, whereas token-wise task yields a result for each individual token within the sequence.
+The key distinction between sequence-wise task and token-wise task lies in their output granularity: sequence-wise task 
+produces a single result for an entire input sequence, whereas token-wise task yields a result for each individual token 
+within the sequence.
 
-Of course, we also have "plugin" tasks that allow users to customize input and output processors. For more information, please refer to [IO Processor Plugins](../../design/io_processor_plugins.md).
+Many Pooling models support both (sequence) task and token task. When the default pooling task (e.g. a sequence-wise task) 
+is not what you want, you need to manually specify (e.g. a token-wise task) via `PoolerConfig(pooling_task="...")` offline 
+or `--pooler-config {"pooling_task": "..."}` online.
+
+Of course, we also have "plugin" tasks that allow users to customize input and output processors. For more information, 
+please refer to [IO Processor Plugins](../../design/io_processor_plugins.md).
 
 ### Pooling Tasks
 
@@ -39,11 +56,13 @@ Of course, we also have "plugin" tasks that allow users to customize input and o
 | `token_embed`         | Token-wise    | vector representations for each token           |
 
 !!! note
-    Within classification tasks, there is a specialized subcategory: Cross-encoder (aka reranker) models. These models are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
+    Within classification tasks, there is a specialized subcategory: Cross-encoder (aka reranker) models. These models 
+are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
 ### Score Types
 
-The scoring models is designed to compute similarity scores between two input prompts. It supports three model types (aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
+The scoring models is designed to compute similarity scores between two input prompts. It supports three model types 
+(aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
 
 | Pooling Tasks         | Granularity   | Outputs                                      | Score Types        | scoring function         |
 |-----------------------|---------------|----------------------------------------------|--------------------|--------------------------|
@@ -250,11 +269,18 @@ We have split the `encode` task into two more specific token-wise tasks: `token_
 - `token_embed` is the same as `embed`, using normalization as the activation.
 - `token_classify` is the same as `classify`, by default using softmax as the activation.
 
-Pooling models now default support all pooling, you can use it without any settings.
+Pooling models now default support all pooling.
 
 - Extracting hidden states prefers using `token_embed` task.
 - Named Entity Recognition (NER) and reward models prefers using `token_classify` task.
 
 ### Score task
 
-`score` task is deprecated and will be removed in v0.20. Please use `classify` instead. Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
+`score` task is deprecated and will be removed in v0.20. Please use `classify` instead. Only when a 
+classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
+
+### Pooling multitask support
+
+Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task is not 
+what you want, you need to manually specify it via `PoolerConfig(pooling_task="...")` offline or 
+`--pooler-config {"pooling_task": "..."}` online.

@@ -13,6 +13,12 @@ The key distinction between (sequence) classification and token classification l
 
 Many classification models support both (sequence) classification and token classification. For further details on (sequence) classification, please refer to [this page](classify.md).
 
+!!! note
+
+    Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task (classify) is not 
+    what you want, you need to manually specify it via `PoolerConfig(pooling_task="token_classify")` offline or 
+    `--pooler-config {"pooling_task": "token_classify"}` online.
+
 ## Typical Use Cases
 
 ### Named Entity Recognition (NER)
