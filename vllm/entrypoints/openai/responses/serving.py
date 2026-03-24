@@ -799,11 +799,13 @@ class OpenAIServingResponses(OpenAIServing):
                 "Only 'auto' tool_choice is supported in response API with Harmony"
             )
 
+        arrival_time = time.time()
         messages = await self._construct_input_messages_with_harmony(
             request, prev_response, prev_messages
         )
         prompt_token_ids = render_for_completion(messages)
         engine_prompt = token_inputs(prompt_token_ids)
+        engine_prompt["arrival_time"] = arrival_time
 
         # Add cache_salt if provided in the request
         if request.cache_salt is not None:
@@ -965,6 +967,7 @@ class OpenAIServingResponses(OpenAIServing):
             output=output,
             status=status,
             usage=usage,
+            kv_transfer_params=context.kv_transfer_params,
         )
 
         # Inject state carrier for stateless multi-turn (RFC #26934 + @grs).

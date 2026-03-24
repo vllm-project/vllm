@@ -14,7 +14,12 @@ import vllm.envs as envs
 from vllm.config.model_arch import (
     ModelArchitectureConfig,
 )
-from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
+from vllm.config.multimodal import (
+    MMCacheType,
+    MMEncoderTPMode,
+    MMTensorIPC,
+    MultiModalConfig,
+)
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
@@ -88,7 +93,7 @@ LayerBlockType = Literal["attention", "linear_attention", "mamba"]
 
 _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "generate": [],
-    "pooling": ["embed", "classify", "reward"],
+    "pooling": ["embed", "classify"],
     "draft": [],
 }
 
@@ -97,8 +102,8 @@ AttnTypeStr = Literal[
 ]
 
 
-@config(config=ConfigDict(arbitrary_types_allowed=True))
-class ModelConfig:
+@config(config=ConfigDict(arbitrary_types_allowed=True))  # type: ignore[arg-type,misc]
+class ModelConfig:  # type: ignore[misc]
     """Configuration for the model."""
 
     model: str = "Qwen/Qwen3-0.6B"
@@ -116,7 +121,7 @@ class ModelConfig:
     """Convert the model using adapters defined in
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
-    tokenizer: str = Field(default=None)
+    tokenizer: str = Field(default=None)  # type: ignore[assignment]
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode | str = "auto"
@@ -172,7 +177,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: int = Field(default=None, ge=-1)
+    max_model_len: int = Field(default=None, ge=-1)  # type: ignore[assignment]
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
@@ -310,6 +315,7 @@ class ModelConfig:
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
+    mm_tensor_ipc: InitVar[MMTensorIPC] = None
 
     def compute_hash(self) -> str:
         """
@@ -430,6 +436,7 @@ class ModelConfig:
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
+        mm_tensor_ipc: MMTensorIPC,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -447,7 +454,7 @@ class ModelConfig:
             self.hf_config_path = maybe_model_redirect(self.hf_config_path)
 
         if callable(self.hf_overrides):
-            hf_overrides_kw = {}
+            hf_overrides_kw: dict[str, Any] = {}
             hf_overrides_fn = self.hf_overrides
             dict_overrides: dict[str, Any] = {}
         else:
@@ -575,7 +582,7 @@ class ModelConfig:
             self.dtype,
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
-            config_format=self.config_format,
+            config_format=self.config_format,  # type: ignore[arg-type]
         )
 
         self.original_max_model_len = self.max_model_len
@@ -612,13 +619,14 @@ class ModelConfig:
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
+                mm_tensor_ipc=mm_tensor_ipc,
             )
 
             mm_config_kwargs = {
                 k: v for k, v in mm_config_kwargs.items() if v is not None
             }
 
-            self.multimodal_config = MultiModalConfig(**mm_config_kwargs)
+            self.multimodal_config = MultiModalConfig(**mm_config_kwargs)  # type: ignore[arg-type]
 
         # Multimodal GGUF models must use original repo for mm processing
         if is_gguf(self.tokenizer) and self.is_multimodal_model:
@@ -724,7 +732,7 @@ class ModelConfig:
 
     @property
     def architectures(self) -> list[str]:
-        return self.model_arch_config.architectures
+        return self.model_arch_config.architectures  # type: ignore[return-value]
 
     @property
     def architecture(self) -> str:
@@ -996,7 +1004,7 @@ class ModelConfig:
         is_bitsandbytes = self.quantization == "bitsandbytes"
         has_quantization_config = self.model_arch_config.quantization_config is not None
         is_8bit = (
-            self.model_arch_config.quantization_config.get("load_in_8bit", False)
+            self.model_arch_config.quantization_config.get("load_in_8bit", False)  # type: ignore[union-attr]
             if has_quantization_config
             else False
         )
@@ -1110,6 +1118,22 @@ class ModelConfig:
                 " must be divisible by dcp world size when enable "
                 "decode context parallel for GQA "
                 f"({parallel_config.decode_context_parallel_size})."
+            )
+
+        # torch_shm uses a single IPC queue to rank 0; DP>1 is
+        # incompatible because API servers can't know which
+        # CoreEngine the scheduler will assign work to. TP>1 is
+        # also not supported because this requires broadcasting
+        # MM tensors between all TP ranks.
+        if (
+            self.multimodal_config is not None
+            and self.multimodal_config.mm_tensor_ipc == "torch_shm"
+            and parallel_config.world_size_across_dp > 1
+        ):
+            raise ValueError(
+                "mm_tensor_ipc='torch_shm' is not supported with "
+                "data_parallel_size > 1 or tensor_parallel_size > 1 "
+                "or pipeline_parallel_size > 1."
             )
 
     def get_sliding_window(self) -> int | None:
@@ -1268,6 +1292,7 @@ class ModelConfig:
                     "attn_type_list, or a layer_types in the hf_config, "
                     f"cannot determine the num of {block_type} layers"
                 )
+            raise AssertionError(f"Unsupported block type: {block_type}")
 
     def get_mamba_chunk_size(self) -> int | None:
         """
@@ -1435,10 +1460,10 @@ class ModelConfig:
     @property
     def score_type(self) -> ScoreType:
         """
-        Score API handles score/rerank for:
-        - "score" task (score_type: cross-encoder models)
-        - "embed" task (score_type: bi-encoder models)
-        - "token_embed" task (score_type: late interaction models)
+        Scoring API handles score/rerank for:\n
+        - "classify" task (score_type: cross-encoder models)\n
+        - "embed" task (score_type: bi-encoder models)\n
+        - "token_embed" task (score_type: late interaction models)\n
         """
         # fixme: self._model_info.score_type is the score type before
         #  as_seq_cls_model, which is "bi-encoder", rather than the
