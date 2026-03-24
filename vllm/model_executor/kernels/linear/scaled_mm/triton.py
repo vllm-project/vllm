@@ -104,10 +104,6 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return False, "only cuda like devices are supported."
         return True, None
 
-    @classmethod
-    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
-        return [cls]
-
     def apply_block_scaled_mm(
         self,
         A: torch.Tensor,
