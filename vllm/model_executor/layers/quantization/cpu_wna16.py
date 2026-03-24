@@ -280,16 +280,9 @@ class CPUAWQLinearMethod(LinearMethodBase):
         packed_weight = layer.qweight.data
         packed_zeros = layer.qzeros.data
         scales = layer.scales.data
-
-        logger.info("lyt_debug_sglang_int4: pack AWQ weights by convert_weight_packed_scale_zp, qweight=%s, qzeros=%s, scales=%s",
-            packed_weight.shape, packed_zeros.shape, scales.shape)
-
         blocked_w, blocked_zp, blocked_s = (
             torch.ops._C.convert_weight_packed_scale_zp(
                 packed_weight, packed_zeros, scales))
-
-        logger.info("lyt_debug_slang_int4: packed results: blocked_w=%s, blocked_zp=%s, blocked_s=%s",
-            blocked_w.shape, blocked_zp.shape, blocked_s.shape)
 
         layer.packed_weight = blocked_w
         layer.packed_qzeros = blocked_zp

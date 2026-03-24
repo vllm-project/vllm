@@ -9,7 +9,7 @@ Part 2: INT4 W4A8 GEMM tests
   - int4_scaled_mm_cpu correcness w.r.t. float reference
   - Bias, 3D input, various shapes
 
-Part 3: create_weights shapes (same as v1 )
+Part 3: create_weights shapes
 
 cmd:
     VLLM_CPU_INT4_W4A8=1 python -m pytest tests/kernels/test_awq_int4_to_int8.py -v -s
@@ -33,7 +33,6 @@ requires_int4_w4a8 = pytest.mark.skipif(
 
 
 
-# lyt_debug Hepers to create synthetic AWQ-like data
 def make_awq_checkpoint_data(K, N, group_size, seed=42):
     """Create synthetic AWQ checkpoint data in packed int32 format.
 
@@ -139,9 +138,6 @@ class TestInt4ScaledMmCpu:
         ref_mag = ref_out.abs().mean().item() + 1e-6
         mean_rel = mean_abs / ref_mag
 
-        print(f"  lyt_debug INT4 GEMM M={M}, K={K}, N={N}, gs={group_size}: "
-            f"mean_abs={mean_abs:.4f}, max_abs={max_abs:.4f}, pct95={pct95:.4f}, mean_rel={mean_rel:.4f}")
-
         assert mean_rel < 0.05, (f"Mean relative error {mean_rel:.4f} exceeds 5% threshold")
         assert pct95 < ref_mag * 0.15, (f"95th-pctile abs_diff {pct95:.4f} exceeds 15% of ref magnitude")
         print(f"  [PASS] INT4 GEMM correct: M={M}, K={K}, N={N}")
@@ -169,10 +165,6 @@ class TestInt4ScaledMmCpu:
         mean_abs = abs_diff.mean().item()
         ref_mag = ref_out.abs().mean().item() + 1e-6
         mean_rel = mean_abs / ref_mag
-
-        print(f"  lyt_debug bias M={M}: mean_abs={mean_abs:.4f}, "
-              f"mean_rel={mean_rel:.4f}")
-
         assert mean_rel < 0.05, (
             f"Mean relative error {mean_rel:.4f} with bias exceeds 5%")
         print(f"  [PASS] INT4 GEMM with bias: M={M}")
@@ -204,7 +196,6 @@ class TestInt4ScaledMmCpu:
         ref_mag = ref_out.abs().mean().item() + 1e-6
         mean_rel = mean_abs / ref_mag
 
-        print(f"  lyt_debug 3Dresult: mean_abs={mean_abs:.4f}, mean_rel={mean_rel:.4f}")
         assert mean_rel < 0.05, (
             f"Mean relative error {mean_rel:.4f} for 3D exceeds 5%")
         print(f"  [PASS] 3D input [{B},{S},{K}] -> output [{B},{S},{N}]")
@@ -227,13 +218,12 @@ class TestInt4ScaledMmCpu:
         ref_mag = ref_out.abs().mean().item() + 1e-6
         mean_rel = abs_diff.mean().item() / ref_mag
 
-        print(f"  ly_debug fp16 result: mean_rel={mean_rel:.4f}")
         assert mean_rel < 0.05, (f"Mean relative error {mean_rel:.4f} for fp16 exceeds 5%")
         print(f"  [PASS] fp16 input M={M}, K={K}, N={N}")
 
 
 class TestCreateWeightsUnchanged:
-    """A6: create_weights should still produce correct int4 placeholder shapes."""
+    """Create_weights should still produce correct int4 placeholder shapes."""
 
     @pytest.mark.parametrize("K,N,group_size", [
         (128, 128, 128),

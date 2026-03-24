@@ -2,12 +2,12 @@
 """
 Unit tests for GPTQ int4 -> int8 re-quantization pipeline.
 
-Part 1 (G2 & G3): Pure Python tests
+Part 1: Pure Python tests
   - _dequant_gptq_to_float (with and without g_idx / desc_act)
   - _requantize_to_int8 (reused from AWQ A3)
   - Full GPTQ unpack → dequant → re-quantize roundtrip
 
-Part 2 (G4 & G5): oneDNN integration tests — requires CPU C++ extensions.
+Part 2: oneDNN integration tests — requires CPU C++ extensions.
   - oneDNN handler creation from GPTQ int4 weights
   - End-to-end: GPTQ int4 → int8 → oneDNN GEMM vs reference
 
@@ -45,16 +45,12 @@ requires_onednn = pytest.mark.skipif(
 
 
 
-
-# lyt_debug Helpers to create synthetic GPTQ-like data
-
 def make_synthetic_gptq_data(
     K: int, N: int, group_size: int, seed: int = 42,
     use_g_idx: bool = False,
 ):
     """Create synthetic GPTQ-style quantized data.
-
-    GPTQ uses uint4b8 format: raw values [0, 15], representing signed [-8, 7].No zero point.
+    GPTQ uses uint4b8 format: raw values [0, 15], representing signed [-8, 7]. No zero point.
 
     Returns:
         weight_int4: [K, N] int32, raw values in [0, 15]
@@ -74,7 +70,7 @@ def make_synthetic_gptq_data(
     # signed values: raw - 8
     signed_vals = weight_int4.float() - 8.0
 
-    if use_g_idx:    # lyt_debug Simulate desc_act: shuffle group assignments
+    if use_g_idx:
         g_idx_np = np.zeros(K, dtype=np.int32)
         for g in range(num_groups):
             g_idx_np[g * group_size:(g + 1) * group_size] = g
@@ -113,10 +109,8 @@ def _gptq_int4_to_int8_pipeline(
 
 
 
-# lyy_debug est G2: _dequant_gptq_to_float
-
 class TestDequantGPTQToFloat:
-    """Tests for _dequant_gptq_to_float (G2)."""
+    """Tests for _dequant_gptq_to_float."""
 
     @pytest.mark.parametrize("K,N,group_size", [
         (128, 64, 128),
@@ -167,10 +161,10 @@ class TestDequantGPTQToFloat:
         print("  [PASS] dequant extreme values")
 
 
-# lyt_debug Testing G6: desc_act (g_idx) handling
+
 
 class TestDescActGIdx:
-    """Tests for G6: desc_act handling with g_idx in dequant."""
+    """desc_act handling with g_idx in dequant."""
 
     @pytest.mark.parametrize("K,N,group_size", [
         (128, 64, 64),
@@ -215,9 +209,8 @@ class TestDescActGIdx:
 
 
 
-# lyt_debug Test G3: _requantize_to_int8 (reused from AWQ A3)
 class TestGPTQRequantizeToInt8:
-    """G3: re-quantize float32 weights to int8 (reuses AWQ's _requantize_to_int8)."""
+    """re-quantize float32 weights to int8 (reusing AWQ's _requantize_to_int8)."""
 
     @pytest.mark.parametrize("K,N,group_size", [
         (128, 128, 128),
@@ -238,7 +231,6 @@ class TestGPTQRequantizeToInt8:
         assert weight_int8.min().item() >= -128
         assert weight_int8.max().item() <= 127
 
-        # lyt_debugChecking roundtrip error
         reconstructed = weight_int8.float() * channel_scale.unsqueeze(0)
         rel_err_mask = float_weight.abs() > 1e-6
         rel_err = (float_weight - reconstructed).abs()
@@ -268,9 +260,8 @@ class TestGPTQRequantizeToInt8:
 
 
 
-# lyt_debug Test G4: oneDNN handler creation from GPTQ int4 weights
 class TestGPTQOneDNNHandlerCreation:
-    """G4: Create oneDNN int8 GEMM handler from GPTQ-derived int8 weights."""
+    """Create oneDNN int8 GEMM handler from GPTQ-derived int8 weights."""
 
     @requires_onednn
     @pytest.mark.parametrize("K,N,group_size", [
@@ -314,7 +305,6 @@ class TestGPTQOneDNNHandlerCreation:
         print(f"  [PASS] handler creation with g_idx K={K}, N={N}")
 
 
-# lyt_debug Test G5: End-to-end GPTQ int4 → int8 → oneDNN GEMM
 def _ref_onednn_dynamic_gemm(x_q, weight_int8, x_s, channel_scale_2d,
                               bias, out_dtype):
     """Reference matching oneDNN dynamic-quant int8 GEMM execution flow."""
@@ -328,7 +318,7 @@ def _ref_onednn_dynamic_gemm(x_q, weight_int8, x_s, channel_scale_2d,
 
 
 class TestGPTQOneDNNInt8GEMM:
-    """G5: oneDNN int8 GEMM with GPTQ-derived int8 weights."""
+    """oneDNN int8 GEMM with GPTQ-derived int8 weights."""
     @requires_onednn
     @pytest.mark.parametrize("M,K,N,group_size", [
         (1, 128, 128, 128),
@@ -360,10 +350,6 @@ class TestGPTQOneDNNInt8GEMM:
         abs_diff = (out_int8.float() - out_ref.float()).abs()
         mean_abs = abs_diff.mean().item()
         pct95 = torch.quantile(abs_diff, 0.95).item()
-
-        print(f"  lyt_debug_G5 kernel check M={M}, K={K}, N={N}, gs={group_size}: "
-              f"max_abs={abs_diff.max().item():.4f}, mean_abs={mean_abs:.4f}, "
-              f"pct95_abs={pct95:.4f}")
 
         assert mean_abs < 2.0, (
             f"mean_abs_diff {mean_abs:.4f} too large (threshold 2.0)")
@@ -399,9 +385,6 @@ class TestGPTQOneDNNInt8GEMM:
         abs_diff = (out_int8.float() - out_ref.float()).abs()
         mean_abs = abs_diff.mean().item()
         pct95 = torch.quantile(abs_diff, 0.95).item()
-        print(f"  lyt_debug_G5 bias M={M}: max_abs={abs_diff.max().item():.4f}, "
-              f"mean_abs={mean_abs:.4f}, pct95_abs={pct95:.4f}")
-
         assert mean_abs < 2.0, (
             f"mean_abs_diff {mean_abs:.4f} with bias exceeds threshold")
         assert pct95 < 5.0, (
@@ -439,8 +422,6 @@ class TestGPTQOneDNNInt8GEMM:
         abs_diff = (out_3d.float() - out_ref.float()).abs()
         mean_abs = abs_diff.mean().item()
         pct95 = torch.quantile(abs_diff, 0.95).item()
-        print(f"  lyt_debug_G5 3D: max_abs={abs_diff.max().item():.4f}, "
-              f"mean_abs={mean_abs:.4f}, pct95_abs={pct95:.4f}")
         assert mean_abs < 2.0
         assert pct95 < 5.0
         print(f"  [PASS] 3D input [{B},{S},{K}] → output [{B},{S},{N}]")
@@ -471,8 +452,7 @@ class TestGPTQOneDNNInt8GEMM:
         abs_diff = (out_int8.float() - out_ref.float()).abs()
         mean_abs = abs_diff.mean().item()
         pct95 = torch.quantile(abs_diff, 0.95).item()
-        print(f"lyt_debug_G5 g_idx: max_abs={abs_diff.max().item():.4f}, "
-              f"mean_abs={mean_abs:.4f}, pct95_abs={pct95:.4f}")
+
         assert mean_abs < 2.0
         assert pct95 < 5.0
         print(f"  [PASS] GPTQ int8 GEMM with g_idx: M={M}, K={K}, N={N}")

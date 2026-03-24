@@ -5,9 +5,7 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.cpu_wna16 import (
-    _requantize_to_int8,
-)
+
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
     unpack_quantized_values_into_int32,
@@ -20,8 +18,17 @@ from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 _CPUWNA16_SUPPORTED_QUANT_TYPES = (scalar_types.uint4, scalar_types.uint4b8)
 
 
+def _requantize_to_int8(
+    float_weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    K, N = float_weight.shape
+    channel_max = float_weight.abs().amax(dim=0)
+    channel_scale = (channel_max / 127.0).clamp(min=1e-10)
+    weight_int8 = (float_weight / channel_scale.unsqueeze(0)).round().clamp(
+        -128, 127
+    ).to(torch.int8)
+    return weight_int8, channel_scale
 
-# lyt_debug_G2 helper: dequantize GPTQ int4 weights into float32
 
 def _dequant_gptq_to_float(
     weight_int4: torch.Tensor,
@@ -36,7 +43,7 @@ def _dequant_gptq_to_float(
         weight_int4: [K, N] int32, raw unpacked 4-bit values (0-15)
         scales:      [num_groups, N] bf16/fp16, per-group per-channel scale
         group_size:  number of rows per group
-        g_idx:       [K] int32, optional group index for desc_act (G6)
+        g_idx:       [K] int32, optional group index for desc_act
 
     Returns:
         float_weight: [K, N] float32
@@ -44,31 +51,17 @@ def _dequant_gptq_to_float(
     K, N = weight_int4.shape
     num_groups = scales.shape[0]
 
-    print(f'lyt_debug_G2 _dequant_gptq_to_float called: '
-        f'K={K}, N={N}, num_groups={num_groups}, group_size={group_size}, '
-        f'has_g_idx={g_idx is not None}')
-    print(f'lyt_debug_G2 weight_int4 (raw) range: min={weight_int4.min().item()}, max={weight_int4.max().item()}')
-    print(f'lyt_debug_G2 scales range: min={scales.min().item():.6f}, max={scales.max().item():.6f}')
 
     signed_int4 = weight_int4.float() - 8.0 # uint4b8: raw [0,15] → signed [-8, 7] by subtracting bias 8
 
-    print(f'lyt_debug_G2 signed_int4 range: '
-        f'min={signed_int4.min().item():.0f}, max={signed_int4.max().item():.0f}')
 
-    # lyt_debug_G6 desc_act: when g_idx is present, each row maps to its group via g_idx[k] instead of uniform group_size blocks
     if g_idx is not None:
         # g_idx: [K] int32, g_idx[k] = group index for row k
         scales_expanded = scales[g_idx.long(), :]  # [K, N]
-        print(f'lyt_debug_G6 desc_act: using g_idx to map rows to groups, '
-            f'g_idx range=[{g_idx.min().item()}, {g_idx.max().item()}]')
     else:
-        # lyt_debug_G6 Uniform group layout: each group_size rows share the same scale
         scales_expanded = scales.repeat_interleave(group_size, dim=0)  # [K, N]
 
     float_weight = signed_int4 * scales_expanded.float()
-
-    print(f'lyt_debug_G2 float_weight range: min={float_weight.min().item():.6f}, max={float_weight.max().item():.6f}')
-    print(f'lyt_debug_G2 float_weight shape: {float_weight.shape}, dtype: {float_weight.dtype}')
 
     return float_weight
 
@@ -161,8 +154,8 @@ class CPUWNA16LinearKernel(MPLinearKernel):
     def _process_gptq_weights_int8(self, layer: torch.nn.Module):
         """Convert GPTQ int4 weights to int8 and create oneDNN handler.
 
-        Flow: unpack int4 -> dequant to float (G2) -> re-quantize to int8 (G3)
-              -> create oneDNN handler (G4)
+        Flow: unpack int4 -> dequant to float -> re-quantize to int8
+              -> create oneDNN handler
         """
         w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
         packed_weight = w_q.data
@@ -177,35 +170,19 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         group_size = self.config.group_size if self.config.group_size > 0 \
             else input_size
 
-        print(f'lyt_debug_G1 _process_gptq_weights_int8 ENTER: '
-            f'input_size(K)={input_size}, output_size(N)={output_size}, '
-            f'group_size={group_size}, bits={bits}, pack_factor={pack_factor}')
-        print(f'lyt_debug_G1 packed_weight shape: {packed_weight.shape}, '
-            f'scales shape: {scales.shape}, has_g_idx={g_idx is not None}')
 
         weight_int4 = unpack_quantized_values_into_int32(
             packed_weight, self.config.weight_type, 0
         )
-
-        print(f'lyt_debug_G1 after unpack: weight_int4 shape={weight_int4.shape}')
 
         float_weight = _dequant_gptq_to_float(
             weight_int4, scales, group_size, g_idx
         )
 
         weight_int8, channel_scale = _requantize_to_int8(float_weight)
-
-        print(f'lyt_debug_G3 final weight_int8 shape: {weight_int8.shape}, '
-            f'dtype: {weight_int8.dtype}')
-        print(f'lyt_debug_G3 final channel_scale shape: {channel_scale.shape}, '
-                f'dtype: {channel_scale.dtype}')
-
         channel_scale_2d = channel_scale.unsqueeze(0)
 
         weight_int8 = weight_int8.t().contiguous().t()
-
-        print(f'lyt_debug_G4 creating oneDNN handler: weight_int8 shape={weight_int8.shape}, '
-              f'stride={weight_int8.stride()}, channel_scale_2d shape={channel_scale_2d.shape}')
 
         self.dnnl_handler = ops.create_onednn_scaled_mm(
             weight_int8,
@@ -215,9 +192,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
             False,
             32,
         )
-
-        print(f'lyt_debug_G4 oneDNN handler created: handler.k={self.dnnl_handler.k}, handler.n={self.dnnl_handler.n}')
-
         del weight_int8, float_weight
         if self.w_q_name and hasattr(layer, self.w_q_name):
             setattr(layer, self.w_q_name, None)
@@ -225,10 +199,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
             setattr(layer, self.w_s_name, None)
         if self.w_zp_name and hasattr(layer, self.w_zp_name):
             setattr(layer, self.w_zp_name, None)
-
-        print(f'lyt_debug_G4 _process_gptq_weights_int8 DONE. '
-            f'int8 oneDNN path ready, old int4 params cleaned up.')
-
     def process_weights_after_loading(self, layer: torch.nn.Module):
         if (not self.config.zero_points) and (self.w_zp_name is not None):
             setattr(layer, self.w_zp_name, None)
@@ -276,7 +246,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Int8 oneDNN inference path (G5)."""
+        """Int8 oneDNN inference path."""
         x_shape = x.shape
         x_2d = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
 
