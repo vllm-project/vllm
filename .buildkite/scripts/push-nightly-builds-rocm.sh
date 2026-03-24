@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Push ROCm nightly base image and nightly image from ECR 
-# to Docker Hub as vllm/vllm-openai-rocm:nightly-base and vllm/vllm-openai-rocm:nightly
+# to Docker Hub as vllm/vllm-openai-rocm:base-nightly and vllm/vllm-openai-rocm:nightly
 # and vllm/vllm-openai-rocm:base-nightly-<commit> and vllm/vllm-openai-rocm:nightly-<commit>.
 # Run when NIGHTLY=1 after build-rocm-release-image has pushed to ECR.
 #
