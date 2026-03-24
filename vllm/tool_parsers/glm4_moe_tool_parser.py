@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import regex as re
+from openai.types.responses import FunctionTool
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -122,19 +123,23 @@ class Glm4MoeModelToolParser(ToolParser):
     def _is_string_type(
         tool_name: str,
         arg_name: str,
-        tools: list[ChatCompletionToolsParam] | None,
+        tools: list[ChatCompletionToolsParam | FunctionTool] | None,
     ) -> bool:
         if tools is None:
             return False
         for tool in tools:
-            if tool.function.name != tool_name:
+            if isinstance(tool, FunctionTool):
+                name = tool.name
+                parameters = tool.parameters
+            else:
+                name = tool.function.name
+                parameters = tool.function.parameters
+            if name != tool_name:
                 continue
-            if tool.function.parameters is None:
+            if parameters is None:
                 return False
             arg_type = (
-                tool.function.parameters.get("properties", {})
-                .get(arg_name, {})
-                .get("type", None)
+                parameters.get("properties", {}).get(arg_name, {}).get("type", None)
             )
             return arg_type == "string"
         logger.debug("No tool named '%s'.", tool_name)
