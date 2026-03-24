@@ -460,23 +460,16 @@ class Platform:
             cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             return
 
-        def get_full_attn_backend_cls() -> type[AttentionBackend]:
-            backend_cls_list = [
-                layer.get_attn_backend() for layer in attn_layers.values()
-            ]
-            backend_cls_dict = {
-                backend_cls.get_name(): backend_cls
-                for backend_cls in backend_cls_list
-                if not backend_cls.is_ssm()
-            }
-            if len(backend_cls_dict) == 1:
-                return list(backend_cls_dict.values())[0]
-            else:
-                raise ValueError(
-                    f"Multiple attention backends are not supported: {backend_cls_dict}"
-                )
+        backend_cls = None
+        for layer in attn_layers.values():
+            b = layer.get_attn_backend()
+            if not b.is_ssm():
+                backend_cls = b
+                break
 
-        backend_cls = get_full_attn_backend_cls()
+        if backend_cls is None:
+            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
+            return
         with set_current_vllm_config(vllm_config):
             preferred = backend_cls.get_preferred_block_size(
                 CacheConfig.DEFAULT_BLOCK_SIZE
