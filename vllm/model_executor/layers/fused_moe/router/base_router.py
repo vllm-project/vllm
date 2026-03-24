@@ -34,11 +34,12 @@ if current_platform.is_cuda_alike():
 
         expert_id = tl.load(topk_ids_ptr + offs, mask=mask, other=0).to(tl.int64)
         valid_expert = (expert_id >= 0) & (expert_id < num_logical_experts)
+        safe_expert_id = tl.where(valid_expert, expert_id, 0)
 
         # 1. Convert the logical expert ids to physical expert ids
         # Directly select a random replica for each logical expert
         replica_count = tl.load(
-            logical_replica_count_ptr + expert_id,
+            logical_replica_count_ptr + safe_expert_id,
             mask=mask & valid_expert,
             other=1,
         )
@@ -60,7 +61,7 @@ if current_platform.is_cuda_alike():
         # If later refactor moved all the MoE kernel calls
         # to the modular kernel, we can move this logic there
         # to achieve better efficiency.
-        map_index = expert_id * map_slots + replica_idx
+        map_index = safe_expert_id * map_slots + replica_idx
         physical_id = tl.load(
             logical_to_physical_ptr + map_index,
             mask=mask & valid_expert,
@@ -192,6 +193,7 @@ class BaseRouter(FusedMoERouter):
     def _apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
         """Apply EPLB mapping to convert logical expert IDs to physical expert IDs."""
         if self.enable_eplb:
+            assert self.eplb_state.expert_load_view is not None
             assert self.eplb_state.logical_to_physical_map is not None
             assert self.eplb_state.logical_replica_count is not None
             assert self.eplb_state.should_record_tensor is not None
