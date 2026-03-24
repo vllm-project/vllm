@@ -455,7 +455,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 // self.num_k_heads
             ),
         )
-        new_tensor_shape_ba = mixed_qkvz.size()[:-1] + (
+        new_tensor_shape_ba = mixed_ba.size()[:-1] + (
             self.num_k_heads // self.tp_size,
             2 * self.num_v_heads // self.num_k_heads,
         )
