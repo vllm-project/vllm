@@ -238,6 +238,9 @@ class SchedulerOutput:
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
 
+    # Mamba block copy pairs: {dest_block_id: src_block_id}.
+    mamba_block_copy_pairs: dict[int, int] | None = None
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

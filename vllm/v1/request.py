@@ -172,6 +172,9 @@ class Request:
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
+        # Best-of-n clone: source request whose KV blocks to share.
+        self.clone_from_request_id: str | None = None
+
         # Used for streaming
         self.resumable = resumable
         # None entry in the queue means finished.
@@ -194,7 +197,7 @@ class Request:
         request: EngineCoreRequest,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None,
     ) -> "Request":
-        return cls(
+        req = cls(
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
@@ -211,6 +214,8 @@ class Request:
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
         )
+        req.clone_from_request_id = request.clone_from_request_id
+        return req
 
     def append_output_token_ids(
         self,

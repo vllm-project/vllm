@@ -392,14 +392,32 @@ class AsyncLLM(EngineClient):
         assert isinstance(parent_params, SamplingParams)
 
         # Fan out child requests (for n>1).
+        # Send child 0 immediately, defer children 1..n-1 until child 0's
+        # prefill completes so they get prefix cache hits.
         parent_request = ParentRequest(request)
+        child_0_id = None
+        deferred = []
         for idx in range(parent_params.n):
             request_id, child_params = parent_request.get_child_info(idx)
-            child_request = request if idx == parent_params.n - 1 else copy(request)
+            child_request = (
+                request if idx == parent_params.n - 1 else copy(request)
+            )
             child_request.request_id = request_id
             child_request.sampling_params = child_params
-            await self._add_request(
-                child_request, prompt_text, parent_request, idx, queue
+            if idx == 0:
+                child_0_id = request_id
+                await self._add_request(
+                    child_request, prompt_text, parent_request, idx, queue
+                )
+            else:
+                child_request.clone_from_request_id = child_0_id
+                self.output_processor.add_request(
+                    child_request, prompt_text, parent_request, idx, queue
+                )
+                deferred.append(child_request)
+        if deferred:
+            self.output_processor.pending_bon_children[child_0_id] = (
+                deferred
             )
         return queue
 
@@ -686,7 +704,15 @@ class AsyncLLM(EngineClient):
                         if end < num_outputs:
                             await asyncio.sleep(0)
 
-                        # 3) Abort any reqs that finished due to stop strings.
+                        # 3) Send deferred best-of-n children.
+                        if output_processor.ready_bon_children:
+                            ready = output_processor.ready_bon_children
+                            output_processor.ready_bon_children = []
+                            for child_req in ready:
+                                await engine_core.add_request_async(
+                                    child_req)
+
+                        # 4) Abort any reqs that finished due to stop strings.
                         if processed_outputs.reqs_to_abort:
                             await engine_core.abort_requests_async(
                                 processed_outputs.reqs_to_abort

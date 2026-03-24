@@ -212,6 +212,29 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             # Exclude zero-length padded sequences from prefill count.
             num_zero_len = (non_spec_query_lens_cpu == 0).sum().item()
             num_prefills = non_spec_query_lens_cpu.size(0) - num_decodes - num_zero_len
+
+            # Promote regular decodes to spec decodes to avoid mixed
+            # in-place state updates that cause corruption.  A regular
+            # decode with 1 token is equivalent to a spec decode with
+            # num_accepted_tokens=1.
+            if num_decodes > 0:
+                decode_mask = (~spec_sequence_masks_cpu) & (query_lens_cpu == 1)
+                spec_sequence_masks_cpu = spec_sequence_masks_cpu | decode_mask
+                num_spec_decodes = spec_sequence_masks_cpu.sum().item()
+                spec_sequence_masks = spec_sequence_masks_cpu.to(
+                    query_start_loc.device, non_blocking=True
+                )
+                assert num_accepted_tokens is not None
+                num_accepted_tokens[decode_mask] = 1
+                # Recompute non-spec counts (only prefills remain)
+                non_spec_query_lens_cpu = query_lens_cpu[
+                    ~spec_sequence_masks_cpu]
+                num_decodes = 0
+                num_zero_len = (
+                    non_spec_query_lens_cpu == 0).sum().item()
+                num_prefills = (
+                    non_spec_query_lens_cpu.size(0) - num_zero_len)
+
             num_decode_tokens = num_decodes
             num_prefill_tokens = (
                 non_spec_query_lens_cpu.sum().item() - num_decode_tokens
@@ -305,8 +328,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         else:
             has_initial_state = None
 
-        # Function code counted on either presency non-spec decode or spec decode,
-        # but not both.
+        # After promotion above, regular decodes are merged into the spec
+        # batch.  Only prefills + spec_decodes should remain.
         assert not (num_decodes > 0 and num_spec_decodes > 0), (
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )

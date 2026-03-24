@@ -102,6 +102,9 @@ class EngineCoreRequest(
 
     reasoning_ended: bool | None = None
 
+    # Best-of-n: share KV cache blocks from this request.
+    clone_from_request_id: str | None = None
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""

@@ -939,6 +939,23 @@ class GPUModelRunner(
         if hasattr(self, "_kv_block_zeroer"):
             self._kv_block_zeroer.zero_block_ids(block_ids)
 
+    def _copy_mamba_blocks(self, copy_pairs: dict[int, int]) -> None:
+        """Copy mamba state blocks on GPU. Only touches mamba group tensors
+        which are simple [num_blocks, ...] layout (no striding issues)."""
+        from vllm.v1.kv_cache_interface import MambaSpec
+        fwd_ctx = self.compilation_config.static_forward_context
+        for group in self.kv_cache_config.kv_cache_groups:
+            if not isinstance(group.kv_cache_spec, MambaSpec):
+                continue
+            for layer_name in group.layer_names:
+                kv = fwd_ctx[layer_name].kv_cache[0]
+                # kv is a list of state tensors for mamba
+                if not isinstance(kv, (list, tuple)):
+                    continue
+                for state_tensor in kv:
+                    for dst_id, src_id in copy_pairs.items():
+                        state_tensor[dst_id].copy_(state_tensor[src_id])
+
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
         """Initialize attributes from torch.cuda.get_device_properties"""
@@ -976,6 +993,10 @@ class GPUModelRunner(
         # stale NaN/data from corrupting attention or SSM computation.
         if scheduler_output.new_block_ids_to_zero:
             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
+
+        # Copy mamba state blocks for clone requests (after zeroing).
+        if scheduler_output.mamba_block_copy_pairs:
+            self._copy_mamba_blocks(scheduler_output.mamba_block_copy_pairs)
 
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:

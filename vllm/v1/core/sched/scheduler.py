@@ -595,9 +595,46 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
+                clone_shared = False
+
+                # Best-of-n clone: share all blocks from source.
+                if (getattr(request, 'clone_from_request_id', None)
+                        is not None
+                        and request.num_computed_tokens == 0):
+                    source = self.requests.get(
+                        request.clone_from_request_id)
+                    if (source is None
+                            or source.num_computed_tokens
+                            < source.num_prompt_tokens):
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
+                    result = (
+                        self.kv_cache_manager
+                        .share_all_blocks_from_source(
+                            source.request_id,
+                            request.request_id))
+                    if result is not None:
+                        n_shared, mamba_copies = result
+                        new_computed_blocks = (
+                            self.kv_cache_manager
+                            .empty_kv_cache_blocks)
+                        n_computed = min(
+                            n_shared,
+                            request.num_prompt_tokens - 1)
+                        request.num_computed_tokens = n_computed
+                        num_computed_tokens = n_computed
+                        num_new_local_computed_tokens = 0
+                        request.clone_from_request_id = None
+                        clone_shared = True
+                        # Record mamba copy pairs for GPU memcpy.
+                        if mamba_copies:
+                            if not hasattr(self, '_mamba_copy_pairs'):
+                                self._mamba_copy_pairs = {}
+                            self._mamba_copy_pairs.update(mamba_copies)
 
                 # Get already-cached tokens.
-                if request.num_computed_tokens == 0:
+                if request.num_computed_tokens == 0 and not clone_shared:
                     # Get locally-cached tokens.
                     new_computed_blocks, num_new_local_computed_tokens = (
                         self.kv_cache_manager.get_computed_blocks(request)
@@ -888,7 +925,11 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            mamba_block_copy_pairs=getattr(
+                self, '_mamba_copy_pairs', None) or None,
         )
+        if hasattr(self, '_mamba_copy_pairs'):
+            self._mamba_copy_pairs = {}
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1368,8 +1409,9 @@ class Scheduler(SchedulerInterface):
             if stopped:
                 routed_experts = self._get_routed_experts(request)
 
-                # Capture finish_reason BEFORE _handle_stopped_request, which may
-                # reset the status to WAITING for streaming requests that continue.
+                # Capture finish_reason BEFORE _handle_stopped_request,
+                # which may reset the status to WAITING for streaming
+                # requests that continue.
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:

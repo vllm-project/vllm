@@ -375,6 +375,74 @@ class KVCacheManager:
 
         return self.create_kv_cache_blocks(new_blocks)
 
+    def share_all_blocks_from_source(
+        self,
+        source_request_id: str,
+        target_request_id: str,
+    ) -> "tuple[int, dict[int, int]] | None":
+        """Share KV cache blocks from source to target.
+
+        Attention blocks: share ALL via touch (read-only for prompt
+        positions during decode).
+        Mamba blocks: share all-but-last via touch, allocate fresh
+        last block and return copy pair for GPU memcpy.
+
+        Returns (shared_tokens, mamba_copy_pairs) or None.
+        mamba_copy_pairs: {dest_block_id: src_block_id}
+        """
+        from vllm.v1.kv_cache_interface import MambaSpec
+
+        # Pre-check: count total mamba blocks needed and verify source
+        # exists in all managers, so we don't partially mutate state
+        # and then fail mid-way (which would leak blocks on retry).
+        total_mamba_blocks_needed = 0
+        for manager in self.coordinator.single_type_managers:
+            source_blocks = manager.req_to_blocks.get(source_request_id)
+            if source_blocks is None:
+                return None
+            if isinstance(manager.kv_cache_spec, MambaSpec):
+                total_mamba_blocks_needed += len(source_blocks)
+        if total_mamba_blocks_needed > self.block_pool.get_num_free_blocks():
+            return None
+
+        min_tokens = float('inf')
+        mamba_copy_pairs: dict[int, int] = {}
+        for manager in self.coordinator.single_type_managers:
+            source_blocks = manager.req_to_blocks[source_request_id]
+            is_mamba = isinstance(manager.kv_cache_spec, MambaSpec)
+            if is_mamba:
+                # Mamba state is updated in-place during decode, so
+                # every block must be independently owned (not shared).
+                # Allocate fresh blocks for ALL source blocks and copy.
+                n_blocks = len(source_blocks)
+                if n_blocks > 0:
+                    new_blocks = self.block_pool.get_new_blocks(n_blocks)
+                    for new_blk, src_blk in zip(
+                            new_blocks, source_blocks):
+                        mamba_copy_pairs[new_blk.block_id] = (
+                            src_blk.block_id)
+                    target_blocks = manager.req_to_blocks[
+                        target_request_id]
+                    target_blocks.extend(new_blocks)
+                    manager.num_cached_block[target_request_id] = (
+                        n_blocks)
+                min_tokens = min(
+                    min_tokens,
+                    n_blocks * manager.block_size)
+            else:
+                # Share all attention blocks.
+                blocks_to_share = list(source_blocks)
+                self.block_pool.touch(blocks_to_share)
+                target_blocks = manager.req_to_blocks[target_request_id]
+                target_blocks.extend(blocks_to_share)
+                manager.num_cached_block[target_request_id] = len(
+                    blocks_to_share)
+                min_tokens = min(
+                    min_tokens,
+                    len(source_blocks) * manager.block_size)
+        n = int(min_tokens) if min_tokens != float('inf') else 0
+        return n, mamba_copy_pairs
+
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
         We free the blocks in reverse order so that the tail blocks are evicted

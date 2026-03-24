@@ -430,6 +430,11 @@ class OutputProcessor:
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
 
+        # Deferred best-of-n children: child_0_id -> list of child requests.
+        # Sent to engine core when child 0 produces its first output.
+        self.pending_bon_children: dict[str, list] = {}
+        self.ready_bon_children: list = []
+
     def get_num_unfinished_requests(self):
         return len(self.request_states)
 
@@ -675,6 +680,14 @@ class OutputProcessor:
                     )
                     if self.tracing_enabled:
                         self.do_tracing(engine_core_output, req_state, iteration_stats)
+
+        # Deferred best-of-n: when child 0 produces first output,
+        # send all deferred children to engine core.
+        for engine_core_output in engine_core_outputs:
+            req_id = engine_core_output.request_id
+            if req_id in self.pending_bon_children:
+                children = self.pending_bon_children.pop(req_id)
+                self.ready_bon_children.extend(children)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
