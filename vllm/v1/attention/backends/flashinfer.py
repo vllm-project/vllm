@@ -42,7 +42,11 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import is_quantized_kv_cache, is_strictly_contiguous
+from vllm.utils.torch_utils import (
+    is_quantized_kv_cache,
+    is_strictly_contiguous,
+    nvfp4_kv_cache_split_views,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -1420,22 +1424,15 @@ class FlashInferImpl(AttentionImpl):
         num_prefill_tokens = attn_metadata.num_prefill_tokens
 
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
-        kv_cache_permute = kv_cache.permute(*stride_order)
+        kv_cache_permute = kv_cache.permute(*stride_order)  # HND and contiguous
 
-        # For NVFP4, split packed kv_cache into data and block scale views.
-        # kv_cache_permute shape (HND):
-        #   [num_blocks, 2, num_heads, block_size, head_size//2 + head_size//16]
+        # For NVFP4, the kv_cache last dim is full_dim (data + scale packed).
+        # Split into correctly-strided data and scale views.
         nvfp4_kv_data = None
         nvfp4_kv_block_scales = None
         if self.is_nvfp4:
-            d = self.fp4_data_dim
-            nvfp4_kv_data = (
-                kv_cache_permute[:, 0, :, :, :d],
-                kv_cache_permute[:, 1, :, :, :d],
-            )
-            nvfp4_kv_block_scales = (
-                kv_cache_permute[:, 0, :, :, d:].view(torch.float8_e4m3fn),
-                kv_cache_permute[:, 1, :, :, d:].view(torch.float8_e4m3fn),
+            nvfp4_kv_data, nvfp4_kv_block_scales = nvfp4_kv_cache_split_views(
+                kv_cache_permute
             )
 
         use_dcp = self.dcp_world_size > 1
@@ -1709,11 +1706,13 @@ class FlashInferImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
+            k_cache = kv_cache[:, 0]
+            v_cache = kv_cache[:, 1]
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
                 value,
-                kv_cache[:, 0],
-                kv_cache[:, 1],
+                k_cache,
+                v_cache,
                 slot_mapping,
                 self.kv_cache_dtype,
                 layer._k_scale,

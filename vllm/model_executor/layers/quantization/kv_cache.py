@@ -114,6 +114,13 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 layer._q_scale.copy_(k_scale)
                 layer._q_scale_float = k_scale
 
+            # For NVFP4, multiply k/v scales by 6 so that
+            # cvt_warp_fp16_to_fp4 produces block scales in the /6
+            # range expected by the trtllm-gen MHA kernel.
+            if layer.kv_cache_dtype == "nvfp4":
+                k_scale *= 6.0
+                v_scale *= 6.0
+
             # These are used in the final Attention.forward()
             layer._k_scale.copy_(k_scale)
             layer._v_scale.copy_(v_scale)

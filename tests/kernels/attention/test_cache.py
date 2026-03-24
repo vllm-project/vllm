@@ -10,7 +10,7 @@ from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_dequantize
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import nvfp4_kv_cache_split_views, set_random_seed
 
 COPYING_DIRECTION = [("cuda", "cpu"), ("cuda", "cuda"), ("cpu", "cuda")]
 DTYPES = [torch.bfloat16, torch.float]
@@ -246,6 +246,18 @@ def test_reshape_and_cache_flash(
     del key_caches
     del value_caches
 
+    # For nvfp4, the factory returns kv[:, 0] and kv[:, 1] like all dtypes.
+    # Split views are still needed for dequant verification.
+    key_scale_cache = None
+    value_scale_cache = None
+    nvfp4_key_data = None
+    nvfp4_value_data = None
+    if kv_cache_dtype == "nvfp4":
+        (nvfp4_key_data,), (key_scale_cache,) = nvfp4_kv_cache_split_views(key_cache)
+        (nvfp4_value_data,), (value_scale_cache,) = nvfp4_kv_cache_split_views(
+            value_cache
+        )
+
     if kv_cache_dtype == "nvfp4":
         # Global scale = amax / 448 (per-tensor)
         k_scale = (key.abs().amax() / 448.0).to(torch.float32)
@@ -342,16 +354,23 @@ def test_reshape_and_cache_flash(
             dequant_nvfp4_kv_cache,
         )
 
-        def dequant_nvfp4_cache_nhd(cache, global_scale):
-            # cache: [N, T, H, last_dim] NHD → permute to [N, H, T, last_dim]
-            cache_hnd = cache.permute(0, 2, 1, 3)
+        def dequant_nvfp4_cache_nhd(data_cache, scale_cache, global_scale):
+            # data_cache:  [N, T, H, data_dim]  NHD (contiguous inner dims)
+            # scale_cache: [N, T, H, scale_dim] NHD (contiguous inner dims)
+            # Permute to HND layout for the dequant utility.
+            data_hnd = data_cache.permute(0, 2, 1, 3)
+            scale_hnd = scale_cache.permute(0, 2, 1, 3)
             result_hnd = dequant_nvfp4_kv_cache(
-                cache_hnd, global_scale, head_size, block_size
+                data_hnd, scale_hnd, global_scale, head_size, block_size
             )
             return result_hnd.permute(0, 2, 1, 3)  # back to [N, T, H, D]
 
-        result_key_cache = dequant_nvfp4_cache_nhd(key_cache, k_scale.item())
-        result_value_cache = dequant_nvfp4_cache_nhd(value_cache, v_scale.item())
+        result_key_cache = dequant_nvfp4_cache_nhd(
+            nvfp4_key_data, key_scale_cache, k_scale.item()
+        )
+        result_value_cache = dequant_nvfp4_cache_nhd(
+            nvfp4_value_data, value_scale_cache, v_scale.item()
+        )
 
         # Flatten [num_blocks, block_size] → [num_slots] and index by slot_mapping.
         num_slots = num_blocks * block_size

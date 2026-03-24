@@ -89,7 +89,11 @@ def break_fp4_bytes(a, dtype):
 
 
 def dequant_nvfp4_kv_cache(
-    cache: torch.Tensor, global_scale: float, head_size: int, block_size: int
+    fp4_data: torch.Tensor,
+    block_scale: torch.Tensor,
+    global_scale: float,
+    head_size: int,
+    block_size: int,
 ) -> torch.Tensor:
     """Dequantize an NVFP4 KV cache with 4x4-swizzled block scales.
 
@@ -97,9 +101,9 @@ def dequant_nvfp4_kv_cache(
     (block_size, last_dim).  For NHD caches, permute to HND first.
 
     Args:
-        cache: [..., num_heads, block_size, last_dim] uint8, where
-            last_dim = head_size//2 + head_size//16.
-            The second-to-last dim must be block_size (the swizzle T dim).
+        fp4_data: [..., num_heads, block_size, head_size//2] uint8 packed fp4.
+        block_scale: [..., num_heads, block_size, head_size//16] fp8 block
+            scales (as uint8 or float8_e4m3fn).
         global_scale: checkpoint dequant scale (k_scale or v_scale).
         head_size: head dimension.
         block_size: page size.
@@ -110,9 +114,8 @@ def dequant_nvfp4_kv_cache(
     data_dim = head_size // 2
     scale_dim = head_size // 16
 
-    cache_c = cache.contiguous()
-    fp4_packed = cache_c[..., :data_dim]
-    sf_swizzled = cache_c[..., data_dim:]
+    fp4_packed = fp4_data
+    sf_swizzled = block_scale.view(torch.uint8)
 
     # Unswizzle 4x4 block scales on (block_size, scale_dim) plane.
     # [..., T, S] → [..., T//4, 4, sg, 4] → permute → [..., T, S]
