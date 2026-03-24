@@ -592,6 +592,6 @@ class INCXPULinearMethod(LinearMethodBase):
             layer.scales,
             layer.qzeros,
             self.group_size,
-            layer.g_idx,
+            None,  # g_idx not needed: desc_act is always False for INC models
         )
         return out.reshape(out_shape)
