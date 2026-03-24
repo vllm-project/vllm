@@ -728,7 +728,11 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
             torch.tensor([10, 10, 10]),
             1000,  # workspace allows all
             5000,  # 1250 float32 elems -> forces split
-            [(0, 1), (1, 2), (2, 3)],
+            [
+                (slice(0, 1), slice(0, 10)),
+                (slice(1, 2), slice(0, 10)),
+                (slice(2, 3), slice(0, 10)),
+            ],
         ),
         # Both constraints satisfied - all fit in one chunk
         (
@@ -736,7 +740,7 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
             torch.tensor([5, 5, 5]),
             100,
             10000,  # 2500 elems, M*N = 15*30 = 450 < 2500
-            [(0, 3)],
+            [(slice(0, 3), slice(0, 15))],
         ),
         # Workspace constraint triggers first
         (
@@ -744,7 +748,11 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
             torch.tensor([1, 1, 1]),
             50,  # workspace only fits one at a time
             1000000,  # logits budget is huge
-            [(0, 1), (1, 2), (2, 3)],
+            [
+                (slice(0, 1), slice(0, 1)),
+                (slice(1, 2), slice(0, 1)),
+                (slice(2, 3), slice(0, 1)),
+            ],
         ),
         # Greedy filling: first two fit, third doesn't
         # req0: M=5, N=10 -> 50 elems
@@ -755,7 +763,7 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
             torch.tensor([5, 5, 5]),
             100,
             1000,  # 250 elems
-            [(0, 2), (2, 3)],
+            [(slice(0, 2), slice(0, 10)), (slice(2, 3), slice(0, 5))],
         ),
     ],
 )
@@ -779,7 +787,11 @@ def test_split_indexer_prefill_chunks_single_request_overflow():
     query_lens = torch.tensor([100, 5])
 
     out = split_indexer_prefill_chunks(seq_lens, query_lens, 2000, 1000)
-    assert out == [(0, 1), (1, 2)]
+    # max_logits_elems = 250, N=1000 -> max_q = 1 -> 100 query sub-chunks
+    expected = [(slice(0, 1), slice(i, i + 1)) for i in range(100)]
+    # req1: M=5, N=50 -> 250 elems fits budget
+    expected.append((slice(1, 2), slice(0, 5)))
+    assert out == expected
 
 
 def test_triton_convert_returns_valid_counts():

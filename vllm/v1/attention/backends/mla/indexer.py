@@ -36,35 +36,47 @@ def split_indexer_prefill_chunks(
     workspace_size: int,
     max_logits_bytes: int,
     request_offset: int = 0,
-) -> list[tuple[int, int]]:
+) -> list[tuple[slice, slice]]:
     """
     Split prefill requests into chunks for the sparse indexer, respecting:
     - N constraint: total_seq_lens <= workspace_size (existing O(N) workspace)
     - Logits constraint: M * N * 4 <= max_logits_bytes
+
+    When a single request-level chunk still exceeds the logits budget,
+    sub-chunks on the query dimension (M) to bound peak memory.
+
+    Returns list of (req_slice, query_slice) tuples.
     """
-    chunk_bounds: list[tuple[int, int]] = []
+    chunks: list[tuple[slice, slice]] = []
     n = len(seq_lens_cpu)
     max_logits_elems = max_logits_bytes // 4
-    i = 0
+    end = 0
 
-    while i < n:
-        start, chunk_m, chunk_n = i, 0, 0
+    while end < n:
+        start, chunk_m, chunk_n = end, 0, 0
 
-        while i < n:
-            q, s = query_lens_cpu[i].item(), seq_lens_cpu[i].item()
+        while end < n:
+            q, s = query_lens_cpu[end].item(), seq_lens_cpu[end].item()
             new_m, new_n = chunk_m + q, chunk_n + s
             if new_n <= workspace_size and new_m * new_n <= max_logits_elems:
                 chunk_m, chunk_n = new_m, new_n
-                i += 1
+                end += 1
             else:
                 break
 
-        if i == start:
-            i += 1
+        # A single request can exceed the budget, requiring sub-chunking
+        # on the query dimension.
+        if end == start:
+            chunk_m, chunk_n = query_lens_cpu[end].item(), seq_lens_cpu[end].item()
+            end += 1
 
-        chunk_bounds.append((start + request_offset, i + request_offset))
+        req_slice = slice(start + request_offset, end + request_offset)
+        max_q = max(1, max_logits_elems // chunk_n) if chunk_n > 0 else chunk_m
+        for q_off in range(0, chunk_m, max_q):
+            sub_m = min(max_q, chunk_m - q_off)
+            chunks.append((req_slice, slice(q_off, q_off + sub_m)))
 
-    return chunk_bounds
+    return chunks
 
 
 class DeepseekV32IndexerBackend(AttentionBackend):
@@ -118,6 +130,7 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     token_start: int
     token_end: int
     num_reqs: int
+    skip_kv_gather: bool = False
 
 
 @dataclass
@@ -308,43 +321,51 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
 
     def build_one_prefill_chunk(
-        self, reqs_start, reqs_end, query_start_loc_cpu, seq_lens_cpu, block_table
-    ):
+        self,
+        req_slice: slice,
+        query_slice: slice,
+        query_start_loc_cpu,
+        seq_lens_cpu,
+        block_table,
+        skip_kv_gather: bool = False,
+    ) -> DeepseekV32IndexerPrefillChunkMetadata:
         prefill_query_start_loc = (
-            query_start_loc_cpu[reqs_start : reqs_end + 1]
-            - query_start_loc_cpu[reqs_start]
+            query_start_loc_cpu[req_slice.start : req_slice.stop + 1]
+            - query_start_loc_cpu[req_slice.start]
         )
         cu_seqlen_ks, cu_seqlen_ke = kv_spans_from_batches(
-            prefill_query_start_loc, seq_lens_cpu[reqs_start:reqs_end], self.device
+            prefill_query_start_loc, seq_lens_cpu[req_slice], self.device
         )
-        token_start = query_start_loc_cpu[reqs_start].item()
-        token_end = query_start_loc_cpu[reqs_end].item()
-        total_seq_lens = seq_lens_cpu[reqs_start:reqs_end].sum()
-        seq_idx = torch.arange(0, reqs_end - reqs_start, dtype=torch.int32)
+        token_start = query_start_loc_cpu[req_slice.start].item()
+        total_seq_lens = seq_lens_cpu[req_slice].sum()
+        num_reqs = req_slice.stop - req_slice.start
+        seq_idx = torch.arange(0, num_reqs, dtype=torch.int32)
         token_to_seq = torch.repeat_interleave(
-            seq_idx, seq_lens_cpu[reqs_start:reqs_end]
+            seq_idx, seq_lens_cpu[req_slice]
         ).to(self.device)
         assert total_seq_lens <= self.max_prefill_buffer_size
         cu_seq_lens = (
             torch.cat(
                 [
                     torch.zeros(1, dtype=torch.int32),
-                    seq_lens_cpu[reqs_start:reqs_end].cumsum(dim=0),
+                    seq_lens_cpu[req_slice].cumsum(dim=0),
                 ]
             )
             .to(torch.int32)
             .to(self.device)
         )
+
         return DeepseekV32IndexerPrefillChunkMetadata(
-            cu_seqlen_ks=cu_seqlen_ks,
-            cu_seqlen_ke=cu_seqlen_ke,
+            cu_seqlen_ks=cu_seqlen_ks[query_slice],
+            cu_seqlen_ke=cu_seqlen_ke[query_slice],
             cu_seq_lens=cu_seq_lens,
             token_to_seq=token_to_seq,
             total_seq_lens=total_seq_lens,
-            block_table=block_table[reqs_start:reqs_end],
-            token_start=token_start,
-            token_end=token_end,
-            num_reqs=reqs_end - reqs_start,
+            block_table=block_table[req_slice],
+            token_start=token_start + query_slice.start,
+            token_end=token_start + query_slice.stop,
+            num_reqs=num_reqs,
+            skip_kv_gather=skip_kv_gather,
         )
 
     def build(
@@ -374,7 +395,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
             max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-            chunk_seq_ids = split_indexer_prefill_chunks(
+            chunk_specs = split_indexer_prefill_chunks(
                 common_attn_metadata.seq_lens_cpu[num_decodes:],
                 prefill_query_lens_cpu,
                 self.max_prefill_buffer_size,
@@ -383,13 +404,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
             chunks = [
                 self.build_one_prefill_chunk(
-                    reqs_start,
-                    reqs_end,
+                    req_slice, query_slice,
                     query_start_loc_cpu,
                     common_attn_metadata.seq_lens_cpu,
                     common_attn_metadata.block_table_tensor,
+                    skip_kv_gather=query_slice.start > 0,
                 )
-                for reqs_start, reqs_end in chunk_seq_ids
+                for req_slice, query_slice in chunk_specs
             ]
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks=chunks,
