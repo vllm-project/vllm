@@ -16,6 +16,7 @@ import torch
 from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
@@ -873,18 +874,48 @@ def mamba_get_block_table_tensor(
         return block_table
     else:
         assert isinstance(kv_cache_spec, MambaSpec)
-        # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
-        # to handle the invalid block table.
-        start_indices = torch.clamp(
-            (seq_lens - 1) // kv_cache_spec.block_size,
-            min=0,
-        )
-        # Use int32 for arithmetic to avoid dtype promotion overhead,
-        # then convert to int64 for gather (which requires Long indices)
-        offsets = torch.arange(
-            1 + kv_cache_spec.num_speculative_blocks,
+        num_out_cols = 1 + kv_cache_spec.num_speculative_blocks
+        out = torch.empty(
+            (block_table.shape[0], num_out_cols),
+            dtype=block_table.dtype,
             device=block_table.device,
-            dtype=torch.int32,
         )
-        indices_to_gather = (start_indices.unsqueeze(1) + offsets).to(torch.int64)
-        return torch.gather(block_table, 1, indices_to_gather)
+        _mamba_gather_align_block_table_kernel[(block_table.shape[0],)](
+            block_table,
+            seq_lens,
+            out,
+            block_table.stride(0),
+            out.stride(0),
+            kv_cache_spec.block_size,
+            num_out_cols,
+            block_table.shape[1],
+            BLOCK_K=triton.next_power_of_2(num_out_cols),
+        )
+        return out
+
+
+@triton.jit
+def _mamba_gather_align_block_table_kernel(
+    block_table_ptr,
+    seq_lens_ptr,
+    out_ptr,
+    stride_bt_row,
+    stride_out_row,
+    block_size,
+    num_out_cols,
+    num_bt_cols,
+    BLOCK_K: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    seq_len = tl.load(seq_lens_ptr + pid)
+    # Clamp to 0 for 0-length requests in CUDA graph padding
+    start = tl.maximum((seq_len - 1) // block_size, 0)
+    offsets = tl.arange(0, BLOCK_K)
+    # Guard against both power-of-2 padding and block_table column bounds
+    mask = (offsets < num_out_cols) & (start + offsets < num_bt_cols)
+    vals = tl.load(
+        block_table_ptr + pid * stride_bt_row + start + offsets,
+        mask=mask,
+    )
+    out_mask = offsets < num_out_cols
+    tl.store(out_ptr + pid * stride_out_row + offsets, vals, mask=out_mask)
