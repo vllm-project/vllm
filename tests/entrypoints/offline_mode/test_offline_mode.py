@@ -155,7 +155,7 @@ def test_model_from_huggingface_offline(monkeypatch: pytest.MonkeyPatch):
             # and friends to set up offline mode
             _re_import_modules()
             engine_args = EngineArgs(model="facebook/opt-125m")
-            LLM(**engine_args.dict())
+            LLM(**vars(engine_args))
         finally:
             # Reset the environment after the test
             # NB: Assuming tests are run in online mode

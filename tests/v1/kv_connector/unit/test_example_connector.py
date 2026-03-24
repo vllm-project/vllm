@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import asdict
 from typing import NamedTuple
 
 import pytest
@@ -163,8 +162,7 @@ def test_shared_storage_connector_hashes(tmp_path, attn_backend):
     assert image_1 != image_2, "The images should not be identical"
 
     # Create the LLM instance
-    engine_args = asdict(engine_args)
-    llm = LLM(**engine_args)
+    llm = LLM(**vars(engine_args))
 
     # Prepare the input cases
     input_cases = [
