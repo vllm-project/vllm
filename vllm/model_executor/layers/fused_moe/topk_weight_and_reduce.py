@@ -10,7 +10,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 
 class TopKWeightAndReduceDelegate(mk.TopKWeightAndReduce):
     """
-    Useful in the case when some FusedMoEPermuteExpertsUnpermute
+    Useful in the case when some FusedMoEExpertsModular
     implementation does not perform weight application and reduction
     but cannot address the needs of all the compatible PrepareAndFinalize
     implementations.
@@ -62,7 +62,7 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
         if output is None:
             return fused_expert_output
 
-        # MoEPrepareAndFinalizeNoEP needs the output to be in the `output`
+        # MoEPrepareAndFinalizeNoDPEPModular needs the output to be in the `output`
         # tensor.
         assert output.size() == fused_expert_output.size(), (
             "output shape is expected to match the fused_expert_output shape. "

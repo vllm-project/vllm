@@ -54,11 +54,14 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
 /vllm/v1/kv_cache_interface.py @heheda12345
 /vllm/v1/kv_offload @ApostaC @orozery
-/vllm/v1/worker/gpu/kv_connector.py @orozery
+/vllm/v1/engine @njhill
+/vllm/v1/executor @njhill
+/vllm/v1/worker @njhill
 /vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery @NickLucche
 
 # Model runner V2
-/vllm/v1/worker/gpu @WoosukKwon
+/vllm/v1/worker/gpu @WoosukKwon @njhill
+/vllm/v1/worker/gpu/kv_connector.py @orozery
 
 # Test ownership
 /.buildkite/lm-eval-harness @mgoin 
@@ -72,7 +75,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety
 /tests/test_inputs.py @DarkLight1337 @ywang96
-/tests/v1/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
+/tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
 /tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery
 /tests/weight_loading @mgoin @youkaichao @yewentao256
@@ -168,6 +171,7 @@ mkdocs.yaml @hmellor
 
 # Pooling models
 /examples/pooling @noooop
+/docs/models/pooling_models @noooop
 /tests/models/*/pooling* @noooop
 /tests/entrypoints/pooling @noooop
 /vllm/config/pooler.py @noooop

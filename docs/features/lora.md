@@ -106,7 +106,8 @@ curl http://localhost:8000/v1/completions \
 
 In addition to serving LoRA adapters at server startup, the vLLM server supports dynamically configuring LoRA adapters at runtime through dedicated API endpoints and plugins. This feature can be particularly useful when the flexibility to change models on-the-fly is needed.
 
-Note: Enabling this feature in production environments is risky as users may participate in model adapter management.
+!!! warning
+    This feature comes with security risks. It should not be used in production unless it is an isolated, fully trusted environment.
 
 To enable dynamic LoRA configuration, ensure that the environment variable `VLLM_ALLOW_RUNTIME_LORA_UPDATING`
 is set to `True`.
@@ -388,3 +389,17 @@ vllm serve model --enable-lora --max-lora-rank 64
 # Bad: unnecessarily high, wastes memory
 vllm serve model --enable-lora --max-lora-rank 256
 ```
+
+### Restricting LoRA to Specific Modules
+
+The `--lora-target-modules` parameter allows you to restrict which model modules have LoRA applied at deployment time. This is useful for performance tuning when you only need LoRA on specific layers:
+
+```bash
+# Apply LoRA only to output projection layers
+vllm serve model --enable-lora --lora-target-modules o_proj
+
+# Apply LoRA to multiple specific modules
+vllm serve model --enable-lora --lora-target-modules o_proj qkv_proj down_proj
+```
+
+When `--lora-target-modules` is not specified, LoRA will be applied to all supported modules in the model. This parameter accepts module suffixes (the last component of the module name), such as `o_proj`, `qkv_proj`, `gate_proj`, etc.
