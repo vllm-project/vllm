@@ -71,3 +71,40 @@ def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
         ) as _,
     ):
         pass
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+# Requires Cuda and 8 gpus as well
+@pytest.mark.forked
+@pytest.mark.skip(reason="Skipping due to CI resource constraints")
+def test_mllama4_vit_compilation(vllm_runner, monkeypatch):
+    """Test that Mllama4 vision submodules are compiled.
+
+    This test verifies that the 2 vision submodules (Llama4VisionEncoder,
+    Llama4VisionPixelShuffleMLP) are properly tagged
+    for compilation by checking that num_models_seen increases to 3.
+
+    However since we are using TP=8, we compilation_counter will not
+    work properly so we will just check the run succeeds rn
+    """
+    # Disable multiprocessing so that the counter is in the same process
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    with (
+        monkeypatch.context(),
+        # TODO: Since we require TP=8, this messes with the compilation
+        # counter. We should fix this in the future, but leave for now
+        # to make sure that compilation runs (no crash) with llama vision encoder
+        compilation_counter.expect(num_models_seen=0),
+        vllm_runner(
+            "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+            max_model_len=512,
+            gpu_memory_utilization=0.8,
+            tensor_parallel_size=8,
+            compilation_config={
+                "mode": CompilationMode.VLLM_COMPILE,
+                "compile_mm_encoder": True,
+            },
+        ),
+    ):
+        pass

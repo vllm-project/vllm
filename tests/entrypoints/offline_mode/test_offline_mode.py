@@ -109,8 +109,15 @@ def _re_import_modules():
         if k.startswith("transformers") and not k.startswith("transformers_modules")
     ]
 
+    # These modules are aliased in Transformers v5 and so cannot be reloaded directly
+    aliased_modules = ["tokenization_utils", "tokenization_utils_fast"]
+
     reload_exception = None
     for module_name in hf_hub_module_names + transformers_module_names:
+        if any(module_name.endswith(f".{alias}") for alias in aliased_modules):
+            # Remove from sys.modules so they are re-aliased on next import
+            del sys.modules[module_name]
+            continue
         try:
             importlib.reload(sys.modules[module_name])
         except Exception as e:

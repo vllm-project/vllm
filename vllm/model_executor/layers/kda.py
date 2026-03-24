@@ -5,7 +5,6 @@ import torch
 from einops import rearrange
 from torch import nn
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (
     divide,
@@ -17,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from .fla.ops.kda import (
@@ -306,7 +306,7 @@ class KimiDeltaAttention(nn.Module, MambaBase):
         non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         num_actual_tokens = attn_metadata.num_actual_tokens
-        constant_caches = self.kv_cache[forward_context.virtual_engine]
+        constant_caches = self.kv_cache
 
         q_proj_states = q_proj_states[:num_actual_tokens]
         k_proj_states = k_proj_states[:num_actual_tokens]

@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.config import FUSED_MOE_UNQUANTIZED_CONFIG
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 from .common import (
     Config,
@@ -40,13 +40,7 @@ def rank_worker(
     config: Config,
     weights: WeightTensors,
 ):
-    current_platform.seed_everything(pgi.rank)
-
-    # sanity check
-    from vllm import envs
-
-    if config.fused_moe_chunk_size is not None:
-        assert config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE
+    set_random_seed(pgi.rank)
 
     # get weights to this device
     weights.to_current_device()
@@ -135,7 +129,6 @@ def make_feature_matrix(csv_file_path: str):
             fused_experts_type=experts_type,
             quant_config=quant_config,
             world_size=2,
-            fused_moe_chunk_size=None,
         )
 
         success = None

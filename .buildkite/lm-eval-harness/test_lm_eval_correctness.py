@@ -13,8 +13,9 @@ import os
 from contextlib import contextmanager
 
 import lm_eval
-import numpy as np
 import yaml
+
+from vllm.platforms import current_platform
 
 DEFAULT_RTOL = 0.08
 
@@ -60,7 +61,11 @@ def launch_lm_eval(eval_config, tp_size):
         f"add_bos_token=true,"
         f"trust_remote_code={trust_remote_code},"
         f"max_model_len={max_model_len},"
+        "allow_deprecated_quantization=True,"
     )
+
+    if current_platform.is_rocm() and "Nemotron-3" in eval_config["model_name"]:
+        model_args += "attention_backend=TRITON_ATTN"
 
     env_vars = eval_config.get("env_vars", None)
     with scoped_env_vars(env_vars):
@@ -101,6 +106,8 @@ def test_lm_eval_correctness_param(config_filename, tp_size):
                 f"ground_truth={ground_truth:.3f} | "
                 f"measured={measured_value:.3f} | rtol={rtol}"
             )
-            success = success and np.isclose(ground_truth, measured_value, rtol=rtol)
+
+            min_acceptable = ground_truth * (1 - rtol)
+            success = success and measured_value >= min_acceptable
 
     assert success

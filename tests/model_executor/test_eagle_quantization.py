@@ -11,7 +11,7 @@ from vllm.model_executor.models.utils import get_draft_quant_config
 from vllm.platforms import current_platform
 
 DEVICES = (
-    [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+    [f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)]
     if current_platform.is_cuda_alike()
     else ["cpu"]
 )
@@ -55,13 +55,13 @@ def test_get_draft_quant_config_without_draft_model():
 
 @torch.inference_mode()
 @pytest.mark.parametrize("device", DEVICES)
-def test_fc_layer_quant_config_usage(dist_init, device) -> None:
+def test_fc_layer_quant_config_usage(default_vllm_config, dist_init, device) -> None:
     import torch
 
     from vllm.model_executor.layers.linear import ReplicatedLinear
 
     if current_platform.is_cuda_alike():
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
 
     torch.set_default_device(device)
 

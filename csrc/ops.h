@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <torch/library.h>
+#include <tuple>
 
 #include "core/scalar_type.hpp"
 
@@ -113,6 +114,10 @@ void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
                           int64_t numRows, int64_t stride0, int64_t stride1,
                           int64_t topK);
 
+void large_context_topk(const torch::Tensor& score, torch::Tensor& indices,
+                        const torch::Tensor& lengths,
+                        std::optional<torch::Tensor> row_starts_opt);
+
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,
                                double epsilon);
@@ -196,7 +201,6 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              torch::Tensor _zeros, int64_t split_k_iters,
                              int64_t thx, int64_t thy);
 
-torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
 #endif
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
@@ -257,21 +261,21 @@ void get_cutlass_moe_mm_data(
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
     const int64_t num_experts, const int64_t n, const int64_t k,
-    const std::optional<torch::Tensor>& blockscale_offsets);
+    const std::optional<torch::Tensor>& blockscale_offsets,
+    const bool is_gated);
 
-void get_cutlass_moe_mm_problem_sizes(
-    const torch::Tensor& topk_ids, torch::Tensor& problem_sizes1,
-    torch::Tensor& problem_sizes2, const int64_t num_experts, const int64_t n,
-    const int64_t k, const std::optional<torch::Tensor>& blockscale_offsets,
-    std::optional<bool> force_swap_ab = std::nullopt);
+void get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
+    const torch::Tensor& expert_first_token_offset,
+    torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
+    const int64_t n, const int64_t k, const bool swap_ab);
 
-void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
-                                  torch::Tensor& problem_sizes1,
-                                  torch::Tensor& problem_sizes2,
-                                  const torch::Tensor& expert_num_tokens,
-                                  const int64_t num_local_experts,
-                                  const int64_t padded_m, const int64_t n,
-                                  const int64_t k);
+void get_cutlass_batched_moe_mm_data(torch::Tensor& expert_offsets,
+                                     torch::Tensor& problem_sizes1,
+                                     torch::Tensor& problem_sizes2,
+                                     const torch::Tensor& expert_num_tokens,
+                                     const int64_t num_local_experts,
+                                     const int64_t padded_m, const int64_t n,
+                                     const int64_t k);
 
 void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,
@@ -281,21 +285,22 @@ void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            std::optional<torch::Tensor> const& azp,
                            std::optional<torch::Tensor> const& bias);
 
-bool cutlass_sparse_scaled_mm_supported(int64_t cuda_device_capability);
+std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
+    torch::Tensor const& input, torch::Tensor const& input_scale,
+    bool is_sf_swizzled_layout);
 
-void cutlass_scaled_sparse_mm(torch::Tensor& out, torch::Tensor const& a,
-                              torch::Tensor const& b, torch::Tensor const& e,
-                              torch::Tensor const& a_scales,
-                              torch::Tensor const& b_scales,
-                              std::optional<torch::Tensor> const& bias);
-
-std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a);
-
-void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
-                      torch::Tensor& output_scale,
-                      torch::Tensor const& input_scale);
+void scaled_fp4_quant_out(torch::Tensor const& input,
+                          torch::Tensor const& input_scale,
+                          bool is_sf_swizzled_layout, torch::Tensor& output,
+                          torch::Tensor& output_scale);
 
 void scaled_fp4_experts_quant(
+    torch::Tensor& output, torch::Tensor& output_scale,
+    torch::Tensor const& input, torch::Tensor const& input_global_scale,
+    torch::Tensor const& input_offset_by_experts,
+    torch::Tensor const& output_scale_offset_by_experts);
+
+void silu_and_mul_scaled_fp4_experts_quant(
     torch::Tensor& output, torch::Tensor& output_scale,
     torch::Tensor const& input, torch::Tensor const& input_global_scale,
     torch::Tensor const& input_offset_by_experts,
@@ -304,7 +309,9 @@ void scaled_fp4_experts_quant(
 void per_token_group_quant_fp8(const torch::Tensor& input,
                                torch::Tensor& output_q, torch::Tensor& output_s,
                                int64_t group_size, double eps, double fp8_min,
-                               double fp8_max, bool scale_ue8m0);
+                               double fp8_max, bool scale_ue8m0,
+                               bool dummy_is_scale_transposed,
+                               bool dummy_is_tma_aligned);
 
 void per_token_group_quant_int8(const torch::Tensor& input,
                                 torch::Tensor& output_q,
@@ -335,8 +342,9 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 
-void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
-                             torch::Tensor const& scale);
+void static_scaled_fp8_quant(
+    torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& scale,
+    std::optional<std::tuple<int64_t, int64_t>> group_shape = std::nullopt);
 
 void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor& scale);
@@ -357,7 +365,9 @@ void selective_scan_fwd(
     const torch::Tensor& ssm_states, int64_t pad_slot_id, int64_t block_size,
     const std::optional<torch::Tensor>& block_idx_first_scheduled_token,
     const std::optional<torch::Tensor>& block_idx_last_scheduled_token,
-    const std::optional<torch::Tensor>& initial_state_idx);
+    const std::optional<torch::Tensor>& initial_state_idx,
+    const std::optional<torch::Tensor>& cu_chunk_seqlen,
+    const std::optional<torch::Tensor>& last_chunk_indices);
 
 torch::Tensor dynamic_4bit_int_moe_cpu(
     torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
@@ -395,4 +405,9 @@ void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
 void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                    int64_t quant_level, bool cast_bf2half = false);
 int64_t qr_max_size();
+#endif
+
+#ifndef USE_ROCM
+void dsv3_fused_a_gemm(torch::Tensor& output, torch::Tensor const& mat_a,
+                       torch::Tensor const& mat_b);
 #endif

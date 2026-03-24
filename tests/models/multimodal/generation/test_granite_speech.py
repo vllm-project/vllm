@@ -39,6 +39,10 @@ models = [MODEL_NAME]
 def granite_speech_attention_config():
     """Return attention config for Granite Speech tests on ROCm."""
     if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_mi3xx
+
+        if on_mi3xx():
+            return {"backend": "ROCM_AITER_FA"}
         return {"backend": "TRITON_ATTN"}
     return None
 

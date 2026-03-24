@@ -51,8 +51,21 @@ class BlockStored(KVCacheEvent):
     parent_block_hash: ExternalBlockHash | None
     token_ids: list[int]
     block_size: int
+
     lora_id: int | None
+    """Deprecated: use `lora_name` for KV block key hash.
+    Retained for backward compatibility.
+    """
+
     medium: str | None
+    lora_name: str | None
+
+    extra_keys: list[tuple[Any, ...] | None] | None = None
+    """Extra keys used in block hash computation, one entry per block in
+    block_hashes. Each entry contains MM identifiers, LoRA name, cache_salt,
+    prompt embedding hashes, etc. for that specific block. Exposed for external
+    KV cache consumers to reconstruct block hashes.
+    """
 
     def __hash__(self) -> int:
         return hash(
@@ -63,6 +76,7 @@ class BlockStored(KVCacheEvent):
                 self.block_size,
                 self.lora_id,
                 self.medium,
+                tuple(self.extra_keys) if self.extra_keys else None,
             )
         )
 
@@ -194,6 +208,10 @@ class KVConnectorKVEvents(ABC):
     @abstractmethod
     def clear_events(self) -> None:
         raise NotImplementedError
+
+    def merge(self, other: "KVConnectorKVEvents") -> "KVConnectorKVEvents":
+        self.add_events(other.get_all_events())
+        return self
 
 
 class EventPublisher(ABC):

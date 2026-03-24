@@ -7,6 +7,7 @@ from typing import Any, Literal
 import torch
 
 from vllm.config import VllmConfig
+from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.model_manager import (
@@ -16,7 +17,11 @@ from vllm.lora.model_manager import (
 )
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
-from vllm.lora.utils import get_adapter_absolute_path
+from vllm.lora.utils import (
+    get_adapter_absolute_path,
+    is_in_target_modules,
+    is_supported_lora_module,
+)
 
 logger = init_logger(__name__)
 
@@ -49,7 +54,18 @@ class WorkerLoRAManager:
         # Use get_text_config() in case of multimodal models
         text_config = vllm_config.model_config.hf_config.get_text_config()
 
-        self.max_position_embeddings = text_config.max_position_embeddings
+        # For encoder-decoder models (e.g., Whisper), use max_target_positions
+        # instead of max_position_embeddings
+        # TODO: Generalize max_position_embeddings handling for
+        # out-of-tree (OOT) encoder-decoder models
+        if vllm_config.model_config.is_encoder_decoder:
+            self.max_position_embeddings = getattr(
+                text_config, "max_target_positions", None
+            )
+        else:
+            self.max_position_embeddings = getattr(
+                text_config, "max_position_embeddings", None
+            )
         self.device = device
         # Lazily initialized by create_lora_manager.
         self._adapter_manager: LoRAModelManager
@@ -69,6 +85,7 @@ class WorkerLoRAManager:
     def create_lora_manager(
         self,
         model: torch.nn.Module,
+        vllm_config: VllmConfig | None = None,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
@@ -78,6 +95,7 @@ class WorkerLoRAManager:
             lora_config=self.lora_config,
             device=self.device,
             lora_manager_cls=self._manager_cls,
+            vllm_config=vllm_config,
         )
         self._adapter_manager = lora_manager
         return lora_manager.model
@@ -112,6 +130,9 @@ class WorkerLoRAManager:
             model = self._adapter_manager.model
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
 
+            # Get model-defined prefixes to skip during LoRA loading.
+            lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
+
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_path,
                 expected_lora_modules,
@@ -122,7 +143,32 @@ class WorkerLoRAManager:
                 model_vocab_size=self.vocab_size,
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper,
+                skip_prefixes=lora_skip_prefixes,
             )
+
+            # Warn about adapter modules that will be ignored.
+            target_modules = self.lora_config.target_modules
+            expected_lora_modules_lst = list(expected_lora_modules)
+            for module_name in lora.loras:
+                if not is_supported_lora_module(module_name, expected_lora_modules_lst):
+                    logger.warning_once(
+                        "LoRA module '%s' in adapter '%s' is not in the "
+                        "model's supported LoRA target modules [%s]. "
+                        "These parameters will be ignored, which may "
+                        "cause abnormal model behavior.",
+                        module_name,
+                        lora_request.lora_path,
+                        ", ".join(sorted(expected_lora_modules_lst)),
+                    )
+                elif not is_in_target_modules(module_name, target_modules):
+                    logger.warning_once(
+                        "LoRA module '%s' in adapter '%s' is not in the "
+                        "deployment-time target_modules restriction [%s]."
+                        " These parameters will be ignored.",
+                        module_name,
+                        lora_request.lora_path,
+                        ", ".join(sorted(target_modules)),
+                    )
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
@@ -130,12 +176,10 @@ class WorkerLoRAManager:
             #       offline mode)
             # - No local adapter files found at `lora_request.lora_path`
             # For NotFoundError
-            raise ValueError(
-                f"Loading lora {lora_request.lora_name} failed: No adapter "
-                f"found for {lora_request.lora_path}"
+            raise LoRAAdapterNotFoundError(
+                lora_request.lora_name, lora_request.lora_path
             ) from e
         except Exception as e:
-            # For BadRequestError
             raise e
 
         return lora
@@ -160,6 +204,12 @@ class WorkerLoRAManager:
         self._apply_adapters(requests)
         if mapping is not None:
             self._adapter_manager.set_adapter_mapping(mapping)
+
+    def supports_tower_connector_lora(self) -> bool:
+        return (
+            self._adapter_manager.supports_mm
+            and self._adapter_manager.supports_tower_connector_lora
+        )
 
     def _apply_adapters(self, adapter_requests: set[Any]) -> None:
         existing_adapters = self.list_adapters()
@@ -210,6 +260,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
+        vllm_config: VllmConfig | None = None,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
@@ -219,6 +270,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             lora_config=self.lora_config,
             device=self.device,
             max_num_batched_tokens=self.max_num_batched_tokens,
+            vllm_config=vllm_config,
         )
         self._adapter_manager = lora_manager
         return lora_manager.model
@@ -244,12 +296,19 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         # This is ok because it's currently only called from
         # the single-threaded core engine loop.
 
-        if lora_request.lora_int_id not in self.list_adapters():
+        if (
+            lora_request.lora_int_id not in self.list_adapters()
+            or lora_request.load_inplace
+        ):
             # Load the new adapter first to ensure it is actually valid, before
             # evicting any existing adapters.
             # This may cause the # of loaded lora adapters to very temporarily
             # exceed `--max-cpu-loras`.
             lora = self._load_adapter(lora_request)
+
+            # Remove the existing adapter if it exists
+            # Use case for LoRA inplace
+            self._adapter_manager.remove_adapter(lora.id)
 
             # Loading succeeded, now check if we will exceed cache capacity and
             # evict if the oldest adapter if so

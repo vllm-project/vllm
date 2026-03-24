@@ -11,9 +11,39 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  pre-run-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check PR label and author merge count
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      with:
+        script: |
+          const { data: pr } = await github.rest.pulls.get({
+            ...context.repo,
+            pull_number: context.payload.pull_request.number,
+          });
+
+          const hasReadyLabel = pr.labels.some(l => l.name === 'ready');
+
+          const { data: mergedPRs } = await github.rest.search.issuesAndPullRequests({
+            q: `repo:${context.repo.owner}/${context.repo.repo} is:pr is:merged author:${pr.user.login}`,
+            per_page: 4,
+          });
+          const mergedCount = mergedPRs.total_count;
+
+          if (hasReadyLabel || mergedCount >= 4) {
+            core.info(`Check passed: ready label=${hasReadyLabel}, 4+ merged PRs=${mergedCount >= 4}`);
+          } else {
+            core.setFailed(`PR must have the 'ready' label or the author must have at least 4 merged PRs (found ${mergedCount}).`);
+          }
+
   pre-commit:
+    needs: pre-run-check
+    if: always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1

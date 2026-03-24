@@ -14,8 +14,6 @@ from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from .utils import supports_pdl
-
 
 @triton.jit
 def _lora_shrink_kernel(
@@ -136,6 +134,7 @@ def _lora_shrink(
     lora_token_start_loc: torch.Tensor,  # shape [max-loras + 2]
     lora_ids: torch.Tensor,  # shape [max-loras + 1]
     no_lora_flag_cpu: torch.Tensor,  # shape [1]
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     scaling: float,
 ) -> None:
     """
@@ -158,6 +157,9 @@ def _lora_shrink(
         lora_ids (torch.Tensor): LoRA ids to process.
         no_lora_flag_cpu (torch.Tensor): A CPU tensor of size 1, that indicates
             if there are any requests that require LoRA.
+        num_active_loras (torch.Tensor): A CPU tensor of size 1, containing the
+            number of active LoRAs. Stored as a tensor (not int) so
+            torch.compile treats it as dynamic rather than a constant.
         scaling (float): Scaling factor.
     """
 
@@ -216,12 +218,11 @@ def _lora_shrink(
     grid = (
         SPLIT_K * triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         NUM_SLICES,
-        # Each LoRA receives its own set of thread blocks for output
-        # computation. If some LoRA doesn't have any tokens to process, its
-        # thread blocks exit early.
-        MAX_LORAS,
+        num_active_loras.item(),
     )
-    use_gdc = supports_pdl(inputs.device)
+    # We disable PDL temporarily because LoRA kernels are not launching back-to-back,
+    # making PDL invalid and affecting the kernel performance.
+    use_gdc = False  # supports_pdl(inputs.device)
     _lora_shrink_kernel[grid](
         inputs,
         lora_ptr_tensor,
@@ -269,6 +270,7 @@ def _lora_shrink_fake(
     lora_token_start_loc: torch.Tensor,
     lora_ids: torch.Tensor,
     no_lora_flag_cpu: torch.Tensor,
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     scaling: float,
 ) -> None:
     return

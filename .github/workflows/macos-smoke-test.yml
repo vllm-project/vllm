@@ -1,10 +1,13 @@
 name: macOS Apple Silicon Smoke Test
 
 on:
-  push:
-    branches:
-      - main
+  schedule:
+    # Daily at 2:30 AM UTC
+    - cron: '30 2 * * *'
   workflow_dispatch:  # Manual trigger
+
+permissions:
+  contents: read
 
 jobs:
   macos-m1-smoke-test:
@@ -29,8 +32,9 @@ jobs:
 
       - name: Install dependencies and build vLLM
         run: |
+          uv pip install -r requirements/cpu-build.txt --index-strategy unsafe-best-match
           uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match
-          uv pip install -e .
+          uv pip install -e . --no-build-isolation
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: 4
 

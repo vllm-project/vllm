@@ -36,10 +36,11 @@ from typing import Any
 import numpy as np
 import torch
 
+from vllm.benchmarks.lib.utils import default_vllm_config
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.torch_utils import set_random_seed
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -78,6 +79,7 @@ def calculate_stats(times: list[float]) -> dict[str, float]:
     }
 
 
+@default_vllm_config()
 def benchmark_mrope(
     model_name: str,
     num_tokens: int,
@@ -94,7 +96,7 @@ def benchmark_mrope(
     benchmark_iter: int = 100,
     csv_writer=None,
 ):
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     # the parameters to compute the q k v size based on tp_size
     mrope_helper_class = get_rope(
@@ -133,14 +135,14 @@ def benchmark_mrope(
             key.clone(),
         )
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Time reference implementation
     torch_times = []
     for _ in range(benchmark_iter):
         query_clone = query.clone()
         key_clone = key.clone()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         start_time = time.time()
 
         mrope_helper_class.forward_native(
@@ -149,7 +151,7 @@ def benchmark_mrope(
             key_clone,
         )
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         torch_times.append(time.time() - start_time)
 
     # Time triton kernel implementation
@@ -157,14 +159,14 @@ def benchmark_mrope(
     for _ in range(benchmark_iter):
         query_clone = query.clone()
         key_clone = key.clone()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         start_time = time.time()
         mrope_helper_class.forward_cuda(
             positions,
             query_clone,
             key_clone,
         )
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         triton_times.append(time.time() - start_time)
 
     # Calculate statistics

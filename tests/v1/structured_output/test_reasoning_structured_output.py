@@ -71,6 +71,7 @@ class TestReasoningStructuredOutput:
         request.prompt_token_ids = [1, 2, 3, 4, 5]
         request.all_token_ids = [1, 2, 3, 4, 5, 6, 7, 8]
         request.num_computed_tokens = 5
+        request.num_output_placeholders = 0
         return request
 
     def test_should_fill_bitmask_with_enable_in_reasoning(

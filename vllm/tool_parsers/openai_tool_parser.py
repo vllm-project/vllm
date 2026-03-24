@@ -4,14 +4,16 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.parser.harmony_utils import parse_output_into_messages
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.parser.harmony_utils import parse_output_into_messages
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
@@ -78,6 +80,15 @@ class OpenAIToolParser(ToolParser):
                     final_content = msg_text
                 elif msg.channel == "commentary" and not msg.recipient:
                     commentary_content = msg_text
+
+        # Extract partial content from the parser state if the generation was truncated
+        if parser.current_content:
+            if parser.current_channel == "final":
+                final_content = parser.current_content
+            elif (
+                parser.current_channel == "commentary" and not parser.current_recipient
+            ):
+                commentary_content = parser.current_content
 
         return ExtractedToolCallInformation(
             tools_called=len(tool_calls) > 0,

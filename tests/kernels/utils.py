@@ -13,11 +13,12 @@ import torch
 from torch._prims_common import TensorLikeType
 
 from tests.kernels.quant_utils import native_w8a8_block_matmul
-from vllm.attention.backends.abstract import AttentionType
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import op_registry
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.torch_utils import make_tensor_with_pad
+from vllm.v1.attention.backend import AttentionType
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
 # bugs related to this test in PyTorch 2.4.
@@ -609,7 +610,7 @@ def _num_tokens_to_min_blocks(num_tokens: int, block_size: int) -> int:
     Compute the minimum number of blocks required to hold num_tokens tokens,
     given block_size
     """
-    return (num_tokens + block_size) // block_size
+    return (num_tokens + block_size - 1) // block_size
 
 
 def make_empty_slot_mapping_tensor(device: torch.device | str):
@@ -694,7 +695,7 @@ def make_block_tables_slot_mapping(
     For a sequence with num_tokens tokens the minimum number
     of required KV cache blocks is
 
-    num_blocks = (num_tokens + block_size) // block_size
+    num_blocks = (num_tokens + block_size - 1) // block_size
 
     Then the minimum KV cache size in blocks is
 
@@ -840,7 +841,7 @@ def torch_experts(
     per_act_token_quant=False,
     block_shape: list[int] | None = None,
     apply_router_weights_on_input: bool = False,
-    activation: str = "silu_and_mul",
+    activation: MoEActivation = MoEActivation.SILU,
 ) -> torch.Tensor:
     assert (
         global_num_experts == -1
@@ -883,7 +884,7 @@ def torch_experts(
 
     f32 = torch.float32
 
-    act = CustomOp.op_registry[activation]
+    act = op_registry[activation.custom_op_name]
 
     for i in range(num_experts):
         mask = topk_ids == i
@@ -973,7 +974,7 @@ def torch_moe(
     b_bias2: torch.Tensor | None = None,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
-    activation: str = "silu_and_mul",
+    activation: MoEActivation = MoEActivation.SILU,
 ) -> torch.Tensor:
     score = torch.softmax(score, dim=-1, dtype=torch.float32)
     topk_weight, topk_ids = torch.topk(score, topk)

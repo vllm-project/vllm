@@ -10,28 +10,32 @@ import pytest
 import torch.distributed
 from torch.distributed import ProcessGroup
 
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import BatchedTritonExperts
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
-from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
 
 if has_deep_ep():
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
         DeepEPHTPrepareAndFinalize,
     )
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
         DeepEPLLPrepareAndFinalize,
     )
 
@@ -131,7 +135,7 @@ def make_modular_kernel(
     q_dtype: torch.dtype | None,
     use_fp8_dispatch: bool,
     quant_config: FusedMoEQuantConfig,
-) -> FusedMoEModularKernel:
+) -> FusedMoEKernel:
     ht_args: DeepEPHTArgs | None = None
     ll_args: DeepEPLLArgs | None = None
 
@@ -160,17 +164,27 @@ def make_modular_kernel(
 
     num_dispatchers = pgi.world_size // dp_size
 
+    moe_config = make_dummy_moe_config()
+
     if low_latency_mode:
         assert not quant_config.per_act_token_quant, "not supported in ll mode"
         fused_experts = BatchedTritonExperts(
             max_num_tokens=MAX_TOKENS_PER_RANK,
             num_dispatchers=num_dispatchers,
+            moe_config=moe_config,
             quant_config=quant_config,
         )
     else:
-        fused_experts = TritonExperts(quant_config=quant_config)
+        fused_experts = TritonExperts(
+            moe_config=moe_config,
+            quant_config=quant_config,
+        )
 
-    mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
+    mk = FusedMoEKernel(
+        prepare_finalize=a2a,
+        fused_experts=fused_experts,
+        inplace=False,
+    )
     return mk
 
 
@@ -196,7 +210,8 @@ def deep_ep_moe_impl(
         s = pgi.rank * num_local_experts
         e = s + num_local_experts
         expert_map[s:e] = torch.tensor(list(range(num_local_experts)))
-        return expert_map.to(device=torch.cuda.current_device(), dtype=torch.int32)
+        device = torch.accelerator.current_device_index()
+        return expert_map.to(device=device, dtype=torch.int32)
 
     hidden_size = test_tensors.rank_tokens.size(1)
     is_quantized = w1.dtype == torch.float8_e4m3fn
@@ -228,7 +243,7 @@ def deep_ep_moe_impl(
         )
 
         # Make modular kernel
-        mk: FusedMoEModularKernel = make_modular_kernel(
+        mk: FusedMoEKernel = make_modular_kernel(
             pg,
             pgi,
             low_latency_mode,
@@ -241,14 +256,13 @@ def deep_ep_moe_impl(
             quant_config,
         )
 
-        out = mk.forward(
+        out = mk.apply(
             hidden_states=rank_tokens_chunk,
             w1=w1,
             w2=w2,
             topk_weights=topk_weights_chunk,
             topk_ids=topk_chunk,
-            inplace=False,
-            activation="silu",
+            activation=MoEActivation.SILU,
             global_num_experts=num_experts,
             expert_map=build_expert_map(),
             apply_router_weight_on_input=False,
@@ -352,15 +366,13 @@ def _deep_ep_moe(
         )
 
     is_quantized = w1.dtype == torch.float8_e4m3fn
-    w1 = w1.to(device=torch.cuda.current_device())
-    w2 = w2.to(device=torch.cuda.current_device())
+    device_idx = torch.accelerator.current_device_index()
+    w1 = w1.to(device=device_idx)
+    w2 = w2.to(device=device_idx)
     if is_quantized:
-        w1_scale = w1_scale.to(  # type: ignore
-            device=torch.cuda.current_device()
-        )
-        w2_scale = w2_scale.to(  # type: ignore
-            device=torch.cuda.current_device()
-        )
+        assert w1_scale is not None and w2_scale is not None
+        w1_scale = w1_scale.to(device=device_idx)
+        w2_scale = w2_scale.to(device=device_idx)
 
     pg = torch.distributed.new_group(list(range(pgi.world_size)))
     test_tensors = TestTensors.make(config, low_latency_mode)
@@ -446,7 +458,7 @@ def test_deep_ep_moe(
     low_latency_mode = False
     use_fp8_dispatch = False
 
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     world_size, dp_size = world_dp_size
     config = TestConfig(dtype=dtype, topk=topk, m=m, k=k, n=n, num_experts=num_experts)
 
@@ -507,7 +519,7 @@ def test_low_latency_deep_ep_moe(
             f"hidden sizes {DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES}"
         )
 
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     world_size, dp_size = world_dp_size
     config = TestConfig(dtype=dtype, topk=topk, m=m, k=k, n=n, num_experts=num_experts)
 

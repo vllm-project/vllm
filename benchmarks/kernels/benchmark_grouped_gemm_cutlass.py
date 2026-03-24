@@ -5,15 +5,21 @@ import torch
 import torch.utils.benchmark as benchmark
 from benchmark_shapes import WEIGHT_SHAPES_MOE
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
-from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp8
+from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
     fused_topk,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.v1.worker.workspace import init_workspace_manager
 
 DEFAULT_MODELS = [
     "mistralai/Mixtral-8x7B-Instruct-v0.1",
@@ -44,6 +50,7 @@ def bench_run(
     per_out_ch: bool,
     mkn: tuple[int, int, int],
 ):
+    init_workspace_manager(torch.accelerator.current_device_index())
     label = "Quant Matmul"
 
     sub_label = (
@@ -81,11 +88,6 @@ def bench_run(
         a, score, topk, renormalize=False
     )
 
-    ab_strides1 = torch.full((num_experts,), k, device="cuda", dtype=torch.int64)
-    ab_strides2 = torch.full((num_experts,), n, device="cuda", dtype=torch.int64)
-    c_strides1 = torch.full((num_experts,), 2 * n, device="cuda", dtype=torch.int64)
-    c_strides2 = torch.full((num_experts,), k, device="cuda", dtype=torch.int64)
-
     def run_triton_moe(
         a: torch.Tensor,
         w1: torch.Tensor,
@@ -119,10 +121,6 @@ def bench_run(
         w2: torch.Tensor,
         w1_scale: torch.Tensor,
         w2_scale: torch.Tensor,
-        ab_strides1: torch.Tensor,
-        ab_strides2: torch.Tensor,
-        c_strides1: torch.Tensor,
-        c_strides2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         per_act_token: bool,
@@ -133,32 +131,36 @@ def bench_run(
             w2_scale=w2_scale,
             per_act_token_quant=per_act_token,
         )
+        moe_config = make_dummy_moe_config(
+            num_experts=w2.shape[0],
+            hidden_dim=w2.shape[1],
+            intermediate_size_per_partition=w2.shape[2],
+            in_dtype=a.dtype,
+        )
+
+        fn = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
+            CutlassExpertsFp8(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
+        )
 
         for _ in range(num_repeats):
-            cutlass_moe_fp8(
-                a,
-                w1,
-                w2,
-                topk_weights,
-                topk_ids,
-                ab_strides1,
-                ab_strides2,
-                c_strides1,
-                c_strides2,
-                quant_config=quant_config,
-            )
+            fn(a, w1, w2, topk_weights, topk_ids)
 
     def run_cutlass_from_graph(
         a: torch.Tensor,
         a_scale: torch.Tensor,
-        w1_q: torch.Tensor,
-        w2_q: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
         w1_scale: torch.Tensor,
         w2_scale: torch.Tensor,
-        ab_strides1: torch.Tensor,
-        ab_strides2: torch.Tensor,
-        c_strides1: torch.Tensor,
-        c_strides2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ):
@@ -167,22 +169,30 @@ def bench_run(
             w2_scale=w2_scale,
             per_act_token_quant=per_act_token,
         )
+        moe_config = make_dummy_moe_config(
+            num_experts=w2.shape[0],
+            hidden_dim=w2.shape[1],
+            intermediate_size_per_partition=w2.shape[2],
+            in_dtype=a.dtype,
+        )
+
+        fn = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
+            CutlassExpertsFp8(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
+        )
 
         with set_current_vllm_config(
             VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
         ):
-            return cutlass_moe_fp8(
-                a,
-                w1_q,
-                w2_q,
-                topk_weights,
-                topk_ids,
-                ab_strides1,
-                ab_strides2,
-                c_strides1,
-                c_strides2,
-                quant_config=quant_config,
-            )
+            return fn(a, w1, w2, topk_weights, topk_ids)
 
     def run_triton_from_graph(
         a: torch.Tensor,
@@ -214,7 +224,7 @@ def bench_run(
     def replay_graph(graph, num_repeats):
         for _ in range(num_repeats):
             graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     cutlass_stream = torch.cuda.Stream()
     cutlass_graph = torch.cuda.CUDAGraph()
@@ -226,14 +236,10 @@ def bench_run(
             w2_q,
             w1_scale,
             w2_scale,
-            ab_strides1,
-            ab_strides2,
-            c_strides1,
-            c_strides2,
             topk_weights,
             topk_ids,
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     triton_stream = torch.cuda.Stream()
     triton_graph = torch.cuda.CUDAGraph()
@@ -248,7 +254,7 @@ def bench_run(
             w2_scale,
             a_scale,
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     min_run_time = 5
     num_warmup = 5
@@ -267,10 +273,6 @@ def bench_run(
         "w1_scale": w1_scale,
         "w2_scale": w2_scale,
         "per_act_token": per_act_token,
-        "ab_strides1": ab_strides1,
-        "ab_strides2": ab_strides2,
-        "c_strides1": c_strides1,
-        "c_strides2": c_strides2,
         # cuda graph params
         "cutlass_graph": cutlass_graph,
         "triton_graph": triton_graph,
@@ -329,10 +331,6 @@ def bench_run(
         w2_q,
         w1_scale,
         w2_scale,
-        ab_strides1,
-        ab_strides2,
-        c_strides1,
-        c_strides2,
         topk_weights,
         topk_ids,
         per_act_token,
@@ -341,7 +339,7 @@ def bench_run(
 
     results.append(
         benchmark.Timer(
-            stmt="run_cutlass_moe(a, a_scale, w1_q, w2_q, w1_scale, w2_scale, ab_strides1, ab_strides2, c_strides1, c_strides2, topk_weights, topk_ids, per_act_token, num_runs)",  # noqa: E501
+            stmt="run_cutlass_moe(a, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights, topk_ids, per_act_token, num_runs)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
@@ -364,6 +362,10 @@ def bench_run(
 
 
 def main(args):
+    # Initialize workspace manager (required for CUTLASS MoE kernels)
+    device = torch.device("cuda:0")
+    init_workspace_manager(device)
+
     print("Benchmarking models:")
     for i, model in enumerate(args.models):
         print(f"[{i}]  {model}")
