@@ -522,31 +522,41 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        projected_states_qkvz, projected_states_ba = torch.ops.vllm.gdn_in_proj(
-            hidden_states,
-            self._qkvz_output_size(),
-            sum(self.in_proj_ba.output_sizes) // self.tp_size,
-            self.prefix,
-        )
-
-        if self.gqa_interleaved_layout:
-            # Qwen3-Next: unpack the interleaved GQA layout
-            query, key, value, z, b, a = self.fix_query_key_value_ordering(
-                projected_states_qkvz, projected_states_ba
-            )
-            query, key, value = map(
-                lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
-            )
-            mixed_qkv = torch.cat((query, key, value), dim=-1)
-        else:
-            # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
-            qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-            z_size = self.value_dim // self.tp_size
-            mixed_qkv, z = projected_states_qkvz.split([qkv_size, z_size], dim=-1)
+        if hasattr(self, "in_proj_qkv"):
+            # LoRA path (Qwen3.5 only): separate in_proj_qkv and in_proj_z
+            mixed_qkv, _ = self.in_proj_qkv(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+            z, _ = self.in_proj_z(hidden_states)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
-            b, a = projected_states_ba.chunk(2, dim=-1)
+            b, a = ba.chunk(2, dim=-1)
             b = b.contiguous()
             a = a.contiguous()
+        else:
+            mixed_qkvz, ba = torch.ops.vllm.gdn_in_proj(
+                hidden_states,
+                sum(self.in_proj_qkvz.output_sizes) // self.tp_size,
+                sum(self.in_proj_ba.output_sizes) // self.tp_size,
+                self.prefix,
+            )
+            
+            if self.gqa_interleaved_layout:
+                # Qwen3-Next: unpack the interleaved GQA layout
+                query, key, value, z, b, a = self.fix_query_key_value_ordering(
+                    mixed_qkvz, ba
+                )
+                query, key, value = map(
+                    lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+                )
+                mixed_qkv = torch.cat((query, key, value), dim=-1)
+            else:
+                # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
+                qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+                z_size = self.value_dim // self.tp_size
+                mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+                z = z.reshape(z.size(0), -1, self.head_v_dim)
+                b, a = ba.chunk(2, dim=-1)
+                b = b.contiguous()
+                a = a.contiguous()
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
@@ -680,13 +690,14 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         torch.accelerator.empty_cache()
 
     def _qkvz_output_size(self) -> int:
-        """Per-rank output size of the qkvz projection (for gdn_in_proj fake impl)."""
-        if hasattr(self, "in_proj_qkvz"):
-            return sum(self.in_proj_qkvz.output_sizes) // self.tp_size
-        # LoRA case: separate in_proj_qkv (q+k+v) and in_proj_z
-        return (
-            sum(self.in_proj_qkv.output_sizes) + self.in_proj_z.output_size
-        ) // self.tp_size
+        """Per-rank output size of the qkvz projection (for gdn_in_proj fake impl).
+
+        The total is always key_dim*2 + value_dim*2, regardless of whether
+        weights are fused (in_proj_qkvz) or split (LoRA: in_proj_qkv + in_proj_z).
+        Computing directly from model dimensions avoids accessing layer attributes
+        that may not be present on LoRA wrapper classes.
+        """
+        return (self.key_dim * 2 + self.value_dim * 2) // self.tp_size
 
     def _forward_in_proj(
         self, hidden_states: torch.Tensor
