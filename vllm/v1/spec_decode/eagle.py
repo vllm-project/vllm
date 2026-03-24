@@ -1679,10 +1679,12 @@ class SpecDecodeBaseProposer:
             attention_groups[backend_key] = attn_group
 
         self.draft_attn_groups = list(attention_groups.values())
-        for ag in self.draft_attn_groups:
-            if ag.kv_cache_group_id == self.kv_cache_gid:
-                self.block_size = ag.get_metadata_builder().kv_cache_spec.block_size
-                break
+        if self.draft_attn_groups:
+            self.block_size = (
+                self.draft_attn_groups[0]
+                .get_metadata_builder()
+                .kv_cache_spec.block_size
+            )
         logger.debug("Using block size %d for drafting layers", self.block_size)
 
     def _determine_batch_execution_and_padding(
