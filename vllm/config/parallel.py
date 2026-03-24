@@ -40,6 +40,7 @@ All2AllBackend = Literal[
     "pplx",
     "deepep_high_throughput",
     "deepep_low_latency",
+    "hybrid_ep",
     "mori",
     "nixl_ep",
     "allgather_reducescatter",
@@ -163,6 +164,7 @@ class ParallelConfig:
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
+    - "hybrid_ep": Use HybridEP kernels (NVLink-only, high throughput)
     - "mori": Use mori kernels
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
@@ -534,6 +536,7 @@ class ParallelConfig:
                 "allgather_reducescatter",
                 "deepep_high_throughput",
                 "deepep_low_latency",
+                "hybrid_ep",
                 "mori",
                 "nixl_ep",
             )

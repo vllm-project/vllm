@@ -144,6 +144,28 @@ def maybe_make_prepare_finalize(
             rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
         )
 
+    elif moe.use_hybrid_ep_kernels:
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.hybrid_ep import (
+            HybridEPPrepareAndFinalize,
+        )
+
+        assert moe.dp_size == all2all_manager.dp_world_size
+
+        all_to_all_args = dict(
+            hidden_dim=moe.hidden_dim,
+            max_num_tokens=moe.max_num_tokens,
+            num_local_experts=moe.num_local_experts,
+        )
+        handle = all2all_manager.get_handle(all_to_all_args)
+        prepare_finalize = HybridEPPrepareAndFinalize(
+            handle,
+            num_dispatchers=all2all_manager.world_size,
+            dp_size=all2all_manager.dp_world_size,
+            rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
+            num_local_experts=moe.num_local_experts,
+            num_experts=moe.num_experts,
+        )
+
     elif moe.use_deepep_ll_kernels:
         assert quant_config is not None
         global_to_physical = physical_to_global = local_expert_global_ids = None

@@ -295,6 +295,55 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
     ]
 
 
+def test_hybrid_ep_backend_wiring():
+    from vllm.distributed.device_communicators.all2all import (
+        DeepEPAll2AllManagerBase,
+        HybridEPAll2AllManager,
+    )
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+    )
+
+    assert issubclass(HybridEPAll2AllManager, DeepEPAll2AllManagerBase)
+
+    parallel_config = ParallelConfig(
+        all2all_backend="hybrid_ep",
+        data_parallel_size=8,
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+    )
+
+    assert parallel_config.use_sequence_parallel_moe
+
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            all2all_backend="hybrid_ep",
+            data_parallel_size=8,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+        ),
+    )
+    assert config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+
+    moe_parallel = FusedMoEParallelConfig(
+        tp_size=1,
+        pcp_size=1,
+        dp_size=2,
+        ep_size=2,
+        tp_rank=0,
+        pcp_rank=0,
+        dp_rank=0,
+        ep_rank=0,
+        sp_size=1,
+        use_ep=True,
+        all2all_backend="hybrid_ep",
+        enable_eplb=False,
+    )
+    assert moe_parallel.use_hybrid_ep_kernels
+    assert not moe_parallel.use_deepep_ht_kernels
+
+
 def test_should_split():
     import torch
 
