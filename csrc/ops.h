@@ -325,6 +325,11 @@ void per_token_group_quant_8bit_packed(const torch::Tensor& input,
                                        int64_t group_size, double eps,
                                        double min_8bit, double max_8bit);
 
+void indexer_concat_quant_fp8(torch::Tensor& q_out, torch::Tensor& scale_out,
+                              const torch::Tensor& pe,
+                              const torch::Tensor& nope, int64_t group_size,
+                              double eps, double fp8_min, double fp8_max,
+                              bool scale_ue8m0);
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,

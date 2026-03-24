@@ -1679,3 +1679,54 @@ def process_fp8_input_tensor_strategy_moe(
         )
 
     return w13_input_scale.max(), w2_input_scale.max()
+
+
+def indexer_concat_quant_fp8(
+    q_pe: torch.Tensor,  # [num_tokens, n_head, rope_dim].
+    q_nope: torch.Tensor,  # [num_tokens, n_head, nope_dim].
+    group_size: int,
+    eps: float = 1e-10,
+    column_major_scales: bool = False,
+    use_ue8m0: bool | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Function that fuses concat and fp8 quantization."""
+    if use_ue8m0 is None:
+        use_ue8m0 = is_deep_gemm_e8m0_used()
+
+    if current_platform.is_cuda() and q_pe.is_contiguous() and q_nope.is_contiguous():
+        fp8_min, fp8_max = get_fp8_min_max()
+        rope_dim = q_pe.shape[-1]
+        nope_dim = q_nope.shape[-1]
+        x_q = torch.empty(
+            (*q_pe.shape[:-1], rope_dim + nope_dim),
+            dtype=current_platform.fp8_dtype(),
+            device=q_pe.device,
+        )
+        x_s = torch.empty(
+            (*q_pe.shape[:-1], 1), device=q_pe.device, dtype=torch.float32
+        )
+        torch.ops._C.indexer_concat_quant_fp8(
+            x_q,
+            x_s,
+            q_pe,
+            q_nope,
+            group_size,
+            eps,
+            fp8_min,
+            fp8_max,
+            use_ue8m0,
+        )
+        return x_q, x_s
+
+    # Fallback
+    rope_dim = q_pe.shape[-1]
+    nope_dim = q_nope.shape[-1]
+    q = torch.cat([q_pe, q_nope], dim=-1)
+    q = q.view(-1, rope_dim + nope_dim)
+    x_q, x_s = per_token_group_quant_fp8(
+        q,
+        group_size,
+        column_major_scales=column_major_scales,
+        use_ue8m0=use_ue8m0,
+    )
+    return x_q, x_s

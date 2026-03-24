@@ -64,7 +64,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
+    indexer_concat_quant_fp8,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
@@ -706,16 +706,15 @@ class Indexer(nn.Module):
         q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
         k_pe = k_pe.reshape(-1, 1, self.rope_dim)
 
-        # `rotary_emb` is shape-preserving; `q_pe` is already
-        # [num_tokens, n_head, rope_dim].
-        q = torch.cat([q_pe, q_nope], dim=-1)
         # `k_pe` is [num_tokens, 1, rope_dim] (MQA).
         k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
 
+        # `rotary_emb` is shape-preserving; `q_pe` is already
+        # [num_tokens, n_head, rope_dim].
         # we only quant q here since k quant is fused with cache insertion
-        q = q.view(-1, self.head_dim)
-        q_fp8, q_scale = per_token_group_quant_fp8(
-            q,
+        q_fp8, q_scale = indexer_concat_quant_fp8(
+            q_pe,
+            q_nope,
             self.quant_block_size,
             column_major_scales=False,
             use_ue8m0=self.scale_fmt is not None,
