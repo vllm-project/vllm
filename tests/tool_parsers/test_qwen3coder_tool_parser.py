@@ -342,6 +342,7 @@ def test_extract_tool_calls(
     expected_tool_calls,
     expected_content,
 ):
+    qwen3_tool_parser_parametrized.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
     extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
         model_output, request=request
@@ -366,6 +367,7 @@ TX
 </parameter>
 </function>"""
 
+    qwen3_tool_parser_parametrized.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
     extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
         model_output, request=request
@@ -417,6 +419,7 @@ hello world
 </function>
 </tool_call>"""
 
+    qwen3_tool_parser_parametrized.tools = tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
     extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
         model_output, request=request
@@ -614,6 +617,7 @@ def test_extract_tool_calls_streaming(
     expected_content,
 ):
     """Test incremental streaming behavior including typed parameters"""
+    qwen3_tool_parser_parametrized.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
@@ -702,6 +706,7 @@ fahrenheit
 </function>
 </tool_call>"""
 
+    qwen3_tool_parser_parametrized.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
     extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
         model_output, request=request
@@ -744,6 +749,7 @@ fahrenheit
 </function>
 </tool_call>"""
 
+    qwen3_tool_parser_parametrized.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
@@ -815,6 +821,7 @@ TX
 </function>
 </tool_call>"""
 
+    qwen3_tool_parser_parametrized.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     chunks = []
@@ -889,6 +896,7 @@ def test_extract_tool_calls_complex_type_with_single_quote(
 </function>
 </tool_call>"""
 
+    qwen3_tool_parser_parametrized.tools = tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
     extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
         model_output, request=request
@@ -921,6 +929,7 @@ fahrenheit
 </function>
 </tool_call>"""
 
+    qwen3_tool_parser_parametrized.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""

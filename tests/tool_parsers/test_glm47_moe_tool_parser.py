@@ -24,31 +24,34 @@ def glm47_tokenizer():
     return get_tokenizer(tokenizer_name=MODEL)
 
 
+SAMPLE_TOOLS = [
+    ChatCompletionToolsParam(
+        function=FunctionDefinition(name="get_current_date", parameters={}),
+    ),
+    ChatCompletionToolsParam(
+        function=FunctionDefinition(
+            name="get_weather",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "date": {"type": "string"},
+                },
+            },
+        ),
+    ),
+]
+
+
 @pytest.fixture
 def glm47_tool_parser(glm47_tokenizer):
-    return Glm47MoeModelToolParser(glm47_tokenizer)
+    return Glm47MoeModelToolParser(glm47_tokenizer, tools=SAMPLE_TOOLS)
 
 
 @pytest.fixture
 def mock_request() -> ChatCompletionRequest:
     request = Mock(spec=ChatCompletionRequest)
-    request.tools = [
-        ChatCompletionToolsParam(
-            function=FunctionDefinition(name="get_current_date", parameters={}),
-        ),
-        ChatCompletionToolsParam(
-            function=FunctionDefinition(
-                name="get_weather",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "city": {"type": "string"},
-                        "date": {"type": "string"},
-                    },
-                },
-            ),
-        ),
-    ]
+    request.tools = SAMPLE_TOOLS
     request.tool_choice = "auto"
     return request
 

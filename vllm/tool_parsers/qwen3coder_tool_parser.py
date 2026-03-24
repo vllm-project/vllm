@@ -30,8 +30,8 @@ logger = init_logger(__name__)
 
 
 class Qwen3CoderToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools=None):
+        super().__init__(tokenizer, tools=tools)
 
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
@@ -107,7 +107,6 @@ class Qwen3CoderToolParser(ToolParser):
         self.json_closed = False
         # Store accumulated parameters for type conversion
         self.accumulated_params = {}
-        self.streaming_request = None
 
     def _get_arguments_config(
         self, func_name: str, tools: list[ChatCompletionToolsParam] | None
@@ -316,7 +315,7 @@ class Qwen3CoderToolParser(ToolParser):
                 )
 
             tool_calls = [
-                self._parse_xml_function_call(function_call_str, request.tools)
+                self._parse_xml_function_call(function_call_str, self.tools)
                 for function_call_str in function_calls
             ]
             # Populate prev_tool_call_arr for serving layer to set finish_reason
@@ -361,7 +360,6 @@ class Qwen3CoderToolParser(ToolParser):
         # Store request for type conversion
         if not previous_text:
             self._reset_streaming_state()
-            self.streaming_request = request
 
         # If no delta text, return None unless it's an EOS token after tools
         if not delta_text:
@@ -609,7 +607,7 @@ class Qwen3CoderToolParser(ToolParser):
 
                 param_config = self._get_arguments_config(
                     self.current_function_name or "",
-                    self.streaming_request.tools if self.streaming_request else None,
+                    self.tools,
                 )
 
                 converted_value = self._convert_param_value(
@@ -668,9 +666,7 @@ class Qwen3CoderToolParser(ToolParser):
                     try:
                         parsed_tool = self._parse_xml_function_call(
                             func_content,
-                            self.streaming_request.tools
-                            if self.streaming_request
-                            else None,
+                            self.tools,
                         )
                         if parsed_tool and self.current_tool_index < len(
                             self.prev_tool_call_arr

@@ -30,8 +30,8 @@ logger = init_logger(__name__)
 
 
 class Internlm2ToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools=None):
+        super().__init__(tokenizer, tools=tools)
         self.position = 0
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
@@ -196,7 +196,7 @@ class Internlm2ToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
         text = model_output
-        tools = request.tools
+        tools = self.tools
         if "<|action_start|><|plugin|>" in text:
             text, action = text.split("<|action_start|><|plugin|>")
             action = action.split("<|action_end|>".strip())[0]

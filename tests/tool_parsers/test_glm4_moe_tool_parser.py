@@ -26,22 +26,25 @@ def glm4_moe_tokenizer():
     return get_tokenizer(tokenizer_name=MODEL)
 
 
+SAMPLE_TOOLS = [
+    ChatCompletionToolsParam(
+        function=FunctionDefinition(
+            name="get_weather",
+            parameters={"city": {"type": "string"}},
+        ),
+    ),
+]
+
+
 @pytest.fixture
 def glm4_moe_tool_parser(glm4_moe_tokenizer):
-    return Glm4MoeModelToolParser(glm4_moe_tokenizer)
+    return Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=SAMPLE_TOOLS)
 
 
 @pytest.fixture
 def mock_request() -> ChatCompletionRequest:
     request = Mock(spec=ChatCompletionRequest)
-    request.tools = [  # GLM45 parser needs this attribute to enable tool parsing.
-        ChatCompletionToolsParam(
-            function=FunctionDefinition(
-                name="get_weather",
-                parameters={"city": {"type": "string"}},
-            ),
-        ),
-    ]
+    request.tools = SAMPLE_TOOLS
     return request
 
 
@@ -705,26 +708,27 @@ if __name__ == "__main__":
     sorted_arr = bubble_sort(test_arr.copy())
     print(f"Sorted: {sorted_arr}")'''
 
-    # Create a request with tool schema to enable string type detection
+    # Set tool schema on parser to enable string type detection
     # This is required for incremental streaming of string values
+    write_tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="write_to_file",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
+            ),
+        ),
+    ]
+    glm4_moe_tool_parser.tools = write_tools
     request = ChatCompletionRequest(
         model=MODEL,
         messages=[],
-        tools=[
-            {
-                "type": "function",
-                "function": {
-                    "name": "write_to_file",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "file_path": {"type": "string"},
-                            "content": {"type": "string"},
-                        },
-                    },
-                },
-            }
-        ],
+        tools=write_tools,
     )  # type: ignore
 
     # Simulate token-based streaming (special tags as single tokens)

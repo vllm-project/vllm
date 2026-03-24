@@ -1167,9 +1167,11 @@ class StreamingXMLToolCallParser:
 
 
 class Qwen3XMLToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools=None):
+        super().__init__(tokenizer, tools=tools)
         self.parser = StreamingXMLToolCallParser()
+        if self.tools:
+            self.parser.set_tools(self.tools)
 
         # Add missing attributes for compatibility with serving_chat.py
         self.prev_tool_call_arr: list[dict] = []
@@ -1188,8 +1190,8 @@ class Qwen3XMLToolParser(ToolParser):
         # Reset tool call tracking arrays for new extraction
         self.prev_tool_call_arr = []
         self.streamed_args_for_tool = []
-        if request:
-            self.parser.set_tools(request.tools)
+        if self.tools:
+            self.parser.set_tools(self.tools)
         result = self.parser.parse_single_streaming_chunks(model_output)
         if not result.tool_calls:
             return ExtractedToolCallInformation(
@@ -1260,8 +1262,8 @@ class Qwen3XMLToolParser(ToolParser):
             # Reset tool call tracking arrays for new streaming session
             self.prev_tool_call_arr = []
             self.streamed_args_for_tool = []
-            if request:
-                self.parser.set_tools(request.tools)
+            if self.tools:
+                self.parser.set_tools(self.tools)
 
         # Model sometimes outputs separately causing delta_text to be empty.
         # If there were tool_calls before and all current tool_calls have ended,

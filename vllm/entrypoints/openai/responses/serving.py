@@ -1005,7 +1005,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Use parser to extract and create response output items
         if self.parser:
-            parser = self.parser(tokenizer)
+            parser = self.parser(tokenizer, tools=request.tools)  # type: ignore[arg-type]
             return parser.extract_response_outputs(
                 model_output=final_output.text,
                 model_output_token_ids=final_output.token_ids,
@@ -1348,7 +1348,7 @@ class OpenAIServingResponses(OpenAIServing):
             reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
         tool_parser = None
         if self.parser and self.parser.tool_parser_cls:
-            tool_parser = self.parser.tool_parser_cls(tokenizer)
+            tool_parser = self.parser.tool_parser_cls(tokenizer, request.tools)  # type: ignore[arg-type]
         reasoning_ended = False
         tool_call_text_started = False
         previous_text = ""

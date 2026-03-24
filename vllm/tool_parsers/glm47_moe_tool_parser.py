@@ -22,8 +22,8 @@ logger = init_logger(__name__)
 
 
 class Glm47MoeModelToolParser(Glm4MoeModelToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools=None):
+        super().__init__(tokenizer, tools=tools)
         # GLM-4.7 format: <tool_call>func_name[<arg_key>...]*</tool_call>
         # The function name can be followed by a newline, whitespace, or
         # directly by <arg_key> tags (no separator).  The arg section is

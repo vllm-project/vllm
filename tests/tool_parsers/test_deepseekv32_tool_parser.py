@@ -285,9 +285,9 @@ class TestExtractToolCallsStreaming:
                 },
             },
         )
-        request = make_request(tools=[tool])
+        parser.tools = [tool]
         full_text = build_tool_call("add", {"x": "3", "y": "4"})
-        deltas = self._stream(parser, full_text, request=request)
+        deltas = self._stream(parser, full_text)
         args_str = self._reconstruct_args(deltas)
         assert json.loads(args_str) == {"x": 3, "y": 4}
 

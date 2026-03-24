@@ -224,6 +224,7 @@ def test_extract_tool_calls(
     expected_tool_calls,
     expected_content,
 ):
+    seed_oss_tool_parser.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
     extracted_tool_calls = seed_oss_tool_parser.extract_tool_calls(
         model_output, request=request
@@ -431,6 +432,7 @@ def test_streaming_tool_calls(
     expected_content,
 ):
     """Test incremental streaming behavior"""
+    seed_oss_tool_parser.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""

@@ -354,6 +354,7 @@ def test_extract_tool_calls(
     expected_tool_calls,
     expected_content,
 ):
+    step3p5_tool_parser.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
     extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
         model_output, request=request
@@ -376,6 +377,7 @@ TX
 </parameter>
 </function>"""
 
+    step3p5_tool_parser.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
     extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
         model_output, request=request
@@ -427,6 +429,7 @@ hello world
 </function>
 </tool_call>"""
 
+    step3p5_tool_parser.tools = tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
     extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
         model_output, request=request
@@ -624,6 +627,7 @@ def test_extract_tool_calls_streaming(
     expected_content,
 ):
     """Test incremental streaming behavior including typed parameters"""
+    step3p5_tool_parser.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
@@ -709,6 +713,7 @@ fahrenheit
 </function>
 </tool_call>"""
 
+    step3p5_tool_parser.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
     extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
         model_output, request=request
@@ -751,6 +756,7 @@ fahrenheit
 </function>
 </tool_call>"""
 
+    step3p5_tool_parser.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
@@ -821,6 +827,7 @@ TX
 </function>
 </tool_call>"""
 
+    step3p5_tool_parser.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     chunks = []
@@ -893,6 +900,7 @@ def test_extract_tool_calls_complex_type_with_single_quote(step3p5_tool_parser):
 </function>
 </tool_call>"""
 
+    step3p5_tool_parser.tools = tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
     extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
         model_output, request=request
@@ -932,6 +940,7 @@ rectangle
 </function>
 </tool_call>"""
 
+    step3p5_tool_parser.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
@@ -1038,6 +1047,7 @@ rectangle
 </function>
 </tool_call>"""
 
+    step3p5_tool_parser.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
@@ -1116,6 +1126,7 @@ rectangle
 </function>
 </tool_call>"""
 
+    step3p5_tool_parser.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
@@ -1247,6 +1258,7 @@ rectangle
 </function>
 </tool_call>"""
 
+    step3p5_tool_parser.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
@@ -1318,6 +1330,7 @@ def test_extract_tool_calls_streaming_multi_token_chunk_boundary(
     step3p5_tool_parser, step3p5_tokenizer, sample_tools
 ):
     """Ensure fallback doesn't close a new tool_call when boundary is in one chunk."""
+    step3p5_tool_parser.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
     delta_text_chunks = [
         """<tool_call>
@@ -1396,6 +1409,7 @@ rectangle
 </function>
 </tool_call>"""
 
+    step3p5_tool_parser.tools = sample_tools
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(

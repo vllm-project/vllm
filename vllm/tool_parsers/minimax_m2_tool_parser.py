@@ -29,8 +29,8 @@ logger = init_logger(__name__)
 
 
 class MinimaxM2ToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools=None):
+        super().__init__(tokenizer, tools=tools)
 
         self.prev_tool_call_arr: list[dict] = []
 
@@ -293,7 +293,6 @@ class MinimaxM2ToolParser(ToolParser):
     def _extract_delta_tool_calls(
         self,
         current_text: str,
-        request: ChatCompletionRequest | None,
     ) -> list[DeltaToolCall]:
         """Extract DeltaToolCalls from newly completed <invoke> blocks.
 
@@ -307,7 +306,7 @@ class MinimaxM2ToolParser(ToolParser):
             invoke_str = complete_invokes[self.current_tool_index]
             tool_call = self._parse_single_invoke(
                 invoke_str,
-                request.tools if request else None,
+                self.tools,
             )
             if not tool_call:
                 self.current_tool_index += 1
@@ -357,9 +356,7 @@ class MinimaxM2ToolParser(ToolParser):
             for tool_call_match in self.tool_call_complete_regex.findall(model_output):
                 # Find all invokes within this tool_call
                 for invoke_match in self.invoke_complete_regex.findall(tool_call_match):
-                    tool_call = self._parse_single_invoke(
-                        invoke_match, request.tools if request else None
-                    )
+                    tool_call = self._parse_single_invoke(invoke_match, self.tools)
                     if tool_call:
                         tool_calls.append(tool_call)
 
@@ -430,7 +427,7 @@ class MinimaxM2ToolParser(ToolParser):
             content_before = before or None
 
         # Extract newly completed <invoke> blocks as DeltaToolCalls.
-        delta_tool_calls = self._extract_delta_tool_calls(current_text, request)
+        delta_tool_calls = self._extract_delta_tool_calls(current_text)
 
         if delta_tool_calls or content_before:
             return DeltaMessage(

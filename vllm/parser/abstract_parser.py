@@ -542,10 +542,10 @@ class _WrappedParser(DelegatingParser):
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
 
-    def __init__(self, tokenizer: TokenizerLike):
+    def __init__(self, tokenizer: TokenizerLike, tools=None):
         super().__init__(tokenizer)
         # Instantiate the underlying parsers from class attributes
         if self.__class__.reasoning_parser_cls is not None:
             self._reasoning_parser = self.__class__.reasoning_parser_cls(tokenizer)
         if self.__class__.tool_parser_cls is not None:
-            self._tool_parser = self.__class__.tool_parser_cls(tokenizer)
+            self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools=tools)

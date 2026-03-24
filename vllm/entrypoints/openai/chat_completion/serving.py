@@ -565,7 +565,7 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
                 tool_parsers: list[ToolParser | None] = [
-                    self.tool_parser(tokenizer)
+                    self.tool_parser(tokenizer, request.tools)
                 ] * num_choices
             else:
                 tool_parsers = [None] * num_choices
@@ -1331,7 +1331,7 @@ class OpenAIServingChat(OpenAIServing):
                             "Tokenizer not available when `skip_tokenizer_init=True`"
                         )
 
-                    tool_parser = self.tool_parser(tokenizer)
+                    tool_parser = self.tool_parser(tokenizer, request.tools)
                     # NOTE: We use token_ids for openai tool parser
                     tool_call_info = tool_parser.extract_tool_calls(
                         "",

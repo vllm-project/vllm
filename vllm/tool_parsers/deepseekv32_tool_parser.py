@@ -10,6 +10,7 @@ import regex as re
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -43,8 +44,8 @@ class DeepSeekV32ToolParser(ToolParser):
     </｜DSML｜function_calls>
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools=None):
+        super().__init__(tokenizer, tools=tools)
 
         self.prev_tool_call_arr: list[dict] = []
 
@@ -136,12 +137,12 @@ class DeepSeekV32ToolParser(ToolParser):
         self,
         function_name: str,
         param_dict: dict[str, str],
-        request: ChatCompletionRequest | None,
+        tools: list[ChatCompletionToolsParam] | None = None,
     ) -> dict[str, Any]:
         """Convert raw string param values using the tool schema types."""
         param_config: dict = {}
-        if request and request.tools:
-            for tool in request.tools:
+        if tools:
+            for tool in tools:
                 if (
                     hasattr(tool, "function")
                     and tool.function.name == function_name
@@ -221,7 +222,6 @@ class DeepSeekV32ToolParser(ToolParser):
     def _extract_delta_tool_calls(
         self,
         current_text: str,
-        request: ChatCompletionRequest | None,
     ) -> list[DeltaToolCall]:
         """Extract DeltaToolCalls from newly completed <invoke> blocks.
 
@@ -236,7 +236,7 @@ class DeepSeekV32ToolParser(ToolParser):
             param_dict = self._parse_invoke_params(invoke_body)
 
             converted = self._convert_params_with_schema(
-                invoke_name, param_dict, request
+                invoke_name, param_dict, self.tools
             )
             args_json = json.dumps(converted, ensure_ascii=False)
             idx = self.current_tool_index
@@ -298,7 +298,7 @@ class DeepSeekV32ToolParser(ToolParser):
             return DeltaMessage(content=delta_text) if delta_text else None
 
         # Inside tool-call region: emit any newly completed invokes.
-        delta_tool_calls = self._extract_delta_tool_calls(current_text, request)
+        delta_tool_calls = self._extract_delta_tool_calls(current_text)
 
         if delta_tool_calls or content_before:
             return DeltaMessage(

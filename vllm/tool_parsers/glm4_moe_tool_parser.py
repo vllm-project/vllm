@@ -48,8 +48,8 @@ class Glm4MoeModelToolParser(ToolParser):
     rather than waiting for the complete </arg_value> tag.
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools=None):
+        super().__init__(tokenizer, tools=tools)
         # Stateful streaming fields
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict[str, Any]] = []
@@ -140,16 +140,9 @@ class Glm4MoeModelToolParser(ToolParser):
         logger.debug("No tool named '%s'.", tool_name)
         return False
 
-    @staticmethod
-    def _tools_enabled(request: ChatCompletionRequest) -> bool:
-        """Return whether tool parsing should be applied for this request."""
-        try:
-            tools = getattr(request, "tools", None)
-            tool_choice = getattr(request, "tool_choice", None)
-            return bool(tools) and tool_choice != "none"
-        except Exception:
-            logger.exception("Failed to determine if tools are enabled.")
-            return False
+    def _tools_enabled(self) -> bool:
+        """Return whether tool parsing should be applied."""
+        return bool(self.tools)
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         """Adjust request parameters for tool call token handling."""
@@ -186,7 +179,7 @@ class Glm4MoeModelToolParser(ToolParser):
                 for key, value in pairs:
                     arg_key = key.strip()
                     arg_val = value.strip()
-                    if not self._is_string_type(tc_name, arg_key, request.tools):
+                    if not self._is_string_type(tc_name, arg_key, self.tools):
                         arg_val = self._deserialize(arg_val)
                     logger.debug("arg_key = %s, arg_val = %s", arg_key, arg_val)
                     arg_dct[arg_key] = arg_val
@@ -229,7 +222,7 @@ class Glm4MoeModelToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        if not self._tools_enabled(request):
+        if not self._tools_enabled():
             return DeltaMessage(content=delta_text) if delta_text else None
 
         self._buffer += delta_text
@@ -327,7 +320,7 @@ class Glm4MoeModelToolParser(ToolParser):
                 key = (self._pending_key or "").strip()
 
                 is_string = self._is_string_type(
-                    self._current_tool_name, key, request.tools
+                    self._current_tool_name, key, self.tools
                 )
 
                 if is_string:

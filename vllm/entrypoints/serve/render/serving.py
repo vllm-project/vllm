@@ -547,6 +547,7 @@ class OpenAIServingRender:
                     )
                     raise NotImplementedError(msg)
                 tokenizer = renderer.get_tokenizer()
-                request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore[arg-type]
+                parser = tool_parser(tokenizer, request.tools)  # type: ignore[arg-type,call-arg]
+                request = parser.adjust_request(request=request)  # type: ignore[arg-type]
 
         return conversation, [engine_prompt]
