@@ -35,7 +35,7 @@ class ChunkingMoERunner(MoERunnerBase):
     """
 
     def __init__(self, inner: MoERunnerBase, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(**kwargs)  # this is not ideal
 
         # Assert that _maybe_dispatch/_maybe_combine will be nops.
         assert inner.moe_config.pcp_size == 1
