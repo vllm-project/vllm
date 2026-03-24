@@ -16,7 +16,7 @@ Many classification models support both (sequence) classification and token clas
 !!! note
 
     Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task (classify) is not 
-    what you want, you need to manually specify it via `PoolerConfig(task="token_classify")` offline or 
+    what you want, you need to manually specify it via `PoolerConfig(task="token_classify")` offline or
     `--pooler-config.task token_classify` online.
 
 ## Typical Use Cases
