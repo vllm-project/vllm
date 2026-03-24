@@ -639,7 +639,11 @@ def emit_content_delta_events(
             events.extend(_emit_channel_done_events(state))
             state.reset_for_new_item()
 
-        events.extend(_emit_delta_for_channel(channel, recipient, delta, state))
+        segment_events = _emit_delta_for_channel(channel, recipient, delta, state)
+        if not segment_events:
+            continue
+
+        events.extend(segment_events)
         state.last_channel = channel
         state.last_recipient = recipient
         state.accumulated_text += delta
@@ -839,22 +843,5 @@ def emit_tool_action_events(
         and previous_item.recipient.startswith("browser.")
     ):
         events.extend(emit_browser_tool_events(previous_item, state))
-
-    # Handle tool completion
-    if (
-        tool_server is not None
-        and previous_item.recipient is not None
-        and state.current_item_id is not None
-        and state.sent_output_item_added
-    ):
-        recipient = previous_item.recipient
-        if recipient == "python":
-            events.extend(emit_code_interpreter_completion_events(previous_item, state))
-        elif recipient.startswith("mcp.") or is_mcp_tool_by_namespace(recipient):
-            events.extend(
-                emit_mcp_completion_events(
-                    recipient, previous_item.content[0].text, state
-                )
-            )
 
     return events
