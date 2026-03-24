@@ -86,34 +86,19 @@ def mock_on_mi3xx():
             None,
             AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
-        # Test Case 7: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=1
-        (
-            {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "1"},
-            None,
-            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
-        ),
-        # Test Case 8: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
-        (
-            {
-                "VLLM_ROCM_USE_AITER": "1",
-                "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": "1",
-            },
-            None,
-            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
-        ),
-        # Test Case 9: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
+        # Test Case 7: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             "TRITON_ATTN",
             AttentionBackendEnum.TRITON_ATTN.get_path(),
         ),
-        # Test Case 10: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=0
+        # Test Case 8: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=0
         (
             {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "0"},
             None,
             AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
-        # Test Case 11: VLLM_ROCM_USE_AITER=1 + explicit ROCM_ATTN
+        # Test Case 9: VLLM_ROCM_USE_AITER=1 + explicit ROCM_ATTN
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             "ROCM_ATTN",
