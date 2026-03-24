@@ -125,12 +125,12 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - Connection info is passed via KVTransferParams from prefiller to decoder for handshake
 
 - `VLLM_NIXL_KV_LEASE_DURATION`: Initial lease duration (in seconds) for KV blocks on the prefiller. (Optional)
-    - Default: 15
+    - Default: 30
     - After a prefill completes, the prefiller holds KV blocks for this duration. The decoder sends periodic heartbeats to extend the lease.
     - If no heartbeat is received within the lease duration, blocks are released.
 
 - `VLLM_NIXL_KV_LEASE_EXTENSION`: Lease extension (in seconds) granted per heartbeat. (Optional)
-    - Default: 30
+    - Default: 20
     - Each heartbeat from the decoder extends the lease by this amount.
 
 - `VLLM_NIXL_KV_HEARTBEAT_INTERVAL`: Interval (in seconds) at which the decoder sends heartbeats. (Optional)
