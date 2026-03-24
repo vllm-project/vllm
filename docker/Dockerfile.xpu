@@ -173,7 +173,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # FIX triton
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip uninstall triton triton-xpu && \
-    uv pip install triton-xpu==3.6.0
+    uv pip install triton-xpu==3.7.0
 
 # remove torch bundled oneccl to avoid conflicts
 RUN --mount=type=cache,target=/root/.cache/uv \
