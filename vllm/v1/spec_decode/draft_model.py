@@ -51,15 +51,17 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             )
 
     @override
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        return create_vllm_config_for_draft_model(self.vllm_config)
+
+    @override
     def _get_model(self) -> nn.Module:
-        # Draft models may be quantized or on different parallelism,
-        # so we load them with a modified vllm config
         from vllm.compilation.backends import set_model_tag
 
-        temp_vllm_config = create_vllm_config_for_draft_model(self.vllm_config)
+        draft_vllm_config = self._create_draft_vllm_config()
         with set_model_tag("draft_model"):
             model = get_model(
-                vllm_config=temp_vllm_config,
+                vllm_config=draft_vllm_config,
                 prefix="draft_model",
             )
         return model

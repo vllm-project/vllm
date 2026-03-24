@@ -26,8 +26,8 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.v1.metrics.reader import Metric
 from vllm.v1.spec_decode.utils import (
-    apply_draft_moe_backend,
     create_vllm_config_for_draft_model,
+    create_vllm_config_for_spec_decode,
 )
 
 MTP_SIMILARITY_RATE = 0.8
@@ -997,7 +997,7 @@ def test_draft_moe_backend(
     tensor_parallel_size: int,
     trust_remote_code: bool,
 ):
-    """Both create_vllm_config_for_draft_model and apply_draft_moe_backend
+    """Both create_vllm_config_for_spec_decode and create_vllm_config_for_draft_model
     must propagate (or inherit) moe_backend correctly across drafting
     methods."""
     spec_cfg = {**spec_method_cfg}
@@ -1014,8 +1014,8 @@ def test_draft_moe_backend(
     tgt_cfg: VllmConfig = engine_args.create_engine_config()
     assert tgt_cfg.kernel_config.moe_backend == expected_target
 
-    # apply_draft_moe_backend (used by Eagle/MTP/Medusa proposers)
-    applied = apply_draft_moe_backend(tgt_cfg)
+    # create_vllm_config_for_spec_decode (used by Eagle/MTP/Medusa proposers)
+    applied = create_vllm_config_for_spec_decode(tgt_cfg)
     assert applied.kernel_config.moe_backend == expected_draft
     assert applied.model_config is tgt_cfg.model_config
     assert applied.parallel_config is tgt_cfg.parallel_config
@@ -1027,8 +1027,9 @@ def test_draft_moe_backend(
     assert draft_cfg.kernel_config.moe_backend == expected_draft
 
 
-def test_apply_draft_moe_backend_noop_without_spec_config():
-    """apply_draft_moe_backend is a no-op when there is no speculative_config."""
+def test_create_vllm_config_for_spec_decode_noop_without_spec_config():
+    """create_vllm_config_for_spec_decode is a no-op when there is no
+    speculative_config."""
     engine_args = EngineArgs(
         model="Qwen/Qwen3-1.7B",
         tensor_parallel_size=1,
@@ -1036,7 +1037,7 @@ def test_apply_draft_moe_backend_noop_without_spec_config():
     vllm_config: VllmConfig = engine_args.create_engine_config()
     assert vllm_config.speculative_config is None
 
-    result = apply_draft_moe_backend(vllm_config)
+    result = create_vllm_config_for_spec_decode(vllm_config)
     assert result is vllm_config
 
 

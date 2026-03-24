@@ -56,9 +56,9 @@ class MedusaProposer:
 
     def load_model(self, target_model: nn.Module) -> None:
         from vllm.compilation.backends import set_model_tag
-        from vllm.v1.spec_decode.utils import apply_draft_moe_backend
+        from vllm.v1.spec_decode.utils import create_vllm_config_for_spec_decode
 
-        draft_vllm_config = apply_draft_moe_backend(self.vllm_config)
+        draft_vllm_config = create_vllm_config_for_spec_decode(self.vllm_config)
         with set_model_tag("medusa_head"):
             self.model = get_model(
                 vllm_config=draft_vllm_config,

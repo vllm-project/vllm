@@ -257,9 +257,11 @@ def compute_new_slot_mapping(
     return new_slot_mapping
 
 
-def apply_draft_moe_backend(vllm_config: VllmConfig) -> VllmConfig:
-    """Return a VllmConfig with kernel_config.moe_backend overridden by
-    speculative_config.moe_backend when the latter is set.
+def create_vllm_config_for_spec_decode(
+    vllm_config: VllmConfig,
+) -> VllmConfig:
+    """Apply kernel-level overrides (e.g. moe_backend) from speculative_config.
+    Returns the original object unchanged when no override is needed.
     """
     spec_config = vllm_config.speculative_config
     if spec_config is not None and spec_config.moe_backend is not None:
@@ -273,11 +275,8 @@ def apply_draft_moe_backend(vllm_config: VllmConfig) -> VllmConfig:
 def create_vllm_config_for_draft_model(
     target_model_vllm_config: VllmConfig,
 ) -> VllmConfig:
-    """The vllm_config is configured for the target model, e.g.
-    its quant_config and parallel_config. But the draft model is potentially
-    quantized differently, and has potentially different tensor_parallel_size.
-    This function creates a new vllm_config configured for the drafter.
-    The vllm_config is useful when loading the draft model with get_model().
+    """Extends create_vllm_config_for_spec_decode with quant_config,
+    parallel_config, and model_config overrides for standalone draft models.
     """
     old = target_model_vllm_config
     assert old.speculative_config is not None, "speculative_config is not set"
@@ -286,10 +285,10 @@ def create_vllm_config_for_draft_model(
         old_spec_config.draft_parallel_config, rank=old.parallel_config.rank
     )
 
-    applied = apply_draft_moe_backend(old)
+    base = create_vllm_config_for_spec_decode(old)
 
     new: VllmConfig = replace(
-        applied,
+        base,
         quant_config=None,
         parallel_config=new_parallel_config,
         model_config=old_spec_config.draft_model_config,
