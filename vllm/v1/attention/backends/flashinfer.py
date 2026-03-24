@@ -5,6 +5,8 @@
 from dataclasses import dataclass
 from typing import ClassVar
 
+import os
+
 import numpy as np
 import torch
 from flashinfer import (
@@ -582,7 +584,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         can_use_xqa = (
             supports_xqa_decode()
             and self.num_qo_heads % self.num_kv_heads == 0
-            and get_kv_cache_layout() == "HND"
+            and not os.environ.get("VLLM_DISABLE_XQA_DECODE")
         )
 
         # Q dtype: FP8 quantization only for trtllm-gen (SM100), not XQA
@@ -886,6 +888,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             and self.num_qo_heads % self.num_kv_heads == 0
             and num_prefills > 0
             and get_kv_cache_layout() == "HND"
+            and not os.environ.get("VLLM_DISABLE_FMHA_V2_PREFILL")
         )
 
         decode_use_trtllm = (
@@ -1453,6 +1456,23 @@ class FlashInferImpl(AttentionImpl):
                 block_tables_prefill = attn_metadata.prefill.block_tables
                 seq_lens_prefill = attn_metadata.prefill.seq_lens
 
+                # fmha_v2/XQA compute max_seq_len from block_tables.shape[-1]
+                # * page_size. Trim to actual needed width to avoid OOB reads
+                # from stale page indices beyond the valid sequence length.
+                if supports_fmha_v2_prefill() and not supports_trtllm_attention():
+                    page_size = kv_cache.shape[2]  # [blocks, 2, page_size, ...]
+                    max_pages_needed = (
+                        attn_metadata.prefill.max_seq_len + page_size - 1
+                    ) // page_size
+                    if (
+                        max_pages_needed > 0
+                        and max_pages_needed < block_tables_prefill.shape[-1]
+                    ):
+                        bt = block_tables_prefill[:, :max_pages_needed]
+                        block_tables_prefill = bt.contiguous().reshape(
+                            bt.shape
+                        )
+
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
                 assert is_strictly_contiguous(prefill_query)
@@ -1464,6 +1484,7 @@ class FlashInferImpl(AttentionImpl):
                 if (
                     supports_fmha_v2_prefill()
                     and not supports_trtllm_attention()
+                    and not os.environ.get("VLLM_DISABLE_FMHA_V2_PREFILL")
                 ):
                     logger.info_once(
                         "Using FMHAv2 prefill kernel (Q_PAGED_KV_HND)")
@@ -1479,6 +1500,28 @@ class FlashInferImpl(AttentionImpl):
                         ),
                     ])
 
+                    _fmha_debug = os.environ.get("VLLM_XQA_DUMP_INPUTS")
+                    if _fmha_debug:
+                        import pathlib
+                        torch.cuda.synchronize()
+                        dump_dir = pathlib.Path("/scratch/bench_serving/xqa_debug")
+                        dump_dir.mkdir(exist_ok=True)
+                        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+                        torch.save({
+                            "type": "fmha_v2_prefill",
+                            "query": prefill_query.cpu(),
+                            "kv_cache_shape": kv_cache_permute.shape,
+                            "kv_cache_dtype": str(kv_cache_permute.dtype),
+                            "block_tables": block_tables_prefill.cpu(),
+                            "seq_lens": seq_lens_prefill.cpu(),
+                            "cum_seq_lens_q": attn_metadata.prefill.cum_seq_lens_q.cpu(),
+                            "cum_seq_lens_kv": cum_seq_lens_kv_tokens.cpu(),
+                            "max_q_len": attn_metadata.prefill.max_q_len,
+                            "max_kv_len": attn_metadata.prefill.max_seq_len,
+                            "num_prefills": attn_metadata.num_prefills,
+                            "page_size": kv_cache.shape[2],
+                        }, dump_dir / f"fmha_v2_inputs_rank{rank}.pt")
+                    # logger.error(f"Dumped to {dump_dir / f'fmha_v2_inputs_rank{rank}.pt'}")
                     trtllm_fmha_v2_prefill(
                         qkv=(prefill_query, kv_cache_permute),
                         input_layout="Q_PAGED_KV_HND",
@@ -1504,6 +1547,9 @@ class FlashInferImpl(AttentionImpl):
                         mask_mode="causal",
                         window_left=self.window_left,
                     )
+
+                    if _fmha_debug:
+                        torch.cuda.synchronize()
                 else:
                     # SM100: trtllm-gen prefill (CUBINs)
                     if output.dtype == FP4_DTYPE:
@@ -1613,6 +1659,22 @@ class FlashInferImpl(AttentionImpl):
                 block_tables_decode = attn_metadata.decode.block_tables
                 seq_lens_decode = attn_metadata.decode.seq_lens
 
+                # XQA computes max_seq_len from block_tables.shape[-1] * page_size,
+                # ignoring the max_seq_len arg. Trim block_tables to the actual
+                # needed width to avoid OOB page index reads from stale page
+                # indices beyond the valid sequence length.
+                if supports_xqa_decode():
+                    page_size = kv_cache.shape[2]  # [blocks, 2, page_size, ...]
+                    max_pages_needed = (
+                        attn_metadata.decode.max_seq_len + page_size - 1
+                    ) // page_size
+                    if (
+                        max_pages_needed > 0
+                        and max_pages_needed < block_tables_decode.shape[-1]
+                    ):
+                        bt = block_tables_decode[:, :max_pages_needed]
+                        block_tables_decode = bt.contiguous().reshape(bt.shape)
+
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
                 assert is_strictly_contiguous(decode_query)
@@ -1640,6 +1702,31 @@ class FlashInferImpl(AttentionImpl):
                 else:
                     q_len_per_req = num_decode_tokens // attn_metadata.num_decodes
 
+                _xqa_debug = os.environ.get("VLLM_XQA_DUMP_INPUTS")
+                if _xqa_debug:
+                    import pathlib
+                    torch.cuda.synchronize()
+                    dump_dir = pathlib.Path("/scratch/bench_serving/xqa_debug")
+                    dump_dir.mkdir(exist_ok=True)
+                    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+                    torch.save({
+                        "query": decode_query.cpu(),
+                        "kv_cache_shape": kv_cache_permute.shape,
+                        "kv_cache_stride": kv_cache_permute.stride(),
+                        "kv_cache_dtype": str(kv_cache_permute.dtype),
+                        "block_tables": block_tables_decode.cpu(),
+                        "seq_lens": seq_lens_decode.cpu(),
+                        "max_seq_len": attn_metadata.decode.max_seq_len,
+                        "bmm1_scale": self.bmm1_scale,
+                        "bmm2_scale": self.bmm2_scale,
+                        "num_decodes": attn_metadata.num_decodes,
+                        "q_len_per_req": q_len_per_req,
+                        "page_size": kv_cache.shape[2],
+                        "num_kv_heads": self.num_kv_heads,
+                        "head_size": self.head_size,
+                    }, dump_dir / f"xqa_inputs_rank{rank}.pt")
+                    # logger.error(f"Dumped to {dump_dir / f'xqa_inputs_rank{rank}.pt'}")
+
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
                     kv_cache=kv_cache_permute,
@@ -1655,6 +1742,9 @@ class FlashInferImpl(AttentionImpl):
                     out=out,
                     q_len_per_req=q_len_per_req,
                 )
+
+                if _xqa_debug:
+                    torch.cuda.synchronize()
         return output_padded
 
     def do_kv_cache_update(
