@@ -169,6 +169,5 @@ livenessProbe:
     # -- Name or number of the port to access on the container, on which the server is listening
     port: 8000
 
-labels:
-  environment: "test"
-  release: "test"
+# -- Additional labels for all resources
+labels: {}
