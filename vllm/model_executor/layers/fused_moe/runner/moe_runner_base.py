@@ -87,7 +87,7 @@ def _moe_forward(
     layer_name: _layer_name_type,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    return layer.runner._forward_dispatch(
+    return layer._runner._forward_dispatch(
         layer,
         hidden_states,
         router_logits,
@@ -111,7 +111,7 @@ def _moe_forward_shared(
     layer_name: _layer_name_type,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    return layer.runner._forward_dispatch(
+    return layer._runner._forward_dispatch(
         layer,
         hidden_states,
         router_logits,
