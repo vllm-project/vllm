@@ -482,7 +482,7 @@ class GroupCoordinator:
 
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
-        curr_stream = torch.cuda.current_stream()
+        curr_stream = torch.accelerator.current_stream()
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
@@ -898,7 +898,7 @@ class GroupCoordinator:
                 tensor, dst=self.ranks[dst], group=comm_group
             )
             if tensor.is_cuda:
-                tensor.record_stream(torch.cuda.current_stream(tensor.device))
+                tensor.record_stream(torch.accelerator.current_stream(tensor.device))
             handles.append(handle)
 
         return handles

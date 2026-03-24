@@ -156,7 +156,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
 
         if self.gpu_to_cpu:
             # wait for model computation to finish before offloading
-            stream.wait_stream(torch.cuda.current_stream())
+            stream.wait_stream(torch.accelerator.current_stream())
         if self._transfers:
             last_transfer: Transfer = self._transfers[-1]
             last_event = last_transfer.end_event

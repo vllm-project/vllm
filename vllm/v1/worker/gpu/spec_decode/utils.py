@@ -31,7 +31,7 @@ class DraftTokensHandler:
 
         # For spec decoding + structured outputs, we must transfer the
         # draft tokens back to the scheduler for grammar validation.
-        current_stream = torch.cuda.current_stream(self.device)
+        current_stream = torch.accelerator.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
         with torch.cuda.stream(self.copy_stream):
             self.draft_tokens_np = async_copy_to_np(draft_tokens)

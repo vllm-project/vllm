@@ -241,7 +241,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._logprobs_tensors = logprobs_tensors
 
         # Initiate the copy on a separate stream, but do not synchronize it.
-        default_stream = torch.cuda.current_stream()
+        default_stream = torch.accelerator.current_stream()
         with torch.cuda.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
             self.sampled_token_ids_cpu = self._sampled_token_ids.to(
@@ -349,7 +349,7 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         self._raw_pooler_output = raw_pooler_output
 
         # Initiate the copy on a separate stream, but do not synchronize it.
-        default_stream = torch.cuda.current_stream()
+        default_stream = torch.accelerator.current_stream()
         with torch.cuda.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
             self._model_runner_output.pooler_output = _copy_pooler_output_to_cpu(
@@ -4401,7 +4401,7 @@ class GPUModelRunner(
         assert self.draft_token_ids_event is not None
         assert self.draft_token_ids_copy_stream is not None
         assert self.draft_token_ids_cpu is not None
-        default_stream = torch.cuda.current_stream()
+        default_stream = torch.accelerator.current_stream()
         num_reqs = draft_token_ids.shape[0]
         with torch.cuda.stream(self.draft_token_ids_copy_stream):
             if not zeros_only:
@@ -4432,7 +4432,7 @@ class GPUModelRunner(
         if self.valid_sampled_token_count_event is None:
             return
 
-        default_stream = torch.cuda.current_stream()
+        default_stream = torch.accelerator.current_stream()
         # Initialize a new stream to overlap the copy operation with
         # prepare_input of draft model.
         with torch.cuda.stream(self.valid_sampled_token_count_copy_stream):
