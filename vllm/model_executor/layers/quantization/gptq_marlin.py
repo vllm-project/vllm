@@ -19,7 +19,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+    fused_marlin_moe,
+    make_marlin_moe_kernel,
+)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -793,6 +796,52 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         if hasattr(layer, "w2_bias") and layer.w2_bias is not None:
             layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
 
+        self._setup_kernel(layer)
+
+    def _setup_kernel(self, layer: FusedMoE) -> None:
+        """Build the FusedMoEKernel for this layer.
+
+        Skipped for 8-bit weights, which are not supported by the modular
+        Marlin kernel.  In that case ``self.moe_kernel`` stays ``None`` and
+        the legacy ``fused_marlin_moe()`` path is used in ``apply()``.
+        """
+        # 8-bit weights are not supported by the modular marlin kernel.
+        if self.quant_config.weight_bits == 8:
+            return
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        if self.moe_quant_config is None:
+            return
+
+        w13_g_idx = (
+            getattr(layer, "w13_g_idx", None) if self.quant_config.desc_act else None
+        )
+        w2_g_idx = (
+            getattr(layer, "w2_g_idx", None) if self.quant_config.desc_act else None
+        )
+        w13_g_idx_sort_indices = (
+            getattr(layer, "w13_g_idx_sort_indices", None)
+            if self.quant_config.desc_act
+            else None
+        )
+        w2_g_idx_sort_indices = (
+            getattr(layer, "w2_g_idx_sort_indices", None)
+            if self.quant_config.desc_act
+            else None
+        )
+
+        self.moe_kernel = make_marlin_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            w13_g_idx=w13_g_idx,
+            w2_g_idx=w2_g_idx,
+            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+            is_k_full=self.is_k_full,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+            shared_experts=layer.shared_experts,
+        )
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
@@ -820,85 +869,10 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         prepare_finalize,
         layer: torch.nn.Module,
     ):
-        """
-        Select the GEMM implementation for GPTQ-Marlin MoE.
-
-        Returns MarlinExperts configured for GPTQ quantization.
-        This is ONLY used when LoRA is enabled.
-        Without LoRA, GPTQ uses its own apply() method.
-        """
-        # Only use modular kernels when LoRA is enabled
-        # Without LoRA, GPTQ's own apply() method works fine and is more efficient
-        if not self.moe.is_lora_enabled:
-            raise NotImplementedError(
-                "GPTQ-Marlin uses its own apply() method when LoRA is not enabled. "
-                "Modular kernels are only used for LoRA support."
-            )
-
-        # The modular marlin kernels do not support 8-bit weights.
-        if self.quant_config.weight_bits == 8:
-            raise NotImplementedError(
-                "GPTQ-Marlin kernel does not support 8-bit weights."
-            )
-
-        from vllm.model_executor.layers.fused_moe import modular_kernel as mk
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-            BatchedMarlinExperts,
-            MarlinExperts,
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel "
+            "initialization logic. This function should not be called."
         )
-
-        # Ensure quant config is initialized
-        assert self.moe_quant_config is not None, (
-            "moe_quant_config must be initialized before select_gemm_impl"
-        )
-
-        w13_g_idx = (
-            getattr(layer, "w13_g_idx", None) if self.quant_config.desc_act else None
-        )
-        w2_g_idx = (
-            getattr(layer, "w2_g_idx", None) if self.quant_config.desc_act else None
-        )
-        w13_g_idx_sort_indices = (
-            getattr(layer, "w13_g_idx_sort_indices", None)
-            if self.quant_config.desc_act
-            else None
-        )
-        w2_g_idx_sort_indices = (
-            getattr(layer, "w2_g_idx_sort_indices", None)
-            if self.quant_config.desc_act
-            else None
-        )
-
-        # Check if using batched expert format (for Expert Parallelism)
-        if (
-            prepare_finalize.activation_format
-            == mk.FusedMoEActivationFormat.BatchedExperts
-        ):
-            # For batched format, use BatchedMarlinExperts
-            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-            assert max_num_tokens_per_rank is not None
-            return BatchedMarlinExperts(
-                max_num_tokens=max_num_tokens_per_rank,
-                num_dispatchers=prepare_finalize.num_dispatchers(),
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-                w13_g_idx=w13_g_idx,
-                w2_g_idx=w2_g_idx,
-                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-                is_k_full=self.is_k_full,
-            )
-        else:
-            # Standard Marlin experts for GPTQ
-            return MarlinExperts(
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-                w13_g_idx=w13_g_idx,
-                w2_g_idx=w2_g_idx,
-                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-                is_k_full=self.is_k_full,
-            )
 
     def apply(
         self,
@@ -907,7 +881,23 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor :
+        # Use modular kernel when available (4-bit weights).
+        if self.moe_kernel is not None:
+            assert not self.is_monolithic
+            return self.moe_kernel.apply(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                expert_map=layer.expert_map,
+                shared_experts_input=shared_experts_input,
+            )
+        # Fallback for 8-bit weights (not supported by the modular kernel).
         return fused_marlin_moe(
             x,
             layer.w13_qweight,

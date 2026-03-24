@@ -851,3 +851,66 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             sort_indices2=self.w2_g_idx_sort_indices,
             is_k_full=self.is_k_full,
         )
+
+
+def make_marlin_moe_kernel(
+    moe_quant_config: FusedMoEQuantConfig,
+    moe_config: FusedMoEConfig,
+    w13_g_idx: torch.Tensor | None,
+    w2_g_idx: torch.Tensor | None,
+    w13_g_idx_sort_indices: torch.Tensor | None,
+    w2_g_idx_sort_indices: torch.Tensor | None,
+    is_k_full: bool,
+    routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    shared_experts: torch.nn.Module | None = None,
+) -> mk.FusedMoEKernel:
+    """Create a FusedMoEKernel for the Marlin (GPTQ) backend.
+
+    Mirrors make_mxfp4_moe_kernel() / make_nvfp4_moe_kernel() for the
+    GPTQ-Marlin quantization path.
+    """
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        maybe_make_prepare_finalize,
+    )
+
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe=moe_config,
+        quant_config=moe_quant_config,
+        routing_tables=routing_tables,
+        allow_new_interface=True,
+    )
+    assert prepare_finalize is not None
+    assert isinstance(prepare_finalize, mk.FusedMoEPrepareAndFinalizeModular)
+
+    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
+        assert max_num_tokens is not None
+        experts: mk.FusedMoEExperts = BatchedMarlinExperts(
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=prepare_finalize.num_dispatchers(),
+            moe_config=moe_config,
+            quant_config=moe_quant_config,
+            w13_g_idx=w13_g_idx,
+            w2_g_idx=w2_g_idx,
+            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+            is_k_full=is_k_full,
+        )
+    else:
+        experts = MarlinExperts(
+            moe_config=moe_config,
+            quant_config=moe_quant_config,
+            w13_g_idx=w13_g_idx,
+            w2_g_idx=w2_g_idx,
+            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+            is_k_full=is_k_full,
+        )
+
+    return mk.FusedMoEKernel(
+        prepare_finalize,
+        experts,
+        shared_experts=shared_experts,
+        moe_parallel_config=moe_config.moe_parallel_config,
+        inplace=not moe_config.disable_inplace,
+    )
