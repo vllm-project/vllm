@@ -2579,7 +2579,7 @@ class NixlConnectorWorker:
         if now - self._last_heartbeat_time < self._heartbeat_interval:
             return
 
-        sent_any = False
+        num_notifs = 0
         for engine_id, req_ids in self._pending_transfers_by_engine.items():
             if not req_ids:
                 continue
@@ -2599,7 +2599,7 @@ class NixlConnectorWorker:
             for agent_name in remote_agents.values():
                 try:
                     self.nixl_wrapper.send_notif(agent_name, notif_msg=heartbeat_msg)
-                    sent_any = True
+                    num_notifs += 1
                 except Exception as e:
                     logger.warning(
                         "Failed to send heartbeat to engine %s agent %s: %s",
@@ -2608,8 +2608,9 @@ class NixlConnectorWorker:
                         e,
                     )
 
-        if sent_any:
+        if num_notifs > 0:
             self._last_heartbeat_time = now
+            logger.debug("Sent %d heartbeat notifications", num_notifs)
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.kv_topo is not None

@@ -192,7 +192,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_NIXL_KV_LEASE_DURATION: int = 15
     VLLM_NIXL_KV_LEASE_EXTENSION: int = 30
-    VLLM_NIXL_KV_HEARTBEAT_INTERVAL: int = 5
+    VLLM_NIXL_KV_HEARTBEAT_INTERVAL: float = 5
     VLLM_MORIIO_CONNECTOR_READ_MODE: bool = False
     VLLM_MORIIO_QP_PER_TRANSFER: int = 1
     VLLM_MORIIO_POST_BATCH_SIZE: int = -1
@@ -1391,17 +1391,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # time, the blocks will be freed. Used in disaggregated P/D setup.
     # D sends periodic heartbeats to extend the lease (see KV_LEASE_EXTENSION).
     "VLLM_NIXL_KV_LEASE_DURATION": lambda: int(
-        os.getenv("VLLM_NIXL_KV_LEASE_DURATION", "15")
+        os.getenv("VLLM_NIXL_KV_LEASE_DURATION", "30")
     ),
     # Lease extension (in seconds) granted when a heartbeat is received from
     # the consumer (D). Each heartbeat extends the lease by this amount.
     "VLLM_NIXL_KV_LEASE_EXTENSION": lambda: int(
-        os.getenv("VLLM_NIXL_KV_LEASE_EXTENSION", "30")
+        os.getenv("VLLM_NIXL_KV_LEASE_EXTENSION", "20")
     ),
     # Interval (in seconds) at which the consumer (D) sends heartbeat
     # notifications to the producer (P) to extend KV block leases.
     # Should be less than VLLM_NIXL_KV_LEASE_EXTENSION to ensure timely renewal.
-    "VLLM_NIXL_KV_HEARTBEAT_INTERVAL": lambda: int(
+    "VLLM_NIXL_KV_HEARTBEAT_INTERVAL": lambda: float(
         os.getenv("VLLM_NIXL_KV_HEARTBEAT_INTERVAL", "5")
     ),
     # Controls the read mode for the Mori-IO connector

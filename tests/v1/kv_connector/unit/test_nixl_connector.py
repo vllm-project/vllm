@@ -2665,21 +2665,10 @@ class TestHeartbeatLeaseManagement:
 
         remote_engine_id = FakeNixlConnectorWorker.REMOTE_ENGINE_ID
 
-        # Setup kv_topo
-        backend = get_current_attn_backend(vllm_config)
-        test_shape = backend.get_kv_cache_shape(
-            num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
-        )
-        worker.kv_topo = TpKVTopology(
-            tp_rank=worker.tp_rank,
-            engine_id=worker.engine_id,
-            remote_tp_size=worker._tp_size,
-            remote_block_size=worker._block_size,
-            is_mla=worker.use_mla,
-            total_num_kv_heads=worker.model_config.get_total_num_kv_heads(),
-            attn_backends=[backend],
-            tensor_shape=test_shape,
-        )
+        # Register remote engine in shared topology dicts so that
+        # block_size_ratio_from_engine_id can resolve the remote engine.
+        worker._tp_size[remote_engine_id] = 1
+        worker._block_size[remote_engine_id] = 16
 
         # Simulate transfer metadata
         from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
