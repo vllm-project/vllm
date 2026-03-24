@@ -160,9 +160,9 @@ async def transfer_run_periodically(
                             is_profile=is_profile,
                             cuda_stream=cuda_stream,
                         )
-                        event = torch.cuda.Event(blocking=False)
-                        cuda_stream.record_event(event)
-                        model_state.buffer_ready_event = event
+                        # block the async thread until the transfer to
+                        # the intermediate buffer is complete.
+                        cuda_stream.synchronize()
                         model_state.ep_buffer_ready = 1
                     finally:
                         model_state.buffer_lock.release()
