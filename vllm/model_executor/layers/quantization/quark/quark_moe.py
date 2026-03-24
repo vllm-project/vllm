@@ -826,9 +826,12 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # hidden_size to be a multiple of 256 (SCALE_K = hidden_size / 32
         # must be divisible by 8). Pad hidden_size for weight/scale
         # allocation; the original value is preserved in unpadded_hidden_size.
-        # Note: on ROCm this class is only instantiated on GFX950
-        # (gated by supports_mx()).
-        if self.model_type == "gpt_oss" and current_platform.is_rocm():
+        # Only applies to the native (non-emulated) CK path on GFX950.
+        if (
+            self.model_type == "gpt_oss"
+            and current_platform.is_rocm()
+            and not self.emulate
+        ):
             hidden_size = round_up(hidden_size, 256)
 
         # WEIGHTS
