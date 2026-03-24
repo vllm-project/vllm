@@ -4,6 +4,7 @@
 #include <atomic>
 #include <unistd.h>
 #include <ATen/cpu/Utils.h>
+#include <torch/version.h>
 
 #include "cpu/cpu_types.hpp"
 
@@ -55,7 +56,13 @@ struct Counter {
 
 inline int64_t get_available_l2_size() {
   static int64_t size = []() {
+#if TORCH_VERSION_MAJOR > 2 || \
+    (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 11)
+    const uint32_t l2_cache_size =
+        at::cpu::get_cpu_capabilities().at("l2_cache_size").toInt();
+#else
     const uint32_t l2_cache_size = at::cpu::L2_cache_size();
+#endif
     return l2_cache_size >> 1;  // use 50% of L2 cache
   }();
   return size;
