@@ -53,7 +53,7 @@ def sparse_attn_indexer(
             ((total_seq_lens, 4), torch.uint8),
         )
 
-        # Dummy allocation to account for peak logits tensor memory during inference.
+        # Dummy allocation to simulate for peak logits tensor memory during inference.
         max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         _ = torch.empty(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
