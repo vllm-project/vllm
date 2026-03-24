@@ -492,8 +492,7 @@ class INCXPULinearMethod(LinearMethodBase):
         del output_size  # Unused.
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
-        group_size = self.group_size if self.group_size != -1 else input_size
-        scales_and_zp_size = input_size_per_partition // group_size
+        scales_and_zp_size = input_size_per_partition // self.group_size
 
         # GPTQ: qweight [in // pack_factor, out] packed along input dim
         qweight = PackedvLLMParameter(
@@ -541,10 +540,7 @@ class INCXPULinearMethod(LinearMethodBase):
         # Register it so the weight loader doesn't error on unexpected keys.
         g_idx = RowvLLMParameter(
             data=torch.tensor(
-                [
-                    i // (self.group_size if self.group_size != -1 else input_size)
-                    for i in range(input_size_per_partition)
-                ],
+                [i // self.group_size for i in range(input_size_per_partition)],
                 dtype=torch.int32,
             ),
             input_dim=0,
