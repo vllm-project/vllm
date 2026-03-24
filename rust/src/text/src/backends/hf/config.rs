@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
+use thiserror_ext::AsReport as _;
 
 use crate::error::{Error, Result};
 
@@ -96,8 +97,18 @@ where
     let Some(path) = path else {
         return Ok(T::default());
     };
-    let content = fs::read_to_string(path)
-        .map_err(|error| Error::Tokenizer(format!("failed to read {}: {error}", path.display())))?;
-    serde_json::from_str(&content)
-        .map_err(|error| Error::Tokenizer(format!("failed to parse {}: {error}", path.display())))
+    let content = fs::read_to_string(path).map_err(|error| {
+        Error::Tokenizer(format!(
+            "failed to read {}: {}",
+            path.display(),
+            error.as_report()
+        ))
+    })?;
+    serde_json::from_str(&content).map_err(|error| {
+        Error::Tokenizer(format!(
+            "failed to parse {}: {}",
+            path.display(),
+            error.as_report()
+        ))
+    })
 }

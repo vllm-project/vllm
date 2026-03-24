@@ -32,7 +32,10 @@ async fn resolve_remote_model_files(model_id: &str) -> Result<ResolvedModelFiles
     let api = build_api().map_err(|error| Error::Tokenizer(error.to_report_string()))?;
     let repo = api.model(model_id.to_string());
     let info = repo.info().await.map_err(|error| {
-        Error::Tokenizer(format!("failed to fetch model '{model_id}': {error}"))
+        Error::Tokenizer(format!(
+            "failed to fetch model '{model_id}': {}",
+            error.as_report()
+        ))
     })?;
 
     let siblings = info
@@ -109,7 +112,8 @@ fn resolve_cached_model_files(model_id: &str) -> Option<ResolvedModelFiles> {
 async fn download_known_file(repo: &ApiRepo, model_id: &str, filename: &str) -> Result<PathBuf> {
     repo.get(filename).await.map_err(|error| {
         Error::Tokenizer(format!(
-            "failed to download '{filename}' for model '{model_id}': {error}"
+            "failed to download '{filename}' for model '{model_id}': {}",
+            error.as_report()
         ))
     })
 }

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
+use thiserror_ext::AsReport;
 
 use crate::error::{Error, Result};
 use crate::protocol::stats::SchedulerStats;
@@ -304,7 +305,10 @@ impl EngineCoreUtilityRequest {
         T: Serialize,
     {
         let args = rmpv::ext::to_value(args).map_err(|error| {
-            Error::ValueEncodeExt(format!("failed to encode utility args: {error}"))
+            Error::ValueEncodeExt(format!(
+                "failed to encode utility args: {}",
+                error.as_report()
+            ))
         })?;
         let args = match args {
             Value::Nil => Value::Array(Vec::new()),

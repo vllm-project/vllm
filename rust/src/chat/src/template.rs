@@ -204,8 +204,9 @@ fn template_tool_calls_to_json(
     for tool_call in content.tool_calls() {
         let arguments = serde_json::from_str::<Value>(&tool_call.arguments).map_err(|error| {
             Error::ChatTemplate(format!(
-                "assistant tool call `{}` has invalid JSON arguments: {error}",
-                tool_call.id
+                "assistant tool call `{}` has invalid JSON arguments: {}",
+                tool_call.id,
+                error.as_report()
             ))
         })?;
 

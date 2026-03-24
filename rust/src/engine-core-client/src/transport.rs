@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
+use thiserror_ext::AsReport;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -269,7 +270,7 @@ pub async fn run_output_loop(
                 // If we fail to receive a message from the engine, it's likely that the engine has
                 // crashed or become unreachable, so we should notify the client and shut down the
                 // output loop.
-                error!(error = ?error, "failed to receive output message");
+                error!(error = %error.as_report(), "failed to receive output message");
                 let _ = tx.send(Err(Error::Transport(error))).await;
                 return;
             }
@@ -298,7 +299,7 @@ pub async fn run_output_loop(
             Err(error) => {
                 // If we fail to decode the message from the engine, notify the client but keep the
                 // output loop running to continue processing future messages from the engine.
-                warn!(frame_len, error = ?error, "failed to decode output message");
+                warn!(frame_len, error = %error.as_report(), "failed to decode output message");
                 Err(error)
             }
         };
