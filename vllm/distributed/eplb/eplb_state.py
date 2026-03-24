@@ -178,11 +178,6 @@ class EplbModelState:
     """
     The lock to protect the expert buffer.
     """
-    buffer_ready_event: torch.cuda.Event | None
-    """
-    CUDA event recorded when the async worker finishes filling the buffer.
-    The main thread waits on this before consuming the buffer.
-    """
     buffer_consumed_event: torch.cuda.Event | None
     """
     CUDA event recorded after the main thread finishes consuming the buffer.
@@ -491,7 +486,6 @@ class EplbState:
             model=model,
             expert_buffer=expert_buffer,
             buffer_lock=threading.Lock(),
-            buffer_ready_event=None,
             buffer_consumed_event=None,
             window_ready_event=None,
             ep_buffer_ready=0,
@@ -932,11 +926,6 @@ class EplbState:
             )
         try:
             assert model_state.new_physical_to_logical_map is not None
-            device_index = model_state.cuda_device_index or self.cuda_device_index
-            if model_state.buffer_ready_event is not None and device_index is not None:
-                stream = torch.cuda.current_stream(device=device_index)
-                stream.wait_event(model_state.buffer_ready_event)
-                model_state.buffer_ready_event = None
             expert_weights = model_state.model.expert_weights[
                 model_state.layer_to_transfer
             ]
