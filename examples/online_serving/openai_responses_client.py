@@ -16,7 +16,7 @@ input_messages = [{"role": "user", "content": "What model are you?"}]
 
 def main():
     base_url = "http://localhost:8000/v1"
-    client = OpenAI(base_url=base_url, api_key="empty")
+    client = OpenAI(base_url=base_url, api_key="empty", timeout=60.0, max_retries=3)
     model = "Qwen/Qwen3-8B"  # get_first_model(client)
     response = client.responses.create(
         model=model,

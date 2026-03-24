@@ -38,6 +38,8 @@ def main():
     client = OpenAI(
         api_key="EMPTY",
         base_url="http://localhost:8000/v1",
+        timeout=60.0,
+        max_retries=3,
     )
 
     model_name = "meta-llama/Llama-3.2-1B-Instruct"

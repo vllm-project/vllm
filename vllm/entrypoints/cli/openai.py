@@ -31,7 +31,7 @@ def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
 
     base_url = args.url
     api_key = args.api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
-    openai_client = OpenAI(api_key=api_key, base_url=base_url)
+    openai_client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0, max_retries=3)
 
     if args.model_name:
         model_name = args.model_name

@@ -221,7 +221,7 @@ for session_id in sorted(st.session_state.sessions.keys(), reverse=True):
 st.title("vLLM Chat Assistant")
 
 # Initialize OpenAI client with API settings
-client = OpenAI(api_key=openai_api_key, base_url=st.session_state.api_base_url)
+client = OpenAI(api_key=openai_api_key, base_url=st.session_state.api_base_url, timeout=60.0, max_retries=3)
 
 # Get and display current model id
 models = client.models.list()
