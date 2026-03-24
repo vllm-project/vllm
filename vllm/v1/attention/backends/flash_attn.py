@@ -446,8 +446,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         prefix_scheduler_metadata = None
 
         if self.dcp_world_size > 1:
-            query_lens = query_start_loc[1 : num_reqs + 1] - query_start_loc[:num_reqs]
-            context_kv_lens = seq_lens[:num_reqs] - query_lens
+            query_lens = query_start_loc[1:] - query_start_loc[:-1]
+            context_kv_lens = seq_lens - query_lens
             local_context_kv_lens = get_dcp_local_seq_lens(
                 context_kv_lens,
                 self.dcp_world_size,
