@@ -70,7 +70,7 @@ steps:
   - vllm/
   - tests/models/multimodal
   - tests/models/registry.py
-  device: cpu
+  device: cpu-medium
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
