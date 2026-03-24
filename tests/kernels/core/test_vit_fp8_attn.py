@@ -70,6 +70,11 @@ def _fp8_attention(monkeypatch, default_vllm_config):
     monkeypatch.delenv("VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH", raising=False)
     disable_envs_cache()
 
+    # MMEncoderAttention reads torch.get_default_dtype() during init
+    # to determine the output dtype. In real model loading this is bf16.
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
+
     with patch(
         "vllm.model_executor.layers.attention.mm_encoder_attention"
         ".get_vit_attn_backend",
@@ -77,6 +82,7 @@ def _fp8_attention(monkeypatch, default_vllm_config):
     ):
         yield
 
+    torch.set_default_dtype(old_dtype)
     disable_envs_cache()
 
 
@@ -151,15 +157,14 @@ def test_fp8_attn_output_shape(
         pytest.skip("FP8 MMEncoderAttention not available")
     assert attn is not None  # mypy narrowing
 
-    padded_dim = round_up(head_dim, 16)
-    fp8_hidden = num_heads * padded_dim if padded_dim != head_dim else None
+    # FP8 always needs fp8_padded_hidden_size for correct cu_seqlens
+    fp8_padded_hidden_size = num_heads * round_up(head_dim, 16)
 
     cu_seqlens, max_seqlen, sequence_lengths = _build_cu_seqlens_and_meta(
-        seq_len, num_heads, head_dim, fp8_padded_hidden_size=fp8_hidden
+        seq_len, num_heads, head_dim, fp8_padded_hidden_size=fp8_padded_hidden_size
     )
 
     q = torch.randn(
-        1,
         seq_len,
         num_heads,
         head_dim,
@@ -180,13 +185,17 @@ def test_fp8_attn_output_shape(
     not (HAS_TRITON and _has_flashinfer_cudnn()),
     reason="Triton and FlashInfer cuDNN required",
 )
-def test_fp8_vs_bf16_close(_fp8_attention) -> None:
+@pytest.mark.parametrize("head_dim", HEAD_DIMS)
+@pytest.mark.parametrize("seq_len", SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+def test_fp8_vs_bf16_close(
+    head_dim: int, seq_len: int, num_heads: int, _fp8_attention
+) -> None:
     """FP8 attention output should be reasonably close to BF16 baseline."""
     from vllm.model_executor.layers.attention.mm_encoder_attention import (
         MMEncoderAttention,
     )
-
-    head_dim, seq_len, num_heads = 80, 128, 16
+    from vllm.utils.math_utils import round_up
 
     torch.manual_seed(42)
     q = torch.randn(
@@ -213,8 +222,12 @@ def test_fp8_vs_bf16_close(_fp8_attention) -> None:
         pytest.skip("FP8 MMEncoderAttention not available")
     assert attn_fp8 is not None  # mypy narrowing
 
+    fp8_padded_hidden_size = num_heads * round_up(head_dim, 16)
     cu_seqlens, max_seqlen, seq_lengths = _build_cu_seqlens_and_meta(
-        seq_len, num_heads, head_dim
+        seq_len,
+        num_heads,
+        head_dim,
+        fp8_padded_hidden_size=fp8_padded_hidden_size,
     )
 
     out_fp8 = attn_fp8._forward_flashinfer(
@@ -246,18 +259,42 @@ def test_fp8_vs_bf16_close(_fp8_attention) -> None:
         sequence_lengths=seq_lengths,
     )
 
-    diff = (out_fp8.float() - out_bf16.float()).abs()
-    max_diff = diff.max().item()
-    mean_diff = diff.mean().item()
+    out_fp8_f = out_fp8.float()
+    out_bf16_f = out_bf16.float()
 
-    # FP8 quantization introduces error; check reasonable bounds
-    assert max_diff < 0.5, f"FP8 vs BF16 max diff too large: {max_diff}"
-    assert mean_diff < 0.05, f"FP8 vs BF16 mean diff too large: {mean_diff}"
+    abs_diff = (out_fp8_f - out_bf16_f).abs()
+    abs_diff_flat = abs_diff.flatten()
 
-    # Also check cosine similarity
-    out_fp8_flat = out_fp8.flatten().float()
-    out_bf16_flat = out_bf16.flatten().float()
+    # Relative diff (avoid division by zero)
+    denom = out_bf16_f.abs().clamp(min=1e-6)
+    rel_diff_flat = (abs_diff / denom).flatten()
+
     cosine_sim = torch.nn.functional.cosine_similarity(
-        out_fp8_flat.unsqueeze(0), out_bf16_flat.unsqueeze(0)
+        out_fp8_f.flatten().unsqueeze(0),
+        out_bf16_f.flatten().unsqueeze(0),
     ).item()
+
+    pcts = [50, 90, 95, 99, 99.9]
+    abs_pct = {p: torch.quantile(abs_diff_flat, p / 100).item() for p in pcts}
+    rel_pct = {p: torch.quantile(rel_diff_flat, p / 100).item() for p in pcts}
+
+    print(f"\nFP8 vs BF16 (head_dim={head_dim}, seq_len={seq_len}):")
+    print(f"  cosine_sim={cosine_sim:.6f}")
+    print(
+        f"  abs_diff: max={abs_diff_flat.max().item():.6f}, "
+        f"mean={abs_diff_flat.mean().item():.6f}, "
+        + ", ".join(f"p{p}={abs_pct[p]:.6f}" for p in pcts)
+    )
+    print(
+        f"  rel_diff: max={rel_diff_flat.max().item():.6f}, "
+        f"mean={rel_diff_flat.mean().item():.6f}, "
+        + ", ".join(f"p{p}={rel_pct[p]:.6f}" for p in pcts)
+    )
+
+    assert abs_diff_flat.max().item() < 0.2, (
+        f"FP8 vs BF16 max abs diff too large: {abs_diff_flat.max().item()}"
+    )
+    assert abs_diff_flat.mean().item() < 0.02, (
+        f"FP8 vs BF16 mean abs diff too large: {abs_diff_flat.mean().item()}"
+    )
     assert cosine_sim > 0.99, f"Cosine similarity too low: {cosine_sim:.6f}"

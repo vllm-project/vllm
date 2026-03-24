@@ -367,12 +367,12 @@ class Qwen3_VisionTransformer(nn.Module):
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
 
-        # When FP8 attention is enabled and head_dim is not a multiple of 16,
-        # the quantization kernel pads head_dim (e.g. 72 -> 80). Store the
-        # padded hidden_size so prepare_encoder_metadata can produce
-        # element offsets that match the contiguous FP8 tensor strides.
+        # When FP8 attention is enabled, Q/K/V become independent contiguous
+        # tensors after quantization, so cu_seqlens must use the same stride
+        # for all three (no 3x V multiplier from the interleaved BF16 layout).
+        # If head_dim is not a multiple of 16, the padded size is larger.
         self.fp8_vit_attn = envs.VLLM_MM_ENCODER_FP8_ATTN
-        if self.fp8_vit_attn and head_dim % 16 != 0:
+        if self.fp8_vit_attn:
             self.fp8_padded_hidden_size = self.num_heads * round_up(head_dim, 16)
         else:
             self.fp8_padded_hidden_size = None
