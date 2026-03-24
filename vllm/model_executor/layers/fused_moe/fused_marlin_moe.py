@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kMxfp4Static,
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
@@ -574,12 +575,13 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # TODO(rob): add int4, mxfp4, int8 as integrations
+        # TODO(rob): add int4, int8 as integrations
         # are migrated to use the oracle one-by-one.
         SUPPORTED_W = [
             kFp8Static128BlockSym,
             kFp8StaticChannelSym,
             kFp8StaticTensorSym,
+            kMxfp4Static,
             kNvfp4Static,
         ]
         return weight_key in SUPPORTED_W
@@ -600,7 +602,10 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not moe_parallel_config.use_fi_all2allv_kernels
+        return not (
+            moe_parallel_config.use_fi_nvl_two_sided_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
+        )
 
     @property
     def quant_type_id(self) -> int:
@@ -657,9 +662,6 @@ class MarlinExperts(MarlinExpertsBase):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
-
-    def supports_chunking(self) -> bool:
-        return True
 
     def workspace_shapes(
         self,
@@ -785,9 +787,6 @@ class BatchedMarlinExperts(MarlinExpertsBase):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
-
-    def supports_chunking(self) -> bool:
-        return False
 
     def workspace_shapes(
         self,

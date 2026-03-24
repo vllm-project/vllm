@@ -51,11 +51,8 @@ For example:
 **1. Attention:**
 
 ```python
---8<-- "vllm/model_executor/layers/attention/mm_encoder_attention.py:mm_encoder_attn"
-
 --8<-- "vllm/model_executor/layers/mla.py:multi_head_latent_attention"
 
---8<-- "vllm/model_executor/models/deepencoder.py:rel_pos_attention"
 ```
 
 **2. Activation:**
@@ -170,6 +167,16 @@ For example:
 --8<-- "vllm/model_executor/layers/rotary_embedding/dual_chunk_rope.py:dual_chunk_rotary_embedding"
 
 --8<-- "vllm/model_executor/layers/rotary_embedding/common.py:apply_rotary_emb"
+```
+
+**12. Encoder:**
+
+```python
+--8<-- "vllm/model_executor/models/deepencoder2.py:qwen2_decoder"
+
+--8<-- "vllm/model_executor/layers/attention/mm_encoder_attention.py:mm_encoder_attn"
+
+--8<-- "vllm/model_executor/models/deepencoder.py:rel_pos_attention"
 ```
 
 ## Guidelines for Implementing a New CustomOp
