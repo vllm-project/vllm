@@ -602,7 +602,7 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         messages: list[ResponseInputOutputItem],
         tool_dicts: list[dict[str, Any]] | None,
-        tool_parser: Callable[[TokenizerLike], ToolParser] | None,
+        tool_parser: type[ToolParser] | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
     ):
