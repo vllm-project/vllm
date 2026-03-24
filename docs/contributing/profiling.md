@@ -42,7 +42,7 @@ Traces can be visualized using <https://ui.perfetto.dev/>.
 
 #### Offline Inference
 
-Refer to [examples/basic/offline_inference/simple_profiling.py](../../examples/basic/offline_inference/simple_profiling.py) for an example.
+Refer to [examples/offline_inference/simple_profiling.py](../examples/offline_inference/simple_profiling.py) for an example.
 
 #### OpenAI Server
 

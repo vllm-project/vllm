@@ -68,7 +68,7 @@ You can pass a single image to the `'image'` field of the multi-modal dictionary
         print(generated_text)
     ```
 
-Full example: [examples/basic/offline_inference/vision_language.py](../../examples/basic/offline_inference/vision_language.py)
+Full example: [examples/offline_inference/vision_language.py](../examples/offline_inference/vision_language.py)
 
 To substitute multiple images inside the same text prompt, you can pass in a list of images instead:
 
@@ -101,7 +101,7 @@ To substitute multiple images inside the same text prompt, you can pass in a lis
         print(generated_text)
     ```
 
-Full example: [examples/basic/offline_inference/vision_language_multi_image.py](../../examples/basic/offline_inference/vision_language_multi_image.py)
+Full example: [examples/offline_inference/vision_language_multi_image.py](../examples/offline_inference/vision_language_multi_image.py)
 
 If using the [LLM.chat](../models/generative_models.md#llmchat) method, you can pass images directly in the message content using various formats: image URLs, PIL Image objects, or pre-computed embeddings:
 
@@ -287,13 +287,13 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
     !!! note
         'process_vision_info' is only applicable to Qwen2.5-VL and similar models.
 
-Full example: [examples/basic/offline_inference/vision_language.py](../../examples/basic/offline_inference/vision_language.py)
+Full example: [examples/offline_inference/vision_language.py](../examples/offline_inference/vision_language.py)
 
 ### Audio Inputs
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
 
-Full example: [examples/basic/offline_inference/audio_language.py](../../examples/basic/offline_inference/audio_language.py)
+Full example: [examples/offline_inference/audio_language.py](../examples/offline_inference/audio_language.py)
 
 #### Chunking Long Audio for Transcription
 
