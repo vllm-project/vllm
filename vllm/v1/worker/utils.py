@@ -136,8 +136,8 @@ class KVBlockZeroer:
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
-                kv = static_forward_context[layer_name].kv_cache[0]
-                if isinstance(kv, list):
+                kv = static_forward_context[layer_name].kv_cache
+                if not isinstance(kv, torch.Tensor):
                     continue
                 dp = kv.data_ptr()
                 if dp in seen_ptrs:
@@ -510,8 +510,7 @@ def bind_kv_cache(
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
-        # NOTE: Keep list wrapper for layers that index kv_cache by engine slot.
-        forward_context[layer_name].kv_cache = [kv_cache]
+        forward_context[layer_name].kv_cache = kv_cache
 
 
 def is_residual_scattered_for_sp(
