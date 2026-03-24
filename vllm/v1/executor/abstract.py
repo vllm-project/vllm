@@ -316,12 +316,11 @@ class Executor(ABC):
     def _get_gpu_access_signal_path(self, device_id: int) -> Path:
         """Get a node-local signal path for a specific GPU device."""
         hostname = socket.gethostname()
-        if os.path.exists("/dev/shm"):
-            base_dir = Path("/dev/shm")
-        else:
-            tmp_dir = os.environ.get("VLLM_TEMP_DIR", tempfile.gettempdir())
-            base_dir = Path(tmp_dir)
-
+        base_dir = (
+            Path("/dev/shm")
+            if os.path.exists("/dev/shm")
+            else Path(tempfile.gettempdir())
+        )
         sig_dir = base_dir / "vllm_signals"
         try:
             # 0o1777 sets the sticky bit,
@@ -339,10 +338,7 @@ class Executor(ABC):
 
     def _acquire_gpu_access(self):
         """Acquire atomic signals for all GPUs managed by this executor."""
-        # Use getattr to satisfy mypy since device_ids may not be explicitly
-        # typed in DeviceConfig.
-        device_ids = getattr(self.device_config, "device_ids", None)
-
+        device_ids = self.device_config.device_ids
         if not device_ids:
             logger.warning(
                 "Could not determine device IDs for GPU access lock. "
