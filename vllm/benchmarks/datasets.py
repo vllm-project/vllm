@@ -2202,6 +2202,7 @@ class CustomMMDataset(CustomDataset):
                 logger.warning(
                     "Multiple image files found for sample %d. "
                     "Only the first image will be used.",
+                    "For multi-image benchmarking, consider using RandomMultiModalDataset.",
                     i,
                 )
             mm_content = process_image(images[0])

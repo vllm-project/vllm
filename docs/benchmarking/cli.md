@@ -144,6 +144,13 @@ You can skip applying chat template if your data already has it by using `--cust
 
 If the multimodal dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomMMDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" and "image_files" field per entry, e.g., `mm_data.jsonl`:
 
+> ⚠️ **Note**
+>
+> Although `image_files` is defined as a list, **only the first image is currently used** for each request.
+> Any additional images in the list will be ignored.
+> This behavior reflects the current implementation.
+> For multi-image benchmarking, consider using `RandomMultiModalDataset`.
+
 ```json
 {"prompt": "How many animals are present in the given image?", "image_files": ["/path/to/image/folder/horsepony.jpg"]}
 {"prompt": "What colour is the bird shown in the image?", "image_files": ["/path/to/image/folder/flycatcher.jpeg"]}
