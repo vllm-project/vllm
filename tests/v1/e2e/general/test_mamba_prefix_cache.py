@@ -258,8 +258,8 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                     mamba_kv_cache_dict[
                         num_computed_tokens - num_computed_tokens % BLOCK_SIZE
                     ] = (
-                        kv_cache[0][0][block_id].clone(),
-                        kv_cache[0][1][block_id].clone(),
+                        kv_cache[0][block_id].clone(),
+                        kv_cache[1][block_id].clone(),
                     )
 
             last_num_computed_tokens = num_computed_tokens
@@ -302,7 +302,7 @@ def get_fake_process_mamba_fn(
             mamba_layer_name = kv_cache_config.kv_cache_groups[
                 mamba_group_id
             ].layer_names[0]
-            mamba_kv_cache = forward_context[mamba_layer_name].kv_cache[0][-1]
+            mamba_kv_cache = forward_context[mamba_layer_name].kv_cache[-1]
             mamba_block_table = input_batch.block_table.block_tables[
                 mamba_group_id
             ].block_table.cpu[0]
