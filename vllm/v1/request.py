@@ -135,7 +135,9 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
-        self.shared_prefix_tokens: int = shared_prefix_tokens
+        self.shared_prefix_tokens: int = min(
+            shared_prefix_tokens, self.num_prompt_tokens
+        )
 
         # Multi-modal related
         self.mm_features = mm_features or []

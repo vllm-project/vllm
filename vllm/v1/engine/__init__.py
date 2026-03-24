@@ -77,8 +77,7 @@ class EngineCoreRequest(
     arrival_time: float
     lora_request: LoRARequest | None
     cache_salt: str | None
-    shared_prefix_tokens: int = 0
-    data_parallel_rank: int | None = None
+    data_parallel_rank: int | None
     prompt_embeds: torch.Tensor | None = None
 
     # Index of the client, used to ensure outputs are sent back to the same
@@ -101,6 +100,7 @@ class EngineCoreRequest(
     external_req_id: str | None = None
 
     reasoning_ended: bool | None = None
+    shared_prefix_tokens: int = 0
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
