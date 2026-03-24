@@ -2362,3 +2362,19 @@ def test_hma_not_disabled_when_kv_events_enabled():
     assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is False, (
         "kv_events_config must not force-disable the hybrid KV cache manager."
     )
+
+
+def test_unify_kv_cache_spec_page_size_scales_page_size_padded():
+    kv_cache_spec = {
+        "layer_1": new_kv_cache_spec(block_size=16, page_size_padded=16 * 1024),
+        "layer_2": new_kv_cache_spec(block_size=32, page_size_padded=32 * 1024),
+    }
+
+    unified_spec = kv_cache_utils.unify_kv_cache_spec_page_size(kv_cache_spec)
+
+    assert unified_spec["layer_1"].block_size == 32
+    assert unified_spec["layer_1"].page_size_padded == 32 * 1024
+    assert (
+        unified_spec["layer_1"].page_size_bytes
+        == unified_spec["layer_2"].page_size_bytes
+    )
