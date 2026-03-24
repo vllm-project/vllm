@@ -369,9 +369,8 @@ def initialize_ray_cluster(
 
     # Prevalidate GPU requirements before Ray processing
     if current_platform.is_cuda() and parallel_config.world_size > 1:
-        from vllm.utils.torch_utils import cuda_device_count_stateless
 
-        available_gpus = cuda_device_count_stateless()
+        available_gpus = current_platform.device_count()
         if parallel_config.world_size > available_gpus:
             logger.warning(
                 "Tensor parallel size (%d) exceeds available GPUs (%d). "

@@ -310,10 +310,10 @@ def test_modular_kernel_combinations_multigpu(
     world_size: int,
     pytestconfig,
 ):
-    if cuda_device_count_stateless() < world_size:
+    if current_platform.device_count() < world_size:
         pytest.skip(
             f"Not enough GPUs available to run, got "
-            f"{cuda_device_count_stateless()} expected "
+            f"{current_platform.device_count()} expected "
             f"{world_size}."
         )
 
