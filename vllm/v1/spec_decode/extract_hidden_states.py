@@ -286,7 +286,7 @@ class ExtractHiddenStatesProposer:
 
     def prepare_next_token_ids_padded(
         self,
-        seq_lens: torch.Tensor,
+        common_attn_metadata: CommonAttentionMetadata,
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
@@ -303,10 +303,11 @@ class ExtractHiddenStatesProposer:
         device = sampled_token_ids.device
 
         # Compute backup tokens for discarded / invalid requests
-        seq_lens_list = seq_lens[:num_reqs].tolist()
         backup_tokens_gpu = torch.tensor(
             [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
+                requests[gpu_input_batch.req_ids[i]].get_token_id(
+                    common_attn_metadata.seq_lens_cpu[i].item()
+                )
                 for i in range(num_reqs)
             ],
             dtype=torch.int32,
