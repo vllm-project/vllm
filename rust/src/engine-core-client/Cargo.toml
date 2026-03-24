@@ -23,6 +23,8 @@ vllm-metrics.workspace = true
 zeromq.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
+clap.workspace = true
 expect-test.workspace = true
 hex.workspace = true
 tempfile.workspace = true

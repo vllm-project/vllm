@@ -28,6 +28,7 @@ pub mod handshake;
 pub mod stats;
 pub use classfied_outputs::{
     ClassifiedEngineCoreOutputs, DpControlMessage, OtherEngineCoreOutputs, RequestBatchOutputs,
+    UtilityCallOutput,
 };
 
 /// Request types are encoded as single-byte protocol constants so they can be
@@ -278,6 +279,47 @@ impl EngineCoreRequest {
     }
 }
 
+/// Engine-core utility call payload sent from frontend to engine.
+///
+/// Original Python payload shape:
+/// `(client_index, call_id, method_name, args)`
+#[derive(Debug, Clone, PartialEq, Serialize_tuple)]
+pub struct EngineCoreUtilityRequest {
+    pub client_index: u32,
+    pub call_id: i64,
+    pub method_name: String,
+    pub args: OpaqueValue,
+}
+
+impl EngineCoreUtilityRequest {
+    /// Create a new utility request with the given strongly typed arguments, encoding them into the
+    /// expected msgpack value format.
+    pub fn new<T>(
+        client_index: u32,
+        call_id: i64,
+        method_name: impl Into<String>,
+        args: T,
+    ) -> Result<Self>
+    where
+        T: Serialize,
+    {
+        let args = rmpv::ext::to_value(args).map_err(|error| {
+            Error::ValueEncodeExt(format!("failed to encode utility args: {error}"))
+        })?;
+        let args = match args {
+            Value::Nil => Value::Array(Vec::new()),
+            other => other,
+        };
+
+        Ok(Self {
+            client_index,
+            call_id,
+            method_name: method_name.into(),
+            args,
+        })
+    }
+}
+
 /// Engine-core output for a single request.
 ///
 /// Original Python definition:
@@ -333,7 +375,62 @@ pub struct UtilityOutput {
     #[serde(default)]
     pub failure_message: Option<String>,
     #[serde(default)]
-    pub result: Option<OpaqueValue>,
+    pub result: Option<UtilityResultEnvelope>,
+}
+
+/// Python `UtilityResult` wrapper carried inside `UtilityOutput.result`.
+///
+/// Upstream reference:
+/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/serial_utils.py#L178-L185>
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
+pub struct UtilityResultEnvelope {
+    /// Recursive type information encoded on Python side, serving as the hint for deserialization.
+    /// We don't care it here as in Rust frontend all utility calls are strongly-typed.
+    #[serde(default)]
+    type_info: Option<OpaqueValue>,
+    /// The actual utility result.
+    #[serde(default)]
+    result: Option<OpaqueValue>,
+}
+
+impl UtilityResultEnvelope {
+    /// Create a utility result envelope without type information.
+    pub fn without_type_info(result: OpaqueValue) -> Self {
+        Self {
+            type_info: None,
+            result: Some(result),
+        }
+    }
+}
+
+impl UtilityOutput {
+    /// Decode the typed result of a utility call.
+    pub fn into_typed_result<T>(self, method: &str) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        if let Some(message) = self.failure_message {
+            return Err(Error::UtilityCallFailed {
+                method: method.to_string(),
+                call_id: self.call_id,
+                message,
+            });
+        }
+
+        let result =
+            self.result
+                .and_then(|e| e.result)
+                .ok_or_else(|| Error::UtilityResultMissing {
+                    method: method.to_string(),
+                    call_id: self.call_id,
+                })?;
+
+        rmpv::ext::from_value(result).map_err(|error| Error::UtilityResultDecode {
+            method: method.to_string(),
+            call_id: self.call_id,
+            reason: error.to_string(),
+        })
+    }
 }
 
 /// Batch of engine-core outputs returned to a frontend client.
@@ -390,6 +487,13 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    fn utility_result_value<T>(value: T) -> UtilityResultEnvelope
+    where
+        T: Serialize,
+    {
+        UtilityResultEnvelope::without_type_info(rmpv::ext::to_value(value).unwrap())
+    }
 
     #[test]
     fn engine_core_request_serializes_as_full_array() {
@@ -462,5 +566,54 @@ mod tests {
             decoded.finished_requests,
             Some(BTreeSet::from(["req-1".to_string()]))
         );
+    }
+
+    #[test]
+    fn utility_request_serializes_as_tuple_payload() {
+        let request = EngineCoreUtilityRequest::new(7, 42, "is_sleeping", ()).unwrap();
+
+        let encoded = encode_msgpack(&request).unwrap();
+        let value = decode_value(&encoded).unwrap();
+        let array = match value {
+            Value::Array(array) => array,
+            other => panic!("expected utility request array, got {other:?}"),
+        };
+
+        assert_eq!(array.len(), 4);
+        assert_eq!(array[0], Value::from(7));
+        assert_eq!(array[1], Value::from(42));
+        assert_eq!(array[2], Value::from("is_sleeping"));
+        assert_eq!(array[3], Value::Array(Vec::new()));
+    }
+
+    #[test]
+    fn utility_output_decodes_typed_result() {
+        let output = UtilityOutput {
+            call_id: 9,
+            failure_message: None,
+            result: Some(utility_result_value(true)),
+        };
+
+        assert!(output.into_typed_result::<bool>("is_sleeping").unwrap());
+    }
+
+    #[test]
+    fn utility_output_reports_failure_message() {
+        let error = UtilityOutput {
+            call_id: 9,
+            failure_message: Some("boom".to_string()),
+            result: None,
+        }
+        .into_typed_result::<bool>("is_sleeping")
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::UtilityCallFailed {
+                method,
+                call_id,
+                message
+            } if method == "is_sleeping" && call_id == 9 && message == "boom"
+        ));
     }
 }

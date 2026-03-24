@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::convert::TryFrom;
+use std::io::Cursor;
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Command;
@@ -7,13 +8,14 @@ use std::sync::Once;
 use std::time::Duration;
 
 use futures::StreamExt;
+use rmpv::Value;
 use thiserror_ext::AsReport as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
     EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams, FinishReason,
-    RequestOutputKind, UtilityOutput,
+    RequestOutputKind, UtilityOutput, UtilityResultEnvelope,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, Error};
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
@@ -171,6 +173,17 @@ fn init_tracing() {
 
 fn is_shared_dispatcher_closed(error: &Error) -> bool {
     matches!(error, Error::Shared(inner) if matches!(inner.as_ref(), Error::DispatcherClosed { .. }))
+}
+
+fn decode_value(bytes: &[u8]) -> Value {
+    rmpv::decode::read_value(&mut Cursor::new(bytes)).unwrap()
+}
+
+fn utility_result_value<T>(value: T) -> UtilityResultEnvelope
+where
+    T: serde::Serialize,
+{
+    UtilityResultEnvelope::without_type_info(rmpv::ext::to_value(value).unwrap())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -590,6 +603,165 @@ async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
         Err(error) => error,
     };
     assert!(matches!(add_error, Error::DispatcherClosed { .. }));
+
+    client.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn is_sleeping_wrapper_sends_typed_request_and_returns_typed_response() {
+    init_tracing();
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-utility-success".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+
+            let utility = recv_engine_message(&mut dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]);
+            let array = match payload {
+                Value::Array(array) => array,
+                other => panic!("expected utility payload array, got {other:?}"),
+            };
+            assert_eq!(array.len(), 4);
+            assert_eq!(array[0], Value::from(5));
+            let call_id = array[1].as_i64().expect("call_id");
+            assert_eq!(array[2], Value::from("is_sleeping"));
+            assert_eq!(array[3], Value::Array(Vec::new()));
+
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    utility_output: Some(UtilityOutput {
+                        call_id,
+                        failure_message: None,
+                        result: Some(utility_result_value(true)),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    });
+
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
+        handshake_address,
+        model_name: "test-model".to_string(),
+        local_host: "127.0.0.1".to_string(),
+        ready_timeout: Duration::from_secs(2),
+        client_index: 5,
+    })
+    .await
+    .unwrap();
+
+    let result = client.is_sleeping().await.unwrap();
+    assert!(result);
+
+    client.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn call_utility_failure_message_surfaces_as_error() {
+    init_tracing();
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-utility-fail".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+
+            let utility = recv_engine_message(&mut dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+            let payload = decode_value(&utility[1]);
+            let call_id = payload
+                .as_array()
+                .and_then(|array| array[1].as_i64())
+                .expect("call_id");
+
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    utility_output: Some(UtilityOutput {
+                        call_id,
+                        failure_message: Some("boom".to_string()),
+                        result: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    });
+
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
+        handshake_address,
+        model_name: "test-model".to_string(),
+        local_host: "127.0.0.1".to_string(),
+        ready_timeout: Duration::from_secs(2),
+        client_index: 0,
+    })
+    .await
+    .unwrap();
+
+    let error = client
+        .call_utility::<bool, _>("is_sleeping", ())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::UtilityCallFailed {
+            method,
+            message,
+            ..
+        } if method == "is_sleeping" && message == "boom"
+    ));
+
+    client.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatcher_failure_propagates_to_waiting_utility_calls() {
+    init_tracing();
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-utility-dispatcher-fail".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+
+            let utility = recv_engine_message(&mut dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            push.send(ZmqMessage::from(vec![0xc1])).await.unwrap();
+        }
+    });
+
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
+        handshake_address,
+        model_name: "test-model".to_string(),
+        local_host: "127.0.0.1".to_string(),
+        ready_timeout: Duration::from_secs(2),
+        client_index: 0,
+    })
+    .await
+    .unwrap();
+
+    let error = client
+        .call_utility::<bool, _>("is_sleeping", ())
+        .await
+        .unwrap_err();
+    assert!(is_shared_dispatcher_closed(&error));
 
     client.shutdown().await.unwrap();
     engine_task.await.unwrap();

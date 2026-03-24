@@ -21,13 +21,15 @@ pub struct RequestBatchOutputs {
     pub finished_requests: Option<BTreeSet<String>>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct UtilityCallOutput {
+    pub engine_index: u32,
+    pub timestamp: f64,
+    pub output: UtilityOutput,
+}
+
 #[derive(Debug, Clone, PartialEq, EnumAsInner)]
 pub enum OtherEngineCoreOutputs {
-    Utility {
-        engine_index: u32,
-        timestamp: f64,
-        utility_output: UtilityOutput,
-    },
     DpControl {
         engine_index: u32,
         timestamp: f64,
@@ -46,6 +48,7 @@ pub enum OtherEngineCoreOutputs {
 #[derive(Debug, Clone, PartialEq, EnumAsInner)]
 pub enum ClassifiedEngineCoreOutputs {
     RequestBatch(RequestBatchOutputs),
+    Utility(UtilityCallOutput),
     Other(OtherEngineCoreOutputs),
 }
 
@@ -73,10 +76,10 @@ impl EngineCoreOutputs {
                 })
             }
             (false, Some(utility_output), None, None) => {
-                ClassifiedEngineCoreOutputs::Other(OtherEngineCoreOutputs::Utility {
+                ClassifiedEngineCoreOutputs::Utility(UtilityCallOutput {
                     engine_index: self.engine_index,
                     timestamp: self.timestamp,
-                    utility_output,
+                    output: utility_output,
                 })
             }
             (false, None, Some(wave), None) => {
@@ -166,11 +169,11 @@ mod tests {
         };
 
         expect_test::expect![[r#"
-            Other(
-                Utility {
+            Utility(
+                UtilityCallOutput {
                     engine_index: 0,
                     timestamp: 0.0,
-                    utility_output: UtilityOutput {
+                    output: UtilityOutput {
                         call_id: 42,
                         failure_message: None,
                         result: None,

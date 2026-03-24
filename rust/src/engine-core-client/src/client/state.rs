@@ -1,13 +1,16 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::error::{Error, Result};
-use crate::protocol::EngineCoreOutput;
+use crate::protocol::{EngineCoreOutput, UtilityOutput};
 
 pub type OutputSender = mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>;
 pub type OutputReceiver = mpsc::UnboundedReceiver<Result<EngineCoreStreamOutput>>;
+pub type UtilitySender = oneshot::Sender<Result<UtilityOutput>>;
+pub type UtilityReceiver = oneshot::Receiver<Result<UtilityOutput>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientClosedState {
@@ -44,6 +47,71 @@ enum ClientState {
 pub struct RequestRegistry {
     state: ClientState,
     requests: BTreeMap<String, OutputSender>,
+}
+
+/// Internal registry for tracking active utility calls and their waiting receivers.
+#[derive(Debug)]
+pub struct UtilityRegistry {
+    state: ClientState,
+    next_call_id: AtomicI64,
+    utility_calls: BTreeMap<i64, UtilitySender>,
+}
+
+impl Default for UtilityRegistry {
+    fn default() -> Self {
+        Self {
+            state: ClientState::default(),
+            next_call_id: AtomicI64::new(1),
+            utility_calls: BTreeMap::default(),
+        }
+    }
+}
+
+impl UtilityRegistry {
+    /// Allocate the next utility `call_id` and register a newly added utility call.
+    pub fn allocate_and_register(&mut self) -> Result<(i64, UtilityReceiver)> {
+        self.ensure_running()?;
+        let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.utility_calls.insert(call_id, tx);
+        Ok((call_id, rx))
+    }
+
+    /// Resolve a utility output to its waiting receiver.
+    pub fn resolve(&mut self, output: UtilityOutput) -> Option<UtilitySender> {
+        self.utility_calls.remove(&output.call_id)
+    }
+
+    /// Mark the registry as closed with the given state, detach and return all tracked senders.
+    /// This will reject any future operations on the registry.
+    pub fn close(&mut self, closed_state: ClientClosedState) -> Vec<UtilitySender> {
+        if matches!(self.state, ClientState::Closed(_)) {
+            return Vec::new();
+        }
+
+        self.state = ClientState::Closed(closed_state);
+        std::mem::take(&mut self.utility_calls)
+            .into_values()
+            .collect()
+    }
+
+    /// Remove one utility call from the local registry. Returns the corresponding sender if exists.
+    #[must_use]
+    pub fn remove(&mut self, call_id: i64) -> Option<UtilitySender> {
+        self.utility_calls.remove(&call_id)
+    }
+
+    #[cfg(test)]
+    pub fn contains(&self, call_id: i64) -> bool {
+        self.utility_calls.contains_key(&call_id)
+    }
+
+    fn ensure_running(&self) -> Result<()> {
+        match &self.state {
+            ClientState::Running => Ok(()),
+            ClientState::Closed(closed_state) => Err(closed_state.error()),
+        }
+    }
 }
 
 impl RequestRegistry {
@@ -131,7 +199,7 @@ impl RequestRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientClosedState, RequestRegistry};
+    use super::{ClientClosedState, RequestRegistry, UtilityRegistry};
     use crate::protocol::{EngineCoreOutput, FinishReason};
 
     #[test]
@@ -172,5 +240,35 @@ mod tests {
 
         assert_eq!(senders.len(), 2);
         assert!(!registry.is_running());
+    }
+
+    #[test]
+    fn utility_registry_tracks_and_removes_call_ids() {
+        let mut registry = UtilityRegistry::default();
+        let (call_id_1, _) = registry.allocate_and_register().unwrap();
+        let (call_id_2, _) = registry.allocate_and_register().unwrap();
+
+        assert_eq!(call_id_1, 1);
+        assert_eq!(call_id_2, 2);
+        assert!(registry.contains(1));
+        assert!(registry.contains(2));
+        assert!(registry.remove(1).is_some());
+        assert!(!registry.contains(1));
+        assert!(registry.contains(2));
+    }
+
+    #[test]
+    fn utility_registry_closes_all_waiters_on_failure() {
+        let mut registry = UtilityRegistry::default();
+        registry.allocate_and_register().unwrap();
+        registry.allocate_and_register().unwrap();
+
+        let senders = registry.close(ClientClosedState::DispatcherFailed {
+            reason: "boom".to_string(),
+        });
+
+        assert_eq!(senders.len(), 2);
+        assert!(!registry.contains(1));
+        assert!(!registry.contains(2));
     }
 }

@@ -6,9 +6,9 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{info, trace};
 
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::protocol::handshake::ReadyMessage;
-use crate::protocol::{EngineCoreRequest, EngineCoreRequestType};
+use crate::protocol::{EngineCoreRequest, EngineCoreRequestType, EngineCoreUtilityRequest};
 use crate::transport;
 
 mod imp;
@@ -174,6 +174,57 @@ impl EngineCoreClient {
         self.inner
             .do_abort_requests(&self.engine_identity, &abortable)
             .await
+    }
+
+    /// Call a typed utility method on the engine.
+    ///
+    /// Callers should pass utility arguments using Rust tuple semantics so the encoded payload
+    /// matches Python's `(client_index, call_id, method_name, args)` contract:
+    /// `()`, `(arg,)`, `(arg1, arg2)`, etc.
+    pub async fn call_utility<T, A>(&self, method: &str, args: A) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+        A: serde::Serialize,
+    {
+        let (call_id, rx) = self.inner.allocate_and_register_utility_call()?;
+        trace!(
+            method,
+            call_id,
+            client_index = self.config.client_index,
+            "sending utility request"
+        );
+
+        let request =
+            EngineCoreUtilityRequest::new(self.config.client_index, call_id, method, args)?;
+        if let Err(error) = self
+            .inner
+            .send_to_engine(
+                &self.engine_identity,
+                EngineCoreRequestType::Utility,
+                &request,
+            )
+            .await
+        {
+            self.inner.rollback_utility_call(call_id);
+            return Err(error);
+        }
+
+        let output = match rx.await {
+            Ok(output) => output?,
+            Err(_) => {
+                return Err(Error::UtilityCallClosed {
+                    method: method.to_string(),
+                    call_id,
+                });
+            }
+        };
+
+        output.into_typed_result(method)
+    }
+
+    /// Return whether the engine is currently sleeping at any level.
+    pub async fn is_sleeping(&self) -> Result<bool> {
+        self.call_utility("is_sleeping", ()).await
     }
 
     /// Shut down local client tasks and close transport state.

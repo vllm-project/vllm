@@ -8,12 +8,14 @@ use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
 
-use crate::client::state::{ClientClosedState, OutputReceiver, RequestRegistry};
+use crate::client::state::{
+    ClientClosedState, OutputReceiver, RequestRegistry, UtilityReceiver, UtilityRegistry,
+};
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::metrics::record_scheduler_stats;
 use crate::protocol::{
     ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequestType,
-    encode_msgpack,
+    OtherEngineCoreOutputs, UtilityOutput, encode_msgpack,
 };
 use crate::{Error, Result, transport};
 
@@ -21,6 +23,7 @@ pub(crate) struct ClientInner {
     input_send: AsyncMutex<Option<RouterSendHalf>>,
     model_name: String,
     request_reg: Mutex<RequestRegistry>,
+    utility_reg: Mutex<UtilityRegistry>,
 }
 
 impl ClientInner {
@@ -30,6 +33,7 @@ impl ClientInner {
             input_send: AsyncMutex::new(Some(input_send)),
             model_name,
             request_reg: Mutex::new(RequestRegistry::default()),
+            utility_reg: Mutex::new(UtilityRegistry::default()),
         }
     }
 
@@ -44,9 +48,19 @@ impl ClientInner {
         self.request_reg.lock().register(request_id)
     }
 
+    /// Allocate the next utility `call_id` and register its waiting receiver.
+    pub fn allocate_and_register_utility_call(&self) -> Result<(i64, UtilityReceiver)> {
+        self.utility_reg.lock().allocate_and_register()
+    }
+
     /// Undo a request registration when `add_request()` fails.
     pub fn rollback_request(&self, request_id: &str) {
         let _ = self.request_reg.lock().remove(request_id);
+    }
+
+    /// Undo a utility call registration when `call_utility()` fails before the engine accepts it.
+    pub fn rollback_utility_call(&self, call_id: i64) {
+        let _ = self.utility_reg.lock().remove(call_id);
     }
 
     /// Filter the given request IDs to the subset that are still tracked as active and can be
@@ -72,15 +86,29 @@ impl ClientInner {
         self.request_reg.lock().finish_many(request_ids)
     }
 
-    /// Close all active request streams with an error message based on the given closed state.
-    pub fn close_requests(&self, closed_state: ClientClosedState) {
+    /// Close all active request streams and utility calls with an error message based on the given
+    /// closed state.
+    pub fn close_registries(&self, closed_state: ClientClosedState) {
         let error = Arc::new(closed_state.error());
-        let senders = self.request_reg.lock().close(closed_state);
+        let request_senders = self.request_reg.lock().close(closed_state.clone());
+        let utility_senders = self.utility_reg.lock().close(closed_state);
 
         // Notify all ongoing requests that the client is closed.
-        for sender in senders {
+        for sender in request_senders {
             let _ = sender.send(Err(Error::Shared(error.clone())));
         }
+        for sender in utility_senders {
+            let _ = sender.send(Err(Error::Shared(error.clone())));
+        }
+    }
+
+    /// Resolve one utility output to the waiting caller. Returns `true` if a waiting caller
+    /// existed.
+    pub fn resolve_utility_output(&self, output: UtilityOutput) -> bool {
+        let Some(sender) = self.utility_reg.lock().resolve(output.clone()) else {
+            return false;
+        };
+        sender.send(Ok(output)).is_ok()
     }
 
     /// Send the given message to the engine. The request should be first registered via
@@ -122,7 +150,7 @@ impl ClientInner {
     /// Shut down by closing all active request streams and then closing the input socket to signal
     /// the engine that no more messages will be sent.
     pub async fn shutdown(&self) {
-        self.close_requests(ClientClosedState::ClientShutdown {
+        self.close_registries(ClientClosedState::ClientShutdown {
             reason: "engine-core client shut down".to_string(),
         });
         self.input_send.lock().await.take();
@@ -175,7 +203,7 @@ pub(crate) async fn run_output_dispatcher_loop(
             Err(error) => {
                 let reason = error.to_report_string();
                 warn!(reason, "engine-core output loop failed");
-                inner.close_requests(ClientClosedState::DispatcherFailed { reason });
+                inner.close_registries(ClientClosedState::DispatcherFailed { reason });
                 return;
             }
         };
@@ -218,14 +246,31 @@ pub(crate) async fn run_output_dispatcher_loop(
                     );
                 }
             }
-            ClassifiedEngineCoreOutputs::Other(other) => {
-                warn!(outputs = ?other, "ignoring non-request engine-core output");
-                // TODO: handle other outputs, like utility call
+            ClassifiedEngineCoreOutputs::Utility(utility) => {
+                let call_id = utility.output.call_id;
+                if inner.resolve_utility_output(utility.output) {
+                    trace!(
+                        call_id,
+                        engine_index = utility.engine_index,
+                        "resolved utility output"
+                    );
+                } else {
+                    warn!(
+                        call_id,
+                        engine_index = utility.engine_index,
+                        "dropping output for inactive utility call"
+                    );
+                }
             }
+            ClassifiedEngineCoreOutputs::Other(other) => match other {
+                OtherEngineCoreOutputs::DpControl { .. } | OtherEngineCoreOutputs::Raw(_) => {
+                    warn!(outputs = ?other, "ignoring non-request engine-core output");
+                }
+            },
         }
     }
 
-    inner.close_requests(ClientClosedState::DispatcherFailed {
+    inner.close_registries(ClientClosedState::DispatcherFailed {
         reason: "engine-core output dispatcher channel closed".to_string(),
     });
 }

@@ -14,6 +14,10 @@ pub enum Error {
     Decode(#[from] rmp_serde::decode::Error),
     #[error("messagepack value decode failed")]
     ValueDecode(#[from] rmpv::decode::Error),
+    #[error("messagepack ext value encode failed")]
+    ValueEncodeExt(String),
+    #[error("messagepack ext value decode failed")]
+    ValueDecodeExt(String),
     #[error("io error")]
     Io(#[from] std::io::Error),
     #[error("transport error")]
@@ -48,6 +52,22 @@ pub enum Error {
     ClientClosed { reason: String },
     #[error("request output stream for `{request_id}` closed unexpectedly")]
     RequestStreamClosed { request_id: String },
+    #[error("utility call `{method}` failed (call_id={call_id}): {message}")]
+    UtilityCallFailed {
+        method: String,
+        call_id: i64,
+        message: String,
+    },
+    #[error("utility call `{method}` returned no result (call_id={call_id})")]
+    UtilityResultMissing { method: String, call_id: i64 },
+    #[error("utility call `{method}` returned an invalid result (call_id={call_id}): {reason}")]
+    UtilityResultDecode {
+        method: String,
+        call_id: i64,
+        reason: String,
+    },
+    #[error("utility call `{method}` closed unexpectedly (call_id={call_id})")]
+    UtilityCallClosed { method: String, call_id: i64 },
 
     /// A special variant to allow cloning the same error.
     #[error(transparent)]
