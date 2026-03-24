@@ -8,7 +8,7 @@
 # Start a server first, e.g.:
 #   vllm serve Qwen/Qwen2.5-1.5B-Instruct --port 8000
 #
-# Limitations (enforced server-side):
+# Current limitations:
 #   - stream=true is not supported with batched messages
 #   - tools / tool_choice are not supported with batched messages
 #   - beam_search (use_beam_search) is not supported with batched messages
@@ -17,42 +17,52 @@ BASE_URL="${VLLM_BASE_URL:-http://localhost:8000}"
 MODEL="${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 
 # ---------------------------------------------------------------------------
-# 1. Simple batch – two plain-text conversations
+# 1. Simple batch, one or two plain-text conversations.
 # ---------------------------------------------------------------------------
-# echo "=== Example 1: simple batch ==="
-# curl -s "${BASE_URL}/v1/chat/completions" \
-#   -H "Content-Type: application/json" \
-#   -d "{
-#     \"model\": \"${MODEL}\",
-#     \"messages\": [
-#       [{\"role\": \"user\", \"content\": \"What is the capital of France?\"}],
-#       [{\"role\": \"user\", \"content\": \"What is the capital of Japan?\"}]
-#     ]
-#   }" | jq '.choices[] | {index, content: .message.content}'
+echo " Example 1a: simple batch with 1 request "
+curl -s "${BASE_URL}/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"${MODEL}\",
+    \"messages\": [
+      {\"role\": \"user\", \"content\": \"What is the capital of Japan?\"}
+    ]
+  }" | jq '.choices[] | {index, content: .message.content}'
+
+echo " Example 1b: simple batch with 2 requests "
+curl -s "${BASE_URL}/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"${MODEL}\",
+    \"messages\": [
+      [{\"role\": \"user\", \"content\": \"What is the capital of France?\"}],
+      [{\"role\": \"user\", \"content\": \"What is the capital of Japan?\"}]
+    ]
+  }" | jq '.choices[] | {index, content: .message.content}'
 
 # ---------------------------------------------------------------------------
-# 2. Batch with regex-constrained structured output
+# 2. Batch with regex-constrained structured output.
 # ---------------------------------------------------------------------------
-# echo ""
-# echo "=== Example 2: batch with regex constraint (yes|no) ==="
-# curl -s "${BASE_URL}/v1/chat/completions" \
-#   -H "Content-Type: application/json" \
-#   -d "{
-#     \"model\": \"${MODEL}\",
-#     \"messages\": [
-#       [{\"role\": \"user\", \"content\": \"Is the sky blue? Answer yes or no.\"}],
-#       [{\"role\": \"user\", \"content\": \"Is fire cold? Answer yes or no.\"}]
-#     ],
-#     \"extra_body\": {
-#       \"structured_outputs\": {\"regex\": \"(yes|no)\"}
-#     }
-#   }" | jq '.choices[] | {index, answer: .message.content}'
+echo ""
+echo " Example 2: batch with regex constraint (yes|no) "
+curl -s "${BASE_URL}/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"${MODEL}\",
+    \"messages\": [
+      [{\"role\": \"user\", \"content\": \"Is the sky blue? Answer yes or no.\"}],
+      [{\"role\": \"user\", \"content\": \"Is fire cold? Answer yes or no.\"}]
+    ],
+    \"extra_body\": {
+      \"structured_outputs\": {\"regex\": \"(yes|no)\"}
+    }
+  }" | jq '.choices[] | {index, answer: .message.content}'
 
 # ---------------------------------------------------------------------------
 # 3. Batch with JSON schema structured output
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Example 3: batch with json_schema ==="
+echo " Example 3: batch with json_schema "
 curl -s "${BASE_URL}/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d "{
@@ -80,10 +90,10 @@ curl -s "${BASE_URL}/v1/chat/completions" \
 
 # ---------------------------------------------------------------------------
 # 4. Batch with a rich JSON schema – book summaries
-#    (two books in one request, extracting structured metadata)
+#    (two books in one request, extracting structured metadata).
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Example 4: batch book summaries ==="
+echo " Example 4: batch book summaries "
 curl -s "${BASE_URL}/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d "{
