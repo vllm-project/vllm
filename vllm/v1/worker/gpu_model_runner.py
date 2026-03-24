@@ -5724,9 +5724,10 @@ class GPUModelRunner(
                         # but embedding inputs are still enabled
                         # This skips the multimodal encoder but we still store
                         # embedding inputs in the encoder cache
-                        logger.info(
+                        logger.info_once(
                             "Skipping memory profiling for multimodal encoder "
                             "under embedding-only mode.",
+                            scope="local",
                         )
                     else:
                         # NOTE: Currently model is profiled with a single
@@ -5800,12 +5801,13 @@ class GPUModelRunner(
                             device=self.device,
                         )
 
-                    logger.info(
+                    logger.info_once(
                         "Encoder cache contains up to %d embeddings (%s GiB). ",
                         mm_budget.encoder_cache_size,
                         format_gib(
                             sum(emb.nbytes for emb in self.encoder_cache.values())
                         ),
+                        scope="local",
                     )
 
         # Add `is_profile` here to pre-allocate communication buffers
