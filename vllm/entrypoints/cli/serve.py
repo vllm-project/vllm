@@ -3,13 +3,29 @@
 
 import argparse
 import signal
+import sys
 import time
+from pathlib import Path
 
 import uvloop
 
 import vllm
 import vllm.envs as envs
+from vllm.entrypoints.cli.local_backends import build_doctor_report, get_runtime_profile
 from vllm.entrypoints.cli.types import CLISubcommand
+from vllm.entrypoints.cli.local_runtime import (
+    LOCAL_LOG_DIR,
+    allocate_service_port,
+    build_service_name,
+    default_service_record,
+    ensure_model_available,
+    find_service,
+    register_service,
+    remove_service,
+    resolve_model_reference,
+    spawn_service_process,
+    wait_for_service,
+)
 from vllm.entrypoints.openai.api_server import (
     run_server,
     run_server_worker,
@@ -39,6 +55,38 @@ Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
 """
 
 
+def _argv_has_option(argv: list[str], option: str) -> bool:
+    return any(arg == option or arg.startswith(f"{option}=") for arg in argv)
+
+
+def _apply_profile_defaults(args: argparse.Namespace) -> dict[str, object]:
+    profile = get_runtime_profile(args.profile)
+    argv = list(getattr(args, "_argv", []))
+    applied: dict[str, object] = {}
+
+    if (
+        profile.gpu_memory_utilization is not None
+        and not _argv_has_option(argv, "--gpu-memory-utilization")
+    ):
+        args.gpu_memory_utilization = profile.gpu_memory_utilization
+        applied["gpu_memory_utilization"] = profile.gpu_memory_utilization
+
+    if (
+        hasattr(args, "enable_prefix_caching")
+        and profile.enable_prefix_caching is not None
+        and not _argv_has_option(argv, "--enable-prefix-caching")
+        and not _argv_has_option(argv, "--no-enable-prefix-caching")
+    ):
+        args.enable_prefix_caching = profile.enable_prefix_caching
+        applied["enable_prefix_caching"] = profile.enable_prefix_caching
+
+    if profile.enforce_eager is not None and not _argv_has_option(argv, "--enforce-eager"):
+        args.enforce_eager = profile.enforce_eager
+        applied["enforce_eager"] = profile.enforce_eager
+
+    return applied
+
+
 class ServeSubcommand(CLISubcommand):
     """The `serve` subcommand for the vLLM CLI."""
 
@@ -49,6 +97,93 @@ class ServeSubcommand(CLISubcommand):
         # If model is specified in CLI (as positional arg), it takes precedence
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
+
+        resolved_model = resolve_model_reference(args.model, revision=args.revision)
+        pulled_model = ensure_model_available(
+            resolved_model,
+            download_dir=args.download_dir,
+        )
+        args.model = pulled_model["local_path"]
+        doctor = build_doctor_report(
+            requested_backend=args.backend,
+            model=resolved_model.requested,
+            dtype=args.dtype,
+            quantization=getattr(args, "quantization", None),
+            max_model_len=args.max_model_len,
+            profile=args.profile,
+        )
+        if args.backend != "auto" and doctor.selected_backend != args.backend:
+            raise ValueError(
+                f"Requested backend `{args.backend}` is unavailable. "
+                f"{doctor.fallback_reason or doctor.selection_reason}"
+            )
+        applied_defaults = _apply_profile_defaults(args)
+        logger.info(
+            "Local serve backend=%s profile=%s model=%s applied_defaults=%s",
+            doctor.selected_backend,
+            args.profile,
+            resolved_model.model,
+            applied_defaults or "none",
+        )
+        if doctor.fallback_reason:
+            logger.info("Backend fallback reason: %s", doctor.fallback_reason)
+        if doctor.preflight is not None:
+            logger.info("Preflight: %s", doctor.preflight.summary)
+
+        if not args.foreground:
+            service_name = build_service_name(args.service_name, resolved_model.requested)
+            if find_service(service_name) is not None:
+                raise ValueError(
+                    f"Service `{service_name}` is already running. Use `vllm ps` "
+                    "or choose a different --service-name."
+                )
+
+            argv = list(getattr(args, "_argv", ["serve", resolved_model.requested]))
+            if "--foreground" not in argv:
+                argv.append("--foreground")
+            if not _argv_has_option(argv, "--port"):
+                args.port = allocate_service_port()
+                argv.extend(["--port", str(args.port)])
+
+            log_path = Path(LOCAL_LOG_DIR) / f"{service_name}.log"
+            command = [sys.executable, "-m", "vllm.entrypoints.cli.main", *argv]
+            process = spawn_service_process(command, log_path)
+            register_service(
+                default_service_record(
+                    name=service_name,
+                    pid=process.pid,
+                    port=args.port,
+                    requested_model=resolved_model.requested,
+                    resolved_model=resolved_model.model,
+                    log_path=log_path,
+                    command=command,
+                )
+            )
+
+            if not args.no_wait:
+                health_host = args.host or "127.0.0.1"
+                if health_host in {"0.0.0.0", "::"}:
+                    health_host = "127.0.0.1"
+                try:
+                    wait_for_service(
+                        f"http://{health_host}:{args.port}/health",
+                        process.pid,
+                    )
+                except Exception:
+                    remove_service(service_name)
+                    raise
+
+            logger.info(
+                "Started local service %s on port %s. Logs: %s",
+                service_name,
+                args.port,
+                log_path,
+            )
+            print(
+                f"Started {service_name} on http://{args.host or '127.0.0.1'}:{args.port}. "
+                f"Logs: {log_path}"
+            )
+            return
 
         if getattr(args, "grpc", False):
             from vllm.entrypoints.grpc_server import serve_grpc
@@ -147,6 +282,38 @@ class ServeSubcommand(CLISubcommand):
             default=False,
             help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
             "server. Requires: pip install vllm[grpc].",
+        )
+        serve_parser.add_argument(
+            "--foreground",
+            action="store_true",
+            default=False,
+            help="Run the server in the foreground instead of as a managed local service.",
+        )
+        serve_parser.add_argument(
+            "--service-name",
+            type=str,
+            default=None,
+            help="Optional local name when running as a managed background service.",
+        )
+        serve_parser.add_argument(
+            "--no-wait",
+            action="store_true",
+            default=False,
+            help="Return immediately after starting the background service.",
+        )
+        serve_parser.add_argument(
+            "--backend",
+            type=str,
+            default="auto",
+            choices=["auto", "cuda", "rocm", "xpu", "apple-metal", "cpu"],
+            help="Backend preference for local runtime selection and diagnostics.",
+        )
+        serve_parser.add_argument(
+            "--profile",
+            type=str,
+            default="balanced",
+            choices=["balanced", "throughput", "low-memory"],
+            help="Local performance profile used to choose sensible serve defaults.",
         )
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return serve_parser

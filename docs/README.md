@@ -33,6 +33,25 @@ Where to get started with vLLM depends on the type of user. If you are looking t
 - Build applications with vLLM, we recommend starting with the [User Guide](./usage/README.md)
 - Build vLLM, we recommend starting with [Developer Guide](./contributing/README.md)
 
+## What's New
+
+This version adds a simpler local-runtime workflow on top of the existing vLLM architecture.
+
+Highlights:
+
+- A repo bootstrap installer at `./scripts/install.sh`
+- Local model lifecycle commands such as `vllm pull`, `vllm run`, `vllm ls`, and `vllm inspect`
+- A lightweight launcher for fast `vllm`, `vllm --help`, `vllm aliases`, and metadata commands
+- Managed background services through `vllm serve`, `vllm ps`, `vllm stop`, and `vllm logs`
+- Built-in short aliases like `deepseek-r1:8b` for common Hugging Face models
+- A tracked follow-up list for deferred parity work in [Local Runtime Follow-ups](./cli/local_runtime_followups.md)
+
+Recommended starting points:
+
+- [Quickstart Guide](./getting_started/quickstart.md)
+- [CLI Guide](./cli/README.md)
+- [Local Runtime Follow-ups](./cli/local_runtime_followups.md)
+
 For information about the development of vLLM, see:
 
 - [Roadmap](https://roadmap.vllm.ai)
