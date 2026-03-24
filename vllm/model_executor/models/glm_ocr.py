@@ -259,7 +259,7 @@ class GlmOcrVisionTransformer(Glm4vVisionTransformer):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(vision_config, norm_eps, quant_config, prefix)
+        super().__init__(text_config, vision_config, norm_eps, quant_config, prefix)
 
         del self.post_conv_layernorm
         del self.embeddings
