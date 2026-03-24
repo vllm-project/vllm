@@ -5,7 +5,7 @@ import itertools
 from collections import defaultdict, deque
 from collections.abc import Set
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import jinja2
 import jinja2.ext
@@ -108,7 +108,9 @@ def resolve_chat_template(
 ) -> str | None:
     # 1st priority: The given chat template
     if chat_template is not None:
-        return chat_template
+        # Resolve template names (e.g. "tool_use") to actual Jinja content
+        # so that downstream kwargs detection can parse template variables.
+        return tokenizer.get_chat_template(chat_template, tools=tools)
 
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
@@ -439,6 +441,28 @@ def resolve_chat_template_kwargs(
     return {k: v for k, v in chat_template_kwargs.items() if k in accept_vars}
 
 
+@overload
+def safe_apply_chat_template(
+    model_config: "ModelConfig",
+    tokenizer: HfTokenizer,
+    conversation: list[ConversationMessage],
+    *,
+    tools: list[dict[str, Any]] | None = ...,
+    chat_template: str | None = ...,
+    tokenize: Literal[True] = ...,
+    **kwargs,
+) -> list[int]: ...
+@overload
+def safe_apply_chat_template(
+    model_config: "ModelConfig",
+    tokenizer: HfTokenizer,
+    conversation: list[ConversationMessage],
+    *,
+    tools: list[dict[str, Any]] | None = ...,
+    chat_template: str | None = ...,
+    tokenize: Literal[False] = ...,
+    **kwargs,
+) -> str: ...
 def safe_apply_chat_template(
     model_config: "ModelConfig",
     tokenizer: HfTokenizer,
@@ -635,6 +659,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(
@@ -689,6 +715,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(

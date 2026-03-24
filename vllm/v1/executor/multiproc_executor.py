@@ -42,6 +42,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils.network_utils import (
     get_distributed_init_method,
@@ -157,10 +158,13 @@ class MultiprocExecutor(Executor):
             global_start_rank = (
                 self.local_world_size * self.parallel_config.node_rank_within_dp
             )
-            # Keep track of socket file descriptors that are inherited by the
-            # worker when using fork, so that we can close them in subsequent
+            # When using fork, keep track of socket file descriptors that are
+            # inherited by the worker, so that we can close them in subsequent
             # workers
-            inherited_fds: list[int] = []
+            inherited_fds: list[int] | None = (
+                [] if context.get_start_method() == "fork" else None
+            )
+
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
                 is_driver_worker = self._is_driver_worker(global_rank)
@@ -175,13 +179,9 @@ class MultiprocExecutor(Executor):
                     inherited_fds=inherited_fds,
                 )
                 unready_workers.append(unready_worker_handle)
-                if context.get_start_method() == "fork":
-                    inherited_fds.extend(
-                        [
-                            unready_worker_handle.death_writer.fileno(),
-                            unready_worker_handle.ready_pipe.fileno(),
-                        ]
-                    )
+                if inherited_fds is not None:
+                    inherited_fds.append(unready_worker_handle.death_writer.fileno())
+                    inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -453,12 +453,13 @@ class MultiprocExecutor(Executor):
                         w.worker_response_mq.shutdown()
                         w.worker_response_mq = None
 
-        if self.rpc_broadcast_mq is not None:
-            self.rpc_broadcast_mq.shutdown()
+        if rpc_broadcast_mq := getattr(self, "rpc_broadcast_mq", None):
+            rpc_broadcast_mq.shutdown()
             self.rpc_broadcast_mq = None
-        for mq in self.response_mqs:
-            mq.shutdown()
-        self.response_mqs = []
+        if response_mqs := getattr(self, "response_mqs", None):
+            for mq in response_mqs:
+                mq.shutdown()
+            self.response_mqs = []
 
     def check_health(self) -> None:
         self.collective_rpc("check_health", timeout=10)
@@ -485,6 +486,10 @@ class MultiprocExecutor(Executor):
             - self.parallel_config.tensor_parallel_size
             * self.parallel_config.prefill_context_parallel_size
         )
+
+    @classmethod
+    def supports_async_scheduling(cls) -> bool:
+        return True
 
 
 @dataclass
@@ -592,6 +597,21 @@ class WorkerProc:
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
 
+        self.setup_proc_title_and_log_prefix(
+            enable_ep=vllm_config.parallel_config.enable_expert_parallel
+        )
+
+        # Load model
+        self.worker.init_device()
+        # Update process title now that parallel groups are initialized
+        self.setup_proc_title_and_log_prefix(
+            enable_ep=vllm_config.parallel_config.enable_expert_parallel
+        )
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            self.worker.elastic_ep_execute("load_model")
+        else:
+            self.worker.load_model()
+
         scheduler_config = vllm_config.scheduler_config
         self.use_async_scheduling = scheduler_config.async_scheduling
         if self.use_async_scheduling:
@@ -603,19 +623,8 @@ class WorkerProc:
             )
             self.async_output_copy_thread.start()
 
-        self.setup_proc_title_and_log_prefix(
-            enable_ep=vllm_config.parallel_config.enable_expert_parallel
-        )
-
-        # Load model
-        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
-        if not is_eep_new_worker:
-            self.worker.init_device()
-            # Update process title now that parallel groups are initialized
-            self.setup_proc_title_and_log_prefix(
-                enable_ep=vllm_config.parallel_config.enable_expert_parallel
-            )
-            self.worker.load_model()
+        # Set block size based on the attention backends
+        current_platform.update_block_size_for_backend(vllm_config)
 
         # Initialize message queues after init_device() since multi-node setups
         # (nnodes_within_dp > 1) require distributed groups to be initialized
@@ -634,13 +643,16 @@ class WorkerProc:
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
         is_driver_worker: bool,
-        inherited_fds: list[int],
+        inherited_fds: list[int] | None = None,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # Ready pipe to communicate readiness from child to parent
         ready_reader, ready_writer = context.Pipe(duplex=False)
         # Death pipe to let child detect parent process exit
         death_reader, death_writer = context.Pipe(duplex=False)
+        if inherited_fds is not None:
+            inherited_fds = inherited_fds.copy()
+            inherited_fds.extend((ready_reader.fileno(), death_writer.fileno()))
         process_kwargs = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -652,8 +664,7 @@ class WorkerProc:
             "shared_worker_lock": shared_worker_lock,
             "is_driver_worker": is_driver_worker,
             # Have the worker close parent end of this worker's pipes too
-            "inherited_fds": inherited_fds
-            + [ready_reader.fileno(), death_writer.fileno()],
+            "inherited_fds": inherited_fds if inherited_fds is not None else [],
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
@@ -697,9 +708,8 @@ class WorkerProc:
         unready_proc_handles: list[UnreadyWorkerProcHandle],
     ) -> list[WorkerProcHandle]:
         e = Exception(
-            "WorkerProc initialization failed due to "
-            "an exception in a background process. "
-            "See stack trace for root cause."
+            "WorkerProc initialization failed due to an exception in a "
+            "background process. See stack trace for root cause."
         )
 
         pipes = {handle.ready_pipe: handle for handle in unready_proc_handles}
@@ -802,7 +812,7 @@ class WorkerProc:
             try:
                 os.close(fd)
             except Exception as e:
-                logger.warning("Exception closing inherited connection: %s", e)
+                logger.warning("Error closing inherited connection: %s: %s", type(e), e)
 
         try:
             # Initialize tracer
@@ -902,6 +912,18 @@ class WorkerProc:
 
     def async_output_busy_loop(self):
         """Entrypoint for the thread which handles outputs asynchronously."""
+
+        # set device to the worker device for the thread.
+        # a thread will not inherit the context of the main thread.
+        # when calling any cuda runtime functions, it will implicitly
+        # create a new cuda context on device 0, consuming extra memory.
+        # here we set the device to the worker device for the thread,
+        # enforcing the context to be the same as the main thread.
+        from vllm.platforms import current_platform
+
+        if hasattr(self.worker, "device"):
+            current_platform.set_device(self.worker.device)
+
         while True:
             output = self.async_output_queue.get()
             self.enqueue_output(output)
@@ -989,12 +1011,13 @@ def set_multiprocessing_worker_envs():
         "OMP_NUM_THREADS" not in os.environ
         and (current_parallelism := torch.get_num_threads()) > default_omp_num_threads
     ):
-        logger.warning(
+        logger.warning_once(
             "Reducing Torch parallelism from %d threads to %d to avoid "
             "unnecessary CPU contention. Set OMP_NUM_THREADS in the "
             "external environment to tune this value as needed.",
             current_parallelism,
             default_omp_num_threads,
+            scope="local",
         )
         os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
         torch.set_num_threads(default_omp_num_threads)

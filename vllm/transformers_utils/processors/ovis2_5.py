@@ -6,7 +6,7 @@ from functools import cached_property
 import numpy as np
 import PIL
 import torch
-from transformers import AutoProcessor, BatchFeature
+from transformers import BatchFeature
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
@@ -412,6 +412,7 @@ class Ovis2_5Processor(ProcessorMixin):
                 images = video
         else:
             raise ValueError("Either images or video should be provided.")
+        assert images is not None
         min_pixels = min(
             max_pixels if max_pixels is not None else MAX_PIXELS,
             min_pixels if min_pixels is not None else MIN_PIXELS,
@@ -476,6 +477,3 @@ class Ovis2_5Processor(ProcessorMixin):
             visual_placeholders,
             torch.tensor([[grid_t, grid_h, grid_w]]),
         )
-
-
-AutoProcessor.register("Ovis2_5Processor", Ovis2_5Processor)
