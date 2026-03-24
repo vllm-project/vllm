@@ -236,14 +236,7 @@ class cmake_build_ext(build_ext):
         targets = []
 
         def target_name(s: str) -> str:
-            # The CMake target name is the last component of the
-            # dotted extension name (e.g. "vllm.third_party.deep_gemm
-            # ._deep_gemm_C" -> "_deep_gemm_C").  For backwards compat
-            # with the flash-attn prefix stripping, keep that path too.
-            stripped = s.removeprefix("vllm.").removeprefix("vllm_flash_attn.")
-            if "." in stripped:
-                return stripped.rsplit(".", 1)[-1]
-            return stripped
+            return s.removeprefix("vllm.").removeprefix("vllm_flash_attn.")
 
         # Build all the extensions
         for ext in self.extensions:
@@ -949,12 +942,7 @@ if _is_cuda():
     ):
         # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
         # Optional since it won't build on unsupported architectures
-        ext_modules.append(
-            CMakeExtension(
-                name="vllm.third_party.deep_gemm._deep_gemm_C",
-                optional=True,
-            )
-        )
+        ext_modules.append(CMakeExtension(name="vllm._deep_gemm_C", optional=True))
 
 if _is_cpu():
     import platform
