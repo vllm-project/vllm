@@ -70,12 +70,44 @@ def test_gpt_oss_sm100_prioritizes_flashinfer_for_sink_attention():
     ]
 
 
+def test_gpt_oss_sm110_prioritizes_flashinfer_for_sink_attention():
+    priorities = _get_backend_priorities(
+        use_mla=False,
+        device_capability=DeviceCapability(11, 0),
+        model_architectures=("GptOssForCausalLM",),
+        has_sink=True,
+    )
+
+    assert priorities == [
+        AttentionBackendEnum.FLASHINFER,
+        AttentionBackendEnum.FLASH_ATTN,
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.FLEX_ATTENTION,
+    ]
+
+
 def test_non_gpt_oss_or_sinkless_configs_keep_generic_policy():
     priorities = _get_backend_priorities(
         use_mla=False,
         device_capability=DeviceCapability(8, 9),
         model_architectures=("GptOssForCausalLM",),
         has_sink=False,
+    )
+
+    assert priorities == [
+        AttentionBackendEnum.FLASH_ATTN,
+        AttentionBackendEnum.FLASHINFER,
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.FLEX_ATTENTION,
+    ]
+
+
+def test_non_target_cuda_families_fall_back_to_generic_policy():
+    priorities = _get_backend_priorities(
+        use_mla=False,
+        device_capability=DeviceCapability(7, 5),
+        model_architectures=("GptOssForCausalLM",),
+        has_sink=True,
     )
 
     assert priorities == [
