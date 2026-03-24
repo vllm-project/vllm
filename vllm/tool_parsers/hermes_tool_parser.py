@@ -9,8 +9,10 @@ import regex as re
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -20,10 +22,10 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
+from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
 
@@ -32,7 +34,7 @@ class Hermes2ProToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
 
-        if isinstance(tokenizer, MistralTokenizer):
+        if is_mistral_tokenizer(tokenizer):
             logger.error("Detected Mistral tokenizer when using a Hermes model")
             self.model_tokenizer = tokenizer.tokenizer
 
@@ -327,11 +329,12 @@ class Hermes2ProToolParser(ToolParser):
                 logger.debug("unable to parse JSON")
                 return None
 
+            if current_tool_call is None:
+                return None
+
             # case - we haven't sent the tool name yet. If it's available, send
             #   it. otherwise, wait until it's available.
             if not self.current_tool_name_sent:
-                if current_tool_call is None:
-                    return None
                 function_name: str | None = current_tool_call.get("name")
                 if function_name:
                     self.current_tool_name_sent = True
@@ -365,6 +368,9 @@ class Hermes2ProToolParser(ToolParser):
             # now, the nitty-gritty of tool calls
             # now we have the portion to parse as tool call.
 
+            if current_tool_call is None:
+                return None
+
             logger.debug(
                 "Trying to parse current tool call with ID %s", self.current_tool_id
             )
@@ -379,6 +385,7 @@ class Hermes2ProToolParser(ToolParser):
             prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get(
                 "arguments"
             )
+            assert current_tool_call is not None
             cur_arguments = current_tool_call.get("arguments")
 
             logger.debug("diffing old arguments: %s", prev_arguments)
@@ -483,6 +490,7 @@ class Hermes2ProToolParser(ToolParser):
 
             # handle saving the state for the current tool into
             # the "prev" list for use in diffing for the next iteration
+            assert isinstance(current_tool_call, dict)
             if self.current_tool_id == len(self.prev_tool_call_arr) - 1:
                 self.prev_tool_call_arr[self.current_tool_id] = current_tool_call
             else:

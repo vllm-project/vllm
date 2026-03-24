@@ -8,14 +8,14 @@ import pytest
 import torch
 from utils import (
     BACKENDS,
+    TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
     is_device_capability_below_90,
-    resolve_model_name,
     skip_unsupported,
 )
 
-import vllm.model_executor.layers.batch_invariant as batch_invariant
+import vllm.envs as envs
 from vllm import LLM, SamplingParams
 
 IS_DEVICE_CAPABILITY_BELOW_90 = is_device_capability_below_90()
@@ -57,7 +57,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     attention_config = {"backend": backend}
     # Allow overrides from environment (useful for CI tuning)
     # "facebook/opt-125m" is too small, doesn't reliably test determinism
-    model = resolve_model_name(backend)
+    model = TEST_MODEL
     num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "5"))
     max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "128"))
     min_random_prompt = int(os.getenv("VLLM_MIN_PROMPT", "1024"))
@@ -169,16 +169,13 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
 ):
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    model_name = resolve_model_name(backend)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
     # For batch invariance, disable custom all-reduce to ensure deterministic
     # all-reduce operations (custom all-reduce may not be deterministic)
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_is_batch_invariant,
-    )
+    import vllm.envs as envs
 
-    disable_custom_ar = vllm_is_batch_invariant()
+    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
 
     if disable_custom_ar:
         print(f"\n{'=' * 80}")
@@ -186,9 +183,9 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         print(f"{'=' * 80}\n")
 
     llm = LLM(
-        model=model_name,
+        model=TEST_MODEL,
         tensor_parallel_size=tp_size,
-        max_num_seqs=32,
+        max_num_seqs=128,
         max_model_len=8192,
         dtype="bfloat16",  # not everything is supported
         gpu_memory_utilization=0.9,
@@ -197,12 +194,20 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     )
 
     # Use more realistic prompts for better token generation
-    prompts = [_random_prompt(10, 50) for i in range(32)]
+    prompts = [_random_prompt(10, 50) for _ in range(32)]
+
+    # TODO: Update prompts to have ragged lengths in order to test chunked prefill
+    #       The above tests are not currently long enough to exercise chunking.
+    # prompts = (
+    #     [_random_prompt(10, 50) for _ in range(28)]
+    #     + [_random_prompt(256, 512) for _ in range(50)]
+    #     + [_random_prompt(2048, 4096) for _ in range(50)]
+    # )
 
     sp = SamplingParams(
         temperature=0.6,
         top_p=1.0,
-        max_tokens=8,
+        max_tokens=16,
         seed=1234,
         logprobs=5,
     )
@@ -387,7 +392,7 @@ def test_simple_generation(backend):
     Simple test that runs the model with a basic prompt and prints the output.
     Useful for quick smoke testing and debugging.
     """
-    model = resolve_model_name(backend)
+    model = TEST_MODEL
 
     llm = LLM(
         model=model,
@@ -447,10 +452,9 @@ def test_logprobs_without_batch_invariance_should_fail(
     """
     # CRITICAL: Disable batch invariance for this test
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
-    monkeypatch.setattr(batch_invariant, "VLLM_BATCH_INVARIANT", False)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    model_name = resolve_model_name(backend)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
     print(f"\n{'=' * 80}")
@@ -458,7 +462,7 @@ def test_logprobs_without_batch_invariance_should_fail(
     print(f"{'=' * 80}\n")
 
     llm = LLM(
-        model=model_name,
+        model=TEST_MODEL,
         tensor_parallel_size=tp_size,
         max_num_seqs=32,
         max_model_len=8192,
@@ -666,14 +670,11 @@ def test_decode_logprobs_match_prefill_logprobs(
     """
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    model_name = resolve_model_name(backend)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_is_batch_invariant,
-    )
+    import vllm.envs as envs
 
-    disable_custom_ar = vllm_is_batch_invariant()
+    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
 
     if disable_custom_ar:
         print(f"\n{'=' * 80}")
@@ -681,7 +682,7 @@ def test_decode_logprobs_match_prefill_logprobs(
         print(f"{'=' * 80}\n")
 
     llm = LLM(
-        model=model_name,
+        model=TEST_MODEL,
         tensor_parallel_size=tp_size,
         max_num_seqs=32,
         max_model_len=8192,

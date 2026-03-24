@@ -17,13 +17,13 @@ from .mk_objects import (
 
 
 def make_config_arg_parser(description: str):
-    def to_pf_class_type(s: str) -> mk.FusedMoEPrepareAndFinalize:
+    def to_pf_class_type(s: str) -> mk.FusedMoEPrepareAndFinalizeModular:
         for pf in MK_ALL_PREPARE_FINALIZE_TYPES:
             if pf.__name__ == s:
                 return pf
         raise ValueError(f"Cannot find a PrepareFinalize type that matches {s}")
 
-    def to_experts_class_type(s: str) -> mk.FusedMoEPermuteExpertsUnpermute:
+    def to_experts_class_type(s: str) -> mk.FusedMoEExpertsModular:
         for fe in MK_FUSED_EXPERT_TYPES:
             if fe.__name__ == s:
                 return fe
@@ -82,11 +82,6 @@ def make_config_arg_parser(description: str):
         "--num-experts", type=int, default=32, help="Global num experts"
     )
     parser.add_argument("--topk", nargs="+", type=int, default=[4, 1], help="num topk")
-    parser.add_argument(
-        "--fused-moe-chunk-size",
-        type=int,
-        help="Fused moe chunk size used for the non-batched fused experts impl.",
-    )
 
     # Quant args
     parser.add_argument(
@@ -141,7 +136,7 @@ def make_config(args: argparse.Namespace) -> Config:
 
     quant_config = None
     if args.quant_dtype is not None:
-        quant_config = FusedMoEQuantConfig(
+        quant_config = FusedMoEQuantConfig.make(
             quant_dtype=args.quant_dtype,
             per_act_token_quant=args.per_token_quantized_activations,
             per_out_ch_quant=args.per_channel_quantized_weights,
@@ -158,7 +153,6 @@ def make_config(args: argparse.Namespace) -> Config:
         quant_config=quant_config,
         prepare_finalize_type=args.pf_type,
         fused_experts_type=args.experts_type,
-        fused_moe_chunk_size=args.fused_moe_chunk_size,
         world_size=args.world_size,
         torch_trace_dir_path=args.torch_trace_dir_path,
     )

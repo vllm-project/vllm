@@ -11,7 +11,7 @@ from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 from transformers.models.cohere2_vision import Cohere2VisionConfig
 from transformers.models.cohere2_vision.image_processing_cohere2_vision_fast import (  # noqa: E501
-    get_optimal_tiled_canvas,
+    Cohere2VisionImageProcessorFast,
 )
 from transformers.models.cohere2_vision.processing_cohere2_vision import (
     Cohere2VisionProcessor,
@@ -27,17 +27,20 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargsItems
+from vllm.multimodal.inputs import (
+    MultiModalDataDict,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    MultiModalFieldConfig,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -163,43 +166,20 @@ class Cohere2VisionProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Cohere2VisionProcessor | None,
+        processor: Cohere2VisionProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
         """
         Calculate the number of image patches for a given image.
         Uses the HF processor to determine the actual number of patches.
         """
-        if processor is None:
-            processor = self.get_hf_processor()
+        image_processor: Cohere2VisionImageProcessorFast = processor.image_processor
 
-        image_processor = processor.image_processor
-
-        # The current implementation of get_number_of_image_patches
-        # is incorrect, so we patch it here.
-        # TODO: Revert once
-        # https://github.com/huggingface/transformers/pull/40312 is released.
-        # return image_processor.get_number_of_image_patches(image_height,
-        #                                                    image_width, {})
-
-        min_patches = image_processor.min_patches
-        max_patches = image_processor.max_patches
-        patch_size = image_processor.size
-        crop_to_patches = image_processor.crop_to_patches
-
-        if not crop_to_patches:
-            return 1
-
-        num_columns, num_rows = get_optimal_tiled_canvas(
-            (image_height, image_width),
-            (patch_size["height"], patch_size["width"]),
-            min_patches,
-            max_patches,
+        return image_processor.get_number_of_image_patches(
+            image_height,
+            image_width,
+            self.ctx.get_merged_mm_kwargs(mm_kwargs),
         )
-        num_patches = num_columns * num_rows
-        if num_patches > 1:
-            num_patches += 1  # Thumbnail image
-
-        return num_patches
 
 
 class Cohere2VisionDummyInputsBuilder(
@@ -217,12 +197,12 @@ class Cohere2VisionDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         image_size = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -259,17 +239,15 @@ class Cohere2VisionMultiModalProcessor(
             hf_processor = self.info.get_hf_processor(**mm_kwargs)
 
             # Fallback calculation if HF processor didn't provide num_patches
-            parsed_images = (
-                self._get_data_parser()
-                .parse_mm_data({"image": images})
-                .get_items("image", ImageProcessorItems)
-            )
+            mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+            parsed_images = mm_items.get_items("image", ImageProcessorItems)
 
             num_patches = [
                 self.info.get_num_patches(
                     image_width=parsed_images.get_image_size(i).width,
                     image_height=parsed_images.get_image_size(i).height,
                     processor=hf_processor,
+                    mm_kwargs=mm_kwargs,
                 )
                 for i in range(len(parsed_images))
             ]
@@ -310,6 +288,7 @@ class Cohere2VisionMultiModalProcessor(
                 image_width=image_size.width,
                 image_height=image_size.height,
                 processor=hf_processor,
+                mm_kwargs=hf_processor_mm_kwargs,
             )
             patch_tokens = image_token * img_tokens_per_tile + img_line_break_token
             repl = f"{boi_token}{patch_tokens * num_patches}{eoi_token}"
@@ -350,21 +329,23 @@ class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         self.multimodal_config = multimodal_config
         self._patch_quant_config(config, quant_config)
 
-        self.vision_tower = SiglipVisionModel(
-            config.vision_config,
-            quant_config,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
-        self.vocab_size = config.text_config.vocab_size
-        self.multi_modal_projector = Cohere2VisionMultiModalProjector(
-            config, prefix=maybe_prefix(prefix, "multi_modal_projector")
-        )
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=config.text_config.architectures,
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = SiglipVisionModel(
+                config.vision_config,
+                quant_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+            self.multi_modal_projector = Cohere2VisionMultiModalProjector(
+                config, prefix=maybe_prefix(prefix, "multi_modal_projector")
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=config.text_config.architectures,
+            )
 
     @property
     def dtype(self):
@@ -386,8 +367,6 @@ class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         Returns:
             List of flattened image embeddings, one per image
         """
-        assert self.vision_tower is not None, "Vision tower is required"
-
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
 
@@ -434,9 +413,6 @@ class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
             ):
                 quant_config.modules_to_not_convert.append("vision_tower")
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -446,7 +422,7 @@ class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

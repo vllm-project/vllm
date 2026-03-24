@@ -14,7 +14,6 @@ from vllm.triton_utils import triton
 from vllm.utils.deep_gemm import (
     calc_diff,
     fp8_gemm_nt,
-    get_col_major_tma_aligned_tensor,
     per_block_cast_to_fp8,
 )
 
@@ -36,7 +35,7 @@ def benchmark_shape(
     B = torch.randn((n, k), device="cuda", dtype=torch.bfloat16)
 
     # Reference result in BF16
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     C_ref = A @ B.t()
 
     # Pre-quantize B for all implementations
@@ -48,8 +47,9 @@ def benchmark_shape(
     block_size = [128, 128]
 
     # Pre-quantize A for all implementations
-    A_deepgemm, A_scale_deepgemm = per_token_group_quant_fp8(A, block_size[1])
-    A_scale_deepgemm = get_col_major_tma_aligned_tensor(A_scale_deepgemm)
+    A_deepgemm, A_scale_deepgemm = per_token_group_quant_fp8(
+        A, block_size[1], column_major_scales=True, tma_aligned_scales=True
+    )
     C_deepgemm = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
     A_vllm, A_scale_vllm = per_token_group_quant_fp8(A, block_size[1])
     A_vllm_cutlass, A_scale_vllm_cutlass = per_token_group_quant_fp8(
@@ -121,14 +121,14 @@ def benchmark_shape(
         # Warmup
         for _ in range(warmup):
             func()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
 
         # Timing loop
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         start = time.time()
         for _ in range(repeat):
             func()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         end = time.time()
 
         # Calculate timing and TFLOPS

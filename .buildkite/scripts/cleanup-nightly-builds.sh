@@ -3,7 +3,14 @@
 set -ex
 
 # Clean up old nightly builds from DockerHub, keeping only the last 14 builds
-# This script uses DockerHub API to list and delete old tags with "nightly-" prefix
+# This script uses DockerHub API to list and delete old tags with specified prefix
+# Usage: cleanup-nightly-builds.sh [TAG_PREFIX]
+# Example: cleanup-nightly-builds.sh "nightly-" or cleanup-nightly-builds.sh "cu130-nightly-"
+
+# Get tag prefix from argument, default to "nightly-" if not provided
+TAG_PREFIX="${1:-nightly-}"
+
+echo "Cleaning up tags with prefix: $TAG_PREFIX"
 
 # DockerHub API endpoint for vllm/vllm-openai repository
 REPO_API_URL="https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags"
@@ -45,7 +52,7 @@ get_all_tags() {
         set -x
         
         # Get both last_updated timestamp and tag name, separated by |
-        local tags=$(echo "$response" | jq -r '.results[] | select(.name | startswith("nightly-")) | "\(.last_updated)|\(.name)"')
+        local tags=$(echo "$response" | jq -r --arg prefix "$TAG_PREFIX" '.results[] | select(.name | startswith($prefix)) | "\(.last_updated)|\(.name)"')
         
         if [ -z "$tags" ]; then
             break

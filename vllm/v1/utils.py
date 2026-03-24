@@ -7,13 +7,14 @@ import time
 import weakref
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
+from multiprocessing.queues import Queue
 from typing import (
     TYPE_CHECKING,
     Any,
     Generic,
-    Optional,
     TypeVar,
     Union,
     overload,
@@ -27,6 +28,7 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils.network_utils import get_open_port, get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import kill_process_tree
+from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     import numpy as np
@@ -172,6 +174,7 @@ class APIServerProcessManager:
         input_addresses: list[str],
         output_addresses: list[str],
         stats_update_address: str | None = None,
+        tensor_queue: Queue | None = None,
     ):
         """Initialize and start API server worker processes.
 
@@ -184,6 +187,7 @@ class APIServerProcessManager:
             input_addresses: Input addresses for each API server
             output_addresses: Output addresses for each API server
             stats_update_address: Optional stats update address
+            tensor_queue: Optional tensor IPC queue for sharing MM tensors
         """
         self.listen_address = listen_address
         self.sock = sock
@@ -204,6 +208,8 @@ class APIServerProcessManager:
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
+            if tensor_queue is not None:
+                client_config["tensor_queue"] = tensor_queue
 
             proc = spawn_context.Process(
                 target=target_server_fn,
@@ -219,15 +225,17 @@ class APIServerProcessManager:
         # The extra processes are managed by their owners
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
-    def close(self) -> None:
-        self._finalizer()
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown API server processes with configurable timeout"""
+        if self._finalizer.detach() is not None:
+            shutdown(self.processes, timeout=timeout)
 
 
 def wait_for_completion_or_failure(
     api_server_manager: APIServerProcessManager,
     engine_manager: Union["CoreEngineProcManager", "CoreEngineActorManager"]
     | None = None,
-    coordinator: Optional["DPCoordinator"] = None,
+    coordinator: "DPCoordinator | None" = None,
 ) -> None:
     """Wait for all processes to complete or detect if any fail.
 
@@ -287,25 +295,30 @@ def wait_for_completion_or_failure(
     except Exception as e:
         logger.exception("Exception occurred while running API servers: %s", str(e))
         raise
-    finally:
-        logger.info("Terminating remaining processes ...")
-        api_server_manager.close()
-        if coordinator:
-            coordinator.close()
-        if engine_manager:
-            engine_manager.close()
 
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(procs: list[BaseProcess]):
+def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
+    """Shutdown processes with timeout.
+
+    Args:
+        procs: List of processes to shutdown
+        timeout: Maximum time in seconds to wait for graceful shutdown
+    """
+    if timeout is None:
+        timeout = 0.0
+
+    # Allow at least 5 seconds for remaining procs to terminate.
+    timeout = max(timeout, 5.0)
+
     # Shutdown the process.
     for proc in procs:
         if proc.is_alive():
             proc.terminate()
 
-    # Allow 5 seconds for remaining procs to terminate.
-    deadline = time.monotonic() + 5
+    # Allow time for remaining procs to terminate.
+    deadline = time.monotonic() + timeout
     for proc in procs:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -411,4 +424,54 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
     Returns:
         A memoryview of the tensor data as uint8.
     """
-    return tensor.flatten().contiguous().view(torch.uint8).numpy().data
+    return tensor.flatten().cpu().contiguous().view(torch.uint8).numpy().data
+
+
+@dataclass
+class IterationDetails:
+    num_ctx_requests: int
+    num_ctx_tokens: int
+    num_generation_requests: int
+    num_generation_tokens: int
+
+    def __repr__(self) -> str:
+        return f"IterationDetails(num_ctx_requests={self.num_ctx_requests},\
+                 num_ctx_tokens={self.num_ctx_tokens}, \
+                 num_generation_requests={self.num_generation_requests}, \
+                 num_generation_tokens={self.num_generation_tokens})"
+
+
+def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDetails:
+    """
+    Compute the number of context/generation requests and tokens
+    for the current iteration's scheduler output. A requests is regarded
+    as a context request if its output tokens are still 0, an extended chunk
+    of chunked prefill falls into this category.
+
+    Args:
+        scheduler_output: The scheduler output for the current iteration.
+
+    Returns:
+        An IterationDetails object containing the number of
+        context/generation requests and tokens.
+    """
+    num_context_requests = 0
+    num_context_tokens = 0
+    num_generation_requests = 0
+    num_generation_tokens = 0
+    new_req_ids = {new_req.req_id for new_req in scheduler_output.scheduled_new_reqs}
+    for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+        if scheduler_output.scheduled_cached_reqs.is_context_phase(req_id) or (
+            req_id in new_req_ids
+        ):
+            num_context_requests += 1
+            num_context_tokens += num_tokens
+        else:
+            num_generation_requests += 1
+            num_generation_tokens += num_tokens
+    return IterationDetails(
+        num_context_requests,
+        num_context_tokens,
+        num_generation_requests,
+        num_generation_tokens,
+    )

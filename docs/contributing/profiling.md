@@ -3,10 +3,18 @@
 !!! warning
     Profiling is only intended for vLLM developers and maintainers to understand the proportion of time spent in different parts of the codebase. **vLLM end-users should never turn on profiling** as it will significantly slow down the inference.
 
+!!! tip "Choosing a profiler"
+    - Use **Nsight Systems** for low-overhead, performance-critical profiling.
+    - Use **PyTorch Profiler** for medium-overhead profiling with richer debugging information (e.g., stack traces, memory, shapes). Note that enabling these features adds overhead and is not recommended for benchmarking.
+
 ## Profile with PyTorch Profiler
 
-We support tracing vLLM workers using the `torch.profiler` module. You can enable the torch profiler by setting `--profiler-config`
-when launching the server, and setting the entries `profiler` to `'torch'` and `torch_profiler_dir` to the directory where you want to save the traces. Additionally, you can control the profiling content by specifying the following additional arguments in the config:
+We support tracing vLLM workers using different profilers. You can enable profiling by setting the `--profiler-config` flag when launching the server.
+
+!!! note
+    The `--profiler-config` flag is available in vLLM v0.13.0 and later. If you are using an earlier version, please upgrade to use this feature.
+
+To use the `torch.profiler` module, set the `profiler` entry to `'torch'` and `torch_profiler_dir` to the directory where you want to save the traces. Additionally, you can control the profiling content by specifying the following additional arguments in the config:
 
 - `torch_profiler_record_shapes` to enable recording Tensor Shapes, off by default
 - `torch_profiler_with_memory` to record memory, off by default
@@ -52,6 +60,29 @@ vllm bench serve \
     --dataset-path sharegpt.json \
     --profile \
     --num-prompts 2
+```
+
+Or use http request:
+
+```shell
+# We need first call /start_profile api to start profile.
+$ curl -X POST http://localhost:8000/start_profile
+
+# Call model generate.
+curl -X POST http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+                "model": "meta-llama/Llama-3.1-8B-Instruct",
+                "messages": [
+                        {
+                                "role": "user",
+                                "content": "San Francisco is a"
+                        }
+                ]
+    }'
+
+# After need call /stop_profile api to stop profile.
+$ curl -X POST http://localhost:8000/stop_profile
 ```
 
 ## Profile with NVIDIA Nsight Systems

@@ -1,16 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 
 from .identity_reasoning_parser import IdentityReasoningParser
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 logger = init_logger(__name__)
 
@@ -24,11 +29,12 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 
-        chat_kwargs = kwargs.pop("chat_template_kwargs", {}) or {}
-        thinking = bool(chat_kwargs.pop("thinking", False))
-        enable_thinking = bool(chat_kwargs.pop("enable_thinking", False))
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        thinking = bool(chat_kwargs.get("thinking", False))
+        enable_thinking = bool(chat_kwargs.get("enable_thinking", False))
         thinking = thinking or enable_thinking
 
+        self._parser: ReasoningParser
         if thinking:
             self._parser = DeepSeekR1ReasoningParser(tokenizer, *args, **kwargs)
         else:
@@ -38,7 +44,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         return self._parser.is_reasoning_end(input_ids)
 
     def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         return self._parser.is_reasoning_end_streaming(input_ids, delta_ids)
 
@@ -46,7 +52,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         return self._parser.extract_content_ids(input_ids)
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         return self._parser.extract_reasoning(model_output, request)
 
@@ -58,7 +64,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> DeltaMessage | None:
+    ) -> "DeltaMessage | None":
         return self._parser.extract_reasoning_streaming(
             previous_text,
             current_text,
@@ -67,3 +73,19 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
             current_token_ids,
             delta_token_ids,
         )
+
+
+class DeepSeekV3ReasoningWithThinkingParser(DeepSeekV3ReasoningParser):
+    """
+    DeepSeekV3ReasoningParser that defaults to thinking mode.
+    """
+
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        thinking = chat_kwargs.get("thinking", None)
+        enable_thinking = chat_kwargs.get("enable_thinking", None)
+        if thinking is None and enable_thinking is None:
+            chat_kwargs["thinking"] = True
+            chat_kwargs["enable_thinking"] = True
+            kwargs["chat_template_kwargs"] = chat_kwargs
+        super().__init__(tokenizer, *args, **kwargs)

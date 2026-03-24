@@ -8,12 +8,12 @@ from einops import rearrange, repeat
 
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops  # noqa: F401
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_scan_fn,
     selective_state_update,
 )
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
 def selective_state_update_ref(
@@ -183,6 +183,8 @@ def selective_scan_opcheck_fn(
     block_idx_first_scheduled_token=None,
     block_idx_last_scheduled_token=None,
     initial_state_idx=None,
+    cu_chunk_seqlen=None,
+    last_chunk_indices=None,
 ):
     """if return_last_state is True, returns (out, last_state)
     last_state has shape (batch, dim, dstate).
@@ -231,6 +233,8 @@ def selective_scan_opcheck_fn(
             block_idx_first_scheduled_token,
             block_idx_last_scheduled_token,
             initial_state_idx,
+            cu_chunk_seqlen,
+            last_chunk_indices,
         ),
         test_utils=["test_schema", "test_faketensor"],
     )
@@ -271,7 +275,7 @@ def test_selective_scan(
         rtolw = max(rtolw, rtol)
         atolw = max(atolw, atol)
     # set seed
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     batch_size = 1
     dim = 4
     dstate = 8
@@ -294,13 +298,13 @@ def test_selective_scan(
     C = torch.randn(C_shape, device=device, dtype=wtype if not is_variable_C else itype)
     C_ref = C.clone()
     D = torch.randn(dim, device=device, dtype=torch.float32) if has_D else None
-    D_ref = D.clone()
+    D_ref = D.clone() if D is not None else None
     z = (
         torch.randn(batch_size, dim, seqlen, device=device, dtype=itype)
         if has_z
         else None
     )
-    z_ref = z.clone() if has_z else None
+    z_ref = z.clone() if z is not None else None
     delta_bias = (
         (0.5 * torch.rand(dim, device=device, dtype=torch.float32))
         if has_delta_bias
@@ -401,7 +405,7 @@ def test_selective_state_update(dim, dstate, has_z, itype):
         if torch.version.hip:
             atol *= 2
     # set seed
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     batch_size = 1
     state = torch.randn(batch_size, dim, dstate, dtype=itype, device=device)
     x = torch.randn(batch_size, dim, device=device, dtype=itype)
@@ -438,7 +442,7 @@ def test_selective_state_update_varlen(dim, dstate, has_z, itype, max_seq_len):
         if torch.version.hip:
             atol *= 2
     # set seed
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     batch_size = 4
     token_counts = torch.randint(1, max_seq_len + 1, (batch_size,), device=device)
     total_tokens = int(token_counts.sum().item())
@@ -489,7 +493,7 @@ def test_selective_state_update_varlen(dim, dstate, has_z, itype, max_seq_len):
                     B[idx : idx + 1],
                     C[idx : idx + 1],
                     D=D,
-                    z=z[idx : idx + 1] if has_z else None,
+                    z=z[idx : idx + 1] if z is not None else None,
                     dt_bias=dt_bias,
                     dt_softplus=True,
                 )
@@ -574,7 +578,7 @@ def test_selective_scan_varlen(
     C = torch.randn(C_shape, device=device, dtype=wtype if not is_variable_C else itype)
     C_ref = C.clone()
     D = torch.randn(dim, device=device, dtype=torch.float32) if has_D else None
-    D_ref = D.clone()
+    D_ref = D.clone() if D is not None else None
     z = torch.randn(dim, seqlen, device=device, dtype=itype)
     z_ref = z.clone()
     delta_bias = (
@@ -746,7 +750,7 @@ def test_selective_state_update_with_batch_indices(
         B[:batch_size],
         C[:batch_size],
         D=D,
-        z=z[:batch_size],
+        z=z[:batch_size] if z is not None else None,
         dt_bias=dt_bias,
         dt_softplus=True,
     )
@@ -857,7 +861,7 @@ def test_selective_state_update_with_num_accepted_tokens(
         if torch.version.hip:
             atol *= 2
 
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     batch_size = 4
 
     tokens_per_seq = torch.randint(1, max_seq_len + 1, (batch_size,), device=device)
@@ -930,7 +934,7 @@ def test_selective_state_update_with_num_accepted_tokens(
                 B[global_idx : global_idx + 1],
                 C[global_idx : global_idx + 1],
                 D=D,
-                z=z[global_idx : global_idx + 1] if has_z else None,
+                z=z[global_idx : global_idx + 1] if z is not None else None,
                 dt_bias=dt_bias,
                 dt_softplus=True,
             )
@@ -983,7 +987,7 @@ def test_selective_state_update_varlen_with_num_accepted(
         if torch.version.hip:
             atol *= 2
 
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     batch_size = 4
 
     tokens_per_seq = torch.randint(1, max_seq_len + 1, (batch_size,), device=device)
@@ -1057,7 +1061,7 @@ def test_selective_state_update_varlen_with_num_accepted(
                 B[global_idx : global_idx + 1],
                 C[global_idx : global_idx + 1],
                 D=D,
-                z=z[global_idx : global_idx + 1] if has_z else None,
+                z=z[global_idx : global_idx + 1] if z is not None else None,
                 dt_bias=dt_bias,
                 dt_softplus=True,
             )

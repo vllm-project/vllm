@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
@@ -29,6 +29,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 
@@ -43,7 +44,6 @@ class MiniMaxText01RMSNormTP(CustomOp):
 
         self.weight.weight_loader = self.weight_loader
         self.variance_epsilon = eps
-        return
 
     @staticmethod
     def weight_loader(
@@ -56,7 +56,6 @@ class MiniMaxText01RMSNormTP(CustomOp):
         shard_size = loaded_weight.shape[0] // tp_world
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         param.data.copy_(loaded_weight[shard])
-        return
 
     def _forward(
         self,
@@ -78,6 +77,123 @@ class MiniMaxText01RMSNormTP(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert residual is None, "RMSNorm does not support residual connection."
         return self._forward(x)
+
+    @staticmethod
+    def forward_qk(
+        q_norm: "MiniMaxText01RMSNormTP",
+        k_norm: "MiniMaxText01RMSNormTP",
+        q: torch.Tensor,
+        k: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        orig_dtype = q.dtype
+        q = q.to(torch.float32)
+        k = k.to(torch.float32)
+        q_var = q.pow(2).mean(dim=-1, keepdim=True)
+        k_var = k.pow(2).mean(dim=-1, keepdim=True)
+        if q_norm.tp_world > 1:
+            qk_var = torch.cat([q_var, k_var], dim=-1)
+            qk_var = tensor_model_parallel_all_reduce(qk_var) / q_norm.tp_world
+            q_var, k_var = qk_var.chunk(2, dim=-1)
+        q = q * torch.rsqrt(q_var + q_norm.variance_epsilon) * q_norm.weight
+        k = k * torch.rsqrt(k_var + k_norm.variance_epsilon) * k_norm.weight
+        q = q.to(orig_dtype)
+        k = k.to(orig_dtype)
+        return q, k
+
+
+def clear_linear_attention_cache_for_new_sequences(
+    kv_cache: torch.Tensor,
+    state_indices_tensor: torch.Tensor,
+    attn_metadata: LinearAttentionMetadata,
+) -> None:
+    num_prefills = getattr(attn_metadata, "num_prefills", 0)
+    if num_prefills <= 0:
+        return
+
+    num_decode_tokens = getattr(attn_metadata, "num_decode_tokens", 0)
+    for prefill_idx in range(num_prefills):
+        q_start = attn_metadata.query_start_loc[num_decode_tokens + prefill_idx]
+        q_end = attn_metadata.query_start_loc[num_decode_tokens + prefill_idx + 1]
+        query_len = q_end - q_start
+        context_len = (
+            attn_metadata.seq_lens[num_decode_tokens + prefill_idx] - query_len
+        )
+        if context_len == 0:
+            block_to_clear = state_indices_tensor[num_decode_tokens + prefill_idx]
+            kv_cache[block_to_clear, ...] = 0
+
+
+def linear_attention_decode(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slope_rate: torch.Tensor,
+    state_indices_tensor: torch.Tensor,
+    q_start: int = 0,
+    q_end: int | None = None,
+    slot_start: int = 0,
+    slot_end: int | None = None,
+    block_size: int = 32,
+) -> torch.Tensor:
+    q = q[q_start:q_end].unsqueeze(2).contiguous()
+    k = k[q_start:q_end].unsqueeze(2).contiguous()
+    v = v[q_start:q_end].unsqueeze(2).contiguous()
+    slot_id = state_indices_tensor[slot_start:slot_end]
+    return linear_decode_forward_triton(
+        q, k, v, kv_cache, slope_rate, slot_id, block_size
+    )
+
+
+def linear_attention_prefill_and_mix(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    kv_cache: torch.Tensor,
+    state_indices_tensor: torch.Tensor,
+    attn_metadata: LinearAttentionMetadata,
+    slope_rate: torch.Tensor,
+    block_size: int,
+    decode_fn: Callable[..., torch.Tensor],
+    prefix_fn: Callable[..., torch.Tensor],
+    layer_idx: int | None = None,
+) -> torch.Tensor:
+    hidden = []
+    for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
+        if _prefill_idx >= len(attn_metadata.query_start_loc):
+            break
+        if _prefill_idx >= len(state_indices_tensor):
+            break
+        offset = attn_metadata.num_decode_tokens
+        _start = attn_metadata.query_start_loc[offset + _prefill_idx]
+        _end = attn_metadata.query_start_loc[offset + _prefill_idx + 1]
+        slot_id = state_indices_tensor[offset + _prefill_idx]
+        qs = q[_start:_end].transpose(0, 1).contiguous()
+        ks = k[_start:_end].transpose(0, 1).contiguous()
+        vs = v[_start:_end].transpose(0, 1).contiguous()
+        slice_layer_cache = kv_cache[slot_id, ...]
+        out_slice = prefix_fn(
+            qs,
+            ks,
+            vs,
+            slice_layer_cache,
+            slope_rate,
+            block_size,
+            layer_idx=layer_idx,
+        )
+        hidden.append(out_slice.contiguous())
+
+    if attn_metadata.num_decode_tokens > 0:
+        hidden_decode = decode_fn(
+            q, k, v, kv_cache, state_indices_tensor, attn_metadata
+        )
+        hidden.insert(0, hidden_decode)
+
+    if not hidden:
+        return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
+
+    hidden = torch.concat(hidden, dim=0).contiguous()
+    return hidden
 
 
 class MiniMaxText01LinearKernel:
@@ -236,50 +352,33 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
     def _prefill_and_mix_infer(
         self, q, k, v, kv_cache, state_indices_tensor, attn_metadata
     ):
-        hidden = []
-        for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
-            if _prefill_idx >= len(attn_metadata.query_start_loc):
-                break
-            if _prefill_idx >= len(state_indices_tensor):
-                break
-            offset = attn_metadata.num_decode_tokens
-            _start = attn_metadata.query_start_loc[offset + _prefill_idx]
-            _end = attn_metadata.query_start_loc[offset + _prefill_idx + 1]
-            slot_id = state_indices_tensor[offset + _prefill_idx]
-            qs = q[_start:_end].transpose(0, 1).contiguous()
-            ks = k[_start:_end].transpose(0, 1).contiguous()
-            vs = v[_start:_end].transpose(0, 1).contiguous()
-            slice_layer_cache = kv_cache[slot_id, ...]
-
-            out_slice = MiniMaxText01LinearKernel.jit_linear_forward_prefix(
-                qs,
-                ks,
-                vs,
-                slice_layer_cache,
-                self.tp_slope,
-                self.BLOCK,
-                layer_idx=self.layer_idx,
-            )
-            hidden.append(out_slice.contiguous())
-        if attn_metadata.num_decode_tokens > 0:
-            hidden_decode = self._decode_infer(
-                q, k, v, kv_cache, state_indices_tensor, attn_metadata
-            )
-            hidden.insert(0, hidden_decode)
-
-        if not hidden:
-            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
-
-        hidden = torch.concat(hidden, dim=0).contiguous()
-        return hidden
+        return linear_attention_prefill_and_mix(
+            q=q,
+            k=k,
+            v=v,
+            kv_cache=kv_cache,
+            state_indices_tensor=state_indices_tensor,
+            attn_metadata=attn_metadata,
+            slope_rate=self.tp_slope,
+            block_size=self.BLOCK,
+            decode_fn=self._decode_infer,
+            prefix_fn=MiniMaxText01LinearKernel.jit_linear_forward_prefix,
+            layer_idx=self.layer_idx,
+        )
 
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor, attn_metadata):
-        q = q[: attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
-        k = k[: attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
-        v = v[: attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
-        slot_id = state_indices_tensor[: attn_metadata.num_decodes]
-        hidden = linear_decode_forward_triton(
-            q, k, v, kv_cache, self.tp_slope, slot_id, 32
+        hidden = linear_attention_decode(
+            q,
+            k,
+            v,
+            kv_cache,
+            self.tp_slope,
+            state_indices_tensor,
+            q_start=0,
+            q_end=attn_metadata.num_decode_tokens,
+            slot_start=0,
+            slot_end=attn_metadata.num_decodes,
+            block_size=32,
         )
         return hidden
 
@@ -314,29 +413,11 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         qkvact = qkvact.view((qkv.shape[0], self.tp_heads, -1))
         q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
         if attn_metadata is not None:
-            kv_cache = self.kv_cache[forward_context.virtual_engine][0]
+            kv_cache = self.kv_cache[0]
             state_indices_tensor = attn_metadata.state_indices_tensor
-
-            num_prefills = getattr(attn_metadata, "num_prefills", 0)
-            if num_prefills > 0:
-                num_decode_tokens = getattr(attn_metadata, "num_decode_tokens", 0)
-                for prefill_idx in range(num_prefills):
-                    q_start = attn_metadata.query_start_loc[
-                        num_decode_tokens + prefill_idx
-                    ]
-                    q_end = attn_metadata.query_start_loc[
-                        num_decode_tokens + prefill_idx + 1
-                    ]
-                    query_len = q_end - q_start
-                    context_len = (
-                        attn_metadata.seq_lens[num_decode_tokens + prefill_idx]
-                        - query_len
-                    )
-                    if context_len == 0:
-                        block_to_clear = state_indices_tensor[
-                            num_decode_tokens + prefill_idx
-                        ]
-                        kv_cache[block_to_clear, ...] = 0
+            clear_linear_attention_cache_for_new_sequences(
+                kv_cache, state_indices_tensor, attn_metadata
+            )
 
         decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
         if attn_metadata is None:
