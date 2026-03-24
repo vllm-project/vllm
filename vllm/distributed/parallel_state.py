@@ -299,12 +299,15 @@ def _flashinfer_scaled_mm_out(
 ) -> torch.Tensor:
     """Adapter: wraps FlashInfer bmm_fp8 to match mm_out_op(A, B, ..., out=)
     interface expected by PyTorch's _fused_*_impl helpers."""
-    result = torch.ops.vllm.bmm_fp8(
+    from flashinfer import bmm_fp8 as flashinfer_bmm_fp8
+
+    result = flashinfer_bmm_fp8(
         A.unsqueeze(0),
         B.unsqueeze(0),
         scale_a,
         scale_b,
         out_dtype or out.dtype,
+        None,
         "auto",
     ).squeeze(0)
     out.copy_(result)
