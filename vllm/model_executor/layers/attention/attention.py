@@ -15,7 +15,6 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
@@ -221,11 +220,9 @@ class Attention(nn.Module, AttentionLayerBase):
         vllm_config = get_current_vllm_config()
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
-            block_size = cache_config.block_size
             calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
-            block_size = 16
             calculate_kv_scales = False
 
         # llm-compressor mdls need to set cache_dtype to "fp8" manually.
@@ -275,7 +272,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size,
                 dtype,
                 kv_cache_dtype,
-                block_size,
                 use_mla=False,
                 has_sink=self.has_sink,
                 use_mm_prefix=self.use_mm_prefix,
@@ -299,7 +295,7 @@ class Attention(nn.Module, AttentionLayerBase):
         if (
             cache_config is not None
             and cache_config.enable_prefix_caching
-            and vllm_is_batch_invariant()
+            and envs.VLLM_BATCH_INVARIANT
             and (
                 self.attn_backend.get_name() == "FLASHINFER"
                 or self.attn_backend.get_name() == "TRITON_MLA"
@@ -353,10 +349,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
         # this variable will not be accessed if use_direct_call is True
-        self.kv_cache = [
-            torch.tensor([])
-            for _ in range(vllm_config.parallel_config.pipeline_parallel_size)
-        ]
+        self.kv_cache = torch.tensor([])
 
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
@@ -592,7 +585,7 @@ def get_attention_context(
         - attn_metadata: Attention metadata for this specific layer, or None if
             no metadata available
         - attn_layer: The attention layer instance (Attention or MLAAttention)
-        - kv_cache: The KV cache tensor for current virtual engine
+        - kv_cache: The KV cache tensor for current forward pass
         - slot_mapping: The slot mapping for this specific layer
 
         Note: attn_metadata may be None, but attn_layer and kv_cache are always
@@ -603,7 +596,7 @@ def get_attention_context(
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    kv_cache = attn_layer.kv_cache
     slot_mapping = forward_context.slot_mapping
     assert isinstance(slot_mapping, dict), (
         f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "

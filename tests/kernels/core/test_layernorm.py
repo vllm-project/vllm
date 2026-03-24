@@ -14,7 +14,9 @@ NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
 HIDDEN_SIZES = [8, 768, 769, 5120, 5125, 8192]  # Arbitrary values for testing
 ADD_RESIDUAL = [False, True]
 SEEDS = [0]
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -127,7 +129,7 @@ def test_fused_rms_norm_quant(
             out_quant, x_unfused.contiguous(), quant_scale_t
         )
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         torch.testing.assert_close(residual_fused, residual, atol=1e-2, rtol=1e-2)
         opcheck(
             torch.ops._C.fused_add_rms_norm_static_fp8_quant,

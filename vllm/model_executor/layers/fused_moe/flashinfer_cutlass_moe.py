@@ -60,7 +60,12 @@ def is_valid_flashinfer_cutlass_fused_moe(
     return True
 
 
-class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class FlashInferExperts(mk.FusedMoEExpertsModular):
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.quant_config.use_nvfp4_w4a4:
+            layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+            layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+
     def __init__(
         self,
         moe_config: mk.FusedMoEConfig,
@@ -194,10 +199,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def supports_expert_map(self) -> bool:
         return False
-
-    def supports_chunking(self) -> bool:
-        # This refers to TP chunking; DP chunking is handled separately.
-        return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -394,5 +395,5 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         # No support for LoRA in flashinfer_cutlass_fused_moe.
-        # See TODOs in flashinfer functions runMoe and runMoeMinLantency.
+        # See TODOs in flashinfer functions runMoe and runMoeMinLatency.
         raise NotImplementedError("LoRA is not supported for flashinfer_cutlass_moe")

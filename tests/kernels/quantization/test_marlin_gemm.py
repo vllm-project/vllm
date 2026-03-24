@@ -260,7 +260,7 @@ def test_gptq_marlin_repack(
     marlin_q_w_2 = ops.gptq_marlin_repack(
         q_w_gptq, sort_indices, size_k, size_n, quant_type.size_bits, is_a_8bit
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
 
@@ -308,7 +308,7 @@ def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, is_a_8bit, nk_factors):
     marlin_q_w_2 = ops.awq_marlin_repack(
         q_w_awq, size_k, size_n, quant_type.size_bits, is_a_8bit
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
 
@@ -565,7 +565,7 @@ def test_marlin_gemm_subset_input():
     )
     output_ref = torch.matmul(a_input, w_ref)
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     max_diff = compute_max_diff(output, output_ref)
 
@@ -614,7 +614,7 @@ def test_marlin_gemm_with_bias(size_m):
     )
     output_ref = torch.matmul(a_input, w_ref) + b_bias.view(1, -1)
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     max_diff = compute_max_diff(output, output_ref)
 
