@@ -6,7 +6,6 @@ from collections.abc import Sequence
 import torch
 
 import vllm.envs as envs
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_block_strategy,
 )
@@ -42,7 +41,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         # Check if platform supports FP8 Marlin
         if not is_fp8_marlin_supported():
             return False, "FP8 Marlin requires compute capability 7.5 or higher"
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             return False, "FP8 Marlin not supported for batch invariant execution."
         if (
             compute_capability is not None

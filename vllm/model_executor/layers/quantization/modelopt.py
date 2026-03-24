@@ -1154,12 +1154,13 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # global scales:
-        input_scale_2 = layer.input_scale.max().to(torch.float32)
-        layer.input_scale = Parameter(input_scale_2, requires_grad=False)
-
-        weight_scale_2 = layer.weight_scale_2.max().to(torch.float32)
-        layer.weight_scale_2 = Parameter(weight_scale_2, requires_grad=False)
+        # Rename ModelOpt checkpoint names to standardized names
+        input_global_scale = layer.input_scale.max().to(torch.float32)
+        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
+        del layer.input_scale
+        weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
+        layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
+        del layer.weight_scale_2
 
         # Pre-compute alpha and inverse for runtime quantization
         layer.alpha = Parameter(
