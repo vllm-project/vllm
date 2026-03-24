@@ -248,10 +248,16 @@ class CPUAWQLinearMethod(LinearMethodBase):
 
         interleave_map = (0, 4, 1, 5, 2, 6, 3, 7)
         weight = unpack_cols(
-            packed_weight, bits, input_size, output_size,
+            packed_weight,
+            bits,
+            input_size,
+            output_size,
         )
         zeros = unpack_cols(
-            packed_zeros, bits, group_num, output_size,
+            packed_zeros,
+            bits,
+            group_num,
+            output_size,
         )
         weight = (
             weight.view(input_size, -1, pack_factor)[:, :, interleave_map]
@@ -280,9 +286,9 @@ class CPUAWQLinearMethod(LinearMethodBase):
         packed_weight = layer.qweight.data
         packed_zeros = layer.qzeros.data
         scales = layer.scales.data
-        blocked_w, blocked_zp, blocked_s = (
-            torch.ops._C.convert_weight_packed_scale_zp(
-                packed_weight, packed_zeros, scales))
+        blocked_w, blocked_zp, blocked_s = torch.ops._C.convert_weight_packed_scale_zp(
+            packed_weight, packed_zeros, scales
+        )
 
         layer.packed_weight = blocked_w
         layer.packed_qzeros = blocked_zp
@@ -337,8 +343,7 @@ class CPUAWQLinearMethod(LinearMethodBase):
             layer.packed_scales,
             bias,
         )
-        out = out.reshape(x_shape[:-1] + (out.size(-1),)) \
-            if len(x_shape) > 2 else out
+        out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
         return out
 
 
@@ -348,5 +353,3 @@ def _get_isa_hint(dtype: torch.dtype) -> str:
         return "amx"
     else:
         return "vec"
-
-

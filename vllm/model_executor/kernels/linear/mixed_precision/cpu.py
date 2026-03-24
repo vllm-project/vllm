@@ -5,7 +5,6 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
     unpack_quantized_values_into_int32,
@@ -24,9 +23,12 @@ def _requantize_to_int8(
     K, N = float_weight.shape
     channel_max = float_weight.abs().amax(dim=0)
     channel_scale = (channel_max / 127.0).clamp(min=1e-10)
-    weight_int8 = (float_weight / channel_scale.unsqueeze(0)).round().clamp(
-        -128, 127
-    ).to(torch.int8)
+    weight_int8 = (
+        (float_weight / channel_scale.unsqueeze(0))
+        .round()
+        .clamp(-128, 127)
+        .to(torch.int8)
+    )
     return weight_int8, channel_scale
 
 
@@ -37,7 +39,7 @@ def _dequant_gptq_to_float(
     g_idx: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Dequantize GPTQ int4 weights to float32.
-    GPTQ uses signed int4 (uint4b8: raw [0,15] with bias 8 → [-8, 7]) si NO zero point. 
+    GPTQ uses signed int4 (uint4b8: raw [0,15] with bias 8 → [-8, 7]) si NO zero point.
     Dequant formula: float_w = signed_int4 * scale
     Args:
         weight_int4: [K, N] int32, raw unpacked 4-bit values (0-15)
@@ -49,11 +51,9 @@ def _dequant_gptq_to_float(
         float_weight: [K, N] float32
     """
     K, N = weight_int4.shape
-    num_groups = scales.shape[0]
 
-
-    signed_int4 = weight_int4.float() - 8.0 # uint4b8: raw [0,15] → signed [-8, 7] by subtracting bias 8
-
+    # uint4b8: raw [0,15] → signed [-8, 7] by subtracting bias 8
+    signed_int4 = weight_int4.float() - 8.0
 
     if g_idx is not None:
         # g_idx: [K] int32, g_idx[k] = group index for row k
@@ -166,18 +166,15 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         pack_factor = 32 // bits
         p_w_k, p_w_n = packed_weight.size()
         input_size = p_w_k * pack_factor
-        output_size = p_w_n
-        group_size = self.config.group_size if self.config.group_size > 0 \
-            else input_size
-
+        group_size = (
+            self.config.group_size if self.config.group_size > 0 else input_size
+        )
 
         weight_int4 = unpack_quantized_values_into_int32(
             packed_weight, self.config.weight_type, 0
         )
 
-        float_weight = _dequant_gptq_to_float(
-            weight_int4, scales, group_size, g_idx
-        )
+        float_weight = _dequant_gptq_to_float(weight_int4, scales, group_size, g_idx)
 
         weight_int8, channel_scale = _requantize_to_int8(float_weight)
         channel_scale_2d = channel_scale.unsqueeze(0)
@@ -199,6 +196,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
             setattr(layer, self.w_s_name, None)
         if self.w_zp_name and hasattr(layer, self.w_zp_name):
             setattr(layer, self.w_zp_name, None)
+
     def process_weights_after_loading(self, layer: torch.nn.Module):
         if (not self.config.zero_points) and (self.w_zp_name is not None):
             setattr(layer, self.w_zp_name, None)
@@ -224,7 +222,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if envs.VLLM_CPU_WOQ_INT8_MODE and hasattr(self, 'dnnl_handler'):
+        if envs.VLLM_CPU_WOQ_INT8_MODE and hasattr(self, "dnnl_handler"):
             return self._apply_weights_int8(layer, x, bias)
         else:
             w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)

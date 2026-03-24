@@ -731,7 +731,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_ZENTORCH_WEIGHT_PREPACK", "1"))
     ),
     # (CPU backend only) whether to use int8 oneDNN GEMM for WOQ (AWQ/GPTQ).
-    "VLLM_CPU_WOQ_INT8_MODE": lambda: bool(int(os.getenv("VLLM_CPU_WOQ_INT8_MODE", "0"))),
+    "VLLM_CPU_WOQ_INT8_MODE": lambda: bool(
+        int(os.getenv("VLLM_CPU_WOQ_INT8_MODE", "0"))
+    ),
     # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ.
     "VLLM_CPU_INT4_W4A8": lambda: bool(int(os.getenv("VLLM_CPU_INT4_W4A8", "0"))),
     # If the env var is set, Ray Compiled Graph uses the specified

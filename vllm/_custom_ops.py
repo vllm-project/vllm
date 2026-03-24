@@ -2993,14 +2993,10 @@ if hasattr(torch.ops._C, "int4_scaled_mm_cpu"):
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
         N = w_scales.size(0) * w_scales.size(-1)
-        return torch.empty(
-            (x.size(0), N), dtype=x.dtype, device=x.device
-        )
+        return torch.empty((x.size(0), N), dtype=x.dtype, device=x.device)
 
 
-_supports_int4_w4a8 = bool(
-    hasattr(torch.ops._C, "convert_weight_packed_scale_zp")
-)
+_supports_int4_w4a8 = bool(hasattr(torch.ops._C, "convert_weight_packed_scale_zp"))
 
 
 class CPUDNNLGEMMHandler:

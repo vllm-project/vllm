@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Unit tests for GPTQ int4 -> int8 re-quantization pipeline.
 
@@ -16,25 +17,18 @@ Run:
 
 """
 
-import torch
-import pytest
 import numpy as np
+import pytest
+import torch
 
-
+from vllm import _custom_ops as ops
+from vllm._custom_ops import _supports_onednn
 from vllm.model_executor.kernels.linear.mixed_precision.cpu import (
     _dequant_gptq_to_float,
 )
 from vllm.model_executor.layers.quantization.cpu_wna16 import (
     _requantize_to_int8,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    pack_quantized_values_into_int32,
-    unpack_quantized_values_into_int32,
-)
-from vllm.scalar_type import scalar_types
-
-from vllm import _custom_ops as ops
-from vllm._custom_ops import _supports_onednn
 
 requires_onednn = pytest.mark.skipif(
     not _supports_onednn,
@@ -42,15 +36,16 @@ requires_onednn = pytest.mark.skipif(
 )
 
 
-
-
-
 def make_synthetic_gptq_data(
-    K: int, N: int, group_size: int, seed: int = 42,
+    K: int,
+    N: int,
+    group_size: int,
+    seed: int = 42,
     use_g_idx: bool = False,
 ):
     """Create synthetic GPTQ-style quantized data.
-    GPTQ uses uint4b8 format: raw values [0, 15], representing signed [-8, 7]. No zero point.
+    GPTQ uses uint4b8 format: raw values [0, 15],
+    representing signed [-8, 7]. No zero point.
 
     Returns:
         weight_int4: [K, N] int32, raw values in [0, 15]
@@ -73,7 +68,7 @@ def make_synthetic_gptq_data(
     if use_g_idx:
         g_idx_np = np.zeros(K, dtype=np.int32)
         for g in range(num_groups):
-            g_idx_np[g * group_size:(g + 1) * group_size] = g
+            g_idx_np[g * group_size : (g + 1) * group_size] = g
         rng.shuffle(g_idx_np)
         g_idx = torch.from_numpy(g_idx_np)
         scales_expanded = scales[g_idx.long(), :]
@@ -87,7 +82,10 @@ def make_synthetic_gptq_data(
 
 
 def _gptq_int4_to_int8_pipeline(
-    K: int, N: int, group_size: int, seed: int = 42,
+    K: int,
+    N: int,
+    group_size: int,
+    seed: int = 42,
     use_g_idx: bool = False,
 ):
     """Full pipeline: synthetic GPTQ data → dequant → int8 requant.
@@ -106,23 +104,21 @@ def _gptq_int4_to_int8_pipeline(
     return weight_int8, channel_scale, float_weight
 
 
-
-
-
 class TestDequantGPTQToFloat:
     """Tests for _dequant_gptq_to_float."""
 
-    @pytest.mark.parametrize("K,N,group_size", [
-        (128, 64, 128),
-        (256, 256, 128),
-        (512, 128, 64),
-        (1024, 512, 128),
-    ])
+    @pytest.mark.parametrize(
+        "K,N,group_size",
+        [
+            (128, 64, 128),
+            (256, 256, 128),
+            (512, 128, 64),
+            (1024, 512, 128),
+        ],
+    )
     def test_dequant_matches_reference(self, K, N, group_size):
         """Dequant output should exactly match manual per-group computation."""
-        weight_int4, scales, _, float_ref = make_synthetic_gptq_data(
-            K, N, group_size
-        )
+        weight_int4, scales, _, float_ref = make_synthetic_gptq_data(K, N, group_size)
 
         float_result = _dequant_gptq_to_float(weight_int4, scales, group_size)
         torch.testing.assert_close(float_result, float_ref, rtol=1e-5, atol=1e-5)
@@ -136,9 +132,7 @@ class TestDequantGPTQToFloat:
 
         result = _dequant_gptq_to_float(weight_int4, scales, group_size)
 
-        torch.testing.assert_close(
-            result, torch.zeros_like(result), rtol=0, atol=1e-7
-        )
+        torch.testing.assert_close(result, torch.zeros_like(result), rtol=0, atol=1e-7)
         print("  [PASS] dequant zero weights (raw=8 → signed=0)")
 
     def test_dequant_extreme_values(self):
@@ -161,42 +155,36 @@ class TestDequantGPTQToFloat:
         print("  [PASS] dequant extreme values")
 
 
-
-
 class TestDescActGIdx:
     """desc_act handling with g_idx in dequant."""
 
-    @pytest.mark.parametrize("K,N,group_size", [
-        (128, 64, 64),
-        (256, 128, 128),
-        (512, 256, 64),
-    ])
+    @pytest.mark.parametrize(
+        "K,N,group_size",
+        [
+            (128, 64, 64),
+            (256, 128, 128),
+            (512, 256, 64),
+        ],
+    )
     def test_g_idx_dequant_matches_reference(self, K, N, group_size):
         """With g_idx, dequant should match element-wise reference."""
         weight_int4, scales, g_idx, float_ref = make_synthetic_gptq_data(
             K, N, group_size, use_g_idx=True
         )
 
-        float_result = _dequant_gptq_to_float(
-            weight_int4, scales, group_size, g_idx
-        )
+        float_result = _dequant_gptq_to_float(weight_int4, scales, group_size, g_idx)
 
-        torch.testing.assert_close(
-            float_result, float_ref, rtol=1e-5, atol=1e-5
-        )
+        torch.testing.assert_close(float_result, float_ref, rtol=1e-5, atol=1e-5)
         print(f"  [PASS] g_idx dequant K={K}, N={N}, gs={group_size}")
 
     def test_g_idx_vs_no_g_idx_uniform(self):
         """With sequential g_idx, result should match uniform grouping."""
         K, N, group_size = 256, 128, 128
-        num_groups = K // group_size
 
         weight_int4, scales, _, _ = make_synthetic_gptq_data(K, N, group_size)
         g_idx_uniform = torch.arange(K, dtype=torch.int32) // group_size
 
-        result_no_gidx = _dequant_gptq_to_float(
-            weight_int4, scales, group_size, None
-        )
+        result_no_gidx = _dequant_gptq_to_float(weight_int4, scales, group_size, None)
         result_with_gidx = _dequant_gptq_to_float(
             weight_int4, scales, group_size, g_idx_uniform
         )
@@ -207,21 +195,21 @@ class TestDescActGIdx:
         print("  [PASS] uniform g_idx matches no-g_idx path")
 
 
-
-
 class TestGPTQRequantizeToInt8:
     """re-quantize float32 weights to int8 (reusing AWQ's _requantize_to_int8)."""
 
-    @pytest.mark.parametrize("K,N,group_size", [
-        (128, 128, 128),
-        (256, 256, 128),
-        (512, 128, 64),
-    ])
+    @pytest.mark.parametrize(
+        "K,N,group_size",
+        [
+            (128, 128, 128),
+            (256, 256, 128),
+            (512, 128, 64),
+        ],
+    )
     def test_requantize_gptq_pipeline(self, K, N, group_size):
-        """Full GPTQ pipeline: dequant → int8 re-quantize shoud preserve signed int4 values within int8 range."""
-        weight_int4, scales, _, float_ref = make_synthetic_gptq_data(
-            K, N, group_size
-        )
+        """Full GPTQ pipeline: dequant then int8 re-quantize
+        should preserve signed int4 values within int8 range."""
+        weight_int4, scales, _, float_ref = make_synthetic_gptq_data(K, N, group_size)
         float_weight = _dequant_gptq_to_float(weight_int4, scales, group_size)
         weight_int8, channel_scale = _requantize_to_int8(float_weight)
 
@@ -235,12 +223,14 @@ class TestGPTQRequantizeToInt8:
         rel_err_mask = float_weight.abs() > 1e-6
         rel_err = (float_weight - reconstructed).abs()
         mean_rel = (
-            rel_err[rel_err_mask] / float_weight[rel_err_mask].abs()
-        ).mean().item()
+            (rel_err[rel_err_mask] / float_weight[rel_err_mask].abs()).mean().item()
+        )
 
         assert mean_rel < 0.10, f"mean_rel_err {mean_rel:.4f} exceeds 0.10"
-        print(f"  [PASS] GPTQ pipeline K={K}, N={N}, gs={group_size}: "
-              f"mean_rel_err={mean_rel:.4f}")
+        print(
+            f"  [PASS] GPTQ pipeline K={K}, N={N}, gs={group_size}: "
+            f"mean_rel_err={mean_rel:.4f}"
+        )
 
     def test_requantize_with_g_idx(self):
         """Pipeline with desc_act should also produce valid int8 weights."""
@@ -248,9 +238,7 @@ class TestGPTQRequantizeToInt8:
         weight_int4, scales, g_idx, _ = make_synthetic_gptq_data(
             K, N, group_size, use_g_idx=True
         )
-        float_weight = _dequant_gptq_to_float(
-            weight_int4, scales, group_size, g_idx
-        )
+        float_weight = _dequant_gptq_to_float(weight_int4, scales, group_size, g_idx)
         weight_int8, channel_scale = _requantize_to_int8(float_weight)
 
         assert weight_int8.dtype == torch.int8
@@ -259,29 +247,32 @@ class TestGPTQRequantizeToInt8:
         print(f"  [PASS] GPTQ pipeline with g_idx: K={K}, N={N}")
 
 
-
 class TestGPTQOneDNNHandlerCreation:
     """Create oneDNN int8 GEMM handler from GPTQ-derived int8 weights."""
 
     @requires_onednn
-    @pytest.mark.parametrize("K,N,group_size", [
-        (128, 128, 128),
-        (256, 256, 128),
-        (512, 256, 64),
-    ])
+    @pytest.mark.parametrize(
+        "K,N,group_size",
+        [
+            (128, 128, 128),
+            (256, 256, 128),
+            (512, 256, 64),
+        ],
+    )
     def test_handler_creation(self, K, N, group_size):
         """Handler should be created successfully with correct K, N."""
-        weight_int8, channel_scale, _ = _gptq_int4_to_int8_pipeline(
-            K, N, group_size
-        )
+        weight_int8, channel_scale, _ = _gptq_int4_to_int8_pipeline(K, N, group_size)
         channel_scale_2d = channel_scale.unsqueeze(0)
 
         handler = ops.create_onednn_scaled_mm(
-            weight_int8, channel_scale_2d, torch.bfloat16,
-            True, False, 32,
+            weight_int8,
+            channel_scale_2d,
+            torch.bfloat16,
+            True,
+            False,
+            32,
         )
 
-        
         assert handler.n == N
         assert handler.k == K
         print(f"  [PASS] handler creation K={K}, N={N}, gs={group_size}")
@@ -296,8 +287,12 @@ class TestGPTQOneDNNHandlerCreation:
         channel_scale_2d = channel_scale.unsqueeze(0)
 
         handler = ops.create_onednn_scaled_mm(
-            weight_int8, channel_scale_2d, torch.bfloat16,
-            True, False, 32,
+            weight_int8,
+            channel_scale_2d,
+            torch.bfloat16,
+            True,
+            False,
+            32,
         )
 
         assert handler.k == K
@@ -305,11 +300,9 @@ class TestGPTQOneDNNHandlerCreation:
         print(f"  [PASS] handler creation with g_idx K={K}, N={N}")
 
 
-def _ref_onednn_dynamic_gemm(x_q, weight_int8, x_s, channel_scale_2d,
-                              bias, out_dtype):
+def _ref_onednn_dynamic_gemm(x_q, weight_int8, x_s, channel_scale_2d, bias, out_dtype):
     """Reference matching oneDNN dynamic-quant int8 GEMM execution flow."""
-    int_mm = torch.mm(x_q.to(torch.float64),
-                      weight_int8.contiguous().to(torch.float64))
+    int_mm = torch.mm(x_q.to(torch.float64), weight_int8.contiguous().to(torch.float64))
     tmp_f32 = int_mm.float() * channel_scale_2d
     out_f32 = x_s * tmp_f32
     if bias is not None:
@@ -319,23 +312,29 @@ def _ref_onednn_dynamic_gemm(x_q, weight_int8, x_s, channel_scale_2d,
 
 class TestGPTQOneDNNInt8GEMM:
     """oneDNN int8 GEMM with GPTQ-derived int8 weights."""
+
     @requires_onednn
-    @pytest.mark.parametrize("M,K,N,group_size", [
-        (1, 128, 128, 128),
-        (4, 256, 256, 128),
-        (16, 512, 256, 64),
-        (32, 256, 512, 128),
-    ])
+    @pytest.mark.parametrize(
+        "M,K,N,group_size",
+        [
+            (1, 128, 128, 128),
+            (4, 256, 256, 128),
+            (16, 512, 256, 64),
+            (32, 256, 512, 128),
+        ],
+    )
     def test_int8_gemm_kernel_correctness(self, M, K, N, group_size):
         """oneDNN int8 GEMM should match exact int8 reference."""
-        weight_int8, channel_scale, _ = _gptq_int4_to_int8_pipeline(
-            K, N, group_size
-        )
+        weight_int8, channel_scale, _ = _gptq_int4_to_int8_pipeline(K, N, group_size)
         channel_scale_2d = channel_scale.unsqueeze(0)
 
         handler = ops.create_onednn_scaled_mm(
-            weight_int8, channel_scale_2d, torch.bfloat16,
-            True, False, 32,
+            weight_int8,
+            channel_scale_2d,
+            torch.bfloat16,
+            True,
+            False,
+            32,
         )
 
         x = torch.randn(M, K, dtype=torch.bfloat16)
@@ -351,10 +350,10 @@ class TestGPTQOneDNNInt8GEMM:
         mean_abs = abs_diff.mean().item()
         pct95 = torch.quantile(abs_diff, 0.95).item()
 
-        assert mean_abs < 2.0, (
-            f"mean_abs_diff {mean_abs:.4f} too large (threshold 2.0)")
+        assert mean_abs < 2.0, f"mean_abs_diff {mean_abs:.4f} too large (threshold 2.0)"
         assert pct95 < 5.0, (
-            f"95th-percentile abs_diff {pct95:.4f} too large (threshold 5.0)")
+            f"95th-percentile abs_diff {pct95:.4f} too large (threshold 5.0)"
+        )
         print(f"  [PASS] GPTQ int8 GEMM: M={M}, K={K}, N={N}")
 
     @requires_onednn
@@ -362,15 +361,17 @@ class TestGPTQOneDNNInt8GEMM:
     def test_int8_gemm_with_bias(self, M):
         """oneDNN int8 GEMM with bias should match reference."""
         K, N, group_size = 256, 128, 128
-        weight_int8, channel_scale, _ = _gptq_int4_to_int8_pipeline(
-            K, N, group_size
-        )
+        weight_int8, channel_scale, _ = _gptq_int4_to_int8_pipeline(K, N, group_size)
         channel_scale_2d = channel_scale.unsqueeze(0)
         bias = torch.randn(N, dtype=torch.bfloat16)
 
         handler = ops.create_onednn_scaled_mm(
-            weight_int8, channel_scale_2d, torch.bfloat16,
-            True, False, 32,
+            weight_int8,
+            channel_scale_2d,
+            torch.bfloat16,
+            True,
+            False,
+            32,
         )
 
         x = torch.randn(M, K, dtype=torch.bfloat16)
@@ -386,23 +387,27 @@ class TestGPTQOneDNNInt8GEMM:
         mean_abs = abs_diff.mean().item()
         pct95 = torch.quantile(abs_diff, 0.95).item()
         assert mean_abs < 2.0, (
-            f"mean_abs_diff {mean_abs:.4f} with bias exceeds threshold")
+            f"mean_abs_diff {mean_abs:.4f} with bias exceeds threshold"
+        )
         assert pct95 < 5.0, (
-            f"95th-pctile abs_diff {pct95:.4f} with bias exceeds threshold")
+            f"95th-pctile abs_diff {pct95:.4f} with bias exceeds threshold"
+        )
         print(f"  [PASS] GPTQ int8 GEMM with bias: M={M}")
 
     @requires_onednn
     def test_int8_gemm_3d_input(self):
-        """apply-fucntion reshapes 3D input [B, S, K] → [B*S, K] → back to 3D."""
+        """apply-function reshapes 3D input [B, S, K] → [B*S, K] → back to 3D."""
         K, N, group_size = 256, 128, 128
-        weight_int8, channel_scale, _ = _gptq_int4_to_int8_pipeline(
-            K, N, group_size
-        )
+        weight_int8, channel_scale, _ = _gptq_int4_to_int8_pipeline(K, N, group_size)
         channel_scale_2d = channel_scale.unsqueeze(0)
 
         handler = ops.create_onednn_scaled_mm(
-            weight_int8, channel_scale_2d, torch.bfloat16,
-            True, False, 32,
+            weight_int8,
+            channel_scale_2d,
+            torch.bfloat16,
+            True,
+            False,
+            32,
         )
 
         B, S = 2, 8
@@ -436,8 +441,12 @@ class TestGPTQOneDNNInt8GEMM:
         channel_scale_2d = channel_scale.unsqueeze(0)
 
         handler = ops.create_onednn_scaled_mm(
-            weight_int8, channel_scale_2d, torch.bfloat16,
-            True, False, 32,
+            weight_int8,
+            channel_scale_2d,
+            torch.bfloat16,
+            True,
+            False,
+            32,
         )
 
         x = torch.randn(M, K, dtype=torch.bfloat16)
@@ -456,4 +465,3 @@ class TestGPTQOneDNNInt8GEMM:
         assert mean_abs < 2.0
         assert pct95 < 5.0
         print(f"  [PASS] GPTQ int8 GEMM with g_idx: M={M}, K={K}, N={N}")
-
