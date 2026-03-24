@@ -119,7 +119,9 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @classmethod
     def _convert_anthropic_to_openai_request(
-        cls, anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest
+        cls,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> ChatCompletionRequest:
         """Convert Anthropic message format to OpenAI format"""
         openai_messages: list[dict[str, Any]] = []
@@ -130,6 +132,10 @@ class AnthropicServingMessages(OpenAIServingChat):
         cls._handle_streaming_options(req, anthropic_request)
         cls._convert_tool_choice(anthropic_request, req)
         cls._convert_tools(anthropic_request, req)
+        if default_chat_template_kwargs:
+            req.chat_template_kwargs = default_chat_template_kwargs | (
+                req.chat_template_kwargs or {}
+            )
         return req
 
     @classmethod
@@ -419,7 +425,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         """
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received messages request %s", request.model_dump_json())
-        chat_req = self._convert_anthropic_to_openai_request(request)
+        chat_req = self._convert_anthropic_to_openai_request(
+            request, self.default_chat_template_kwargs
+        )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())
         generator = await self.create_chat_completion(chat_req, raw_request)
@@ -792,7 +800,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         raw_request: Request | None = None,
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
-        chat_req = self._convert_anthropic_to_openai_request(request)
+        chat_req = self._convert_anthropic_to_openai_request(
+            request, self.default_chat_template_kwargs
+        )
         result = await self.render_chat_request(chat_req)
         if isinstance(result, ErrorResponse):
             return result

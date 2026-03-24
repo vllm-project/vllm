@@ -635,3 +635,36 @@ class TestThinkingBlockConversion:
         # Redacted thinking is ignored, normal thinking still becomes reasoning.
         assert asst.get("reasoning") == "Thinking..."
         assert asst.get("content") == "Hi!"
+
+
+# ======================================================================
+# default_chat_template_kwargs passthrough
+# ======================================================================
+
+
+class TestDefaultChatTemplateKwargs:
+    """Verify that _convert_anthropic_to_openai_request correctly applies
+    server-level default_chat_template_kwargs to the converted request.
+    """
+
+    def test_no_kwargs_by_default(self):
+        """Without default_chat_template_kwargs, converted requests should
+        not have chat_template_kwargs set."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+        )
+        result = _convert(request)
+        assert result.chat_template_kwargs is None
+
+    def test_server_defaults_applied(self):
+        """Server defaults should appear on the converted request."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+        )
+        result = _convert(
+            request,
+            default_chat_template_kwargs={
+                "enable_thinking": False,
+            },
+        )
+        assert result.chat_template_kwargs == {"enable_thinking": False}
