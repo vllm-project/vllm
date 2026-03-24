@@ -23,6 +23,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
@@ -266,9 +267,8 @@ class ShortConv(MambaBase, CustomOp):
             # V1 profile run
             Bx = (B * x).contiguous()
             hidden_states = C * Bx
-            output_tensor, _ = self.out_proj(hidden_states)
-            output[: hidden_states.shape[0]] = output_tensor
-            return
+            contextualized_states, _ = self.out_proj(hidden_states)
+            return contextualized_states
 
         num_prefills = attn_metadata.num_prefills  # request count
         num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
@@ -360,7 +360,7 @@ def short_conv(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    if self.conv.weight.device.type == "cuda":
+    if not current_platform.is_cpu():
         self.forward_cuda(hidden_states=hidden_states, output=output)
     else:
         self.forward_native(hidden_states=hidden_states, output=output)
