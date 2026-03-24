@@ -39,7 +39,7 @@ class ResponsesParser:
         reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
         response_messages: list[ResponseInputOutputItem],
         request: ResponsesRequest,
-        tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
+        tool_parser_cls: type[ToolParser] | None,
     ):
         self.response_messages: list[ResponseInputOutputItem] = (
             # TODO: initial messages may not be properly typed
