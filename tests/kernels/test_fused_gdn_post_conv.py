@@ -142,8 +142,8 @@ def test_fused_post_conv_correctness(H, HV, K, V, L, apply_l2norm, output_g_exp,
 
 
 @pytest.mark.parametrize("L", [1, 64, 256])
-def test_fused_post_conv_empty_and_edge(L):
-    """Test edge cases."""
+def test_fused_post_conv_sanity(L):
+    """Sanity checks: no NaN, unit-norm q/k, beta in (0,1)."""
     torch.manual_seed(0)
     device = "cuda"
     H, HV, K, V = 16, 32, 128, 128
