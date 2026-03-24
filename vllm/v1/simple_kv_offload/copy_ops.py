@@ -86,7 +86,9 @@ def build_params(
         dst_bases.append(d.data_ptr())
         bpb.append(s_bpb)
 
-    attrs = _CUmemcpyAttributes(srcAccessOrder=1)  # STREAM
+    # Refer to https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__MEM.html#group_
+    # _CUDA__MEM_1g6f1ff58e3065df3eb4b573dba77ad31f for details.
+    attrs = _CUmemcpyAttributes(srcAccessOrder=1)  # API_CALL
 
     return BatchMemcpyParams(
         src_bases=np.array(src_bases, dtype=np.uint64),

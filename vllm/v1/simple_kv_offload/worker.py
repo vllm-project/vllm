@@ -13,7 +13,6 @@ from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
@@ -54,8 +53,11 @@ class SimpleCPUOffloadWorker:
         # Metadata for the current step
         self._connector_metadata: SimpleCPUOffloadMetadata | None = None
 
-        # Deferred store: stash blocks and store them later in the next step.
+        # Two-step deferred store: stash blocks for 2 steps so the DMA
+        # launches without any wait_event/wait_stream (the producing
+        # forward is long done by then).
         self._deferred_store: tuple[list[int], list[int], int] | None = None
+        self._deferred_store_prev: tuple[list[int], list[int], int] | None = None
 
         # Pending event index sets, populated in bind_connector_metadata
         self._pending_load_event_indices: set[int] = set()
@@ -221,9 +223,11 @@ class SimpleCPUOffloadWorker:
         if self._is_initialized:
             # Flush the store deferred from the *previous* step.  By now the
             # model forward pass that produced those KV values has completed.
-            if self._deferred_store is not None:
-                src, dst, eidx = self._deferred_store
-                self._deferred_store = None
+
+            # Flush the store from 2 steps ago — no event sync needed.
+            if self._deferred_store_prev is not None:
+                src, dst, eidx = self._deferred_store_prev
+                self._deferred_store_prev = None
                 self._launch_copy_kernel(src, dst, eidx, is_store=True)
 
             if metadata is not None:
@@ -234,10 +238,12 @@ class SimpleCPUOffloadWorker:
                     metadata.load_event,
                     is_store=False,
                 )
-                # Stash the store for next step: the scheduler may include
-                # blocks whose block_hash was set at scheduling time but
-                # whose KV cache is being written by this step's forward pass.
+                # Rotate: move current deferred → prev, stash new store.
+                # The prev slot gets flushed in the NEXT step's
+                # bind_connector_metadata (2 steps after the forward
+                # that wrote these blocks).
                 if metadata.store_gpu_blocks:
+                    self._deferred_store_prev = self._deferred_store
                     self._deferred_store = (
                         metadata.store_gpu_blocks,
                         metadata.store_cpu_blocks,
@@ -266,8 +272,12 @@ class SimpleCPUOffloadWorker:
 
         return finished_sending, finished_recving
 
-    def handle_preemptions(self, kv_connector_metadata: "KVConnectorMetadata") -> None:
+    def handle_preemptions(
+        self, kv_connector_metadata: SimpleCPUOffloadMetadata
+    ) -> None:
         """Sync all in-flight transfers before preempted blocks are reused."""
+        if not kv_connector_metadata.need_flush:
+            return
         self._flush_and_sync_all()
 
     def drain_pending_transfers(self) -> set[str]:
@@ -283,12 +293,14 @@ class SimpleCPUOffloadWorker:
 
     def _flush_and_sync_all(self) -> None:
         """Flush deferred stores and synchronize all in-flight events."""
-        if self._deferred_store is not None:
-            src, dst, event_idx = self._deferred_store
-            self._deferred_store = None
-            if self.store_stream is not None:
-                self.store_stream.wait_stream(torch.cuda.current_stream())
-            self._launch_copy_kernel(src, dst, event_idx, is_store=True)
+        for slot in (self._deferred_store_prev, self._deferred_store):
+            if slot is not None:
+                src, dst, event_idx = slot
+                # if self.store_stream is not None:
+                #     self.store_stream.wait_stream(torch.cuda.current_stream())
+                self._launch_copy_kernel(src, dst, event_idx, is_store=True)
+        self._deferred_store_prev = None
+        self._deferred_store = None
 
         for event_idx, event in self._load_events:
             event.synchronize()
