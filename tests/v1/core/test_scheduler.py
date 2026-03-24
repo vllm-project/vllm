@@ -3664,9 +3664,9 @@ def test_remote_kv_promotion_keeps_fcfs_with_fsm_prefix():
     req_fsm_1, req_fsm_2, req_remote, req_tail = list(scheduler.waiting)
 
     # simulate two FSM requests at the waiting head that become ready now.
-    req_fsm_1.status = RequestStatus.WAITING_FOR_FSM
+    req_fsm_1.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
     req_fsm_1.structured_output_request = Mock(grammar=object())
-    req_fsm_2.status = RequestStatus.WAITING_FOR_FSM
+    req_fsm_2.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
     req_fsm_2.structured_output_request = Mock(grammar=object())
 
     # simulate a remote-KV request that is ready to be promoted now.
@@ -3702,7 +3702,7 @@ def test_fcfs_mixed_skipped_waiting_types_keep_order():
     )[0]
     req_fsm, req_remote, req_stream = mk_req("fsm"), mk_req("remote"), mk_req("stream")
     req_regular, req_tail = mk_req("regular", 20), mk_req("tail")
-    req_fsm.status = RequestStatus.WAITING_FOR_FSM
+    req_fsm.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
     req_fsm.structured_output_request = Mock(grammar=None)
     req_remote.status = RequestStatus.WAITING_FOR_REMOTE_KVS
     req_stream.status = RequestStatus.WAITING_FOR_STREAMING_REQ
