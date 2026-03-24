@@ -555,6 +555,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     "Tool use is not supported with batched messages.",
                     parameter="messages",
                 )
+            if (data.get("n") or 1) != 1:
+                raise VLLMValidationError(
+                    "The 'n' parameter must be 1 for batched requests.",
+                    parameter="n",
+                )
         return data
 
     @model_validator(mode="before")

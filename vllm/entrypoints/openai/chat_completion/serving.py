@@ -1372,7 +1372,6 @@ class OpenAIServingChat(OpenAIServing):
                     if (
                         conversation
                         and "content" in conversation[-1]
-                        and conversation[-1].get("role") == role
                     ):
                         last_msg_content = conversation[-1]["content"] or ""
                     if isinstance(last_msg_content, list):
