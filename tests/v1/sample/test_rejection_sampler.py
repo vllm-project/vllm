@@ -68,6 +68,30 @@ def create_logits_tensor(
     return logits
 
 
+def create_logits_and_metadata_with_bonus(
+    spec_tokens: list[list[int]],
+    output_tokens: list[list[int]],
+    vocab_size: int = 100,
+) -> tuple[torch.Tensor, SpecDecodeMetadata]:
+    """Wrapper around create_logits_tensor and create_spec_decode_metadata
+    that appends bonus logit positions."""
+    logits = create_logits_tensor(output_tokens, vocab_size)
+    metadata = create_spec_decode_metadata(spec_tokens, logits)
+
+    # Append bonus rows to logits.
+    batch_size = len(output_tokens)
+    bonus_logits = torch.full((batch_size, vocab_size), -100.0, device=DEVICE)
+    for i, tokens in enumerate(output_tokens):
+        bonus_logits[i, tokens[-1]] = 100.0
+
+    num_target = logits.shape[0]
+    logits = torch.cat([logits, bonus_logits], dim=0)
+    metadata.bonus_logits_indices = torch.arange(
+        num_target, num_target + batch_size, dtype=torch.int32, device=DEVICE
+    )
+    return logits, metadata
+
+
 def create_sampling_metadata(
     all_greedy: bool,
     output_token_ids: list[list[int]] | None = None,
@@ -903,3 +927,93 @@ def test_sample_recovered_tokens(
         device=DEVICE,
     )
     assert torch.equal(recovered_token_ids, ref_recovered_token_ids)
+
+
+################### Tests for Fast Greedy Path ###################
+
+
+def test_fast_greedy_perfect_match(rejection_sampler):
+    """All draft tokens match target argmax -> all accepted + bonus."""
+    spec_tokens = [[1, 2, 3]]
+    output_tokens = [[1, 2, 3, 4]]
+
+    logits, metadata = create_logits_and_metadata_with_bonus(spec_tokens, output_tokens)
+    sampling_metadata = create_sampling_metadata(all_greedy=True)
+    output = rejection_sampler(
+        metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=sampling_metadata,
+    )
+
+    expected = torch.tensor([[1, 2, 3, 4]], dtype=torch.int, device=DEVICE)
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+def test_fast_greedy_early_mismatch(rejection_sampler):
+    """Mismatch at position 1 -> accept corrected token, rest placeholder."""
+    spec_tokens = [[1, 2, 3]]
+    output_tokens = [[1, 5, 3, 4]]
+
+    logits, metadata = create_logits_and_metadata_with_bonus(spec_tokens, output_tokens)
+    sampling_metadata = create_sampling_metadata(all_greedy=True)
+    output = rejection_sampler(
+        metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=sampling_metadata,
+    )
+
+    expected = torch.tensor(
+        [[1, 5, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]],
+        dtype=torch.int,
+        device=DEVICE,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+def test_fast_greedy_multiple_sequences(rejection_sampler):
+    """Multiple requests with different spec lengths."""
+    spec_tokens = [[1, 2], [3]]
+    output_tokens = [[1, 2, 5], [3, 4]]
+
+    logits, metadata = create_logits_and_metadata_with_bonus(spec_tokens, output_tokens)
+    sampling_metadata = create_sampling_metadata(all_greedy=True)
+    output = rejection_sampler(
+        metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=sampling_metadata,
+    )
+
+    expected = torch.tensor(
+        [[1, 2, 5], [3, 4, PLACEHOLDER_TOKEN_ID]],
+        dtype=torch.int,
+        device=DEVICE,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+def test_fast_greedy_multiple_sequences_with_mismatches(rejection_sampler):
+    """Multiple requests, each with mismatches at different positions."""
+    spec_tokens = [[1, 2, 3], [4, 5, 6]]
+    output_tokens = [[1, 2, 7, 8], [4, 9, 6, 10]]
+
+    logits, metadata = create_logits_and_metadata_with_bonus(spec_tokens, output_tokens)
+    sampling_metadata = create_sampling_metadata(all_greedy=True)
+    output = rejection_sampler(
+        metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=sampling_metadata,
+    )
+
+    expected = torch.tensor(
+        [
+            [1, 2, 7, PLACEHOLDER_TOKEN_ID],
+            [4, 9, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID],
+        ],
+        dtype=torch.int,
+        device=DEVICE,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)

@@ -90,6 +90,9 @@ class RejectionSampler(nn.Module):
         """
         assert metadata.max_spec_len <= MAX_SPEC_LEN
 
+        if self._can_use_fast_greedy_path(sampling_metadata, metadata):
+            return self._fast_greedy_path(metadata, logits)
+
         bonus_logits_indices = metadata.bonus_logits_indices
         target_logits_indices = metadata.target_logits_indices
 
@@ -163,6 +166,80 @@ class RejectionSampler(nn.Module):
         return SamplerOutput(
             sampled_token_ids=output_token_ids,
             logprobs_tensors=logprobs_tensors,
+        )
+
+    @staticmethod
+    def _can_use_fast_greedy_path(
+        sampling_metadata: SamplingMetadata,
+        metadata: SpecDecodeMetadata,
+    ) -> bool:
+        """Check if we can skip the full rejection sampling pipeline.
+
+        The fast path computes a single argmax over all logit positions
+        and runs the greedy rejection kernel directly. This is valid when:
+        - All requests use greedy decoding (argmax is the correct sampler)
+        - No logprobs requested (fast path doesn't compute them)
+        - No penalties/bad_words/allowed_token_ids
+        - Only argmax-invariant logits processors
+        """
+        return (
+            sampling_metadata.all_greedy
+            and sampling_metadata.max_num_logprobs is None
+            and sampling_metadata.no_penalties
+            and not sampling_metadata.bad_words_token_ids
+            and sampling_metadata.allowed_token_ids_mask is None
+            and not sampling_metadata.logitsprocs.non_argmax_invariant
+            and metadata.bonus_logits_indices.numel() > 0
+        )
+
+    def _fast_greedy_path(
+        self,
+        metadata: SpecDecodeMetadata,
+        logits: torch.Tensor,
+    ) -> SamplerOutput:
+        """Fast path for greedy sampling.
+
+        Computes argmax over ALL logit positions (target + bonus) in one
+        shot, avoiding:
+        - The separate bonus Sampler.forward() call
+        - Non-argmax-invariant logits processors
+        - Sampling constraints (temperature/top-k/top-p are no-ops
+          for greedy)
+        """
+        num_requests = len(metadata.num_draft_tokens)
+        device = logits.device
+
+        # Compute argmax for all positions (target + bonus) in one shot.
+        all_argmax = logits.argmax(dim=-1)
+
+        # Extract target and bonus argmax using their respective indices.
+        target_argmax = all_argmax[metadata.target_logits_indices]
+        bonus_token_ids = (
+            all_argmax[metadata.bonus_logits_indices].unsqueeze(1).to(torch.int32)
+        )
+
+        # Create output buffer.
+        output_token_ids = torch.full(
+            (num_requests, metadata.max_spec_len + 1),
+            PLACEHOLDER_TOKEN_ID,
+            dtype=torch.int32,
+            device=device,
+        )
+
+        # Run greedy rejection kernel.
+        rejection_greedy_sample_kernel[(num_requests,)](
+            output_token_ids,
+            metadata.cu_num_draft_tokens,
+            metadata.draft_token_ids,
+            target_argmax,
+            bonus_token_ids,
+            None,  # is_greedy=None since all are greedy
+            metadata.max_spec_len,
+        )
+
+        return SamplerOutput(
+            sampled_token_ids=output_token_ids,
+            logprobs_tensors=None,
         )
 
     def _get_logprobs_tensors(
