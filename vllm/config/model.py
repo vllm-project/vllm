@@ -309,6 +309,7 @@ class ModelConfig:
     mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
+    enable_client_mm_cache_keys: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
 
     def compute_hash(self) -> str:
@@ -355,6 +356,7 @@ class ModelConfig:
             "mm_encoder_tp_mode",
             "interleave_mm_strings",
             "skip_mm_profiling",
+            "enable_client_mm_cache_keys",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -429,6 +431,7 @@ class ModelConfig:
         mm_encoder_attn_backend: AttentionBackendEnum | str | None,
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
+        enable_client_mm_cache_keys: bool | None,
         video_pruning_rate: float | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
@@ -611,6 +614,7 @@ class ModelConfig:
                 mm_encoder_attn_backend=mm_encoder_attn_backend,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
+                enable_client_mm_cache_keys=enable_client_mm_cache_keys,
                 video_pruning_rate=video_pruning_rate,
             )
 

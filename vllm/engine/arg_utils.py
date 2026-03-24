@@ -1093,6 +1093,10 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--skip-mm-profiling", **multimodal_kwargs["skip_mm_profiling"]
         )
+        multimodal_group.add_argument(
+            "--enable-client-mm-cache-keys",
+            **multimodal_kwargs["enable_client_mm_cache_keys"],
+        )
 
         multimodal_group.add_argument(
             "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"]

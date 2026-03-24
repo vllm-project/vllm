@@ -572,17 +572,30 @@ class BaseRenderer(ABC, Generic[_T]):
         # reused across requests, therefore identifying multimodal data items
         # by their content is no longer necessary, and we create uuids with
         # `<mm_req_id>-<modality>-<index>`, overriding even user-provided ones.
-        if (
+        both_caches_disabled = (
             model_config.multimodal_config
             and model_config.multimodal_config.mm_processor_cache_gb == 0
             and not self.config.cache_config.enable_prefix_caching
-        ):
+        )
+        if both_caches_disabled:
             mm_uuid_items = {
                 modality: [f"{mm_req_id}-{modality}-{i}" for i in range(data_count)]
                 for modality, data_count in mm_data_items.get_all_counts().items()
             }
 
         self._validate_mm_uuids(mm_data, mm_data_items, mm_uuid_items)
+
+        # Strip client-provided UUIDs when the flag is off to prevent
+        # cache poisoning in multi-tenant environments. Downstream
+        # processors will fall back to content-based (BLAKE3) hashing.
+        # Synthetic UUIDs (generated above when both caches are disabled)
+        # are preserved since they serve request-level uniqueness.
+        if (
+            not both_caches_disabled
+            and model_config.multimodal_config
+            and not model_config.multimodal_config.enable_client_mm_cache_keys
+        ):
+            mm_uuid_items = {}
 
         return mm_uuid_items
 
