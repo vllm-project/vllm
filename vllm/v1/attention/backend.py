@@ -311,6 +311,10 @@ class AttentionBackend(ABC):
     def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
         return None
 
+    @classmethod
+    def is_ssm(cls) -> bool:
+        return False
+
 
 class AttentionMetadata:
     pass

@@ -465,25 +465,15 @@ class Platform:
                 layer.get_attn_backend() for layer in attn_layers.values()
             ]
             backend_cls_dict = {
-                backend_cls.get_name(): backend_cls for backend_cls in backend_cls_list
+                backend_cls.get_name(): backend_cls
+                for backend_cls in backend_cls_list
+                if not backend_cls.is_ssm()
             }
-            SSM_ATTN_BACKEND_NAMES = [
-                "MAMBA2_ATTN",
-                "MAMBA1_ATTN",
-                "GDN_ATTN",
-                "LINEAR_ATTN",
-                "SHORT_CONV_ATTN",
-            ]
-            backend_cls_list = [
-                backend_cls
-                for name, backend_cls in backend_cls_dict.items()
-                if name not in SSM_ATTN_BACKEND_NAMES
-            ]
-            if len(backend_cls_list) == 1:
-                return backend_cls_list[0]
+            if len(backend_cls_dict) == 1:
+                return list(backend_cls_dict.values())[0]
             else:
                 raise ValueError(
-                    f"Multiple attention backends are not supported: {backend_cls_list}"
+                    f"Multiple attention backends are not supported: {backend_cls_dict}"
                 )
 
         backend_cls = get_full_attn_backend_cls()
