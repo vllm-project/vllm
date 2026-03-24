@@ -196,7 +196,6 @@ void compute_slot_mapping_kernel_impl(const torch::Tensor query_start_loc,
                                       torch::Tensor slot_mapping,
                                       const int64_t block_size) {
   const int32_t req_num = query_start_loc.size(0) - 1;
-  const int32_t token_num = positions.size(0);
   const int64_t block_table_stride = block_table.stride(0);
 
   const int32_t* __restrict__ query_start_loc_ptr =
