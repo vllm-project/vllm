@@ -1346,7 +1346,7 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
 
     timeout = 6
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    monkeypatch.setenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", str(timeout))
+    monkeypatch.setenv("VLLM_NIXL_KV_LEASE_DURATION", str(timeout))
 
     def run_test_and_cleanup():
         llm = LLM(**llm_kwargs)
@@ -1361,7 +1361,7 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
             runtime_env = {
                 "working_dir": working_dir,  # ship fake nixl package
                 "env_vars": {
-                    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": str(timeout),
+                    "VLLM_NIXL_KV_LEASE_DURATION": str(timeout),
                     # TODO: for ray to carry over, remove once we set
                     "NIXL_TELEMETRY_ENABLE": "1",
                 },
@@ -1810,6 +1810,7 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         patch.object(nixl_wrapper, "deregister_memory") as mock_dereg,
     ):
         worker._recving_transfers = {"req1": [123]}
+        worker._pending_transfers_by_engine = {"engine1": {"req1"}}
         # Mock register_kv_cache which registers local handle
         worker.src_xfer_handles_by_block_size = {worker.block_size: 455}
         # P TP = 2 * D TP case, we should register 2 local handles
@@ -2387,10 +2388,12 @@ class TestHeartbeatLeaseManagement:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
         FakeNixlWrapper,
     )
-    def test_d_side_heartbeat_sending(self, default_vllm_config, dist_init, monkeypatch):
+    def test_d_side_heartbeat_sending(
+        self, default_vllm_config, dist_init, monkeypatch
+    ):
         """Test that D-side sends heartbeats to P engines with pending transfers."""
         # Set a short renewal interval for testing
-        monkeypatch.setenv("VLLM_NIXL_LEASE_RENEWAL_INTERVAL", "0.1")
+        monkeypatch.setenv("VLLM_NIXL_KV_HEARTBEAT_INTERVAL", "0.1")
 
         vllm_config = create_vllm_config()
         connector = NixlConnector(
@@ -2401,14 +2404,21 @@ class TestHeartbeatLeaseManagement:
         )
         worker = connector.connector_worker
         # Override the renewal interval since env var is read at init
-        worker._lease_renewal_interval = 0.1
+        worker._heartbeat_interval = 0.1
 
         # Simulate remote agent registration (handshake complete)
         remote_engine_id = FakeNixlConnectorWorker.REMOTE_ENGINE_ID
         worker._remote_agents[remote_engine_id] = {0: "fake_agent"}
 
-        # Track pending transfers for this engine
-        worker._pending_transfers_by_engine[remote_engine_id] = {"req1", "req2", "req3"}
+        # Track pending transfers for this engine.
+        # _recving_transfers keyed by req_id for completion tracking.
+        worker._recving_transfers = {"req1": [1], "req2": [2], "req3": [3]}
+        # _pending_transfers_by_engine keyed by engine_id for heartbeat batching.
+        worker._pending_transfers_by_engine[remote_engine_id] = {
+            "req1",
+            "req2",
+            "req3",
+        }
 
         # Track sent notifications
         sent_notifs: list[tuple[str, bytes]] = []
@@ -2442,11 +2452,62 @@ class TestHeartbeatLeaseManagement:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
         FakeNixlWrapper,
     )
+    def test_d_side_heartbeat_sends_to_all_p_workers(
+        self, default_vllm_config, dist_init, monkeypatch
+    ):
+        """Test that D-side sends heartbeats to ALL P workers (P TP > D TP case)."""
+        monkeypatch.setenv("VLLM_NIXL_KV_HEARTBEAT_INTERVAL", "0.1")
+
+        vllm_config = create_vllm_config()
+        connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
+        connector.connector_worker = FakeNixlConnectorWorker(
+            vllm_config, connector.engine_id, hand_shake_latency=0
+        )
+        worker = connector.connector_worker
+        worker._heartbeat_interval = 0.1
+
+        # Simulate P TP=2 case: two remote agents for same engine
+        remote_engine_id = FakeNixlConnectorWorker.REMOTE_ENGINE_ID
+        worker._remote_agents[remote_engine_id] = {
+            0: "p_worker_0",
+            1: "p_worker_1",
+        }
+
+        # Track pending transfers
+        worker._recving_transfers = {"req1": [1]}
+        worker._pending_transfers_by_engine[remote_engine_id] = {"req1"}
+
+        # Track sent notifications
+        sent_notifs: list[tuple[str, bytes]] = []
+
+        def mock_send_notif(agent_name: str, notif_msg: bytes):
+            sent_notifs.append((agent_name, notif_msg))
+
+        worker.nixl_wrapper.send_notif = mock_send_notif
+
+        # Send heartbeats
+        worker._send_lease_heartbeats()
+
+        # Should send to BOTH P workers
+        assert len(sent_notifs) == 2
+        agent_names = {notif[0] for notif in sent_notifs}
+        assert agent_names == {"p_worker_0", "p_worker_1"}
+
+        # Both should have the same message
+        for _, msg in sent_notifs:
+            assert msg == b"HB:req1"
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        FakeNixlWrapper,
+    )
     def test_p_side_heartbeat_extends_lease(
         self, default_vllm_config, dist_init, monkeypatch
     ):
         """Test that P-side extends lease when receiving heartbeat."""
-        monkeypatch.setenv("VLLM_NIXL_LEASE_EXTENSION", "30")
+        monkeypatch.setenv("VLLM_NIXL_KV_LEASE_EXTENSION", "30")
 
         vllm_config = create_vllm_config()
         connector = NixlConnector(
@@ -2591,9 +2652,7 @@ class TestHeartbeatLeaseManagement:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
         FakeNixlWrapper,
     )
-    def test_d_side_cleanup_on_transfer_complete(
-        self, default_vllm_config, dist_init
-    ):
+    def test_d_side_cleanup_on_transfer_complete(self, default_vllm_config, dist_init):
         """Test that D-side removes completed transfers from heartbeat tracking."""
         vllm_config = create_vllm_config()
         connector = NixlConnector(
@@ -2642,12 +2701,12 @@ class TestHeartbeatLeaseManagement:
             ),
         )
 
-        # Add to pending transfers (D-side heartbeat tracking)
-        worker._pending_transfers_by_engine[remote_engine_id].add(req_id)
-
-        # Simulate transfer handle completion
+        # Simulate transfer handle completion.
+        # _recving_transfers keyed by req_id for completion tracking.
         handle = 12345
         worker._recving_transfers[req_id] = [handle]
+        # _pending_transfers_by_engine keyed by engine_id for heartbeat batching.
+        worker._pending_transfers_by_engine[remote_engine_id] = {req_id}
 
         # Mock check_xfer_state to return DONE
         worker.nixl_wrapper._cycles_before_xfer_done = 0
@@ -2656,8 +2715,12 @@ class TestHeartbeatLeaseManagement:
         _, done_recving = connector.get_finished(finished_req_ids=set())
 
         assert req_id in done_recving
-        # Should be removed from pending transfers
-        assert req_id not in worker._pending_transfers_by_engine[remote_engine_id]
+        # Should be removed from _recving_transfers
+        assert req_id not in worker._recving_transfers
+        # Should be removed from _pending_transfers_by_engine
+        assert req_id not in worker._pending_transfers_by_engine.get(
+            remote_engine_id, set()
+        )
 
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
@@ -2677,10 +2740,11 @@ class TestHeartbeatLeaseManagement:
             vllm_config, connector.engine_id, hand_shake_latency=0
         )
         worker = connector.connector_worker
-        worker._lease_renewal_interval = 0  # Send immediately
+        worker._heartbeat_interval = 0  # Send immediately
 
         remote_engine_id = FakeNixlConnectorWorker.REMOTE_ENGINE_ID
         worker._remote_agents[remote_engine_id] = {0: "fake_agent"}
+        worker._recving_transfers = {"req1": [1]}
         worker._pending_transfers_by_engine[remote_engine_id] = {"req1"}
 
         # Make send_notif raise an exception
@@ -2712,9 +2776,7 @@ class TestHeartbeatLeaseManagement:
         # Verify warning was logged
         warning_logs = [r for r in captured_logs if r.levelno == logging.WARNING]
         assert len(warning_logs) >= 1
-        assert any(
-            "Failed to send heartbeat" in r.message for r in warning_logs
-        )
+        assert any("Failed to send heartbeat" in r.message for r in warning_logs)
 
 
 @pytest.mark.parametrize(
