@@ -46,9 +46,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         super().__init__()
         self.base_layer = base_layer
 
-        assert not self.base_layer.use_ep, (
-            "EP support for Fused MoE LoRA is not implemented yet."
-        )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = _get_lora_device(base_layer)
@@ -526,6 +523,42 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
     #
 
+    def _filter_experts_for_ep(
+        self, w: torch.Tensor
+    ) -> torch.Tensor:
+        """When EP is active, filter global-expert LoRA weights down to the
+        local experts owned by this rank, reordering them to local indices.
+
+        Args:
+            w: Tensor with shape (global_num_experts, ...).
+
+        Returns:
+            Tensor with shape (local_num_experts, ...) containing only the
+            rows that belong to this EP rank, in local-index order.
+        """
+        expert_map = self.base_layer._expert_map
+        if expert_map is None:
+            # No EP (ep_size == 1) — nothing to filter.
+            return w
+
+        # expert_map may be extended with shared-expert entries (ROCm AITER).
+        # Only the first global_num_experts entries correspond to LoRA weights.
+        global_num_experts = w.shape[0]
+        expert_map = expert_map[:global_num_experts]
+
+        # expert_map values: local index (>=0) for local experts, -1 otherwise.
+        local_num_experts = self.base_layer.local_num_experts
+        out_shape = (local_num_experts,) + w.shape[1:]
+        out = torch.zeros(out_shape, dtype=w.dtype, device=w.device)
+
+        # Vectorised scatter: find which global experts belong to this rank.
+        local_mask = expert_map >= 0  # (global_num_experts,)
+        global_indices = torch.where(local_mask)[0]  # global expert indices
+        local_indices = expert_map[global_indices]    # corresponding local indices
+        out[local_indices] = w[global_indices]
+
+        return out
+
     def set_lora(
         self,
         index: int,
@@ -540,12 +573,21 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.reset_lora(index)
         self.adapter_enabled[index] = 1
 
-        num_experts = self.w13_lora_a_stacked[0].shape[1]
-
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+
+        # When EP is active the incoming tensors have global_num_experts rows.
+        # Filter them down to the local experts owned by this rank.
+        w1_lora_a = self._filter_experts_for_ep(w1_lora_a)
+        w1_lora_b = self._filter_experts_for_ep(w1_lora_b)
+        w2_lora_a = self._filter_experts_for_ep(w2_lora_a)
+        w2_lora_b = self._filter_experts_for_ep(w2_lora_b)
+        w3_lora_a = self._filter_experts_for_ep(w3_lora_a)
+        w3_lora_b = self._filter_experts_for_ep(w3_lora_b)
+
+        num_local_experts = self.w13_lora_a_stacked[0].shape[1]
         assert (
-            num_experts
+            num_local_experts
             == w1_lora_a.shape[0]
             == w2_lora_a.shape[0]
             == w3_lora_a.shape[0]
