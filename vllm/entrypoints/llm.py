@@ -1237,9 +1237,10 @@ class LLM:
                 )
             else:
                 logger.warning_once(
-                    "Pooling multitask support is deprecated and will be removed in v0.20. "
-                    "When the default pooling task is not what you want, you need to manually "
-                    'specify it via PoolerConfig(pooling_task="%s"). ',
+                    "Pooling multitask support is deprecated and will "
+                    "be removed in v0.20. When the default pooling task is "
+                    "not what you want, you need to manually specify it "
+                    'via PoolerConfig(task="%s"). ',
                     pooling_task,
                 )
 

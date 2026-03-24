@@ -40,8 +40,8 @@ produces a single result for an entire input sequence, whereas token-wise task y
 within the sequence.
 
 Many Pooling models support both (sequence) task and token task. When the default pooling task (e.g. a sequence-wise task)
-is not what you want, you need to manually specify (e.g. a token-wise task) via `PoolerConfig(task=<task>)` offline
-or `--pooler-config.task <task>` online.
+is not what you want, you need to manually specify (e.g. a token-wise task) via `PoolerConfig(task=<task>)` offline or 
+`--pooler-config.task <task>` online.
 
 Of course, we also have "plugin" tasks that allow users to customize input and output processors. For more information,
 please refer to [IO Processor Plugins](../../design/io_processor_plugins.md).
@@ -282,4 +282,4 @@ classification model outputs num_labels equal to 1 can it be used as a scoring m
 ### Pooling multitask support
 
 Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task is not what you want,
-you need to manually specify it via `PoolerConfig(task="...")` offline or `--pooler-config.task="..."` online.
+you need to manually specify it via `PoolerConfig(task=<task>)` offline or `--pooler-config.task <task>` online.

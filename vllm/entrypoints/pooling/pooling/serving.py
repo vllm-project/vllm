@@ -104,9 +104,9 @@ class OpenAIServingPooling(OpenAIServing):
                 )
             else:
                 logger.warning_once(
-                    "Pooling multitask support is deprecated and will be removed in v0.20. "
-                    "When the default pooling task is not what you want, you need to manually "
-                    'specify it via --pooler-config {"pooling_task": "%s"})). ',
+                    "Pooling multitask support is deprecated and will be removed "
+                    "in v0.20. When the default pooling task is not what you want, you "
+                    'need to manually specify it via --pooler-config.task "%s". ',
                     request.task,
                 )
 
