@@ -315,6 +315,20 @@ class cmake_build_ext(build_ext):
                 dirs_exist_ok=True,
             )
 
+        if _is_cuda():
+            # copy vendored deep_gemm package from build_lib to source tree
+            # for editable installs
+            deep_gemm_build = os.path.join(
+                self.build_lib, "vllm", "third_party", "deep_gemm"
+            )
+            if os.path.exists(deep_gemm_build):
+                print(f"Copying {deep_gemm_build} to vllm/third_party/deep_gemm")
+                shutil.copytree(
+                    deep_gemm_build,
+                    "vllm/third_party/deep_gemm",
+                    dirs_exist_ok=True,
+                )
+
 
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
@@ -922,6 +936,17 @@ if _is_cuda():
         ext_modules.append(CMakeExtension(name="vllm._flashmla_C", optional=True))
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
+        )
+    if envs.VLLM_USE_PRECOMPILED or (
+        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
+    ):
+        # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
+        # Optional since it won't build on unsupported architectures
+        ext_modules.append(
+            CMakeExtension(
+                name="vllm.third_party.deep_gemm._deep_gemm_C",
+                optional=True,
+            )
         )
 
 if _is_cpu():

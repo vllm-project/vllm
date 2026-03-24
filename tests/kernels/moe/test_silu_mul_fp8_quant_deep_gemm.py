@@ -11,7 +11,11 @@ from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     persistent_masked_m_silu_mul_quant,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT, has_deep_gemm
+from vllm.utils.deep_gemm import (
+    DeepGemmQuantScaleFMT,
+    has_deep_gemm,
+    transform_sf_into_required_layout,
+)
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import set_random_seed
 
@@ -244,8 +248,6 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
             and current_platform.has_device_capability(100)
             and scale_fmt == DeepGemmQuantScaleFMT.UE8M0
         ):
-            from deep_gemm import transform_sf_into_required_layout
-
             _q, _s = ref_with_scale_fmt(
                 E,
                 T,
