@@ -4,8 +4,11 @@
 import pytest
 
 from vllm.entrypoints.openai.engine.protocol import StreamOptions
-from vllm.entrypoints.utils import get_max_tokens, sanitize_message
-from vllm.entrypoints.utils import should_include_usage
+from vllm.entrypoints.utils import (
+    get_max_tokens,
+    sanitize_message,
+    should_include_usage,
+)
 
 
 def test_sanitize_message():
