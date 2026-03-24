@@ -1,6 +1,7 @@
 use std::slice;
 use std::sync::Arc;
 
+use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
@@ -8,9 +9,7 @@ use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
 
-use crate::client::state::{
-    ClientClosedState, OutputReceiver, RequestRegistry, UtilityReceiver, UtilityRegistry,
-};
+use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, UtilityRegistry};
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::metrics::record_scheduler_stats;
 use crate::protocol::{
@@ -24,6 +23,7 @@ pub(crate) struct ClientInner {
     model_name: String,
     request_reg: Mutex<RequestRegistry>,
     utility_reg: Mutex<UtilityRegistry>,
+    health_error: ArcSwapOption<Error>,
 }
 
 impl ClientInner {
@@ -34,6 +34,7 @@ impl ClientInner {
             model_name,
             request_reg: Mutex::new(RequestRegistry::default()),
             utility_reg: Mutex::new(UtilityRegistry::default()),
+            health_error: ArcSwapOption::empty(),
         }
     }
 
@@ -45,12 +46,20 @@ impl ClientInner {
     /// Register a newly added request. Return the per-request output channel bound to its
     /// `request_id`.
     pub fn register_request(&self, request_id: String) -> Result<OutputReceiver> {
-        self.request_reg.lock().register(request_id)
+        let mut registry = self.request_reg.lock();
+        if registry.is_closed() {
+            return Err(self.closed_error());
+        }
+        registry.register(request_id)
     }
 
     /// Allocate the next utility `call_id` and register its waiting receiver.
     pub fn allocate_and_register_utility_call(&self) -> Result<(i64, UtilityReceiver)> {
-        self.utility_reg.lock().allocate_and_register()
+        let mut registry = self.utility_reg.lock();
+        if registry.is_closed() {
+            return Err(self.closed_error());
+        }
+        Ok(registry.allocate_and_register())
     }
 
     /// Undo a request registration when `add_request()` fails.
@@ -66,7 +75,11 @@ impl ClientInner {
     /// Filter the given request IDs to the subset that are still tracked as active and can be
     /// aborted.
     pub fn abortable_request_ids(&self, request_ids: &[String]) -> Result<Vec<String>> {
-        self.request_reg.lock().abortable_request_ids(request_ids)
+        let registry = self.request_reg.lock();
+        if registry.is_closed() {
+            return Err(self.closed_error());
+        }
+        Ok(registry.abortable_request_ids(request_ids))
     }
 
     /// Obtain the stream sender for one output. If it indicates the request is finished, it will be
@@ -86,20 +99,29 @@ impl ClientInner {
         self.request_reg.lock().finish_many(request_ids)
     }
 
-    /// Close all active request streams and utility calls with an error message based on the given
-    /// closed state.
-    pub fn close_registries(&self, closed_state: ClientClosedState) {
-        let error = Arc::new(closed_state.error());
-        let request_senders = self.request_reg.lock().close(closed_state.clone());
-        let utility_senders = self.utility_reg.lock().close(closed_state);
+    /// Close all active request streams and utility calls with the first persistent health error.
+    pub fn close_registries(&self, error: Arc<Error>) {
+        let persistent_error = self.record_health_error(error);
+        let request_senders = self.request_reg.lock().close();
+        let utility_senders = self.utility_reg.lock().close();
 
         // Notify all ongoing requests that the client is closed.
         for sender in request_senders {
-            let _ = sender.send(Err(Error::Shared(error.clone())));
+            let _ = sender.send(Err(Error::Shared(persistent_error.clone())));
         }
         for sender in utility_senders {
-            let _ = sender.send(Err(Error::Shared(error.clone())));
+            let _ = sender.send(Err(Error::Shared(persistent_error.clone())));
         }
+    }
+
+    /// Return the first persistent health error observed by the client, if any.
+    pub fn health_error(&self) -> Option<Arc<Error>> {
+        self.health_error.load_full()
+    }
+
+    /// Return whether the client still considers the engine healthy.
+    pub fn is_healthy(&self) -> bool {
+        self.health_error.load().is_none()
     }
 
     /// Resolve one utility output to the waiting caller. Returns `true` if a waiting caller
@@ -150,10 +172,31 @@ impl ClientInner {
     /// Shut down by closing all active request streams and then closing the input socket to signal
     /// the engine that no more messages will be sent.
     pub async fn shutdown(&self) {
-        self.close_registries(ClientClosedState::ClientShutdown {
-            reason: "engine-core client shut down".to_string(),
-        });
+        let reason = "engine-core client shut down".to_string();
+        self.close_registries(Arc::new(Error::ClientClosed { reason }));
         self.input_send.lock().await.take();
+    }
+
+    /// Publish the first persistent health error and return the sticky error recorded for this
+    /// client. Later failures do not overwrite the first one so `/health` and post-close callers
+    /// observe a stable cause.
+    fn record_health_error(&self, error: Arc<Error>) -> Arc<Error> {
+        if let Some(existing) = self.health_error.load_full() {
+            return existing;
+        }
+        self.health_error
+            .rcu(|current| current.clone().unwrap_or_else(|| error.clone()));
+        self.health_error
+            .load_full()
+            .expect("health error must be recorded before registries close")
+    }
+
+    /// Assert there is a recorded health error and return a `Shared` variant wrapping it for error
+    /// returns when the client is already closed.
+    fn closed_error(&self) -> Error {
+        Error::Shared(self.health_error.load_full().expect(
+            "closed registry must have a recorded health error before rejecting new operations",
+        ))
     }
 }
 
@@ -170,7 +213,7 @@ pub(crate) async fn run_abort_loop(
         let should_abort = {
             let mut registry = inner.request_reg.lock();
             let removed = registry.remove(&request_id).is_some();
-            removed && registry.is_running()
+            removed && !registry.is_closed()
         };
         if !should_abort {
             debug!(request_id, "skip auto-abort for inactive request");
@@ -203,7 +246,7 @@ pub(crate) async fn run_output_dispatcher_loop(
             Err(error) => {
                 let reason = error.to_report_string();
                 warn!(reason, "engine-core output loop failed");
-                inner.close_registries(ClientClosedState::DispatcherFailed { reason });
+                inner.close_registries(Arc::new(error));
                 return;
             }
         };
@@ -270,7 +313,40 @@ pub(crate) async fn run_output_dispatcher_loop(
         }
     }
 
-    inner.close_registries(ClientClosedState::DispatcherFailed {
-        reason: "engine-core output dispatcher channel closed".to_string(),
-    });
+    let reason = "engine-core output dispatcher channel closed".to_string();
+    inner.close_registries(Arc::new(Error::DispatcherClosed { reason }));
+}
+
+#[cfg(test)]
+mod tests {
+    use zeromq::{RouterSocket, Socket};
+
+    use super::*;
+
+    async fn test_inner() -> ClientInner {
+        let mut socket = RouterSocket::new();
+        socket.bind("tcp://127.0.0.1:0").await.unwrap();
+        let (send, _) = socket.split();
+        ClientInner::new(send, "test-model".to_string())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_registries_records_first_health_error_only() {
+        let inner = test_inner().await;
+
+        inner.close_registries(Arc::new(Error::EngineCoreDead));
+        assert!(!inner.is_healthy());
+        assert!(matches!(
+            inner.health_error().as_deref(),
+            Some(Error::EngineCoreDead)
+        ));
+
+        inner.close_registries(Arc::new(Error::ClientClosed {
+            reason: "shutdown".to_string(),
+        }));
+        assert!(matches!(
+            inner.health_error().as_deref(),
+            Some(Error::EngineCoreDead)
+        ));
+    }
 }

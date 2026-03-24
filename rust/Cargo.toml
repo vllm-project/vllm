@@ -16,6 +16,7 @@ edition = "2024"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
+arc-swap = "1.9.0"
 async-openai = "0.33.1"
 async-trait = "0.1.89"
 axum = "0.8.8"

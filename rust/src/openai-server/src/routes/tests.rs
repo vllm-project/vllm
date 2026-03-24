@@ -18,7 +18,9 @@ use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMe
 use vllm_engine_core_client::protocol::{
     EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason,
 };
-use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
+use vllm_engine_core_client::{
+    ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig,
+};
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::TextBackend;
@@ -326,6 +328,40 @@ async fn test_app() -> axum::Router {
     build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)))
 }
 
+async fn test_health_app_with_engine_script<F, Fut>(
+    script: F,
+) -> (axum::Router, Arc<AppState>, tokio::task::JoinHandle<()>)
+where
+    F: FnOnce(PushSocket) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-openai-health".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (_dealer, push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            script(push).await;
+        }
+    });
+
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
+        handshake_address,
+        model_name: "test-model".to_string(),
+        local_host: "127.0.0.1".to_string(),
+        ready_timeout: Duration::from_secs(2),
+        client_index: 0,
+    })
+    .await
+    .expect("connect client");
+
+    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let state = Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat));
+    (build_router(state.clone()), state, engine_task)
+}
+
 async fn test_app_with_engine_handle() -> (axum::Router, tokio::task::JoinHandle<()>) {
     test_app_with_stream_output_specs(default_stream_output_specs()).await
 }
@@ -380,6 +416,26 @@ async fn server_load(app: &axum::Router) -> u64 {
         .expect("read body");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
     value["server_load"].as_u64().expect("server_load")
+}
+
+async fn health_status(app: &axum::Router) -> (StatusCode, Bytes) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    (status, body)
 }
 
 fn metric_value(rendered: &str, metric: &str, labels: Option<&str>) -> Option<f64> {
@@ -745,6 +801,50 @@ async fn load_endpoint_tracks_chat_stream_lifecycle() {
     engine_task.await.expect("mock engine task");
 
     assert_eq!(server_load(&app).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn health_endpoint_returns_ok_with_empty_body_when_client_is_healthy() {
+    let (app, _state, engine_task) = test_health_app_with_engine_script(|_push| async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    })
+    .await;
+
+    let (status, body) = health_status(&app).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_empty(), "expected empty body, got {:?}", body);
+
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn health_endpoint_returns_503_after_engine_core_dead_sentinel() {
+    let (app, state, engine_task) = test_health_app_with_engine_script(|mut push| async move {
+        push.send(ZmqMessage::from(ENGINE_CORE_DEAD_SENTINEL.to_vec()))
+            .await
+            .expect("send sentinel");
+    })
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.chat.engine_core_client().is_healthy() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("wait for unhealthy client");
+
+    let (status, body) = health_status(&app).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body.is_empty(), "expected empty body, got {:?}", body);
+    assert!(matches!(
+        state.chat.engine_core_client().health_error().as_deref(),
+        Some(vllm_engine_core_client::Error::EngineCoreDead)
+    ));
+
+    engine_task.await.expect("mock engine task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

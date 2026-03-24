@@ -13,6 +13,9 @@ use crate::error::{Error, Result};
 use crate::protocol::handshake::{HandshakeAddresses, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::{EngineCoreOutputs, decode_msgpack, encode_msgpack};
 
+/// Dedicated single-frame sentinel emitted by Python `EngineCoreProc` when the engine dies.
+pub const ENGINE_CORE_DEAD_SENTINEL: &[u8] = b"ENGINE_CORE_DEAD";
+
 /// Represents the connected transport components after a successful startup handshake, which the
 /// client can use for subsequent communication with the engine.
 pub struct ConnectedTransport {
@@ -291,6 +294,11 @@ pub async fn run_output_loop(
 
         let frame = message.into_vec().into_iter().next().unwrap();
         let frame_len = frame.len();
+        if frame.as_ref() == ENGINE_CORE_DEAD_SENTINEL {
+            warn!("received ENGINE_CORE_DEAD sentinel from engine");
+            let _ = tx.send(Err(Error::EngineCoreDead)).await;
+            return;
+        }
         let decoded = match decode_msgpack(frame.as_ref()) {
             Ok(decoded) => {
                 trace!(frame_len, outputs = ?decoded, "decoded output message");

@@ -1,5 +1,6 @@
 mod chat_completions;
 mod completions;
+mod health;
 mod is_sleeping;
 mod load;
 mod metrics;
@@ -20,6 +21,7 @@ use crate::state::AppState;
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         // Health & monitoring
+        .route("/health", get(health::health))
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
         // OpenAI-compatible endpoints

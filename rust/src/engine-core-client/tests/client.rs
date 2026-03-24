@@ -17,7 +17,9 @@ use vllm_engine_core_client::protocol::{
     EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams, FinishReason,
     RequestOutputKind, UtilityOutput, UtilityResultEnvelope,
 };
-use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, Error};
+use vllm_engine_core_client::{
+    ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, Error,
+};
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
@@ -171,8 +173,28 @@ fn init_tracing() {
     });
 }
 
-fn is_shared_dispatcher_closed(error: &Error) -> bool {
-    matches!(error, Error::Shared(inner) if matches!(inner.as_ref(), Error::DispatcherClosed { .. }))
+fn is_dispatcher_closed(error: &Error) -> bool {
+    match error {
+        Error::DispatcherClosed { .. } => true,
+        Error::Shared(error) => is_dispatcher_closed(error),
+        _ => false,
+    }
+}
+
+fn is_engine_core_dead(error: &Error) -> bool {
+    match error {
+        Error::EngineCoreDead => true,
+        Error::Shared(error) => is_engine_core_dead(error),
+        _ => false,
+    }
+}
+
+fn is_decode_error(error: &Error) -> bool {
+    match error {
+        Error::Decode(_) => true,
+        Error::Shared(error) => is_decode_error(error),
+        _ => false,
+    }
 }
 
 fn decode_value(bytes: &[u8]) -> Value {
@@ -592,17 +614,21 @@ async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
         .unwrap()
         .unwrap()
         .unwrap_err();
-    assert!(is_shared_dispatcher_closed(&error_1));
-    assert!(is_shared_dispatcher_closed(&error_2));
+    assert!(is_decode_error(&error_1));
+    assert!(is_decode_error(&error_2));
+    assert!(matches!(
+        client.health_error().as_deref(),
+        Some(Error::Decode(_))
+    ));
 
     let abort_error = client.abort(&["req-1".to_string()]).await.unwrap_err();
-    assert!(matches!(abort_error, Error::DispatcherClosed { .. }));
+    assert!(is_decode_error(&abort_error));
 
     let add_error = match client.call(sample_request_with_id("req-3")).await {
         Ok(_) => panic!("expected dispatcher closed error"),
         Err(error) => error,
     };
-    assert!(matches!(add_error, Error::DispatcherClosed { .. }));
+    assert!(is_decode_error(&add_error));
 
     client.shutdown().await.unwrap();
     engine_task.await.unwrap();
@@ -761,7 +787,11 @@ async fn dispatcher_failure_propagates_to_waiting_utility_calls() {
         .call_utility::<bool, _>("is_sleeping", ())
         .await
         .unwrap_err();
-    assert!(is_shared_dispatcher_closed(&error));
+    assert!(is_decode_error(&error));
+    assert!(matches!(
+        client.health_error().as_deref(),
+        Some(Error::Decode(_))
+    ));
 
     client.shutdown().await.unwrap();
     engine_task.await.unwrap();
@@ -806,6 +836,116 @@ async fn connect_times_out_without_ready_message() {
     let message = error.to_report_string();
     assert!(message.contains("timed out"));
     assert!(message.contains("READY"));
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engine_core_dead_sentinel_marks_client_unhealthy_and_sticks() {
+    init_tracing();
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-dead".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (_dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            push.send(ZmqMessage::from(ENGINE_CORE_DEAD_SENTINEL.to_vec()))
+                .await
+                .unwrap();
+        }
+    });
+
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
+        handshake_address,
+        model_name: "test-model".to_string(),
+        local_host: "127.0.0.1".to_string(),
+        ready_timeout: Duration::from_secs(2),
+        client_index: 0,
+    })
+    .await
+    .unwrap();
+
+    timeout(Duration::from_secs(2), async {
+        while client.is_healthy() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("wait for unhealthy client");
+
+    assert!(!client.is_healthy());
+    assert!(matches!(
+        client.health_error().as_deref(),
+        Some(Error::EngineCoreDead)
+    ));
+
+    let error = client
+        .call_utility::<bool, _>("is_sleeping", ())
+        .await
+        .unwrap_err();
+    assert!(
+        is_dispatcher_closed(&error) || is_engine_core_dead(&error),
+        "unexpected error: {error:?}"
+    );
+    assert!(matches!(
+        client.health_error().as_deref(),
+        Some(Error::EngineCoreDead)
+    ));
+
+    client.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn output_loop_failure_marks_client_unhealthy_and_records_first_error() {
+    init_tracing();
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-output-failure".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (_dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            push.send(
+                ZmqMessage::try_from(vec![
+                    bytes::Bytes::from_static(b"frame-1"),
+                    bytes::Bytes::from_static(b"frame-2"),
+                ])
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+    });
+
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
+        handshake_address,
+        model_name: "test-model".to_string(),
+        local_host: "127.0.0.1".to_string(),
+        ready_timeout: Duration::from_secs(2),
+        client_index: 0,
+    })
+    .await
+    .unwrap();
+
+    timeout(Duration::from_secs(2), async {
+        while client.is_healthy() {
+            let _ = client.call_utility::<bool, _>("is_sleeping", ()).await;
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("wait for unhealthy client");
+
+    assert!(!client.is_healthy());
+    assert!(matches!(
+        client.health_error().as_deref(),
+        Some(Error::UnsupportedAuxFrames { frame_count: 2 })
+    ));
+
+    client.shutdown().await.unwrap();
     engine_task.await.unwrap();
 }
 

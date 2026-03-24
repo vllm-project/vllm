@@ -128,6 +128,16 @@ impl EngineCoreClient {
     pub fn model_name(&self) -> &str {
         self.inner.model_name()
     }
+
+    /// Return whether the client still considers the engine healthy.
+    pub fn is_healthy(&self) -> bool {
+        self.inner.is_healthy()
+    }
+
+    /// Return the first persistent health error observed by the client, if any.
+    pub fn health_error(&self) -> Option<Arc<Error>> {
+        self.inner.health_error()
+    }
 }
 
 // Client API implementation.
