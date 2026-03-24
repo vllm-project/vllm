@@ -160,6 +160,9 @@ async def test_watch_unknown_service(servicer, request_msg, context):
         results.append(response)
     assert len(results) == 1
     assert results[0].status == SERVICE_UNKNOWN
+    # Watch must NOT set gRPC status code (unlike Check), to avoid
+    # polluting the streaming response.
+    context.set_code.assert_not_called()
 
 
 # -- set_not_serving() test --
