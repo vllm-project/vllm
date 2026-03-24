@@ -37,7 +37,6 @@ from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 from openai.types.responses.tool import Mcp, Tool
-from openai_harmony import Author, Role, TextContent
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import TypeAdapter
 
@@ -101,7 +100,6 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
     _emit_channel_done_events,
     emit_content_delta_events,
-    emit_previous_item_done_events,
     emit_tool_action_events,
 )
 from vllm.entrypoints.openai.responses.utils import (
@@ -1917,12 +1915,6 @@ class OpenAIServingResponses(OpenAIServing):
             # finish_reason='error' indicates a retryable error
             self._raise_if_error(ctx.finish_reason, request.request_id)
 
-            if ctx.is_expecting_start():
-                if state.sent_output_item_added and state.last_channel is not None:
-                    for event in _emit_channel_done_events(state):
-                        yield _increment_sequence_number_and_return(event)
-                state.reset_for_new_item()
-
             # Stream the output of a harmony message.
             # emit_content_delta_events detects mid-message channel
             # transitions (e.g. analysis → final) and emits done events
@@ -1930,25 +1922,27 @@ class OpenAIServingResponses(OpenAIServing):
             for event in emit_content_delta_events(ctx, state):
                 yield _increment_sequence_number_and_return(event)
 
-            # Stream tool call outputs
+            # Stream synthetic browser/web-search events. Function-call,
+            # MCP, and code-interpreter items are finalized through the
+            # state-based channel flush below so they do not double-emit
+            # completion events.
             for event in emit_tool_action_events(ctx, state, self.tool_server):
                 yield _increment_sequence_number_and_return(event)
 
-        # Flush done events for the final item. During the loop, done
-        # events are emitted either at is_expecting_start() boundaries
-        # or at mid-message channel transitions — but the very last
-        # item never gets its done events because there is no
-        # subsequent boundary to trigger them.
+            # If this batch completed a Harmony message, flush done
+            # events only after the batch's deltas have been emitted.
+            # Otherwise the current batch's tail would be missing from
+            # the corresponding *.done payload.
+            if ctx.is_expecting_start():
+                if state.sent_output_item_added and state.last_channel is not None:
+                    for event in _emit_channel_done_events(state):
+                        yield _increment_sequence_number_and_return(event)
+                state.reset_for_new_item()
+
+        # Flush done events for the final item when the stream ends
+        # without a subsequent message boundary.
         if state.sent_output_item_added and state.last_channel is not None:
-            for event in emit_previous_item_done_events(
-                OpenAIHarmonyMessage(
-                    author=Author(role=Role.ASSISTANT),
-                    content=[TextContent(text=state.accumulated_text)],
-                    channel=state.last_channel,
-                    recipient=state.last_recipient,
-                ),
-                state,
-            ):
+            for event in _emit_channel_done_events(state):
                 yield _increment_sequence_number_and_return(event)
 
     async def responses_stream_generator(
