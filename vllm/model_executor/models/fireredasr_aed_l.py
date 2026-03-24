@@ -783,13 +783,6 @@ class FireRedAsrAedLForConditionalGeneration(
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        # inputs_embeds = self.model.decoder.embed_input_ids(input_ids)
-
-        # return _merge_multimodal_embeddings(
-        #     inputs_embeds=inputs_embeds,
-        #     multimodal_embeddings=multimodal_embeddings,
-        #     is_multimodal=_require_is_multimodal(is_multimodal),
-        # )
         return multimodal_embeddings
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
