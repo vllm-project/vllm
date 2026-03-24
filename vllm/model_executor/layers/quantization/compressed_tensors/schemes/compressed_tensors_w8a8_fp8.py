@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from typing import Any
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
@@ -69,8 +70,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.out_dtype = torch.get_default_dtype()
         self.is_static_input_scheme = is_static_input_scheme
         self.weight_block_size = self.weight_quant.block_structure
-        self.fp8_linear = None
-        self.w8a8_block_fp8_linear = None
+        self.fp8_linear: Any = None
+        self.w8a8_block_fp8_linear: Any = None
 
     @classmethod
     def get_min_capability(cls) -> int:
