@@ -45,6 +45,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import (
     is_quantized_kv_cache,
     is_strictly_contiguous,
+    nvfp4_kv_cache_full_dim,
     nvfp4_kv_cache_split_views,
 )
 from vllm.v1.attention.backend import (
@@ -359,7 +360,7 @@ class FlashInferBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if cache_dtype_str == "nvfp4":
             # Packed layout: fp4 data + fp8 block scales in last dim
-            last_dim = head_size // 2 + head_size // 16
+            last_dim = nvfp4_kv_cache_full_dim(head_size)
             return (num_blocks, 2, block_size, num_kv_heads, last_dim)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
@@ -611,8 +612,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.page_size = self.kv_cache_spec.block_size
 
         self.cache_dtype = self.cache_config.cache_dtype
-        self.is_nvfp4 = self.cache_dtype == "nvfp4"
-        if self.is_nvfp4:
+        self.is_kvcache_nvfp4 = self.cache_dtype == "nvfp4"
+        if self.is_kvcache_nvfp4:
             # For NVFP4, kv_cache_dtype stays as the string "nvfp4"
             # which is passed to FlashInferImpl
             self.kv_cache_dtype = self.cache_dtype
@@ -634,7 +635,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             can_use_trtllm
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
         ):
-            if self.is_nvfp4:
+            if self.is_kvcache_nvfp4:
                 # NVFP4 KV cache uses FP8 quantized queries
                 self.q_data_type = FlashInferBackend.get_fp8_dtype_for_flashinfer(
                     "fp8_e4m3"
@@ -1242,8 +1243,8 @@ class FlashInferImpl(AttentionImpl):
             self.sliding_window[0] if self.sliding_window is not None else -1
         )
         self.kv_cache_dtype = kv_cache_dtype
-        self.is_nvfp4 = kv_cache_dtype == "nvfp4"
-        self.fp4_data_dim = head_size // 2 if self.is_nvfp4 else 0
+        self.is_kvcache_nvfp4 = kv_cache_dtype == "nvfp4"
+        self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
@@ -1430,7 +1431,7 @@ class FlashInferImpl(AttentionImpl):
         # Split into correctly-strided data and scale views.
         nvfp4_kv_data = None
         nvfp4_kv_block_scales = None
-        if self.is_nvfp4:
+        if self.is_kvcache_nvfp4:
             nvfp4_kv_data, nvfp4_kv_block_scales = nvfp4_kv_cache_split_views(
                 kv_cache_permute
             )
@@ -1518,7 +1519,7 @@ class FlashInferImpl(AttentionImpl):
                     out = output[num_decode_tokens:]
 
                 prefill_kv_block_scales = None
-                if self.is_nvfp4:
+                if self.is_kvcache_nvfp4:
                     # NVFP4 trtllm-gen kernel requires FP8 query.
                     assert attn_metadata.q_data_type == FP8_DTYPE, (
                         "NVFP4 KV cache requires FP8 quantized queries for "
@@ -1675,7 +1676,9 @@ class FlashInferImpl(AttentionImpl):
 
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
-                    kv_cache=nvfp4_kv_data if self.is_nvfp4 else kv_cache_permute,
+                    kv_cache=nvfp4_kv_data
+                    if self.is_kvcache_nvfp4
+                    else kv_cache_permute,
                     workspace_buffer=workspace_buffer,
                     block_tables=block_tables_decode,
                     seq_lens=seq_lens_decode,

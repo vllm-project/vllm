@@ -374,6 +374,11 @@ def set_random_seed(seed: int | None) -> None:
             torch.cuda.manual_seed_all(seed)
 
 
+def nvfp4_kv_cache_full_dim(head_size: int) -> int:
+    """Packed last dim for NVFP4 KV cache: fp4 data + fp8 block scales."""
+    return head_size // 2 + head_size // 16
+
+
 def _nvfp4_split_data_scale(
     kv_side: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -390,11 +395,10 @@ def _nvfp4_split_data_scale(
 
     Returns:
         ``(data, scale)`` where
-
-        * ``data`` is a uint8 view with shape
-          ``(num_pages, dim_1, dim_2, data_dim)``.
-        * ``scale`` is a float8_e4m3fn view with shape
-          ``(num_pages, dim_1, dim_2, scale_dim)``.
+        ``data`` is a uint8 view with shape
+        ``(num_pages, dim_1, dim_2, data_dim)``.
+        ``scale`` is a float8_e4m3fn view with shape
+        ``(num_pages, dim_1, dim_2, scale_dim)``.
     """
     num_pages = kv_side.shape[0]
     dim_1, dim_2 = kv_side.shape[1], kv_side.shape[2]
@@ -489,7 +493,7 @@ def create_kv_caches_with_random_flash(
             # Full page dim: fp4 data + fp8 block scales per head.
             # Per page layout: [K_data | K_scale | V_data | V_scale]
             # Returns [:, 0] and [:, 1] like all other dtypes.
-            full_dim = head_size // 2 + head_size // 16
+            full_dim = nvfp4_kv_cache_full_dim(head_size)
             nvfp4_shape = (num_blocks, 2, block_size, num_heads, full_dim)
             nvfp4_phys = tuple(nvfp4_shape[i] for i in stride_order)
             inv = [stride_order.index(i) for i in range(len(stride_order))]
