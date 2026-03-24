@@ -37,6 +37,10 @@ async def set_steering(
     specified layer.  Only the listed layers are modified; other layers
     keep their current state.  Call ``POST /v1/steering/clear`` first
     to zero everything if a full replacement is intended.
+
+    When ``replace`` is ``True``, all existing vectors are cleared
+    atomically before the new ones are applied — no generation can
+    observe empty steering in between.
     """
     engine = engine_client(raw_request)
 
@@ -96,10 +100,13 @@ async def set_steering(
                     status_code=HTTPStatus.BAD_REQUEST.value,
                 )
 
+            # Atomic replacement: clear all vectors before applying
+            # new ones, within the same lock acquisition.
+            if request.replace:
+                await engine.collective_rpc("clear_steering_vectors")
+
             # Phase 2 — all workers validated; now apply.
-            await engine.collective_rpc(
-                "set_steering_vectors", args=(scaled, False)
-            )
+            await engine.collective_rpc("set_steering_vectors", args=(scaled, False))
 
         return JSONResponse(
             content={
@@ -107,28 +114,12 @@ async def set_steering(
                 "layers_updated": sorted(validated_layers),
             },
         )
-    except (ValueError, RuntimeError) as err:
-        # ValueError is raised directly in single-proc mode.
-        # MultiprocExecutor wraps worker exceptions as RuntimeError
-        # with the original message embedded in the string.
-        err_str = str(err)
-        if ("expected vector of size" in err_str
-                or "non-finite" in err_str):
-            return JSONResponse(
-                content={"error": err_str},
-                status_code=HTTPStatus.BAD_REQUEST.value,
-            )
-        logger.exception("Failed to set steering vectors")
-        return JSONResponse(
-            content={"error": f"Failed to set steering vectors: {err}"},
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-        )
     except Exception as err:
-        # AsyncMPClient wraps failures as plain Exception — check
-        # for validation messages so we return 400, not 500.
+        # ValueError from single-proc, RuntimeError from MultiprocExecutor,
+        # plain Exception from AsyncMPClient — all may carry validation
+        # messages that should map to 400.
         err_str = str(err)
-        if ("expected vector of size" in err_str
-                or "non-finite" in err_str):
+        if "expected vector of size" in err_str or "non-finite" in err_str:
             return JSONResponse(
                 content={"error": err_str},
                 status_code=HTTPStatus.BAD_REQUEST.value,
@@ -163,17 +154,16 @@ async def get_steering(raw_request: Request) -> JSONResponse:
     engine = engine_client(raw_request)
 
     try:
-        results = await engine.collective_rpc("get_steering_status")
-        # Union across all workers so pipeline-parallel ranks
-        # (which own disjoint layer ranges) are all represented.
-        active: dict = {}
-        for worker_result in results:
-            active.update(worker_result)
+        async with _steering_lock:
+            results = await engine.collective_rpc("get_steering_status")
+            # Union across all workers so pipeline-parallel ranks
+            # (which own disjoint layer ranges) are all represented.
+            active: dict = {}
+            for worker_result in results:
+                active.update(worker_result)
         return JSONResponse(
             content={
-                "active_layers": {
-                    str(k): v for k, v in sorted(active.items())
-                },
+                "active_layers": {str(k): v for k, v in sorted(active.items())},
             },
         )
     except Exception as err:

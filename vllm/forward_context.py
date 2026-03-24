@@ -260,6 +260,38 @@ def is_forward_context_available() -> bool:
     return _forward_context is not None
 
 
+def get_num_decode_tokens(default: int) -> int:
+    """Return the number of decode tokens in the current forward batch.
+
+    Extracts ``num_decode_tokens`` from the attention metadata stored in
+    the active :class:`ForwardContext`.  Falls back to *default* when
+    the forward context is unavailable, the metadata is ``None``, or the
+    backend metadata does not expose the attribute.
+
+    Handles both the standard layout (``dict[str, AttentionMetadata]``)
+    and the DBO / micro-batch layout
+    (``list[dict[str, AttentionMetadata]]``).
+    """
+    if not is_forward_context_available():
+        return default
+
+    attn_metadata = get_forward_context().attn_metadata
+    if attn_metadata is None:
+        return default
+
+    # DBO layout: list of dicts, one per micro-batch.  Use the first.
+    if isinstance(attn_metadata, list):
+        if not attn_metadata:
+            return default
+        attn_metadata = attn_metadata[0]
+
+    if not attn_metadata:
+        return default
+
+    layer_attn_metadata = next(iter(attn_metadata.values()))
+    return getattr(layer_attn_metadata, "num_decode_tokens", default)
+
+
 def create_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,

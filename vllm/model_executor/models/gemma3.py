@@ -25,7 +25,7 @@ from transformers import Gemma3TextConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.forward_context import get_num_decode_tokens
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.attention import (
@@ -284,26 +284,6 @@ class Gemma3DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
-    @staticmethod
-    def _get_num_decode_tokens(default_num_tokens):
-        if not is_forward_context_available():
-            return default_num_tokens
-
-        attn_metadata = get_forward_context().attn_metadata
-        if attn_metadata is None:
-            return default_num_tokens
-
-        if isinstance(attn_metadata, list):
-            if not attn_metadata:
-                return default_num_tokens
-            attn_metadata = attn_metadata[0]
-
-        if not attn_metadata:
-            return default_num_tokens
-
-        layer_attn_metadata = next(iter(attn_metadata.values()))
-        return getattr(layer_attn_metadata, "num_decode_tokens", default_num_tokens)
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -330,14 +310,16 @@ class Gemma3DecoderLayer(nn.Module):
         hidden_states = self.post_feedforward_layernorm(hidden_states)
         # Phase-1 steering is decode-only. Mask out prefill/extend tokens so
         # steered prefills never populate the prefix cache with incompatible KV.
-        num_decode_tokens = self._get_num_decode_tokens(hidden_states.shape[0])
+        num_decode_tokens = get_num_decode_tokens(hidden_states.shape[0])
+        # NOTE: torch.arange runs every forward pass even when steering is
+        # zero.  Branching on buffer contents would break CUDA graph capture;
+        # the zero-vector addition is a numerical no-op.
         decode_mask = (
             torch.arange(hidden_states.shape[0], device=hidden_states.device)
             < num_decode_tokens
         ).unsqueeze(1)
         hidden_states = (
-            hidden_states
-            + decode_mask.to(hidden_states.dtype) * self.steering_vector
+            hidden_states + decode_mask.to(hidden_states.dtype) * self.steering_vector
         )
         return hidden_states, residual
 

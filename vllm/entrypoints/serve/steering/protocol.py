@@ -14,3 +14,10 @@ class SetSteeringRequest(BaseModel):
         description="Optional mapping from layer index to scale factor. "
         "Defaults to 1.0 for any layer not specified.",
     )
+    replace: bool = Field(
+        default=False,
+        description="When True, clears all existing steering vectors "
+        "before applying the new ones, making the operation an atomic "
+        "replacement. When False (default), only the specified layers "
+        "are updated and other layers keep their current state.",
+    )
