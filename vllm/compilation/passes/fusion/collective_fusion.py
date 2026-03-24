@@ -692,7 +692,8 @@ class AsyncTPPass(VllmPatternMatcherPass):
         _register_inductor_lowering_for_flashinfer_collective_fp8_ops()
 
         # Enable symmetric memory for the TP process group
-        enable_symm_mem_for_group(get_tp_group().device_group.group_name)
+        self.tp_device_group_name = get_tp_group().device_group.group_name
+        enable_symm_mem_for_group(self.tp_device_group_name)
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="async_tp_pass"
         )
@@ -800,7 +801,7 @@ class AsyncTPPass(VllmPatternMatcherPass):
                         match.a_scale,
                         match.b_scale,
                         0,
-                        match.group_name,
+                        self.tp_device_group_name,
                         match.out_dtype,
                     ),
                 )
@@ -828,7 +829,7 @@ class AsyncTPPass(VllmPatternMatcherPass):
                     "sum",
                     0,
                     0,
-                    match.group_name,
+                    self.tp_device_group_name,
                     output_shape,
                     match.out_dtype,
                 ),
