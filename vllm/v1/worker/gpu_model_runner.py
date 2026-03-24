@@ -3000,42 +3000,6 @@ class GPUModelRunner(
             return self.model.unwrap()
         return self.model
 
-    def set_steering_vectors(
-        self,
-        steering_vectors: dict[int, torch.Tensor],
-    ) -> None:
-        """Set activation steering vectors on decoder layers.
-
-        Args:
-            steering_vectors: Dict mapping layer index to a steering
-                tensor of shape ``[hidden_size]`` or ``[1, hidden_size]``.
-                Layers not present in the dict are zeroed out.
-        """
-        model = self.get_model()
-        for module in model.modules():
-            if hasattr(module, "steering_vector") and hasattr(
-                module, "layer_idx"
-            ):
-                if module.layer_idx in steering_vectors:
-                    vec = steering_vectors[module.layer_idx]
-                    if vec.dim() == 1:
-                        vec = vec.unsqueeze(0)
-                    module.steering_vector.copy_(
-                        vec.to(
-                            device=module.steering_vector.device,
-                            dtype=module.steering_vector.dtype,
-                        )
-                    )
-                else:
-                    module.steering_vector.zero_()
-
-    def clear_steering_vectors(self) -> None:
-        """Reset all steering vectors to zero (no-op steering)."""
-        model = self.get_model()
-        for module in model.modules():
-            if hasattr(module, "steering_vector"):
-                module.steering_vector.zero_()
-
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         model = self.get_model()
         supported_tasks = list[GenerationTask]()

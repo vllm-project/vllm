@@ -29,33 +29,30 @@ def test_steering_changes_output(vllm_runner, monkeypatch, model: str) -> None:
             baseline = llm.generate([prompt], sampling)
             baseline_tokens = baseline[0][0][0]
 
-            # Clear the clean prompt from APC so the steered run has to prefill
-            # and write its own KV entries before the unsteered replay.
+            # Clear the clean prompt from APC so the steered run has to
+            # prefill and write its own KV entries before the unsteered
+            # replay.
             assert llm.llm.reset_prefix_cache()
 
-            # 2. Set steering on a middle layer
-            def _set(worker):
-                import torch
+            # 2. Discover hidden_size and pick a middle layer.
+            def _discover(worker):
+                layers = {}
+                model = worker.model_runner.get_model()
+                for mod in model.modules():
+                    if hasattr(mod, "steering_vector") and hasattr(mod, "layer_idx"):
+                        layers[mod.layer_idx] = mod.steering_vector.shape[1]
+                return layers
 
-                mr = worker.model_runner
-                nn_model = mr.get_model()
-                # Find a decoder layer to read hidden_size and dtype
-                for mod in nn_model.modules():
-                    if hasattr(mod, "steering_vector"):
-                        hs = mod.steering_vector.shape[1]
-                        dt = mod.steering_vector.dtype
-                        dv = mod.steering_vector.device
-                        break
-                # Steer a single middle layer with a large constant vector
-                vec = torch.ones(hs, device=dv, dtype=dt) * 10.0
-                target_layer = max(
-                    mod.layer_idx
-                    for mod in nn_model.modules()
-                    if hasattr(mod, "layer_idx")
-                ) // 2
-                mr.set_steering_vectors({target_layer: vec})
+            layer_info = llm.llm.collective_rpc(_discover)[0]
+            target_layer = max(layer_info.keys()) // 2
+            hidden_size = layer_info[target_layer]
 
-            llm.llm.collective_rpc(_set)
+            # 3. Set steering via WorkerBase (same path as HTTP API)
+            vec = [10.0] * hidden_size
+            llm.llm.collective_rpc(
+                "set_steering_vectors",
+                args=({target_layer: vec}, False),
+            )
 
             steered = llm.generate([prompt], sampling)
             steered_tokens = steered[0][0][0]
@@ -64,10 +61,8 @@ def test_steering_changes_output(vllm_runner, monkeypatch, model: str) -> None:
                 "Non-zero steering should change model output"
             )
 
-            # 3. Clear steering and verify output matches baseline
-            llm.llm.collective_rpc(
-                lambda worker: worker.model_runner.clear_steering_vectors()
-            )
+            # 4. Clear steering and verify output matches baseline
+            llm.llm.collective_rpc("clear_steering_vectors")
 
             restored = llm.generate([prompt], sampling)
             restored_tokens = restored[0][0][0]

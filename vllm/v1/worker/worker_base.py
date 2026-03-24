@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -154,8 +155,6 @@ class WorkerBase:
             *would* be updated when *validate_only*) on this worker.
             The router unions these across workers.
         """
-        import torch
-
         steerable = self._steerable_layers()
         if not steerable:
             return []
@@ -166,15 +165,12 @@ class WorkerBase:
             return []
 
         # Validate vector sizes and values before any mutation.
-        import math
-
         for idx in sorted(valid_indices):
             vec = vectors_data[idx]
             expected = steerable[idx].steering_vector.shape[1]
             if len(vec) != expected:
                 raise ValueError(
-                    f"Layer {idx}: expected vector of size {expected}, "
-                    f"got {len(vec)}"
+                    f"Layer {idx}: expected vector of size {expected}, got {len(vec)}"
                 )
             if not all(math.isfinite(v) for v in vec):
                 raise ValueError(
@@ -187,9 +183,7 @@ class WorkerBase:
 
         # All checks passed — apply.
         for idx in valid_indices:
-            vec = torch.tensor(
-                vectors_data[idx], dtype=torch.float32
-            ).unsqueeze(0)
+            vec = torch.tensor(vectors_data[idx], dtype=torch.float32).unsqueeze(0)
             buf = steerable[idx].steering_vector
             buf.copy_(vec.to(device=buf.device, dtype=buf.dtype))
 
