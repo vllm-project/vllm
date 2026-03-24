@@ -290,6 +290,28 @@ def supports_trtllm_attention() -> bool:
     )
 
 
+@functools.cache
+def supports_xqa_decode() -> bool:
+    """XQA decode is supported on SM90/SM120 via JIT (no CUBINs needed)."""
+    if vllm_is_batch_invariant():
+        return False
+    cap = current_platform.get_device_capability()
+    if cap is None:
+        return False
+    return cap.major in (9, 12)
+
+
+@functools.cache
+def supports_fmha_v2_prefill() -> bool:
+    """FMHAv2 prefill is supported on SM90/SM120 via JIT (no CUBINs needed)."""
+    if vllm_is_batch_invariant():
+        return False
+    cap = current_platform.get_device_capability()
+    if cap is None:
+        return False
+    return cap.major in (9, 12)
+
+
 def force_use_trtllm_attention() -> bool | None:
     """
     This function should only be called during initialization stage when vllm config
@@ -772,6 +794,8 @@ __all__ = [
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
+    "supports_xqa_decode",
+    "supports_fmha_v2_prefill",
     "can_use_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
