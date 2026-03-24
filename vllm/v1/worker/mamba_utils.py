@@ -98,7 +98,6 @@ def collect_mamba_copy_meta(
     copy_bufs: MambaCopyBuffers,
     kv_cache_config: KVCacheConfig,
     mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
-    mamba_group_ids: list[int],
     src_block_idx: int,
     dest_block_idx: int,
     accept_token_bias: int,
@@ -108,6 +107,7 @@ def collect_mamba_copy_meta(
     if src_block_idx == dest_block_idx and accept_token_bias == 0:
         return
 
+    mamba_group_ids = copy_bufs.mamba_group_ids
     src_ptrs_np = copy_bufs.src_ptrs.np
     dst_ptrs_np = copy_bufs.dst_ptrs.np
     sizes_np = copy_bufs.sizes.np
@@ -159,7 +159,6 @@ def preprocess_mamba(
     Copy the mamba state of previous step to the last
     (1 + num_speculative_blocks) block.
     """
-    mamba_group_ids = copy_bufs.mamba_group_ids
     mamba_spec = copy_bufs.mamba_spec
     num_speculative_blocks = mamba_spec.num_speculative_blocks
     # TODO(Chen): we need to optimize this function a lot
@@ -208,7 +207,6 @@ def preprocess_mamba(
                 copy_bufs,
                 kv_cache_config,
                 mamba_state_copy_funcs,
-                mamba_group_ids,
                 prev_state_idx,
                 curr_state_idx,
                 input_batch.num_accepted_tokens_cpu[i] - 1,
@@ -236,7 +234,6 @@ def postprocess_mamba(
     num_scheduled_tokens_dict = scheduler_output.num_scheduled_tokens
     scheduled_spec_decode_tokens_dict = scheduler_output.scheduled_spec_decode_tokens
     num_accepted_tokens_cpu = input_batch.num_accepted_tokens_cpu
-    mamba_group_ids = copy_bufs.mamba_group_ids
     mamba_spec = copy_bufs.mamba_spec
     copy_bufs.offset = 0
     for i, req_id in enumerate(input_batch.req_ids):
@@ -261,7 +258,6 @@ def postprocess_mamba(
                 copy_bufs,
                 kv_cache_config,
                 mamba_state_copy_funcs,
-                mamba_group_ids,
                 src_block_idx,
                 dest_block_idx,
                 accept_token_bias,
