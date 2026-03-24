@@ -22,7 +22,6 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     convert_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
-    mxfp4_round_up_hidden_size_and_intermediate_size,
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -110,18 +109,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         self.moe_kernel: mk.FusedMoEKernel | None = None
-
-        # Round up dims once based on backend. This mutates the shared
-        # FusedMoEConfig in-place so that create_weights() and all
-        # downstream code see the padded dimensions. This must happen
-        # before create_weights() is called.
-        self.moe.hidden_dim, self.moe.intermediate_size_per_partition = (
-            mxfp4_round_up_hidden_size_and_intermediate_size(
-                self.mxfp4_backend,
-                self.moe.hidden_dim,
-                self.moe.intermediate_size_per_partition,
-            )
-        )
 
         # Used for triton kernel precision configs
         self.w13_precision_config = None

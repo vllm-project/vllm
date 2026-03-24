@@ -7,7 +7,6 @@ import torch
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_triton_kernels
-from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 logger = init_logger(__name__)
@@ -85,68 +84,23 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     return quant_tensor, InFlexData(), scale
 
 
-def get_padding_alignment():
-    import triton
-
-    return (
-        256
-        if triton.runtime.driver.active.get_current_target().arch in ("gfx950",)
-        else 128
-    )
-
-
 def maybe_roundup_mxfp4_fused_moe_sizes(
     hidden_size: int,
     intermediate_size_per_partition: int,
     mxfp4_backend,
 ) -> tuple[int, int]:
-    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    """Delegate to the canonical implementation in oracle/mxfp4.py."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        mxfp4_round_up_hidden_size_and_intermediate_size,
+    )
 
     if not isinstance(mxfp4_backend, Mxfp4MoeBackend):
         raise ValueError(f"Invalid mxfp4_backend: {mxfp4_backend}")
 
-    rounded_hidden_size = hidden_size
-    rounded_intermediate = intermediate_size_per_partition
-
-    if mxfp4_backend in (Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN):
-        # The moe marlin kernel requires that for each linear
-        # n % 256 == 0 and k % 128 == 0.
-        # In gate_up_proj:
-        #    n = 2 * intermediate_size_per_partition_after_pad
-        #    k = hidden_size
-        # In down_proj
-        #    n = hidden_size
-        #    k = intermediate_size_per_partition_after_pad
-        if rounded_intermediate is not None:
-            rounded_intermediate = round_up(rounded_intermediate, 128)
-        if current_platform.is_xpu():
-            rounded_hidden_size = round_up(hidden_size, 128)
-        else:
-            rounded_hidden_size = round_up(hidden_size, 256)
-    elif mxfp4_backend in (
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-    ):
-        if rounded_intermediate is not None:
-            rounded_intermediate = round_up(rounded_intermediate, 256)
-        rounded_hidden_size = round_up(hidden_size, 256)
-    elif mxfp4_backend in (
-        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
-        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
-    ):
-        if rounded_intermediate is not None:
-            rounded_intermediate = round_up(rounded_intermediate, 128)
-        rounded_hidden_size = round_up(hidden_size, 128)
-    elif current_platform.is_rocm():
-        pad_align = get_padding_alignment()
-        if rounded_intermediate is not None:
-            rounded_intermediate = round_up(rounded_intermediate, pad_align)
-        rounded_hidden_size = round_up(hidden_size, pad_align)
-    else:
-        if rounded_intermediate is not None:
-            rounded_intermediate = round_up(rounded_intermediate, 64)
-
-    return rounded_hidden_size, rounded_intermediate
+    return mxfp4_round_up_hidden_size_and_intermediate_size(
+        mxfp4_backend, hidden_size, intermediate_size_per_partition
+    )
 
 
 def _dequant_mxfp4(
