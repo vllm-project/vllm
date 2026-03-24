@@ -529,11 +529,11 @@ class _StreamPlaceholder:
 
 def current_stream() -> torch.cuda.Stream:
     """
-    replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
-    it turns out that `torch.cuda.current_stream()` is quite expensive,
+    replace `torch.accelerator.current_stream()` with `vllm.utils.current_stream()`.
+    it turns out that `torch.accelerator.current_stream()` is quite expensive,
     as it will construct a new stream object at each call.
     here we patch `torch.cuda.set_stream` to keep track of the current stream
-    directly, so that we can avoid calling `torch.cuda.current_stream()`.
+    directly, so that we can avoid calling `torch.accelerator.current_stream()`.
 
     the underlying hypothesis is that we do not call `torch._C._cuda_setStream`
     from C/C++ code.

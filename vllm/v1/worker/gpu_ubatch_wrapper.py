@@ -440,7 +440,7 @@ class UBatchWrapper:
         positions = kwargs["positions"]
         intermediate_tensors = kwargs["intermediate_tensors"]
         inputs_embeds = kwargs["inputs_embeds"]
-        compute_stream = torch.cuda.current_stream()
+        compute_stream = torch.accelerator.current_stream()
 
         dp_metadata = forward_context.dp_metadata
 

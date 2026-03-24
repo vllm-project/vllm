@@ -320,7 +320,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @functools.cached_property
     def main_stream(self) -> torch.cuda.Stream:
         # Cache the default CUDA stream to avoid lookup overhead.
-        return torch.cuda.current_stream(self.device)
+        return torch.accelerator.current_stream(self.device)
 
     def get_kv_cache_spec(self):
         return get_kv_cache_spec(self.vllm_config)

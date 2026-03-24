@@ -200,7 +200,7 @@ class NCCLWeightTransferEngine(
                 dtype = getattr(torch, dtype_name)
                 weight = torch.empty(shape, dtype=dtype, device="cuda")
                 self.model_update_group.broadcast(
-                    weight, src=0, stream=torch.cuda.current_stream()
+                    weight, src=0, stream=torch.accelerator.current_stream()
                 )
                 load_weights([(name, weight)])
                 del weight
@@ -265,7 +265,7 @@ class NCCLWeightTransferEngine(
                 args.group.broadcast(
                     tensor,
                     src=args.src,
-                    stream=args.stream or torch.cuda.current_stream(),
+                    stream=args.stream or torch.accelerator.current_stream(),
                 )
 
     @staticmethod
