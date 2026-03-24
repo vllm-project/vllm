@@ -81,11 +81,21 @@ def main() -> int:
 
     filtered_lines: list[str] = []
     filtered_packages: list[str] = []
+    skipping = False
 
     for line in lines:
         pkg_name = _package_name_from_line(line)
         if pkg_name and _matches_cuda_nvidia(pkg_name):
             filtered_packages.append(pkg_name)
+            skipping = True
+        elif skipping:
+            # Skip indented comment lines that are dependency annotations
+            # for the filtered package (e.g. "    # via torch").
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped == "":
+                continue
+            skipping = False
+            filtered_lines.append(line)
         else:
             filtered_lines.append(line)
 
