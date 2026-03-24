@@ -104,7 +104,7 @@ def test_pooling_params(llm: LLM):
     )
 
 
-@pytest.mark.parametrize("task", ["classify_embed", "classify"])
+@pytest.mark.parametrize("task", ["token_classify", "classify"])
 def test_unsupported_tasks(llm: LLM, task: PoolingTask):
     err_msg = "Classification API is not supported by this model.+"
     with pytest.raises(ValueError, match=err_msg):
