@@ -1428,6 +1428,7 @@ class Glm4vForConditionalGeneration(
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Glm4vVisionTransformer(
+                config.text_config,
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-5),
                 quant_config=quant_config,
