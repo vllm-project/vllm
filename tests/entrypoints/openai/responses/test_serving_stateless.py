@@ -206,6 +206,35 @@ class TestStateCarrierHelpers:
         with pytest.raises(ValueError, match="HMAC verification failed"):
             OpenAIServingResponses._extract_state_from_response(serving, mock_response)
 
+    def test_restore_harmony_state_messages_roundtrips_renderably(self):
+        from openai_harmony import Author, DeveloperContent, Message, Role, TextContent
+
+        from vllm.entrypoints.openai.parser.harmony_utils import render_for_completion
+        from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+        from vllm.entrypoints.openai.responses.state import (
+            deserialize_state,
+            serialize_state,
+        )
+
+        original = [
+            Message(
+                author=Author(role=Role.DEVELOPER),
+                content=[DeveloperContent(instructions="Be concise")],
+            ),
+            Message(
+                author=Author(role=Role.USER),
+                content=[TextContent(text="Hello")],
+            ),
+        ]
+
+        recovered = deserialize_state(serialize_state(original))
+        restored = OpenAIServingResponses._restore_harmony_state_messages(recovered)
+
+        assert [message.to_dict() for message in restored] == [
+            message.to_dict() for message in original
+        ]
+        assert render_for_completion(restored)
+
 
 # ---------------------------------------------------------------------------
 # Error paths when enable_store=False

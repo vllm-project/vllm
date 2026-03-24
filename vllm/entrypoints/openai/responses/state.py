@@ -75,6 +75,8 @@ def _get_signing_key() -> bytes:
 
 def _harmony_serializer(obj: Any) -> Any:
     """JSON serializer for OpenAIHarmonyMessage and similar pydantic models."""
+    if hasattr(obj, "to_dict"):
+        return obj.to_dict()
     if hasattr(obj, "model_dump"):
         return obj.model_dump()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")

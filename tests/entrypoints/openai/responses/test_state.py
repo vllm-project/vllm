@@ -94,6 +94,26 @@ def test_roundtrip_pydantic_model(state):
     assert recovered == [{"author": {"role": "user"}, "content": "hi"}]
 
 
+def test_roundtrip_openai_harmony_messages_uses_wire_format(state):
+    from openai_harmony import Author, DeveloperContent, Message, Role, TextContent
+
+    messages = [
+        Message(
+            author=Author(role=Role.DEVELOPER),
+            content=[DeveloperContent(instructions="Be concise")],
+        ),
+        Message(
+            author=Author(role=Role.USER),
+            content=[TextContent(text="Hello")],
+        ),
+    ]
+
+    blob = state.serialize_state(messages)
+    recovered = state.deserialize_state(blob)
+
+    assert recovered == [message.to_dict() for message in messages]
+
+
 # ---------------------------------------------------------------------------
 # is_state_carrier
 # ---------------------------------------------------------------------------
