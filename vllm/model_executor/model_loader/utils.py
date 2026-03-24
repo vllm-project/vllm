@@ -6,6 +6,7 @@ import inspect
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 from torch import nn
@@ -71,7 +72,7 @@ def initialize_model(
         model_class,
     )
     # try to be compatible with old-style model class
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     if "prefix" in all_params:
         kwargs["prefix"] = prefix
     if "config" in all_params:
