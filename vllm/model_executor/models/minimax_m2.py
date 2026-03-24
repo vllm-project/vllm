@@ -390,8 +390,7 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
             hidden_states, residual = layer(positions, hidden_states, residual)
             if use_aux_hidden_states:
                 self._maybe_add_hidden_state(
-                    aux_hidden_states, self.start_layer + idx, hidden_states,
-                    residual
+                    aux_hidden_states, idx + 1, hidden_states, residual
                 )
 
         if not get_pp_group().is_last_rank:
