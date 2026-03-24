@@ -12,6 +12,7 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
+from multiprocessing.queues import Queue
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
@@ -45,6 +46,7 @@ from vllm.v1.engine import (
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.tensor_ipc import TensorIpcSender
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
@@ -477,9 +479,6 @@ class MPClient(EngineCoreClient):
         client_addresses: dict[str, str] | None = None,
     ):
         self.vllm_config = vllm_config
-        # Serialization setup.
-        self.encoder = MsgpackEncoder()
-        self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -501,11 +500,14 @@ class MPClient(EngineCoreClient):
             enable_input_socket_handover = parallel_config.enable_elastic_ep
 
             self.stats_update_address: str | None = None
+            tensor_queue: Queue | None = None
             if client_addresses:
                 # Engines are managed externally to this client.
                 input_address = client_addresses["input_address"]
                 output_address = client_addresses["output_address"]
                 self.stats_update_address = client_addresses.get("stats_update_address")
+                # Tensor queues passed via client_addresses for multi-API-server case
+                tensor_queue = client_addresses.get("tensor_queue")  # type: ignore[assignment]
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
                     self.ctx,
                     input_address,
@@ -532,7 +534,7 @@ class MPClient(EngineCoreClient):
 
                 with launch_core_engines(
                     vllm_config, executor_class, log_stats, addresses
-                ) as (engine_manager, coordinator, addresses):
+                ) as (engine_manager, coordinator, addresses, tensor_queue):
                     self.resources.coordinator = coordinator
                     self.resources.engine_manager = engine_manager
 
@@ -541,6 +543,17 @@ class MPClient(EngineCoreClient):
                     assert self.stats_update_address == (
                         coordinator.get_stats_publish_address()
                     )
+
+            # Serialization setup with tensor queues for multimodal tensor IPC.
+            tensor_ipc_sender: TensorIpcSender | None = None
+            model_config = getattr(vllm_config, "model_config", None)
+            if model_config is not None and model_config.multimodal_config is not None:
+                mm_tensor_ipc = model_config.multimodal_config.mm_tensor_ipc
+                if mm_tensor_ipc == "torch_shm" and tensor_queue is not None:
+                    tensor_ipc_sender = TensorIpcSender(tensor_queue)
+
+            self.encoder = MsgpackEncoder(oob_tensor_consumer=tensor_ipc_sender)
+            self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
             dp_size = parallel_config.data_parallel_size
             dp_rank = parallel_config.data_parallel_index
