@@ -290,32 +290,6 @@ direct_register_custom_op(
 # --- FlashInfer bmm_fp8 fused ops for AsyncTP on Blackwell (SM >= 100) ---
 
 
-def _flashinfer_scaled_mm_out(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    *,
-    scale_a: torch.Tensor,
-    scale_b: torch.Tensor,
-    out_dtype: torch.dtype | None = None,
-    out: torch.Tensor,
-    **_kwargs: Any,
-) -> torch.Tensor:
-    """Adapter: wraps FlashInfer bmm_fp8 to match mm_out_op(A, B, ..., out=)
-    interface expected by PyTorch's _fused_*_impl helpers."""
-    from flashinfer import bmm_fp8 as flashinfer_bmm_fp8
-
-    flashinfer_bmm_fp8(
-        A.unsqueeze(0),
-        B.unsqueeze(0),
-        scale_a,
-        scale_b,
-        out_dtype or out.dtype,
-        out.unsqueeze(0),
-        "auto",
-    )
-    return out
-
-
 def fused_flashinfer_scaled_matmul_reduce_scatter(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -328,23 +302,29 @@ def fused_flashinfer_scaled_matmul_reduce_scatter(
     output_shape: list[int],
     out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    from torch.distributed._symmetric_memory import (
-        _fused_scaled_matmul_reduce_scatter_impl,
-    )
+    from flashinfer import bmm_fp8 as flashinfer_bmm_fp8
 
-    return _fused_scaled_matmul_reduce_scatter_impl(
-        mm_out_op=_flashinfer_scaled_mm_out,
-        A=A,
-        B=B,
-        A_scale=A_scale,
-        kwargs={"scale_b": B_scale, "out_dtype": out_dtype},
-        out_dtype=out_dtype,
-        reduce_op=reduce_op,
-        orig_scatter_dim=orig_scatter_dim,
-        scatter_dim_after_maybe_reshape=scatter_dim_after_maybe_reshape,
-        group_name=group_name,
-        output_shape=output_shape,
+    if reduce_op != "sum":
+        raise NotImplementedError(
+            "Only sum reduce_op is supported for FlashInfer AsyncTP RS"
+        )
+
+    # This wrapper intentionally stays close to the unfused eager baseline:
+    # GEMM first, then TP reduce-scatter. That lets us isolate whether the
+    # regression comes from the symm_mem helper path or from FlashInfer itself.
+    mm_out = torch.empty(
+        output_shape, dtype=out_dtype or torch.bfloat16, device=A.device
     )
+    flashinfer_bmm_fp8(
+        A.unsqueeze(0),
+        B.unsqueeze(0),
+        A_scale,
+        B_scale,
+        out_dtype or mm_out.dtype,
+        mm_out.unsqueeze(0),
+        "auto",
+    )
+    return get_tp_group()._reduce_scatter_out_place(mm_out, orig_scatter_dim)
 
 
 def fused_flashinfer_scaled_matmul_reduce_scatter_fake(
@@ -382,22 +362,23 @@ def fused_all_gather_flashinfer_scaled_matmul(
     group_name: str,
     out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from torch.distributed._symmetric_memory import (
-        _fused_all_gather_matmul_impl,
-    )
+    from flashinfer import bmm_fp8 as flashinfer_bmm_fp8
 
-    A, res_list = _fused_all_gather_matmul_impl(
-        mm_out_op=_flashinfer_scaled_mm_out,
-        A_shard=A_shard,
-        Bs=[B],
-        A_scale=A_scale,
-        kwargs_list=[{"scale_b": B_scale, "out_dtype": out_dtype}],
-        out_dtypes=[out_dtype],
-        gather_dim=gather_dim,
-        group_name=group_name,
-        return_A=True,
+    # This wrapper intentionally stays close to the unfused eager baseline:
+    # TP all-gather first, then GEMM.
+    A = get_tp_group()._all_gather_out_place(A_shard, gather_dim)
+    mm_shape = (*A.shape[:-1], B.shape[1])
+    mm_out = torch.empty(mm_shape, dtype=out_dtype or torch.bfloat16, device=A.device)
+    flashinfer_bmm_fp8(
+        A.unsqueeze(0),
+        B.unsqueeze(0),
+        A_scale,
+        B_scale,
+        out_dtype or mm_out.dtype,
+        mm_out.unsqueeze(0),
+        "auto",
     )
-    return A, res_list[0]
+    return A, mm_out
 
 
 def fused_all_gather_flashinfer_scaled_matmul_fake(
