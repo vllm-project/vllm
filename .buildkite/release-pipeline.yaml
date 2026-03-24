@@ -648,6 +648,5 @@ steps:
           username: vllmbot
           password-env: DOCKERHUB_TOKEN
     env:
-      DRY_RUN: "1"
       DOCKER_BUILDKIT: "1"
       DOCKERHUB_USERNAME: "vllmbot"
