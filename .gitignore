@@ -234,10 +234,10 @@ ep_kernels_workspace/
 # Allow tracked library source folders under submodules (e.g., benchmarks/lib)
 !vllm/benchmarks/lib/
 
-# Generated gRPC protobuf files (compiled at build time from vllm_engine.proto)
-vllm/grpc/vllm_engine_pb2.py
-vllm/grpc/vllm_engine_pb2_grpc.py
-vllm/grpc/vllm_engine_pb2.pyi
+# Generated gRPC protobuf files (compiled at build time from .proto files)
+vllm/entrypoints/grpc/*_pb2.py
+vllm/entrypoints/grpc/*_pb2_grpc.py
+vllm/entrypoints/grpc/*_pb2.pyi
 
 # Ignore generated cpu headers 
 csrc/cpu/cpu_attn_dispatch_generated.h

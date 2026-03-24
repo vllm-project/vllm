@@ -1,0 +1,162 @@
+syntax = "proto3";
+
+package vllm.grpc.render;
+
+import "google/protobuf/struct.proto";
+import "vllm_engine.proto";
+
+// Service definition for GPU-less render serving.
+// Only management and rendering RPCs — no inference.
+service VllmRender {
+  rpc HealthCheck(vllm.grpc.engine.HealthCheckRequest) returns (vllm.grpc.engine.HealthCheckResponse);
+  rpc GetModelInfo(vllm.grpc.engine.GetModelInfoRequest) returns (vllm.grpc.engine.GetModelInfoResponse);
+  rpc GetServerInfo(vllm.grpc.engine.GetServerInfoRequest) returns (vllm.grpc.engine.GetServerInfoResponse);
+
+  // Render chat messages (apply chat template, tokenize) without inference
+  rpc RenderChat(RenderChatRequest) returns (RenderChatResponse);
+
+  // Render completion prompts (validate, tokenize) without inference
+  rpc RenderCompletion(RenderCompletionRequest) returns (RenderCompletionResponse);
+}
+
+// =====================
+// Chat Rendering (OpenAI-compatible)
+// =====================
+
+// Content part sub-types (match OpenAI nested format so MessageToDict
+// produces OpenAI-compatible dicts without manual conversion).
+message ImageUrlContent {
+  string url = 1;
+  optional string detail = 2;  // "auto", "low", "high"
+}
+
+message InputAudioContent {
+  string data = 1;    // base64-encoded
+  string format = 2;  // "wav", "mp3", etc.
+}
+
+message VideoUrlContent {
+  string url = 1;
+}
+
+// Content part for multimodal messages
+message ContentPart {
+  string type = 1;  // "text", "image_url", "input_audio", "video_url"
+  optional string text = 2;
+  optional ImageUrlContent image_url = 3;
+  optional InputAudioContent input_audio = 4;
+  optional VideoUrlContent video_url = 5;
+}
+
+// Tool call in assistant messages
+message ToolCallFunction {
+  string name = 1;
+  string arguments = 2;  // JSON string
+}
+
+message ToolCall {
+  string id = 1;
+  string type = 2;  // "function"
+  ToolCallFunction function = 3;
+}
+
+// Tool definition
+message FunctionDefinition {
+  string name = 1;
+  optional string description = 2;
+  optional string parameters_json = 3;  // JSON schema as string
+  optional bool strict = 4;
+}
+
+message ChatCompletionTool {
+  string type = 1;  // "function"
+  FunctionDefinition function = 2;
+}
+
+// Chat message — covers system, user, assistant, tool, developer roles
+message ChatCompletionMessage {
+  string role = 1;
+
+  // Content: set content for simple text, content_parts for multimodal.
+  // Neither set means null (e.g., assistant with only tool_calls).
+  optional string content = 2;
+  repeated ContentPart content_parts = 3;
+
+  optional string name = 4;
+  repeated ToolCall tool_calls = 5;     // assistant role
+  optional string tool_call_id = 6;     // tool role
+  optional string refusal = 7;          // assistant role
+  optional string reasoning = 8;        // thinking models
+}
+
+// RenderChat request — mirrors OpenAI ChatCompletionRequest fields
+// relevant to rendering (chat template + tokenization).
+message RenderChatRequest {
+  repeated ChatCompletionMessage messages = 1;
+  string model = 2;
+  repeated ChatCompletionTool tools = 3;
+  optional string tool_choice = 4;  // "none"/"auto"/"required" or JSON
+  optional string chat_template = 5;
+  bool add_generation_prompt = 6;
+  bool continue_final_message = 7;
+}
+
+message RenderChatResponse {
+  GenerateRequestProto generate_request = 1;
+}
+
+// =====================
+// Completion Rendering (OpenAI-compatible)
+// =====================
+
+// Completion prompt variants (represents CompletionRequest.prompt union)
+message CompletionPromptTexts {
+  repeated string texts = 1;
+}
+
+message TokenIdSequence {
+  repeated uint32 token_ids = 1;
+}
+
+message CompletionPromptTokenIdBatch {
+  repeated TokenIdSequence batches = 1;
+}
+
+message CompletionPrompt {
+  oneof prompt {
+    string text = 1;                               // str
+    CompletionPromptTexts texts = 2;               // list[str]
+    TokenIdSequence token_ids = 3;                 // list[int]
+    CompletionPromptTokenIdBatch token_id_batches = 4;  // list[list[int]]
+  }
+}
+
+// RenderCompletion request — mirrors CompletionRequest fields
+// relevant to rendering (validation + tokenization).
+message RenderCompletionRequest {
+  string model = 1;
+  CompletionPrompt prompt = 2;
+  optional bool echo = 3;
+  optional string suffix = 4;
+  optional int32 prompt_logprobs = 5;
+  bool add_special_tokens = 6;
+  optional string cache_salt = 7;
+}
+
+message RenderCompletionResponse {
+  repeated GenerateRequestProto generate_requests = 1;
+}
+
+// Mirrors vllm.entrypoints.serve.disagg.protocol.GenerateRequest
+message GenerateRequestProto {
+  string request_id = 1;
+  repeated int32 token_ids = 2;
+  google.protobuf.Struct sampling_params = 3;
+  optional string model = 4;
+  optional bool stream = 5;
+  optional google.protobuf.Struct stream_options = 6;
+  optional string cache_salt = 7;
+  optional int64 priority = 8;
+  optional google.protobuf.Struct features = 9;
+  optional google.protobuf.Struct kv_transfer_params = 10;
+}
