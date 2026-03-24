@@ -291,6 +291,114 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         return logits
 
 
+class ToolChoiceRequiredLogitsProcessor(LogitsProcessor):
+    """Suppress all stop/EOS tokens from the start of generation until
+    the model completes at least one tool call (<|tool_call_end|>).
+
+    This forces thinking models to produce tool calls when
+    tool_choice=required. Stop tokens are suppressed continuously —
+    during reasoning and after </think> — preventing premature
+    termination. Once the first tool call is complete, suppression
+    lifts and the model can finish naturally.
+
+    Suppresses the explicit stop token (e.g. <|im_end|>), the primary
+    eos_token_id (e.g. [EOS]), and any additional stop_token_ids.
+
+    Activated via extra_args:
+        tool_choice_required_think_end: int      (</think> token id)
+        tool_choice_required_stop: int            (<|im_end|> token id)
+        tool_choice_required_section_end: int     (<|tool_call_end|> token id)
+    """
+
+    # Per-request state:
+    #   (stop_toks, release_tok, output_tok_ids)
+
+    def __init__(
+        self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
+    ):
+        self.device = device
+        self.pin_memory = is_pin_memory
+        self.reqs: dict[int, tuple[list[int], int, Sequence[int]]] = {}
+
+        self.logits_slice: tuple[torch.Tensor, torch.Tensor] = (
+            self._device_tensor([], torch.int32),
+            self._device_tensor([], torch.int32),
+        )
+        self.neg_inf_tensor = torch.tensor(
+            -float("inf"), dtype=torch.float32, device=device
+        )
+
+    def is_argmax_invariant(self) -> bool:
+        return False
+
+    @staticmethod
+    def add_request(
+        params: SamplingParams, _: list[int] | None, output_tok_ids: list[int]
+    ) -> tuple[list[int], int, Sequence[int]] | None:
+        extra = params.extra_args or {}
+        think_end = extra.get("tool_choice_required_think_end")
+        stop = extra.get("tool_choice_required_stop")
+        section_end = extra.get("tool_choice_required_section_end")
+        if think_end is None or stop is None:
+            return None
+        # Collect all tokens that can terminate generation
+        stop_toks: list[int] = [int(stop)]
+        # Also suppress the primary eos_token_id if different from stop
+        eos = params.eos_token_id
+        if eos is not None and eos != int(stop):
+            stop_toks.append(eos)
+        # Also suppress any additional stop_token_ids from generation_config
+        if params.stop_token_ids:
+            for st in params.stop_token_ids:
+                if st not in stop_toks:
+                    stop_toks.append(st)
+        # Release token: <|tool_call_end|> — suppression lifts after
+        # the first complete tool call
+        release = int(section_end) if section_end is not None else -1
+        return (stop_toks, release, output_tok_ids)
+
+    def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
+        return torch.tensor(
+            data, device="cpu", dtype=dtype, pin_memory=self.pin_memory
+        ).to(device=self.device, non_blocking=True)
+
+    def update_state(self, batch_update: BatchUpdate | None):
+        process_dict_updates(self.reqs, batch_update, self.add_request)
+
+        reqs_to_suppress: list[int] = []
+        toks_to_suppress: list[int] = []
+        done: list[int] = []
+
+        for index, (stop_toks, release, out_ids) in self.reqs.items():
+            # Check if model completed a tool call
+            if out_ids and out_ids[-1] == release:
+                done.append(index)
+                continue
+
+            # Suppress all stop tokens for this request
+            for tok in stop_toks:
+                reqs_to_suppress.append(index)
+                toks_to_suppress.append(tok)
+
+        # Remove completed requests
+        for index in done:
+            del self.reqs[index]
+
+        # Rebuild tensors
+        prev_numel = self.logits_slice[0].numel()
+        new_numel = len(reqs_to_suppress)
+        if new_numel != prev_numel or new_numel > 0:
+            self.logits_slice = (
+                self._device_tensor(reqs_to_suppress, torch.int32),
+                self._device_tensor(toks_to_suppress, torch.int32),
+            )
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        if self.logits_slice[0].numel() > 0:
+            logits.index_put_(self.logits_slice, self.neg_inf_tensor)
+        return logits
+
+
 def process_dict_updates(
     req_entries: dict[int, T],
     batch_update: BatchUpdate | None,

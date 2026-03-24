@@ -72,14 +72,35 @@ class ToolParser:
                 )
                 request.response_format = None
             if isinstance(request, ResponsesRequest):
-                request.text = ResponseTextConfig()
-                request.text.format = ResponseFormatTextJSONSchemaConfig(
-                    name="tool_calling_response",
-                    schema=json_schema_from_tool,
-                    type="json_schema",
-                    description="Response format for tool calling",
-                    strict=True,
-                )
+                # For thinking models, guided generation corrupts <think>
+                # tokens.  Instead, use a conditional logits processor that
+                # suppresses <|im_end|> for one token after </think>, which
+                # forces the model into the native tool-call token sequence.
+                think_end = self.vocab.get("</think>")
+                im_end = self.vocab.get("<|im_end|>")
+                reasoning_on = getattr(request, "reasoning", None) is not None
+                tool_call_end = self.vocab.get("<|tool_call_end|>")
+                if think_end is not None and im_end is not None and reasoning_on:
+                    # Thinking model: use logits processor instead of
+                    # guided generation (which would corrupt reasoning).
+                    if request.vllm_xargs is None:
+                        request.vllm_xargs = {}
+                    request.vllm_xargs["tool_choice_required_think_end"] = think_end
+                    request.vllm_xargs["tool_choice_required_stop"] = im_end
+                    if tool_call_end is not None:
+                        request.vllm_xargs["tool_choice_required_section_end"] = (
+                            tool_call_end
+                        )
+                else:
+                    # Non-thinking model: guided generation works fine.
+                    request.text = ResponseTextConfig()
+                    request.text.format = ResponseFormatTextJSONSchemaConfig(
+                        name="tool_calling_response",
+                        schema=json_schema_from_tool,
+                        type="json_schema",
+                        description="Response format for tool calling",
+                        strict=True,
+                    )
 
         return request
 
