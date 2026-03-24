@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import logging
 import weakref
 
 import pytest
@@ -75,8 +75,11 @@ def test_list_prompts(llm: LLM):
 
 
 @pytest.mark.skip_global_cleanup
-def test_token_embed(llm: LLM):
-    outputs = llm.encode(prompt, pooling_task="token_embed", use_tqdm=False)
+def test_token_embed(llm: LLM, caplog_vllm):
+    with caplog_vllm.at_level(level=logging.WARNING, logger="vllm"):
+        outputs = llm.encode(prompt, pooling_task="token_embed", use_tqdm=False)
+        assert "deprecated" in caplog_vllm.text
+
     multi_vector = outputs[0].outputs.data
     assert multi_vector.shape == (11, 384)
 
