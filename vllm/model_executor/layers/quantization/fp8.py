@@ -273,6 +273,7 @@ class Fp8LinearMethod(LinearMethodBase):
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
         self.marlin_input_dtype = None
+        self.use_marlin = False
 
         self.use_deep_gemm = is_deep_gemm_supported()
 
