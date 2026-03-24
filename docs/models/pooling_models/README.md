@@ -269,7 +269,7 @@ We have split the `encode` task into two more specific token-wise tasks: `token_
 - `token_embed` is the same as `embed`, using normalization as the activation.
 - `token_classify` is the same as `classify`, by default using softmax as the activation.
 
-Pooling models now default support all pooling.
+Pooling models now support token-wise task.
 
 - Extracting hidden states prefers using `token_embed` task.
 - Named Entity Recognition (NER) and reward models prefers using `token_classify` task.
