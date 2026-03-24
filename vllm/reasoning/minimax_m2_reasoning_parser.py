@@ -16,6 +16,18 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
+def _count_minimax_reasoning_tokens(
+    token_ids: Sequence[int], end_token_id: int | None
+) -> int:
+    if end_token_id is None:
+        return 0
+
+    for idx, token_id in enumerate(token_ids):
+        if token_id == end_token_id:
+            return idx
+    return len(token_ids)
+
+
 class MiniMaxM2ReasoningParser(MinimaxM2ParserReasoningAdapter):  # type: ignore[valid-type, misc]
     """
     Reasoning parser for MiniMax M2 model.
@@ -24,6 +36,9 @@ class MiniMaxM2ReasoningParser(MinimaxM2ParserReasoningAdapter):  # type: ignore
     token. All content before </think> is reasoning, content after is the
     actual response.
     """
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        return _count_minimax_reasoning_tokens(token_ids, self.vocab.get("</think>"))
 
 
 class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
@@ -64,3 +79,6 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         return None, "<think>" + model_output
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        return _count_minimax_reasoning_tokens(token_ids, self.end_token_id)
