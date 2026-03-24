@@ -19,34 +19,34 @@ MODEL="${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 # ---------------------------------------------------------------------------
 # 1. Simple batch – two plain-text conversations
 # ---------------------------------------------------------------------------
-echo "=== Example 1: simple batch ==="
-curl -s "${BASE_URL}/v1/chat/completions" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"model\": \"${MODEL}\",
-    \"messages\": [
-      [{\"role\": \"user\", \"content\": \"What is the capital of France?\"}],
-      [{\"role\": \"user\", \"content\": \"What is the capital of Japan?\"}]
-    ]
-  }" | jq '.choices[] | {index, content: .message.content}'
+# echo "=== Example 1: simple batch ==="
+# curl -s "${BASE_URL}/v1/chat/completions" \
+#   -H "Content-Type: application/json" \
+#   -d "{
+#     \"model\": \"${MODEL}\",
+#     \"messages\": [
+#       [{\"role\": \"user\", \"content\": \"What is the capital of France?\"}],
+#       [{\"role\": \"user\", \"content\": \"What is the capital of Japan?\"}]
+#     ]
+#   }" | jq '.choices[] | {index, content: .message.content}'
 
 # ---------------------------------------------------------------------------
 # 2. Batch with regex-constrained structured output
 # ---------------------------------------------------------------------------
-echo ""
-echo "=== Example 2: batch with regex constraint (yes|no) ==="
-curl -s "${BASE_URL}/v1/chat/completions" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"model\": \"${MODEL}\",
-    \"messages\": [
-      [{\"role\": \"user\", \"content\": \"Is the sky blue? Answer yes or no.\"}],
-      [{\"role\": \"user\", \"content\": \"Is fire cold? Answer yes or no.\"}]
-    ],
-    \"extra_body\": {
-      \"structured_outputs\": {\"regex\": \"(yes|no)\"}
-    }
-  }" | jq '.choices[] | {index, answer: .message.content}'
+# echo ""
+# echo "=== Example 2: batch with regex constraint (yes|no) ==="
+# curl -s "${BASE_URL}/v1/chat/completions" \
+#   -H "Content-Type: application/json" \
+#   -d "{
+#     \"model\": \"${MODEL}\",
+#     \"messages\": [
+#       [{\"role\": \"user\", \"content\": \"Is the sky blue? Answer yes or no.\"}],
+#       [{\"role\": \"user\", \"content\": \"Is fire cold? Answer yes or no.\"}]
+#     ],
+#     \"extra_body\": {
+#       \"structured_outputs\": {\"regex\": \"(yes|no)\"}
+#     }
+#   }" | jq '.choices[] | {index, answer: .message.content}'
 
 # ---------------------------------------------------------------------------
 # 3. Batch with JSON schema structured output
@@ -79,52 +79,52 @@ curl -s "${BASE_URL}/v1/chat/completions" \
   }" | jq '.choices[] | {index, person: (.message.content | fromjson)}'
 
 # ---------------------------------------------------------------------------
-# 4. Batch with a rich JSON schema – company description summaries
-#    (two companies in one request)
+# 4. Batch with a rich JSON schema – book summaries
+#    (two books in one request, extracting structured metadata)
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Example 4: batch company description summaries ==="
+echo "=== Example 4: batch book summaries ==="
 curl -s "${BASE_URL}/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d "{
     \"model\": \"${MODEL}\",
     \"messages\": [
       [
-        {\"role\": \"system\", \"content\": \"You are a business analyst. Extract structured information from company descriptions.\"},
-        {\"role\": \"user\",   \"content\": \"Summarize: Acme Corp designs and manufactures road runner traps. Founded in 1949 in Arizona, they serve the cartoon character market with explosive devices and elaborate contraptions. Their revenue is $42M.\"}
+        {\"role\": \"system\", \"content\": \"You are a literary analyst. Extract structured information from book descriptions.\"},
+        {\"role\": \"user\",   \"content\": \"Extract information from this book: '1984' by George Orwell, published in 1949, 328 pages. A dystopian novel set in a totalitarian society ruled by Big Brother, following Winston Smith as he secretly rebels against the oppressive Party that surveils and controls every aspect of life.\"}
       ],
       [
-        {\"role\": \"system\", \"content\": \"You are a business analyst. Extract structured information from company descriptions.\"},
-        {\"role\": \"user\",   \"content\": \"Summarize: Initech is a software consultancy founded in 1993 in Texas. They develop enterprise resource planning solutions for mid-size companies. Revenue $15M.\"}
+        {\"role\": \"system\", \"content\": \"You are a literary analyst. Extract structured information from book descriptions.\"},
+        {\"role\": \"user\",   \"content\": \"Extract information from this book: 'The Hitchhiker's Guide to the Galaxy' by Douglas Adams, published in 1979, 193 pages. A comedic science fiction novel following Arthur Dent, an ordinary Englishman who is whisked off Earth moments before it is demolished to make way for a hyperspace bypass, and his subsequent absurd adventures across the universe.\"}
       ]
     ],
     \"response_format\": {
       \"type\": \"json_schema\",
       \"json_schema\": {
-        \"name\": \"company_summary\",
+        \"name\": \"book_summary\",
         \"strict\": true,
         \"schema\": {
           \"type\": \"object\",
           \"properties\": {
-            \"short\": {
+            \"author\": {
               \"type\": \"string\",
-              \"description\": \"A one-sentence description of the company\"
+              \"description\": \"Full name of the author\"
             },
-            \"industry\": {
-              \"type\": \"string\",
-              \"description\": \"Primary industry or sector\"
-            },
-            \"founded_year\": {
+            \"num_pages\": {
               \"type\": \"integer\",
-              \"description\": \"Year the company was founded\"
+              \"description\": \"Number of pages in the book\"
             },
-            \"hq_country\": {
+            \"short_summary\": {
               \"type\": \"string\",
-              \"description\": \"Country where the headquarters is located\"
+              \"description\": \"A one-sentence summary of the book\"
+            },
+            \"long_summary\": {
+              \"type\": \"string\",
+              \"description\": \"A detailed two to three sentence summary covering the main themes and plot\"
             }
           },
-          \"required\": [\"short\", \"industry\", \"founded_year\", \"hq_country\"]
+          \"required\": [\"author\", \"num_pages\", \"short_summary\", \"long_summary\"]
         }
       }
     }
-  }" | jq '.choices[] | {index, summary: (.message.content | fromjson)}'
+  }" | jq '.choices[] | {index, book: (.message.content | fromjson)}'
