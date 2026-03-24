@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-    fused_marlin_moe,
     make_marlin_moe_kernel,
 )
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -882,44 +881,18 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor :
-        # Use modular kernel when available (4-bit weights).
-        if self.moe_kernel is not None:
-            assert not self.is_monolithic
-            return self.moe_kernel.apply(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                expert_map=layer.expert_map,
-                shared_experts_input=shared_experts_input,
-            )
-        # Fallback for 8-bit weights (not supported by the modular kernel).
-        return fused_marlin_moe(
-            x,
-            layer.w13_qweight,
-            layer.w2_qweight,
-            getattr(layer, "w13_bias", None),
-            getattr(layer, "w2_bias", None),
-            layer.w13_scales,
-            layer.w2_scales,
-            topk_weights,
-            topk_ids,
-            input_global_scale1=getattr(layer, "w13_input_global_scale", None),
-            input_global_scale2=getattr(layer, "w2_input_global_scale", None),
-            quant_type_id=self.quant_type.id,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+        # Use modular kernel
+        assert not self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=layer.activation,
             global_num_experts=layer.global_num_experts,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=layer.expert_map,
-            g_idx1=layer.w13_g_idx,
-            g_idx2=layer.w2_g_idx,
-            sort_indices1=layer.w13_g_idx_sort_indices,
-            sort_indices2=layer.w2_g_idx_sort_indices,
-            workspace=layer.workspace,
-            is_k_full=self.is_k_full,
-            input_dtype=self.input_dtype,
-            inplace=not self.moe.disable_inplace,
+            shared_experts_input=shared_experts_input,
         )
