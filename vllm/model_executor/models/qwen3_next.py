@@ -336,6 +336,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config,
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
+                gqa_interleaved_layout=True,
             )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
