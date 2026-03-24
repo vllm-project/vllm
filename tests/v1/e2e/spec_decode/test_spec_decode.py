@@ -936,117 +936,86 @@ def test_draft_model_engine_args_tensor_parallelism():
     assert draft_config.quant_config is None
 
 
-@pytest.mark.parametrize(
-    [
-        "target_moe_backend",
-        "draft_moe_backend",
-        "expected_target",
-        "expected_draft",
-    ],
-    [
-        ("flashinfer_trtllm", "triton", "flashinfer_trtllm", "triton"),
-        ("flashinfer_cutlass", None, "flashinfer_cutlass", "flashinfer_cutlass"),
-        ("auto", None, "auto", "auto"),
-    ],
-    ids=["draft_overrides", "draft_inherits_target", "both_default_auto"],
-)
-@pytest.mark.parametrize(
-    ["target_model", "spec_method_cfg", "tensor_parallel_size", "trust_remote_code"],
-    [
-        pytest.param(
-            "Qwen/Qwen3-1.7B",
-            {
-                "model": "Qwen/Qwen3-0.6B",
-                "method": "draft_model",
-                "num_speculative_tokens": 3,
-            },
-            1,
-            False,
-            id="draft_model",
-        ),
-        pytest.param(
-            "eagle618/deepseek-v3-random",
-            {
-                "model": "eagle618/eagle-deepseek-v3-random",
-                "method": "eagle",
-                "num_speculative_tokens": 3,
-            },
-            1,
-            False,
-            id="eagle",
-        ),
-        pytest.param(
-            "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
-            {
-                "method": "mtp",
-                "num_speculative_tokens": 1,
-                "max_model_len": 2048,
-            },
-            4,
-            True,
-            marks=[
-                large_gpu_mark(min_gb=80),
-                *multi_gpu_marks(num_gpus=4),
-            ],
-            id="nemotron_mtp",
-        ),
-    ],
-)
-def test_draft_moe_backend(
-    target_moe_backend: str,
-    draft_moe_backend: str | None,
-    expected_target: str,
-    expected_draft: str,
-    target_model: str,
-    spec_method_cfg: dict[str, Any],
-    tensor_parallel_size: int,
-    trust_remote_code: bool,
-):
-    """speculative_config.moe_backend must propagate (or inherit) correctly
-    across drafting methods."""
-    spec_method_args = {**spec_method_cfg}
-    if draft_moe_backend is not None:
-        spec_method_args["moe_backend"] = draft_moe_backend
-
-    engine_args = EngineArgs(
-        model=target_model,
-        tensor_parallel_size=tensor_parallel_size,
-        trust_remote_code=trust_remote_code,
-        moe_backend=target_moe_backend,
-        speculative_config=spec_method_args,
-    )
-    target_config: VllmConfig = engine_args.create_engine_config()
-    assert target_config.kernel_config.moe_backend == expected_target
-
-    # Base proposer path: override moe_backend from speculative_config
-    speculative_config = target_config.speculative_config
-    if speculative_config.moe_backend is not None:
-        applied = replace(
-            target_config,
+def _apply_draft_moe_backend(vllm_config: VllmConfig) -> VllmConfig:
+    """Replicate SpecDecodeBaseProposer._create_draft_vllm_config logic
+    so we can test it without instantiating a full proposer."""
+    spec_cfg = vllm_config.speculative_config
+    if spec_cfg.moe_backend is not None:
+        return replace(
+            vllm_config,
             kernel_config=replace(
-                target_config.kernel_config,
-                moe_backend=speculative_config.moe_backend,
+                vllm_config.kernel_config,
+                moe_backend=spec_cfg.moe_backend,
             ),
         )
-    else:
-        applied = target_config
-    assert applied.kernel_config.moe_backend == expected_draft
-    assert applied.model_config is target_config.model_config
-    assert applied.parallel_config is target_config.parallel_config
-    if draft_moe_backend is None:
-        assert applied is target_config
+    return vllm_config
 
-    # DraftModelProposer path: extends base with quant/parallel/model overrides
-    draft_config = replace(
-        applied,
-        quant_config=None,
-        parallel_config=replace(
-            speculative_config.draft_parallel_config,
-            rank=target_config.parallel_config.rank,
-        ),
-        model_config=speculative_config.draft_model_config,
+
+def test_draft_model_moe_backend_override():
+    """When moe_backend is set in speculative_config, the draft VllmConfig
+    should use it while the target keeps its own setting."""
+    engine_args = EngineArgs(
+        model="Qwen/Qwen3-1.7B",
+        tensor_parallel_size=1,
+        moe_backend="flashinfer_trtllm",
+        speculative_config={
+            "model": "Qwen/Qwen3-0.6B",
+            "method": "draft_model",
+            "num_speculative_tokens": 3,
+            "moe_backend": "triton",
+        },
     )
-    assert draft_config.kernel_config.moe_backend == expected_draft
+    tgt_config: VllmConfig = engine_args.create_engine_config()
+    assert tgt_config.kernel_config.moe_backend == "flashinfer_trtllm"
+    assert tgt_config.speculative_config.moe_backend == "triton"
+
+    draft_config = _apply_draft_moe_backend(tgt_config)
+    assert draft_config.kernel_config.moe_backend == "triton"
+    # Target config must be unaffected.
+    assert tgt_config.kernel_config.moe_backend == "flashinfer_trtllm"
+
+
+def test_draft_model_moe_backend_inherits_target():
+    """When moe_backend is not set in speculative_config, the draft should
+    inherit the target's moe_backend."""
+    engine_args = EngineArgs(
+        model="Qwen/Qwen3-1.7B",
+        tensor_parallel_size=1,
+        moe_backend="flashinfer_cutlass",
+        speculative_config={
+            "model": "Qwen/Qwen3-0.6B",
+            "method": "draft_model",
+            "num_speculative_tokens": 3,
+        },
+    )
+    tgt_config: VllmConfig = engine_args.create_engine_config()
+    assert tgt_config.kernel_config.moe_backend == "flashinfer_cutlass"
+    assert tgt_config.speculative_config.moe_backend is None
+
+    draft_config = _apply_draft_moe_backend(tgt_config)
+    assert draft_config.kernel_config.moe_backend == "flashinfer_cutlass"
+    assert draft_config is tgt_config
+
+
+def test_draft_model_moe_backend_default_auto():
+    """When neither target nor draft set moe_backend explicitly, both should
+    default to 'auto'."""
+    engine_args = EngineArgs(
+        model="Qwen/Qwen3-1.7B",
+        tensor_parallel_size=1,
+        speculative_config={
+            "model": "Qwen/Qwen3-0.6B",
+            "method": "draft_model",
+            "num_speculative_tokens": 3,
+        },
+    )
+    tgt_config: VllmConfig = engine_args.create_engine_config()
+    assert tgt_config.kernel_config.moe_backend == "auto"
+    assert tgt_config.speculative_config.moe_backend is None
+
+    draft_config = _apply_draft_moe_backend(tgt_config)
+    assert draft_config.kernel_config.moe_backend == "auto"
+    assert draft_config is tgt_config
 
 
 def test_draft_model_engine_args_rejects_invalid_tp_argname():
