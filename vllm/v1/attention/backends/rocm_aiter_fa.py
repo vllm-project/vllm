@@ -481,13 +481,9 @@ class AiterFlashAttentionMetadataBuilder(
         ):
             layers = get_layers_from_vllm_config(self.vllm_config, Attention)
             first_layer_name = [k for k in layers][0]
-            kv_cache_shape = (
-                self.vllm_config.compilation_config.static_forward_context[
-                    first_layer_name
-                ]
-                .kv_cache[0]
-                .shape
-            )
+            kv_cache_shape = self.vllm_config.compilation_config.static_forward_context[
+                first_layer_name
+            ].kv_cache.shape
             num_blocks = kv_cache_shape[1]
             self.scale = torch.ones(
                 [num_blocks, self.num_heads_kv, self.block_size],

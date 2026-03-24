@@ -5830,7 +5830,10 @@ class GPUModelRunner(
 
         for layer in self.compilation_config.static_forward_context.values():
             if hasattr(layer, "kv_cache"):
-                layer.kv_cache = []
+                kv_cache = layer.kv_cache
+                layer.kv_cache = (
+                    torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
+                )
 
         gc.collect()
         torch.accelerator.empty_cache()
