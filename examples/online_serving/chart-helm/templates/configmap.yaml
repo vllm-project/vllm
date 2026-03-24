@@ -4,6 +4,8 @@ kind: ConfigMap
 metadata:
   name: "{{ .Release.Name }}-configs"
   namespace: {{ .Release.Namespace }}
+  labels:
+  {{- include "chart.labels" . | nindent 4 }}
 data:
   {{- with .Values.configs }}
   {{- toYaml . | nindent 2 }}

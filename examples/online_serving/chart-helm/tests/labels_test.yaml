@@ -1,0 +1,107 @@
+suite: test label consistency
+templates:
+  - deployment.yaml
+  - service.yaml
+tests:
+  # Deployment selector must use stable selector labels
+  - it: should use app.kubernetes.io selector labels on Deployment
+    template: deployment.yaml
+    asserts:
+      - isNotEmpty:
+          path: spec.selector.matchLabels["app.kubernetes.io/name"]
+      - isNotEmpty:
+          path: spec.selector.matchLabels["app.kubernetes.io/instance"]
+
+  - it: should include selector labels in Deployment pod template labels
+    template: deployment.yaml
+    asserts:
+      - isNotEmpty:
+          path: spec.template.metadata.labels["app.kubernetes.io/name"]
+      - isNotEmpty:
+          path: spec.template.metadata.labels["app.kubernetes.io/instance"]
+
+  # Service selector must match Deployment pod selector labels
+  - it: should use same selector labels on Service as on Deployment
+    template: service.yaml
+    asserts:
+      - isNotEmpty:
+          path: spec.selector["app.kubernetes.io/name"]
+      - isNotEmpty:
+          path: spec.selector["app.kubernetes.io/instance"]
+
+  # Selector labels must be derived from Chart.Name and Release.Name
+  - it: should derive selector labels from chart name and release name
+    release:
+      name: my-release
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/name"]
+          value: chart-vllm
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/instance"]
+          value: my-release
+
+  # Custom user labels must NOT break selectors
+  - it: should keep stable selectors when user changes labels
+    set:
+      labels:
+        environment: "production"
+        team: "ml-infra"
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/name"]
+          value: chart-vllm
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/instance"]
+          value: RELEASE-NAME
+
+  # Custom labels appear in pod metadata but NOT in selector
+  - it: should include custom labels in pod template metadata
+    set:
+      labels:
+        environment: "staging"
+        team: "ml-infra"
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels.environment
+          value: staging
+      - equal:
+          path: spec.template.metadata.labels.team
+          value: ml-infra
+
+  # Empty user labels must not break the chart
+  - it: should render valid Deployment when user labels are empty
+    set:
+      labels: {}
+    template: deployment.yaml
+    asserts:
+      - isKind:
+          of: Deployment
+      - isNotEmpty:
+          path: spec.selector.matchLabels["app.kubernetes.io/name"]
+
+  - it: should render valid Service when user labels are empty
+    set:
+      labels: {}
+    template: service.yaml
+    asserts:
+      - isKind:
+          of: Service
+      - isNotEmpty:
+          path: spec.selector["app.kubernetes.io/name"]
+
+  # Deployment metadata labels include both selector and user labels
+  - it: should include both selector and user labels in Deployment metadata
+    set:
+      labels:
+        environment: "dev"
+    template: deployment.yaml
+    asserts:
+      - isNotEmpty:
+          path: metadata.labels["app.kubernetes.io/name"]
+      - equal:
+          path: metadata.labels.environment
+          value: dev
