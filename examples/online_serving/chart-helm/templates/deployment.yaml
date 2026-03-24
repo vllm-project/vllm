@@ -67,6 +67,10 @@ spec:
           volumeMounts:
           - name: {{ .Release.Name }}-storage
             mountPath: /data
+          {{- if .Values.shm.enabled }}
+          - name: {{ .Release.Name }}-shm
+            mountPath: /dev/shm
+          {{- end }}
 
         {{- with .Values.extraContainers }}
         {{ toYaml . | nindent 8 }}
@@ -106,6 +110,14 @@ spec:
         - name: {{ .Release.Name }}-storage
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-storage-claim     
+        {{- if .Values.shm.enabled }}
+        - name: {{ .Release.Name }}-shm
+          emptyDir:
+            medium: Memory
+            {{- if .Values.shm.size }}
+            sizeLimit: {{ .Values.shm.size | quote }}
+            {{- end }}
+        {{- end }}
 
       {{- with .Values.nodeSelector }}
       nodeSelector:
