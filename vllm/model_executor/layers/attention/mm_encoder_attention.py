@@ -1,13 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+import json
+from pathlib import Path
 
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, maybe_get_oot_by_class
+from vllm.model_executor.layers.quantization.input_quant_fp8 import (
+    QuantFP8,
+    quantize_fp8_pad_head_dim_triton,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    get_fp8_min_max,
+)
 from vllm.model_executor.models.vision import get_vit_attn_backend
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -19,6 +32,56 @@ from vllm.v1.attention.ops.vit_attn_wrappers import (
 )
 
 logger = init_logger(__name__)
+
+_, _FP8_MAX = get_fp8_min_max()  # Platform-aware: 448.0 (e4m3fn) or 240.0 (e4m3fnuz)
+_FP8_AMAX_HISTORY_LEN = 16
+
+
+@functools.cache
+def _load_fp8_scales_file(path: str | None) -> dict[str, dict[str, float]]:
+    """Load per-layer FP8 Q/K/V scales from a JSON file. Results are cached.
+
+    Expected format (flat):
+        {"visual.blocks.0.attn": {"q": 0.012, "k": 0.045, "v": 0.078}, ...}
+
+    Also accepts a nested "layers" wrapper:
+        {"layers": {"visual.blocks.0.attn": {"q": 0.012, ...}, ...}}
+
+    Keys "q_scale"/"k_scale"/"v_scale" are accepted as aliases.
+    All scale values must be positive floats.
+    """
+    if path is None:
+        return {}
+
+    path = str(Path(path).expanduser())
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    # Handle nested "layers" format
+    if "layers" in data and isinstance(data["layers"], dict):
+        data = data["layers"]
+
+    scales: dict[str, dict[str, float]] = {}
+    for layer_name, layer_scales in data.items():
+        if not isinstance(layer_scales, dict):
+            continue
+        q = layer_scales.get("q", layer_scales.get("q_scale"))
+        k = layer_scales.get("k", layer_scales.get("k_scale"))
+        v = layer_scales.get("v", layer_scales.get("v_scale"))
+        if q is not None and k is not None and v is not None:
+            q_f, k_f, v_f = float(q), float(k), float(v)
+            if q_f <= 0 or k_f <= 0 or v_f <= 0:
+                raise ValueError(
+                    f"FP8 scales must be positive, got q={q_f}, "
+                    f"k={k_f}, v={v_f} for layer '{layer_name}'"
+                )
+            scales[layer_name] = {"q": q_f, "k": k_f, "v": v_f}
+
+    logger.info_once(
+        "Loaded FP8 attention scales from %s (%d layers)", path, len(scales)
+    )
+    return scales
+
 
 # Batch buckets for cuDNN graph caching.
 # Graphs use batch size and max sequence length as cache key.
@@ -148,27 +211,47 @@ class MMEncoderAttention(CustomOp):
         hidden_size: int,
         tp_size: int,
         device: torch.device,
+        fp8_padded_hidden_size: int | None = None,
     ) -> torch.Tensor:
         if (oot_class := maybe_get_oot_by_class(cls)) is not cls:
             return oot_class.maybe_recompute_cu_seqlens(  # type: ignore[attr-defined]
-                attn_backend, cu_seqlens, hidden_size, tp_size, device
+                attn_backend,
+                cu_seqlens,
+                hidden_size,
+                tp_size,
+                device,
+                fp8_padded_hidden_size=fp8_padded_hidden_size,
             )
 
         if attn_backend == AttentionBackendEnum.FLASHINFER:
             batch_size = len(cu_seqlens) - 1
-            scale = hidden_size // tp_size
-            cu_seqlens = cu_seqlens * scale
 
-            cu_seqlens_qko = cu_seqlens
-            cu_seqlens_v = cu_seqlens * 3
+            if fp8_padded_hidden_size is not None:
+                # FP8 path: after quantization Q/K/V are each independent
+                # contiguous tensors with stride H * padded_D per token.
+                # All sections use the same element stride.
+                scale = fp8_padded_hidden_size // tp_size
+                cu_seqlens = cu_seqlens * scale
+                cu_seqlens_padded = add_padding_to_seqlens(
+                    cu_seqlens, batch_size, cu_seqlens[-1]
+                )
+                cu_seqlens = np.concatenate([cu_seqlens_padded, cu_seqlens_padded])
+            else:
+                # BF16 path: Q/K/V are non-contiguous views into shared
+                # buffers. V section has 3x stride from interleaved QKV.
+                scale = hidden_size // tp_size
+                cu_seqlens = cu_seqlens * scale
 
-            cu_seqlens_qko = add_padding_to_seqlens(
-                cu_seqlens_qko, batch_size, cu_seqlens_qko[-1]
-            )
-            cu_seqlens_v = add_padding_to_seqlens(
-                cu_seqlens_v, batch_size, cu_seqlens_v[-1]
-            )
-            cu_seqlens = np.concatenate([cu_seqlens_qko, cu_seqlens_v])
+                cu_seqlens_qko = cu_seqlens
+                cu_seqlens_v = cu_seqlens * 3
+
+                cu_seqlens_qko = add_padding_to_seqlens(
+                    cu_seqlens_qko, batch_size, cu_seqlens_qko[-1]
+                )
+                cu_seqlens_v = add_padding_to_seqlens(
+                    cu_seqlens_v, batch_size, cu_seqlens_v[-1]
+                )
+                cu_seqlens = np.concatenate([cu_seqlens_qko, cu_seqlens_v])
 
         cu_seqlens = torch.from_numpy(cu_seqlens).to(device, non_blocking=True)
         return cu_seqlens
@@ -206,6 +289,7 @@ class MMEncoderAttention(CustomOp):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
+        self.dtype = dtype
 
         # Get device-specific vision attention backend.
         self.attn_backend = get_vit_attn_backend(
@@ -229,6 +313,109 @@ class MMEncoderAttention(CustomOp):
 
         logger.info_once(
             f"Using {self.attn_backend} for MMEncoderAttention.", scope="local"
+        )
+
+        # FP8 attention support (currently only FlashInfer cuDNN backend)
+        self.fp8_enabled = False
+        self._fp8_dynamic_scale = False
+        self.fp8_quant: QuantFP8 | None = None
+
+        if envs.VLLM_MM_ENCODER_FP8_ATTN:
+            if self.attn_backend != AttentionBackendEnum.FLASHINFER:
+                raise ValueError(
+                    "VLLM_MM_ENCODER_FP8_ATTN requires the FlashInfer "
+                    "cuDNN backend (FLASHINFER), but the current ViT "
+                    f"attention backend is {self.attn_backend}."
+                )
+            # cuDNN FP8 attention requires backend version >= 9.17.1
+            # (e.g., nvidia-cudnn-cu13 >= 9.18.1.3)
+            _min_cudnn = (9, 17, 1)
+            try:
+                import torch.backends.cudnn as cudnn
+
+                if cudnn.is_available():
+                    ver = cudnn.version()
+                    major = ver // 10000
+                    minor = (ver % 10000) // 100
+                    patch = ver % 100
+                    if (major, minor, patch) < _min_cudnn:
+                        raise ValueError(
+                            "VLLM_MM_ENCODER_FP8_ATTN requires cuDNN >= "
+                            f"{'.'.join(map(str, _min_cudnn))}, but the "
+                            f"current version is {major}.{minor}.{patch}."
+                        )
+            except ImportError:
+                pass
+            self._init_fp8_attention(prefix)
+
+    def _init_fp8_attention(self, layer_name: str) -> None:
+        """Initialize FP8 attention for this layer.
+
+        When a scale file is provided via VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH,
+        static (fixed) scales are loaded.  Otherwise, dynamic scaling is
+        enabled: per-tensor amax values are tracked in a circular history
+        buffer and scales are recomputed each forward pass.
+        """
+        scale_path = envs.VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH
+        all_scales = _load_fp8_scales_file(scale_path)
+
+        if scale_path is None:
+            self._fp8_dynamic_scale = True
+            init_scales = {"q": 1.0, "k": 1.0, "v": 1.0}
+            logger.info_once(
+                "FP8 attention enabled with dynamic scaling "
+                "(no scale file provided). Scales will adapt from "
+                "observed Q/K/V amax values (history_len=%d).",
+                _FP8_AMAX_HISTORY_LEN,
+            )
+        else:
+            layer_scales = all_scales.get(layer_name)
+            if layer_scales is None:
+                raise ValueError(
+                    "FP8 attention enabled but scales not found for layer "
+                    f"'{layer_name}' in {scale_path}. "
+                    f"Available layers: {list(all_scales.keys())}"
+                )
+            init_scales = layer_scales
+
+        # Scale buffers: shape (1, 1, 1, 1) as required by cuDNN.
+        # With dynamic scaling these are updated every forward pass.
+        for attr, key in (
+            ("_fp8_q_scale", "q"),
+            ("_fp8_k_scale", "k"),
+            ("_fp8_v_scale", "v"),
+        ):
+            self.register_buffer(
+                attr,
+                torch.tensor([init_scales[key]], dtype=torch.float32).view(1, 1, 1, 1),
+            )
+
+        # Circular amax history buffers for dynamic scaling.
+        # Non-persistent so they are not saved in state_dict / checkpoints.
+        if self._fp8_dynamic_scale:
+            for attr in ("_fp8_q_amax", "_fp8_k_amax", "_fp8_v_amax"):
+                self.register_buffer(
+                    attr,
+                    torch.zeros(_FP8_AMAX_HISTORY_LEN, dtype=torch.float32),
+                    persistent=False,
+                )
+            self._fp8_amax_pos = 0
+
+        self.fp8_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+        self.fp8_enabled = True
+
+        # With dynamic scaling the scale will change, so never skip scaling.
+        self.skip_scale_q = not self._fp8_dynamic_scale and init_scales["q"] == 1.0
+        self.skip_scale_k = not self._fp8_dynamic_scale and init_scales["k"] == 1.0
+        self.skip_scale_v = not self._fp8_dynamic_scale and init_scales["v"] == 1.0
+
+        logger.debug(
+            "FP8 attention enabled for %s: q=%.4f, k=%.4f, v=%.4f%s",
+            layer_name if layer_name else "MMEncoderAttention",
+            init_scales["q"],
+            init_scales["k"],
+            init_scales["v"],
+            " (dynamic scaling)" if self._fp8_dynamic_scale else "",
         )
 
     @classmethod
@@ -355,6 +542,66 @@ class MMEncoderAttention(CustomOp):
             output = output.reshape(bsz, q_len, -1)
         return output
 
+    def _quantize_to_fp8(
+        self,
+        tensor: torch.Tensor,
+        scale: torch.Tensor,
+        skip_scale: bool = False,
+    ) -> torch.Tensor:
+        """Quantize a 3D/4D tensor to FP8.
+
+        Accepts (S, H, D) or (B, S, H, D) input. Uses QuantFP8 CustomOp
+        when head_dim is aligned to 16; otherwise falls back to a
+        stride-aware Triton kernel that pads head_dim to a multiple of 16.
+        """
+        assert self.fp8_quant is not None
+        orig_shape = tensor.shape
+        head_dim = orig_shape[-1]
+
+        if head_dim % 16 == 0:
+            if skip_scale:
+                return tensor.to(current_platform.fp8_dtype())
+
+            # QuantFP8 expects 2D: (total_tokens, num_heads * head_dim)
+            # Flatten all dims except the last two (H, D) into one.
+            total_tokens = tensor[..., 0, 0].numel()
+            tensor_2d = tensor.reshape(total_tokens, -1)
+            fp8_tensor, _ = self.fp8_quant(tensor_2d, scale=scale)
+            return fp8_tensor.reshape(orig_shape)
+
+        # Fall back to Triton kernel for padding head_dim to a multiple of 16
+        return quantize_fp8_pad_head_dim_triton(tensor, scale, skip_scale=skip_scale)
+
+    @torch.no_grad()
+    def _record_amax_and_update_scales(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> None:
+        """Record Q/K/V amax into circular history and recompute scales.
+
+        All work stays on GPU with no device-to-host sync. The Python-side
+        history position counter is mutated, so this method must NOT be
+        called inside CUDA graph capture/replay. When CUDA graphs are
+        used for the encoder, dynamic scaling should be disabled by
+        providing a static scale file via VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH,
+        or using the default scales.
+        """
+        pos = self._fp8_amax_pos
+        self._fp8_amax_pos = (pos + 1) % _FP8_AMAX_HISTORY_LEN
+
+        for tensor, amax_buf, scale_buf in (
+            (query, self._fp8_q_amax, self._fp8_q_scale),
+            (key, self._fp8_k_amax, self._fp8_k_scale),
+            (value, self._fp8_v_amax, self._fp8_v_scale),
+        ):
+            amax_buf[pos] = tensor.amax()
+            max_amax = amax_buf.max()
+            scale_buf.fill_(
+                torch.clamp(max_amax, min=torch.finfo(torch.float32).tiny) / _FP8_MAX
+            )
+
     def _forward_flashinfer(
         self,
         query: torch.Tensor,
@@ -365,7 +612,23 @@ class MMEncoderAttention(CustomOp):
         sequence_lengths: torch.Tensor
         | None = None,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
-        return vit_flashinfer_wrapper(
+        if self.fp8_enabled:
+            assert self.fp8_quant is not None
+
+            if self._fp8_dynamic_scale:
+                self._record_amax_and_update_scales(query, key, value)
+
+            query = self._quantize_to_fp8(
+                query, self._fp8_q_scale, skip_scale=self.skip_scale_q
+            )
+            key = self._quantize_to_fp8(
+                key, self._fp8_k_scale, skip_scale=self.skip_scale_k
+            )
+            value = self._quantize_to_fp8(
+                value, self._fp8_v_scale, skip_scale=self.skip_scale_v
+            )
+
+        output = vit_flashinfer_wrapper(
             q=query,
             k=key,
             v=value,
@@ -374,7 +637,17 @@ class MMEncoderAttention(CustomOp):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
+            q_scale=self._fp8_q_scale if self.fp8_enabled else None,
+            k_scale=self._fp8_k_scale if self.fp8_enabled else None,
+            v_scale=self._fp8_v_scale if self.fp8_enabled else None,
+            o_data_type=self.dtype if self.fp8_enabled else None,
         )
+
+        # Un-pad head dimension if it was padded during FP8 quantization
+        if self.fp8_enabled and output.shape[-1] != self.head_size:
+            output = output[..., : self.head_size].contiguous()
+
+        return output
 
     def forward_native(
         self,

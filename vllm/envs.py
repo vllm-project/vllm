@@ -162,6 +162,8 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
+    VLLM_MM_ENCODER_FP8_ATTN: bool = False
+    VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH: str | None = None
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
@@ -1224,6 +1226,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER", "1"))
+    ),
+    # Controls whether to use FP8 attention for multimodal encoder (e.g., ViT)
+    "VLLM_MM_ENCODER_FP8_ATTN": lambda: bool(
+        int(os.getenv("VLLM_MM_ENCODER_FP8_ATTN", "0"))
+    ),
+    # Path to JSON file containing FP8 attention scales for multimodal encoder
+    "VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH": lambda: os.getenv(
+        "VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH", None
     ),
     # Allow use of FlashInfer BF16 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP16": lambda: bool(

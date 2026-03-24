@@ -48,6 +48,7 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 )
 from transformers.video_utils import VideoMetadata
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -365,6 +366,17 @@ class Qwen3_VisionTransformer(nn.Module):
 
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
+
+        # When FP8 attention is enabled and head_dim is not a multiple of 16,
+        # the quantization kernel pads head_dim (e.g. 72 -> 80). Store the
+        # padded hidden_size so prepare_encoder_metadata can produce
+        # element offsets that match the contiguous FP8 tensor strides.
+        self.fp8_vit_attn = envs.VLLM_MM_ENCODER_FP8_ATTN
+        if self.fp8_vit_attn and head_dim % 16 != 0:
+            self.fp8_padded_hidden_size = self.num_heads * round_up(head_dim, 16)
+        else:
+            self.fp8_padded_hidden_size = None
+
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
             max_position=8192,
@@ -609,6 +621,7 @@ class Qwen3_VisionTransformer(nn.Module):
             self.hidden_size,
             self.tp_size,
             device,
+            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
         )
 
         return metadata
