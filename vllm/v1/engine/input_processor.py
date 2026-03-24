@@ -99,6 +99,16 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
+
+            if (
+                params.thinking_token_budget is not None
+                and self.vllm_config.reasoning_config is None
+            ):
+                raise ValueError(
+                    "thinking_token_budget is set but reasoning_config is "
+                    "not configured. Please set --reasoning-config to use "
+                    "thinking_token_budget."
+                )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
