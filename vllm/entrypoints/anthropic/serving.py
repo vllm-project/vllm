@@ -72,6 +72,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         tool_parser: str | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -87,6 +88,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             tool_parser=tool_parser,
             enable_prompt_tokens_details=enable_prompt_tokens_details,
             enable_force_include_usage=enable_force_include_usage,
+            default_chat_template_kwargs=default_chat_template_kwargs,
         )
         self.stop_reason_map = {
             "stop": "end_turn",
