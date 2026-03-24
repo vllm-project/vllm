@@ -277,6 +277,7 @@ class OpenAIServingRender:
         )
 
         if not self.use_harmony:
+            # Common case: validate the chat template once for the whole batch.
             error_check_ret = self.validate_chat_template(
                 request_chat_template=request.chat_template,
                 chat_template_kwargs=request.chat_template_kwargs,
@@ -290,6 +291,7 @@ class OpenAIServingRender:
 
         for messages in request.get_conversations():
             if self.use_harmony:
+                # For GPT-OSS.
                 conversation, engine_prompts = self._make_request_with_harmony(
                     request, should_include_tools=tool_dicts is not None
                 )

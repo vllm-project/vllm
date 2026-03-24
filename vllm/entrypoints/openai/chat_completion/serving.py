@@ -186,8 +186,7 @@ class OpenAIServingChat(OpenAIServing):
         engine-aware checks (LoRA model validation, engine health).
 
         Returns:
-            A tuple of (all_conversations, engine_prompts) on success — always
-            a list of conversations even for single requests — or an
+            A tuple of (all_conversations, engine_prompts) on success
             ErrorResponse on failure.
         """
         error_check_ret = await self._check_model(request)
@@ -1300,7 +1299,7 @@ class OpenAIServingChat(OpenAIServing):
 
         Fans out N generators (one per conversation in the batch), collects
         the final output for each, and assembles a single
-        ``ChatCompletionResponse`` whose ``choices`` are indexed 0…N-1.
+        ``ChatCompletionResponse`` whose ``choices`` are indexed 0,...,N-1.
 
         Tool-use and streaming are rejected upstream by the
         ``check_batch_mode`` validator, so neither needs to be handled here.
@@ -1397,6 +1396,8 @@ class OpenAIServingChat(OpenAIServing):
             total_tokens=total_prompt_tokens + total_completion_tokens,
         )
         request_metadata.final_usage_info = usage
+
+        choices.sort(key=lambda c: c.index)
 
         return ChatCompletionResponse(
             id=request_id,
