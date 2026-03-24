@@ -767,6 +767,19 @@ class VllmConfig:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
 
         if (
+            self.speculative_config is not None
+            and self.scheduler_config.async_scheduling
+            and self.model_config is not None
+            and not self.model_config.disable_cascade_attn
+        ):
+            logger.warning_once(
+                "Disabling cascade attention (not yet compatible with "
+                "async speculative decoding).",
+                scope="local",
+            )
+            self.model_config.disable_cascade_attn = True
+
+        if (
             self.model_config is not None
             and self.model_config.multimodal_config is not None
             and self.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"
@@ -1100,11 +1113,9 @@ class VllmConfig:
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
-        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
-
         if (
             self.model_config
-            and vllm_is_batch_invariant()
+            and envs.VLLM_BATCH_INVARIANT
             and not self.model_config.disable_cascade_attn
         ):
             self.model_config.disable_cascade_attn = True
