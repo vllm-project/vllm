@@ -210,8 +210,6 @@ void compute_slot_mapping_kernel_impl(const torch::Tensor query_start_loc,
     int32_t token_start_idx = query_start_loc_ptr[req_idx];
     int32_t token_end_idx = query_start_loc_ptr[req_idx + 1];
     int32_t token_num = token_end_idx - token_start_idx;
-    const int32_t* __restrict__ curr_query_start_loc_ptr =
-        query_start_loc_ptr + token_start_idx;
     const int64_t* __restrict__ curr_position_ptr =
         positions_ptr + token_start_idx;
     int64_t* __restrict__ curr_slot_mapping_ptr =
