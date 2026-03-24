@@ -13,6 +13,7 @@ from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
+from multiprocessing.queues import Queue
 from typing import Any, TypeVar, cast
 
 import msgspec
@@ -59,6 +60,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
     EngineZmqAddresses,
@@ -119,18 +121,7 @@ class EngineCore:
             self._eep_scale_up_before_kv_init()
 
         # Setup KV Caches and update CacheConfig after profiling.
-        num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
-            vllm_config
-        )
-        if kv_cache_config.kv_cache_groups:
-            vllm_config.cache_config.block_size = min(
-                g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
-            )
-        vllm_config.validate_block_size()
-        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
-        vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
-        self.collective_rpc("initialize_cache", args=(num_gpu_blocks, num_cpu_blocks))
-
+        kv_cache_config = self._initialize_kv_caches(vllm_config)
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
@@ -161,7 +152,7 @@ class EngineCore:
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
-        self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
+        mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(
             vllm_config
         )
@@ -235,9 +226,7 @@ class EngineCore:
         enable_envs_cache()
 
     @instrument(span_name="Prepare model")
-    def _initialize_kv_caches(
-        self, vllm_config: VllmConfig
-    ) -> tuple[int, int, KVCacheConfig]:
+    def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
 
         # Get all kv cache needed by the model
@@ -278,8 +267,14 @@ class EngineCore:
             self.collective_rpc("update_max_model_len", args=(max_model_len_after,))
 
         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
-        num_gpu_blocks = scheduler_kv_cache_config.num_blocks
-        num_cpu_blocks = 0
+        vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
+        kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
+        if kv_cache_groups:
+            vllm_config.cache_config.block_size = min(
+                g.kv_cache_spec.block_size for g in kv_cache_groups
+            )
+
+        vllm_config.validate_block_size()
 
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
@@ -290,7 +285,7 @@ class EngineCore:
             elapsed,
             scope="local",
         )
-        return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
+        return scheduler_kv_cache_config
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks
@@ -452,9 +447,10 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
-            exec_future = self.model_executor.execute_model(
-                scheduler_output, non_block=True
-            )
+            with self.log_error_detail(scheduler_output):
+                exec_future = self.model_executor.execute_model(
+                    scheduler_output, non_block=True
+                )
             if self.is_ec_consumer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
@@ -794,6 +790,7 @@ class EngineCoreProc(EngineCore):
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
+        tensor_queue: Queue | None = None,
         *,
         engine_index: int = 0,
     ):
@@ -808,6 +805,12 @@ class EngineCoreProc(EngineCore):
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
 
+        # Receiver for tensor IPC
+        self.tensor_ipc_receiver: TensorIpcReceiver | None = None
+        if tensor_queue is not None:
+            self.tensor_ipc_receiver = TensorIpcReceiver(tensor_queue)
+            logger.info("Using tensor IPC queue for multimodal tensor sharing")
+
         with self._perform_handshakes(
             handshake_address,
             identity,
@@ -815,8 +818,6 @@ class EngineCoreProc(EngineCore):
             vllm_config,
             client_handshake_address,
         ) as addresses:
-            self.client_count = len(addresses.outputs)
-
             # Set up data parallel environment.
             self.has_coordinator = addresses.coordinator_output is not None
             self.frontend_stats_publish_address = (
@@ -1048,19 +1049,11 @@ class EngineCoreProc(EngineCore):
             data_parallel = parallel_config.data_parallel_size > 1 or dp_rank > 0
             if data_parallel:
                 parallel_config.data_parallel_rank_local = local_dp_rank
-                maybe_init_worker_tracer(
-                    instrumenting_module_name="vllm.engine_core",
-                    process_kind="engine_core",
-                    process_name=f"EngineCore_DP{dp_rank}",
-                )
-                set_process_title("EngineCore", f"DP{dp_rank}")
+                process_title = f"EngineCore_DP{dp_rank}"
             else:
-                maybe_init_worker_tracer(
-                    instrumenting_module_name="vllm.engine_core",
-                    process_kind="engine_core",
-                    process_name="EngineCore",
-                )
-                set_process_title("EngineCore")
+                process_title = "EngineCore"
+            set_process_title(process_title)
+            maybe_init_worker_tracer("vllm.engine_core", "engine_core", process_title)
             decorate_logs()
 
             if data_parallel and vllm_config.kv_transfer_config is not None:
@@ -1356,9 +1349,11 @@ class EngineCoreProc(EngineCore):
     ):
         """Input socket IO thread."""
 
-        # Msgpack serialization decoding.
-        add_request_decoder = MsgpackDecoder(EngineCoreRequest)
-        generic_decoder = MsgpackDecoder()
+        # Msgpack serialization decoding with optional tensor IPC receiver.
+        add_request_decoder = MsgpackDecoder(
+            EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
+        )
+        generic_decoder = MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver)
 
         with ExitStack() as stack, zmq.Context() as ctx:
             input_sockets = [
@@ -1434,10 +1429,7 @@ class EngineCoreProc(EngineCore):
                     self.input_queue.put_nowait((request_type, request))
 
     def process_output_sockets(
-        self,
-        output_paths: list[str],
-        coord_output_path: str | None,
-        engine_index: int,
+        self, output_paths: list[str], coord_output_path: str | None, engine_index: int
     ):
         """Output socket IO thread."""
 
@@ -1596,6 +1588,7 @@ class DPEngineCoreProc(EngineCoreProc):
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
+        tensor_queue: Queue | None = None,
     ):
         assert vllm_config.model_config.is_moe, (
             "DPEngineCoreProc should only be used for MoE models"
@@ -1621,6 +1614,7 @@ class DPEngineCoreProc(EngineCoreProc):
             log_stats,
             client_handshake_address,
             engine_index=dp_rank,
+            tensor_queue=tensor_queue,
         )
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
@@ -1648,7 +1642,11 @@ class DPEngineCoreProc(EngineCoreProc):
         if self.has_coordinator and request_wave != self.current_wave:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
-            elif not self.engines_running:
+            elif (
+                not self.engines_running
+                and self.scheduler.pause_state == PauseState.UNPAUSED
+            ):
+                self.engines_running = True
                 # Request received for an already-completed wave, notify
                 # front-end that we need to start the next one.
                 self.output_queue.put_nowait(
@@ -1706,6 +1704,8 @@ class DPEngineCoreProc(EngineCoreProc):
             if self.eep_scaling_state is not None:
                 _ = self.eep_scaling_state.progress()
                 if self.eep_scaling_state.is_complete():
+                    if self.eep_scaling_state.worker_type == "removing":
+                        raise SystemExit
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
 
@@ -1783,6 +1783,7 @@ class DPEngineCoreProc(EngineCoreProc):
         new_parallel_config._data_parallel_master_port_list = (
             reconfig_request.new_data_parallel_master_port_list
         )
+        new_parallel_config._coord_store_port = reconfig_request.coord_store_port
 
         is_scale_down = reconfig_request.new_data_parallel_size < old_dp_size
         is_shutdown = (
@@ -1868,20 +1869,7 @@ class DPEngineCoreProc(EngineCoreProc):
             scale_type="scale_up",
             reconfig_request=None,
         )
-        self.model_executor.collective_rpc("init_device")
-        self.model_executor.collective_rpc("load_model")
-        self._eep_send_engine_core_notification(
-            EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY
-        )
-        self.model_executor.collective_rpc(
-            "elastic_ep_execute", args=("receive_weights",)
-        )
-        self.available_gpu_memory_for_kv_cache = (
-            ParallelConfig.sync_kv_cache_memory_size(self.dp_group, -1)
-        )
-        self.model_executor.collective_rpc(
-            "elastic_ep_execute", args=("prepare_new_worker",)
-        )
+        self.eep_scaling_state.run_pre_kv_init_states()
         self.process_input_queue_block = False
 
 

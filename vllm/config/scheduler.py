@@ -203,7 +203,7 @@ class SchedulerConfig:
         logger.warning_once(
             "Using custom scheduler class %s. This scheduler interface is "
             "not public and compatibility may not be maintained.",
-            self.scheduler_cls,
+            self.scheduler_cls,  # type: ignore[arg-type]
         )
         if not isinstance(self.scheduler_cls, str):
             return cast(type["SchedulerInterface"], self.scheduler_cls)
@@ -255,9 +255,10 @@ class SchedulerConfig:
             )
 
         if self.enable_chunked_prefill:
-            logger.info(
+            logger.info_once(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
                 self.max_num_batched_tokens,
+                scope="local",
             )
 
         if self.max_num_partial_prefills > 1:

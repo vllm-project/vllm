@@ -61,7 +61,8 @@ class XPUPlatform(Platform):
 
         dtype = attn_selector_config.dtype
         if attn_selector_config.use_sparse:
-            raise NotImplementedError("Sparse Attention is not supported on XPU.")
+            logger.info_once("Using XPU MLA Sparse backend.")
+            return AttentionBackendEnum.XPU_MLA_SPARSE.get_path()
         if attn_selector_config.use_mla:
             logger.info_once("Using Triton MLA backend on V1 engine.")
             return AttentionBackendEnum.TRITON_MLA.get_path()
@@ -166,7 +167,7 @@ class XPUPlatform(Platform):
             cache_config.block_size = 64
 
         # lazy import to avoid circular import
-        from vllm.config import CompilationMode, CUDAGraphMode
+        from vllm.config import CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
         if compilation_config.compile_sizes is None:
@@ -199,8 +200,6 @@ class XPUPlatform(Platform):
                     "falling back to PIECEWISE graph mode on XPU platform."
                 )
 
-        if vllm_config.lora_config is not None:
-            compilation_config.mode = CompilationMode.NONE
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         # Only override worker_cls if it's still the default "auto"

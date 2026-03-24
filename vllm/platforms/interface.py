@@ -167,6 +167,9 @@ class Platform:
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
 
+    def is_zen_cpu(self) -> bool:
+        return False
+
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
 
@@ -638,6 +641,11 @@ class Platform:
         """Raises if this request is unsupported on this platform"""
 
     def __getattr__(self, key: str):
+        # Pickle checks dunder methods like __getstate__. If we return None
+        # for them, pickle treats it like a real value and tries to call it.
+        if key.startswith("__") and key.endswith("__"):
+            raise AttributeError(key)
+
         device = getattr(torch, self.device_type, None)
         if device is not None and hasattr(device, key):
             attr = getattr(device, key)
@@ -701,6 +709,13 @@ class Platform:
     def support_static_graph_mode(cls) -> bool:
         """
         Returns if the graph mode is supported by the current platform.
+        """
+        return False
+
+    @classmethod
+    def support_deep_gemm(cls) -> bool:
+        """
+        Returns if DeepGEMM is supported by the current platform.
         """
         return False
 
