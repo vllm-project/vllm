@@ -28,6 +28,10 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoeWeightScaleSupported,
     UnquantizedFusedMoEMethod,
 )
+from vllm.model_executor.layers.fused_moe.oracle.marlin import (
+    GptqMarlinMoeBackend,
+    select_gptq_marlin_moe_backend,
+)
 from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
@@ -510,6 +514,10 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         self.input_dtype = None
         self.use_marlin = True
 
+        self.gptq_marlin_backend, self.experts_cls = select_gptq_marlin_moe_backend(
+            moe, quant_config.weight_bits
+        )
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -800,12 +808,12 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     def _setup_kernel(self, layer: FusedMoE) -> None:
         """Build the FusedMoEKernel for this layer.
 
-        Skipped for 8-bit weights, which are not supported by the modular
-        Marlin kernel.  In that case ``self.moe_kernel`` stays ``None`` and
-        the legacy ``fused_marlin_moe()`` path is used in ``apply()``.
+        Skipped when ``gptq_marlin_backend`` is ``NONE`` (e.g. 8-bit weights,
+        which are not supported by the modular Marlin kernel).  In that case
+        ``self.moe_kernel`` stays ``None`` and the legacy
+        ``fused_marlin_moe()`` path is used in ``apply()``.
         """
-        # 8-bit weights are not supported by the modular marlin kernel.
-        if self.quant_config.weight_bits == 8:
+        if self.gptq_marlin_backend == GptqMarlinMoeBackend.NONE:
             return
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
