@@ -5,12 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
-try:
-    import vllm_xpu_kernels._C
-    import vllm_xpu_kernels._C_cache_ops
-    import vllm_xpu_kernels._xpu_C
-except ImportError:
-    pass
+
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -259,119 +254,11 @@ class xpu_ops:
         quant_block_size: int,
         scale_fmt: str | None,
     ) -> None:
-        if hasattr(torch.ops, "_C_cache_ops") and hasattr(
-            torch.ops._C_cache_ops, "indexer_k_quant_and_cache"
-        ):
-            if scale_fmt is None:
-                scale_fmt = "fp8e4m3"
-            torch.ops._C_cache_ops.indexer_k_quant_and_cache(
-                k, kv_cache, slot_mapping, quant_block_size, scale_fmt
-            )
-            return
-
-        head_dim = k.shape[-1]
-        k = k.view(-1, head_dim)  # [total_tokens, head_dim]
-
-        def group_quant_torch(
-            x: torch.Tensor,
-            group_size: int,
-            eps: float = 1e-10,
-            dtype: torch.dtype | None = None,
-            column_major_scales: bool = False,
-            out_q: torch.Tensor | None = None,
-            use_ue8m0: bool | None = None,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            if use_ue8m0 is None:
-                # Default fallback - could import is_deep_gemm_e8m0_used if needed
-                use_ue8m0 = False
-
-            if dtype is None:
-                dtype = current_platform.fp8_dtype()
-
-            # Validate inputs
-            assert x.shape[-1] % group_size == 0, (
-                f"Last dimension {x.shape[-1]} must be divisible by "
-                f"group_size {group_size}"
-            )
-            assert x.stride(-1) == 1, "Input tensor groups must be contiguous"
-
-            # Prepare output tensor
-            if out_q is None:
-                x_q = torch.empty_like(x, dtype=dtype)
-            else:
-                assert out_q.shape == x.shape
-                x_q = out_q
-
-            # Reshape input for group processing
-            # Original shape: (..., last_dim)
-            # Target shape: (..., num_groups, group_size)
-            original_shape = x.shape
-            num_groups = original_shape[-1] // group_size
-
-            # Reshape to separate groups
-            group_shape = original_shape[:-1] + (num_groups, group_size)
-            x_grouped = x.view(group_shape)
-
-            # Compute per-group absolute maximum values
-            # Shape: (..., num_groups)
-            abs_max = torch.amax(torch.abs(x_grouped), dim=-1, keepdim=False)
-            abs_max = torch.maximum(
-                abs_max, torch.tensor(eps, device=x.device, dtype=x.dtype)
-            )
-
-            # Compute scales
-            FP8_MAX = torch.finfo(dtype).max
-            FP8_MIN = torch.finfo(dtype).min
-            scale_raw = abs_max / FP8_MAX
-
-            if use_ue8m0:
-                # For UE8M0 format, scales must be powers of 2
-                scales = torch.pow(2.0, torch.ceil(torch.log2(scale_raw)))
-            else:
-                scales = scale_raw
-
-            # Expand scales for broadcasting with grouped data
-            # Shape: (..., num_groups, 1)
-            scales_expanded = scales.unsqueeze(-1)
-
-            # Quantize the grouped data
-            x_scaled = x_grouped / scales_expanded
-            x_clamped = torch.clamp(x_scaled, FP8_MIN, FP8_MAX)
-            x_quantized = x_clamped.to(dtype)
-
-            # Reshape back to original shape
-            x_q.copy_(x_quantized.view(original_shape))
-
-            # Prepare scales tensor in requested format
-            if column_major_scales:
-                # Column-major: (num_groups,) + batch_dims
-                # Transpose the scales to put group dimension first
-                scales_shape = (num_groups,) + original_shape[:-1]
-                x_s = scales.permute(-1, *range(len(original_shape) - 1))
-                x_s = x_s.contiguous().view(scales_shape)
-            else:
-                # Row-major: batch_dims + (num_groups,)
-                x_s = scales.contiguous()
-
-            # Ensure scales are float32
-            return x_q, x_s.float()
-
-        k_fp8, k_scale = group_quant_torch(
-            k,
-            group_size=quant_block_size,
-            column_major_scales=False,
-            use_ue8m0=(scale_fmt == "ue8m0"),
+        if scale_fmt is None:
+            scale_fmt = "fp8e4m3"
+        torch.ops._C_cache_ops.indexer_k_quant_and_cache(
+            k, kv_cache, slot_mapping, quant_block_size, scale_fmt
         )
-
-        k_fp8_bytes = k_fp8.view(-1, head_dim).view(torch.uint8)
-        scale_bytes = k_scale.view(torch.uint8).view(-1, 4)
-        k = torch.cat(
-            [k_fp8_bytes, scale_bytes], dim=-1
-        )  # [total_tokens, head_dim + 4]
-
-        slot_mapping = slot_mapping.flatten()
-        # kv_cache: [num_block, block_size, head_dim + 4]
-        kv_cache.view(-1, kv_cache.shape[-1]).index_copy_(0, slot_mapping, k)
 
     @staticmethod
     def cp_gather_indexer_k_quant_cache(
@@ -455,33 +342,15 @@ class xpu_ops:
         strdide1: int,
         topk_tokens: int,
     ) -> None:
-        if hasattr(torch.ops, "_C") and hasattr(
-            torch.ops._C, "top_k_per_row_prefill"
-        ):
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                cu_seqlen_ks,
-                cu_seqlen_ke,
-                raw_topk_indices,
-                num_rows,
-                stride0,
-                strdide1,
-                topk_tokens,
-            )
-            return
-
-        real_topk = min(topk_tokens, logits.shape[-1])
-        topk_indices = logits.topk(real_topk, dim=-1)[1].to(torch.int32)
-        topk_indices -= cu_seqlen_ks[:, None]
-        mask_lo = topk_indices >= 0
-        mask_hi = topk_indices - (cu_seqlen_ke - cu_seqlen_ks)[:, None] < 0
-        mask = torch.full_like(
-            topk_indices, False, dtype=torch.bool, device=topk_indices.device
-        )
-        mask = mask_lo & mask_hi
-        topk_indices.masked_fill_(~mask, -1)
-        raw_topk_indices[: topk_indices.shape[0], : topk_indices.shape[1]] = (
-            topk_indices
+        torch.ops._C.top_k_per_row_prefill(
+            logits,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            raw_topk_indices,
+            num_rows,
+            stride0,
+            strdide1,
+            topk_tokens,
         )
 
     @staticmethod
@@ -495,45 +364,15 @@ class xpu_ops:
         stride1: int,
         topk_tokens: int,
     ) -> None:
-        if hasattr(torch.ops, "_C") and hasattr(
-            torch.ops._C, "top_k_per_row_decode"
-        ):
-            torch.ops._C.top_k_per_row_decode(
-                logits,
-                next_n,
-                seq_lens,
-                raw_topk_indices,
-                num_rows,
-                stride0,
-                stride1,
-                topk_tokens,
-            )
-            return
-
-        device = logits.device
-        batch_size = seq_lens.size(0)
-        # padded query len
-        padded_num_tokens = batch_size * next_n
-        positions = (
-            torch.arange(logits.shape[-1], device=device)
-            .unsqueeze(0)
-            .expand(batch_size * next_n, -1)
-        )
-        row_indices = torch.arange(padded_num_tokens, device=device) // next_n
-        next_n_offset = torch.arange(padded_num_tokens, device=device) % next_n
-        index_end_pos = (seq_lens[row_indices] - next_n + next_n_offset).unsqueeze(1)
-        # index_end_pos: [B * N, 1]
-        mask = positions <= index_end_pos
-        # mask: [B * N, L]
-        logits = logits.masked_fill(~mask, float("-inf"))
-        real_topk = min(topk_tokens, logits.shape[-1])
-        topk_indices = logits.topk(real_topk, dim=-1)[1].to(torch.int32)  # [B * N, K]
-        # ensure we don't set indices for the top k
-        # that is out of range(masked already)
-        # this will happen if context length is shorter than K
-        topk_indices[topk_indices > index_end_pos] = -1
-        raw_topk_indices[: topk_indices.shape[0], : topk_indices.shape[1]] = (
-            topk_indices
+        torch.ops._C.top_k_per_row_decode(
+            logits,
+            next_n,
+            seq_lens,
+            raw_topk_indices,
+            num_rows,
+            stride0,
+            stride1,
+            topk_tokens,
         )
 
     @staticmethod

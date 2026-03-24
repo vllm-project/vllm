@@ -136,28 +136,16 @@ def sparse_attn_indexer(
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
 
-            if current_platform.is_xpu():
-                ops.top_k_per_row_prefill(
-                    logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
-            else:
-                torch.ops._C.top_k_per_row_prefill(
-                    logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
+            torch.ops._C.top_k_per_row_prefill(
+                logits,
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
 
             # Compute lengths from row spans
             # lengths = (chunk.cu_seqlen_ke - chunk.cu_seqlen_ks).to(torch.int32)
@@ -233,28 +221,16 @@ def sparse_attn_indexer(
                 None,
             )
         else:
-            if current_platform.is_xpu():
-                ops.top_k_per_row_decode(
-                    logits,
-                    next_n,
-                    decode_metadata.seq_lens,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
-            else:
-                torch.ops._C.top_k_per_row_decode(
-                    logits,
-                    next_n,
-                    decode_metadata.seq_lens,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
+            torch.ops._C.top_k_per_row_decode(
+                logits,
+                next_n,
+                decode_metadata.seq_lens,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
