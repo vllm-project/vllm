@@ -5,11 +5,11 @@ import asyncio
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
-from typing import Final
+from typing import Any, Final
 
 from fastapi import Request
 from openai.types.responses import (
@@ -46,6 +46,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    get_tool_call_id_type,
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import ToolServer
@@ -86,6 +87,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseCompletedEvent,
     ResponseCreatedEvent,
     ResponseInProgressEvent,
+    ResponseInputOutputItem,
     ResponseInputOutputMessage,
     ResponseReasoningPartAddedEvent,
     ResponseReasoningPartDoneEvent,
@@ -105,16 +107,19 @@ from vllm.entrypoints.openai.responses.utils import (
     construct_tool_dicts,
     extract_tool_types,
 )
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import ProcessorInputs, token_inputs
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
+from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 from vllm.parser import ParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers import ToolParser
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
@@ -165,6 +170,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         engine_client: EngineClient,
         models: OpenAIServingModels,
+        openai_serving_render: OpenAIServingRender,
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
@@ -185,6 +191,7 @@ class OpenAIServingResponses(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
+        self.openai_serving_render = openai_serving_render
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.enable_log_outputs = enable_log_outputs
@@ -235,15 +242,7 @@ class OpenAIServingResponses(OpenAIServing):
                 get_stop_tokens_for_assistant_actions()
             )
 
-        # Handle tool call ID type for Kimi K2 (supporting test mocking via overrides)
-        hf_overrides = getattr(self.model_config, "hf_overrides", None)
-        if self.model_config.hf_text_config.model_type == "kimi_k2" or (
-            isinstance(hf_overrides, dict)
-            and hf_overrides.get("model_type") == "kimi_k2"
-        ):
-            self.tool_call_id_type = "kimi_k2"
-        else:
-            self.tool_call_id_type = "random"
+        self.tool_call_id_type = get_tool_call_id_type(self.model_config)
 
         self.enable_auto_tools = enable_auto_tools
         # HACK(woosuk): This is a hack. We should use a better store.
@@ -587,7 +586,7 @@ class OpenAIServingResponses(OpenAIServing):
             prev_response_output=prev_response.output if prev_response else None,
         )
 
-        _, engine_prompts = await self._preprocess_chat(
+        _, engine_prompts = await self.openai_serving_render.preprocess_chat(
             request,
             messages,
             default_template=self.chat_template,
@@ -597,6 +596,109 @@ class OpenAIServingResponses(OpenAIServing):
             tool_parser=self.parser.tool_parser_cls if self.parser else None,
         )
         return messages, engine_prompts
+
+    async def _render_next_turn(
+        self,
+        request: ResponsesRequest,
+        messages: list[ResponseInputOutputItem],
+        tool_dicts: list[dict[str, Any]] | None,
+        tool_parser: type[ToolParser] | None,
+        chat_template: str | None,
+        chat_template_content_format: ChatTemplateContentFormatOption,
+    ):
+        new_messages = construct_input_messages(
+            request_input=messages,
+        )
+
+        _, engine_prompts = await self.openai_serving_render.preprocess_chat(
+            request,
+            new_messages,
+            default_template=chat_template,
+            default_template_content_format=chat_template_content_format,
+            default_template_kwargs=None,
+            tool_dicts=tool_dicts,
+            tool_parser=tool_parser,
+        )
+        return engine_prompts
+
+    async def _generate_with_builtin_tools(
+        self,
+        request_id: str,
+        engine_prompt: ProcessorInputs,
+        sampling_params: SamplingParams,
+        context: ConversationContext,
+        lora_request: LoRARequest | None = None,
+        priority: int = 0,
+        trace_headers: Mapping[str, str] | None = None,
+    ):
+        max_model_len = self.model_config.max_model_len
+
+        orig_priority = priority
+        sub_request = 0
+        while True:
+            # Ensure that each sub-request has a unique request id.
+            sub_request_id = f"{request_id}_{sub_request}"
+
+            self._log_inputs(
+                sub_request_id,
+                engine_prompt,
+                params=sampling_params,
+                lora_request=lora_request,
+            )
+
+            generator = self.engine_client.generate(
+                engine_prompt,
+                sampling_params,
+                sub_request_id,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                priority=priority,
+            )
+
+            async for res in generator:
+                context.append_output(res)
+                # NOTE(woosuk): The stop condition is handled by the engine.
+                yield context
+
+            if not context.need_builtin_tool_call():
+                # The model did not ask for a tool call, so we're done.
+                break
+
+            # Call the tool and update the context with the result.
+            tool_output = await context.call_tool()
+            context.append_tool_output(tool_output)
+
+            # TODO: uncomment this and enable tool output streaming
+            # yield context
+
+            # Create inputs for the next turn.
+            # Render the next prompt token ids and update sampling_params.
+            if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
+                token_ids = context.render_for_completion()
+                engine_prompt = token_inputs(token_ids)
+
+                sampling_params.max_tokens = max_model_len - len(token_ids)
+            elif isinstance(context, ParsableContext):
+                (engine_prompt,) = await self._render_next_turn(
+                    context.request,
+                    context.parser.response_messages,
+                    context.tool_dicts,
+                    context.tool_parser_cls,
+                    context.chat_template,
+                    context.chat_template_content_format,
+                )
+
+                sampling_params.max_tokens = get_max_tokens(
+                    max_model_len,
+                    context.request.max_output_tokens,
+                    self._extract_prompt_len(engine_prompt),
+                    self.default_sampling_params,  # type: ignore
+                    self.override_max_tokens,  # type: ignore
+                )
+
+            # OPTIMIZATION
+            priority = orig_priority - 1
+            sub_request += 1
 
     def _make_request_with_harmony(
         self,
@@ -608,9 +710,11 @@ class OpenAIServingResponses(OpenAIServing):
                 "Only 'auto' tool_choice is supported in response API with Harmony"
             )
 
+        arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
         engine_prompt = token_inputs(prompt_token_ids)
+        engine_prompt["arrival_time"] = arrival_time
 
         # Add cache_salt if provided in the request
         if request.cache_salt is not None:
@@ -771,6 +875,7 @@ class OpenAIServingResponses(OpenAIServing):
             output=output,
             status=status,
             usage=usage,
+            kv_transfer_params=context.kv_transfer_params,
         )
 
         if request.store:
@@ -903,6 +1008,7 @@ class OpenAIServingResponses(OpenAIServing):
             parser = self.parser(tokenizer)
             return parser.extract_response_outputs(
                 model_output=final_output.text,
+                model_output_token_ids=final_output.token_ids,
                 request=request,
                 enable_auto_tools=self.enable_auto_tools,
                 tool_call_id_type=self.tool_call_id_type,

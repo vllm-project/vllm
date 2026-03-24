@@ -67,7 +67,7 @@ class SpeculativeConfig:
     enforce_eager: bool | None = None
     """Override the default enforce_eager from model_config"""
     # General speculative decoding control
-    num_speculative_tokens: int = Field(default=None, gt=0)
+    num_speculative_tokens: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
     model: str | None = None
@@ -89,7 +89,7 @@ class SpeculativeConfig:
     warn users when they mistakenly provide the wrong argument."""
 
     # Draft model configuration
-    quantization: me_quant.QuantizationMethods | None = None
+    quantization: me_quant.QuantizationMethods | str | None = None
     """Quantization method that was used to quantize the draft model weights.
     If `None`, we assume the model weights are not quantized. Note that it only
     takes effect when using the draft model-based speculative method."""
@@ -280,7 +280,7 @@ class SpeculativeConfig:
             )
 
         if (
-            hf_config.model_type == "nemotron_h"
+            hf_config.model_type in {"nemotron_h", "nemotron_h_puzzle"}
             and hasattr(hf_config, "num_nextn_predict_layers")
             and hf_config.num_nextn_predict_layers > 0
         ):
@@ -520,8 +520,10 @@ class SpeculativeConfig:
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):
-                    from vllm.transformers_utils.configs import SpeculatorsConfig
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
+                    from vllm.transformers_utils.configs.speculators import (
+                        SpeculatorsConfig,
+                    )
 
                     if isinstance(
                         self.draft_model_config.hf_config,

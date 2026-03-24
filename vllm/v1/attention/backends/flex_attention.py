@@ -20,12 +20,10 @@ from torch.nn.attention.flex_attention import (
     or_masks,
 )
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -80,7 +78,11 @@ class FlexAttentionBackend(AttentionBackend):
         torch.bfloat16,
         torch.float32,
     ]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16"]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "float16",
+        "bfloat16",
+    ]
 
     forward_includes_kv_cache_update: bool = False
 
@@ -991,7 +993,7 @@ def get_kernel_options(
             return block_size
         return candidate
 
-    if vllm_is_batch_invariant():
+    if envs.VLLM_BATCH_INVARIANT:
         kernel_options["BLOCK_M"] = 16
         kernel_options["BLOCK_N"] = 16
         kernel_options["IS_DIVISIBLE"] = False

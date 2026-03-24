@@ -102,6 +102,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         return None
 
     @property
+    def skip_forward_padding(self) -> bool:
+        """Whether to skip the padding in the forward before applying the moe method."""
+        return False
+
+    @property
     def supports_eplb(self) -> bool:
         return False
 
