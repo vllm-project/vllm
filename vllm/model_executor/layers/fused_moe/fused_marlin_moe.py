@@ -864,11 +864,7 @@ def make_marlin_moe_kernel(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
-    """Create a FusedMoEKernel for the Marlin (GPTQ) backend.
-
-    Mirrors make_mxfp4_moe_kernel() / make_nvfp4_moe_kernel() for the
-    GPTQ-Marlin quantization path.
-    """
+    """Create a FusedMoEKernel for the Marlin (GPTQ) backend."""
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
         maybe_make_prepare_finalize,
     )
