@@ -49,7 +49,7 @@ repos:
     language: python
     files: ^requirements/rocm-test\.(in|txt)$
     pass_filenames: false
-    additional_dependencies: [uv]
+    additional_dependencies: [uv, regex]
   - id: format-torch-nightly-test
     name: reformat nightly_torch_test.txt to be in sync with test.in
     language: python
