@@ -172,7 +172,7 @@ Using remote file:
 
 ```bash
 vllm run-batch \
-    -i ../examples/offline_inference/openai_batch/openai_example_batch.jsonl \
+    -i https://raw.githubusercontent.com/vllm-project/vllm/main/examples/offline_inference/openai_batch/openai_example_batch.jsonl \
     -o results.jsonl \
     --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
