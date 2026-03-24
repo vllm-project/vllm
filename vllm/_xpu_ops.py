@@ -339,7 +339,7 @@ class xpu_ops:
         raw_topk_indices: torch.Tensor,
         num_rows: int,
         stride0: int,
-        strdide1: int,
+        stride1: int,
         topk_tokens: int,
     ) -> None:
         torch.ops._C.top_k_per_row_prefill(
@@ -349,7 +349,7 @@ class xpu_ops:
             raw_topk_indices,
             num_rows,
             stride0,
-            strdide1,
+            stride1,
             topk_tokens,
         )
 
