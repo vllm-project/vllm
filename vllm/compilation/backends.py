@@ -20,6 +20,7 @@ import torch
 import torch.fx as fx
 from torch._dynamo.utils import dynamo_timed
 from torch._logging._internal import trace_structured
+from torch.fx._lazy_graph_module import _use_lazy_graph_module
 
 import vllm.envs as envs
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
@@ -573,9 +574,13 @@ def split_graph(
     # otherwise pytorch might reorder the nodes and
     # the semantics of the graph will change when we
     # have mutations in the graph
-    split_gm = torch.fx.passes.split_module.split_module(
-        graph, None, lambda node: node_to_subgraph_id[node], keep_original_order=True
-    )
+    with _use_lazy_graph_module(True):
+        split_gm = torch.fx.passes.split_module.split_module(
+            graph,
+            None,
+            lambda node: node_to_subgraph_id[node],
+            keep_original_order=True,
+        )
 
     outputs = []
 
@@ -836,18 +841,8 @@ class VllmBackend:
         # in future we need PostGradPassManager.uuid() to be executed
         # only at compile time.
         self.inductor_config = deepcopy(self.compilation_config.inductor_compile_config)
-
-        # Configure post-grad passes (including AllReduceFusionPass) during
-        # backend init rather than at torch.compile time, so that expensive
-        # one-time setup (e.g. FlashInfer workspace allocation) is not
-        # attributed to compilation latency.
-        start = time.time()
-        self.configure_post_pass()
-        logger.info_once(
-            "Post-grad pass configuration time: %.2f s",
-            time.time() - start,
-            scope="local",
-        )
+        # `torch.compile` is JIT compiled, so we don't need to
+        # do anything here
 
     def collect_standalone_compile_artifacts(
         self,
@@ -1128,6 +1123,7 @@ class VllmBackend:
         assert not self._called, "VllmBackend can only be called once"
 
         self.graph = graph
+        self.configure_post_pass()
 
         if self.compilation_config.use_inductor_graph_partition:
             # Let Inductor decide partitioning; avoid FX-level pre-splitting.
