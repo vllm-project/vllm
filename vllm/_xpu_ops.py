@@ -246,20 +246,6 @@ class xpu_ops:
         return None
 
     @staticmethod
-    def indexer_k_quant_and_cache(
-        k: torch.Tensor,
-        kv_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        quant_block_size: int,
-        scale_fmt: str | None,
-    ) -> None:
-        if scale_fmt is None:
-            scale_fmt = "fp8e4m3"
-        torch.ops._C_cache_ops.indexer_k_quant_and_cache(
-            k, kv_cache, slot_mapping, quant_block_size, scale_fmt
-        )
-
-    @staticmethod
     def cp_gather_indexer_k_quant_cache(
         kv_cache: torch.Tensor,
         dst_k: torch.Tensor,
@@ -329,50 +315,6 @@ class xpu_ops:
             scale_size, device=dst_scale.device
         )
         dst_scale[:] = kv_cache_flat[scale_indices]
-
-    @staticmethod
-    def top_k_per_row_prefill(
-        logits: torch.Tensor,
-        cu_seqlen_ks: torch.Tensor,
-        cu_seqlen_ke: torch.Tensor,
-        raw_topk_indices: torch.Tensor,
-        num_rows: int,
-        stride0: int,
-        stride1: int,
-        topk_tokens: int,
-    ) -> None:
-        torch.ops._C.top_k_per_row_prefill(
-            logits,
-            cu_seqlen_ks,
-            cu_seqlen_ke,
-            raw_topk_indices,
-            num_rows,
-            stride0,
-            stride1,
-            topk_tokens,
-        )
-
-    @staticmethod
-    def top_k_per_row_decode(
-        logits: torch.Tensor,
-        next_n: int,
-        seq_lens: torch.Tensor,
-        raw_topk_indices: torch.Tensor,
-        num_rows: int,
-        stride0: int,
-        stride1: int,
-        topk_tokens: int,
-    ) -> None:
-        torch.ops._C.top_k_per_row_decode(
-            logits,
-            next_n,
-            seq_lens,
-            raw_topk_indices,
-            num_rows,
-            stride0,
-            stride1,
-            topk_tokens,
-        )
 
     @staticmethod
     def register_ops_once() -> None:
