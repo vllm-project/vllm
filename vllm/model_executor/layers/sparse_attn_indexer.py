@@ -135,7 +135,7 @@ def sparse_attn_indexer(
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
 
-            torch.ops._C.top_k_per_row_prefill(
+            ops.top_k_per_row_prefill(
                 logits,
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
@@ -220,7 +220,7 @@ def sparse_attn_indexer(
                 None,
             )
         else:
-            torch.ops._C.top_k_per_row_decode(
+            ops.top_k_per_row_decode(
                 logits,
                 next_n,
                 decode_metadata.seq_lens,
