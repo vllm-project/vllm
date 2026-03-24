@@ -589,6 +589,9 @@ class RMSNormGated(CustomOp):
     def forward_cuda(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
+        if envs.VLLM_BATCH_INVARIANT:
+            return self.forward_native(x, z)
+
         from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
 
         return rmsnorm_fn(
