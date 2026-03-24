@@ -789,7 +789,9 @@ def test_same_mamba_output_apc_on_vs_off(
     max_model_len = max(len(p) for p in prompts) + max_tokens + 64
 
     base_kwargs = _get_vllm_runner_params(model, max_model_len)
-    base_kwargs.update(enforce_eager=True, block_size=16, seed=42)
+    base_kwargs.update(
+        enforce_eager=True, block_size=16, seed=42, gpu_memory_utilization=0.8
+    )
 
     # No prefix caching
     kwargs_no_apc = {**base_kwargs, "enable_prefix_caching": False}
