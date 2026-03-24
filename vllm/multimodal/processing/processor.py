@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import (
     TYPE_CHECKING,
     Generic,
@@ -21,6 +21,7 @@ from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
+from vllm.transformers_utils.processor import call_hf_processor_mm_only
 from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 
 from ..inputs import (
@@ -1218,16 +1219,35 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         [`DummyInputsBuilder`][vllm.multimodal.processing.BaseDummyInputsBuilder]
         to go along with the multi-modal data.
         """
-        mm_counts = mm_items.get_all_counts()
+        # Custom logic based on text inputs
+        if type(self)._call_hf_processor != BaseMultiModalProcessor._call_hf_processor:
+            mm_counts = mm_items.get_all_counts()
 
-        _, mm_processed_data, _ = self._apply_hf_processor_text_mm(
-            prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
+            _, mm_processed_data, _ = self._apply_hf_processor_text_mm(
+                prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
+                mm_items=mm_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                tokenization_kwargs=tokenization_kwargs,
+            )
+
+            return mm_processed_data
+
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
         )
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        return mm_processed_data
+        processed_data = self.info.ctx.call_hf_processor(
+            partial(
+                call_hf_processor_mm_only,
+                self.info.get_hf_processor(**hf_processor_mm_kwargs),
+            ),
+            processor_data,
+            dict(**hf_processor_mm_kwargs, **tokenization_kwargs),
+        )
+        processed_data.update(passthrough_data)
+
+        return processed_data
 
     def _apply_hf_processor_main(
         self,

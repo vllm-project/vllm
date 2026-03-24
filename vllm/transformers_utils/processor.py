@@ -11,12 +11,16 @@ from transformers import (
     AutoImageProcessor,
     AutoProcessor,
     AutoVideoProcessor,
+    BatchFeature,
     processing_utils,
 )
+from transformers.audio_utils import AudioInput
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
+from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
+from transformers.video_utils import VideoInput
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
@@ -522,4 +526,44 @@ def cached_video_processor_from_config(
         trust_remote_code=model_config.trust_remote_code,
         processor_cls_overrides=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, AutoVideoProcessor, **kwargs),
+    )
+
+
+def call_hf_processor_mm_only(
+    processor: ProcessorMixin,
+    images: ImageInput | None = None,
+    videos: VideoInput | None = None,
+    audio: AudioInput | None = None,
+    **kwargs,
+) -> BatchFeature:
+    output_kwargs = processor._merge_kwargs(
+        get_processor_kwargs_type(processor),
+        **kwargs,
+    )
+
+    if audio is not None and (
+        feature_extractor := getattr(processor, "feature_extractor", None)
+    ):
+        audio_inputs = feature_extractor(audio, **output_kwargs["audio_kwargs"])
+        audio_inputs["feature_attention_mask"] = audio_inputs.pop("attention_mask")
+    else:
+        audio_inputs = {}
+
+    if images is not None and (
+        image_processor := getattr(processor, "image_processor", None)
+    ):
+        images_inputs = image_processor(images=images, **output_kwargs["images_kwargs"])
+    else:
+        images_inputs = {}
+
+    if videos is not None and (
+        video_processor := getattr(processor, "video_processor", None)
+    ):
+        videos_inputs = video_processor(videos=videos, **output_kwargs["videos_kwargs"])
+    else:
+        videos_inputs = {}
+
+    return BatchFeature(
+        data={**audio_inputs, **images_inputs, **videos_inputs},
+        tensor_type=output_kwargs["common_kwargs"].get("return_tensors"),
     )
