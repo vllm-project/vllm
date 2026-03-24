@@ -20,10 +20,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    _swizzle_mxfp4,
-    get_padding_alignment,
-)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import _swizzle_mxfp4
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
@@ -389,9 +386,8 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif current_platform.is_rocm():
-        pad_align = get_padding_alignment()
-        intermediate_size = round_up(intermediate_size, pad_align)
-        hidden_size = round_up(hidden_size, pad_align)
+        intermediate_size = round_up(intermediate_size, 256)
+        hidden_size = round_up(hidden_size, 256)
     else:
         intermediate_size = round_up(intermediate_size, 64)
     return hidden_size, intermediate_size
