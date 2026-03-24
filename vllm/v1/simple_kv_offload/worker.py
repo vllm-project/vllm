@@ -220,8 +220,7 @@ class SimpleCPUOffloadWorker:
         metadata = self._connector_metadata
         if self._is_initialized:
             # Flush the store deferred from the *previous* step.  By now the
-            # model forward pass that produced those KV values has completed,
-            # so the copy is safe without wait_stream.
+            # model forward pass that produced those KV values has completed.
             if self._deferred_store is not None:
                 src, dst, eidx = self._deferred_store
                 self._deferred_store = None
@@ -287,6 +286,8 @@ class SimpleCPUOffloadWorker:
         if self._deferred_store is not None:
             src, dst, event_idx = self._deferred_store
             self._deferred_store = None
+            if self.store_stream is not None:
+                self.store_stream.wait_stream(torch.cuda.current_stream())
             self._launch_copy_kernel(src, dst, event_idx, is_store=True)
 
         for event_idx, event in self._load_events:
