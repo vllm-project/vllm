@@ -500,6 +500,38 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             buffer.disconnect_ranks(ranks_to_disconnect)
         NixlEPAll2AllManager._buffer = (buffer, new_ep_size)
 
+    @classmethod
+    def replace_peer(
+        cls,
+        dead_ep_rank: int,
+        new_ep_rank: int,
+        new_tcp_store: dist.Store | None = None,
+    ) -> None:
+        """Swap dead_ep_rank → new_ep_rank in the NIXL buffer (same EP size).
+
+        Called on every surviving rank after the replacement rank has started
+        and registered its NIXL metadata.  ``connect_ranks`` blocks internally
+        until the replacement rank's metadata is available.
+        EP size (``_buffer[1]``) is not changed — this is a same-size swap.
+
+        Args:
+            dead_ep_rank: EP rank index of the worker that died.
+            new_ep_rank: EP rank index of the replacement worker (same value
+                as ``dead_ep_rank`` for a peer swap).
+            new_tcp_store: If provided, updates the NIXL buffer's TCPStore
+                group before reconnecting.  Pass the store from the new
+                (post-recovery) EP group so that metadata exchange uses the
+                fresh rendezvous store rather than the stale original.
+        """
+        with cls._lock:
+            assert cls._buffer is not None, "NIXL EP buffer not initialized"
+            buffer, ep_size = cls._buffer
+            if new_tcp_store is not None:
+                buffer.set_tcp_store_group(new_tcp_store)
+            buffer.disconnect_ranks([dead_ep_rank])
+            buffer.connect_ranks([new_ep_rank])
+            # ep_size unchanged — do NOT update _buffer[1]
+
     def get_handle(self, kwargs):
         with NixlEPAll2AllManager._lock:
             if (
