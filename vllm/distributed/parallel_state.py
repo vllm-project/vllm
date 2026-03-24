@@ -304,16 +304,15 @@ def _flashinfer_scaled_mm_out(
     interface expected by PyTorch's _fused_*_impl helpers."""
     from flashinfer import bmm_fp8 as flashinfer_bmm_fp8
 
-    result = flashinfer_bmm_fp8(
+    flashinfer_bmm_fp8(
         A.unsqueeze(0),
         B.unsqueeze(0),
         scale_a,
         scale_b,
         out_dtype or out.dtype,
-        None,
+        out.unsqueeze(0),
         "auto",
-    ).squeeze(0)
-    out.copy_(result)
+    )
     return out
 
 
