@@ -3,6 +3,7 @@
 import dataclasses
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -31,7 +32,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    KVConnectorOutput,
+    LogprobsLists,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -4202,6 +4208,79 @@ def test_jump_forward_tokens_injected():
     assert scheduler.pending_ff_tokens[req.request_id] == [100, 101, 102]
     # Request should still be running.
     assert not req.is_finished()
+
+
+def test_jump_forward_tokens_logprobs():
+    """When logprobs are requested, ff_tokens should get synthetic logprob
+    entries (logprob=0.0 for the deterministic token, -inf for the rest)."""
+    scheduler = create_scheduler(enable_jump_decoding=True)
+    scheduler.structured_output_manager.should_advance = Mock(return_value=True)
+
+    requests = create_requests(num_requests=1, max_tokens=20)
+    req = requests[0]
+    req.num_computed_tokens = req.num_tokens
+    req.status = RequestStatus.RUNNING
+    req.sampling_params.logprobs = 3
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+
+    grammar = _make_mock_grammar([100, 101, 102])
+    req.structured_output_request = Mock(grammar=grammar, reasoning_ended=None)
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    # Build LogprobsLists for 1 sampled token with top_logprobs=3.
+    # Shape: [1, 4] — column 0 is sampled token, columns 1-3 are top-k.
+    sampled_token_ids = np.array([[7, 10, 11, 12]], dtype=np.int32)
+    sampled_logprobs = np.array([[-0.5, -1.0, -2.0, -3.0]],
+                                dtype=np.float32)
+    sampled_ranks = np.array([0], dtype=np.int32)
+    logprobs = LogprobsLists(sampled_token_ids, sampled_logprobs,
+                             sampled_ranks)
+
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[7]],
+        logprobs=logprobs,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    engine_outputs = scheduler.update_from_output(scheduler_output,
+                                                  model_output)
+
+    # Extract the EngineCoreOutput for our request.
+    output = engine_outputs[req.client_index].outputs[0]
+    assert output.new_token_ids == [7, 100, 101, 102]
+
+    # Logprobs should have 4 rows: 1 sampled + 3 ff_tokens.
+    assert output.new_logprobs is not None
+    lp = output.new_logprobs
+    assert lp.logprob_token_ids.shape[0] == 4
+    assert lp.logprobs.shape[0] == 4
+    assert lp.sampled_token_ranks.shape[0] == 4
+
+    # First row: original sampled logprobs (unchanged).
+    assert lp.logprob_token_ids[0, 0] == 7
+    np.testing.assert_allclose(lp.logprobs[0, 0], -0.5)
+
+    # ff_token rows: logprob=0.0 at position 0, -inf elsewhere.
+    for i, tok in enumerate([100, 101, 102], start=1):
+        assert lp.logprob_token_ids[i, 0] == tok
+        assert lp.logprobs[i, 0] == 0.0
+        assert np.all(np.isneginf(lp.logprobs[i, 1:]))
+        assert lp.sampled_token_ranks[i] == 0
 
 
 def test_jump_forward_tokens_stop_eos():
