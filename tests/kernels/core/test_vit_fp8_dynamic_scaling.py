@@ -52,6 +52,7 @@ def _make_attention(monkeypatch, default_vllm_config):
         return
 
     monkeypatch.setenv("VLLM_MM_ENCODER_FP8_ATTN", "1")
+    monkeypatch.setenv("VLLM_MM_ENCODER_FP8_DYNAMIC_SCALING", "1")
     monkeypatch.delenv("VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH", raising=False)
     disable_envs_cache()
 

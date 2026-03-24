@@ -164,6 +164,7 @@ if TYPE_CHECKING:
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_MM_ENCODER_FP8_ATTN: bool = False
     VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH: str | None = None
+    VLLM_MM_ENCODER_FP8_DYNAMIC_SCALING: bool = False
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
@@ -1234,6 +1235,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Path to JSON file containing FP8 attention scales for multimodal encoder
     "VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH": lambda: os.getenv(
         "VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH", None
+    ),
+    # Enable dynamic FP8 scaling (amax history buffer) for multimodal encoder.
+    # Only used when VLLM_MM_ENCODER_FP8_ATTN=1 and no scale file is provided.
+    "VLLM_MM_ENCODER_FP8_DYNAMIC_SCALING": lambda: bool(
+        int(os.getenv("VLLM_MM_ENCODER_FP8_DYNAMIC_SCALING", "0"))
     ),
     # Allow use of FlashInfer BF16 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP16": lambda: bool(

@@ -351,23 +351,36 @@ class MMEncoderAttention(CustomOp):
     def _init_fp8_attention(self, layer_name: str) -> None:
         """Initialize FP8 attention for this layer.
 
-        When a scale file is provided via VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH,
-        static (fixed) scales are loaded.  Otherwise, dynamic scaling is
-        enabled: per-tensor amax values are tracked in a circular history
-        buffer and scales are recomputed each forward pass.
+        Scaling mode is determined by env vars:
+        - Scale file provided (VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH):
+          static (fixed) per-layer scales loaded from JSON.
+        - No scale file + VLLM_MM_ENCODER_FP8_DYNAMIC_SCALING=1:
+          dynamic scaling via circular amax history buffer.
+        - No scale file + dynamic scaling off (default):
+          static scale=1.0 (cast-only, no scaling).
         """
         scale_path = envs.VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH
         all_scales = _load_fp8_scales_file(scale_path)
 
         if scale_path is None:
-            self._fp8_dynamic_scale = True
             init_scales = {"q": 1.0, "k": 1.0, "v": 1.0}
-            logger.info_once(
-                "FP8 attention enabled with dynamic scaling "
-                "(no scale file provided). Scales will adapt from "
-                "observed Q/K/V amax values (history_len=%d).",
-                _FP8_AMAX_HISTORY_LEN,
-            )
+            if envs.VLLM_MM_ENCODER_FP8_DYNAMIC_SCALING:
+                self._fp8_dynamic_scale = True
+                logger.info_once(
+                    "FP8 attention enabled with dynamic scaling "
+                    "(no scale file provided). Scales will adapt from "
+                    "observed Q/K/V amax values (history_len=%d).",
+                    _FP8_AMAX_HISTORY_LEN,
+                )
+            else:
+                logger.warning_once(
+                    "FP8 attention enabled with static scale=1.0 "
+                    "(cast-only, no scaling). For better accuracy, "
+                    "provide a scale file via "
+                    "VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH or enable "
+                    "dynamic scaling via "
+                    "VLLM_MM_ENCODER_FP8_DYNAMIC_SCALING=1."
+                )
         else:
             layer_scales = all_scales.get(layer_name)
             if layer_scales is None:

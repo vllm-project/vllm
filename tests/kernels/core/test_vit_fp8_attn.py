@@ -291,10 +291,10 @@ def test_fp8_vs_bf16_close(
         + ", ".join(f"p{p}={rel_pct[p]:.6f}" for p in pcts)
     )
 
-    assert abs_diff_flat.max().item() < 0.2, (
+    assert abs_diff_flat.max().item() < 0.3, (
         f"FP8 vs BF16 max abs diff too large: {abs_diff_flat.max().item()}"
     )
-    assert abs_diff_flat.mean().item() < 0.02, (
+    assert abs_diff_flat.mean().item() < 0.03, (
         f"FP8 vs BF16 mean abs diff too large: {abs_diff_flat.mean().item()}"
     )
     assert cosine_sim > 0.99, f"Cosine similarity too low: {cosine_sim:.6f}"
