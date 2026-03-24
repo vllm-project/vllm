@@ -136,10 +136,6 @@ class Platform:
 
     supported_quantization: list[str] = []
 
-    # Default block size for the KV cache on this platform.
-    # Backends may override via get_preferred_block_size().
-    default_block_size: int = 16
-
     additional_env_vars: list[str] = []
 
     _global_graph_pool: Any | None = None
@@ -434,6 +430,8 @@ class Platform:
         Ensure block_size is compatible with the attention backend.
         For hybrid models, also aligns block_size with mamba page sizes.
         """
+        from vllm.config.cache import CacheConfig
+
         cache_config = vllm_config.cache_config
         if cache_config.user_specified_block_size:
             # User specified --block-size; keep it.
@@ -442,7 +440,7 @@ class Platform:
         model_config = vllm_config.model_config
         # model_config may be None during testing.
         if model_config is None:
-            cache_config.block_size = cls.default_block_size
+            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             return
 
         from vllm.config.vllm import (
@@ -452,20 +450,48 @@ class Platform:
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
         )
+        from vllm.v1.attention.backend import AttentionBackend
 
         attn_layers = get_layers_from_vllm_config(
             vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
         if not attn_layers:
-            cache_config.block_size = cls.default_block_size
+            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             return
 
-        first_layer = next(iter(attn_layers.values()))
-        backend_cls = first_layer.get_attn_backend()
+        def get_full_attn_backend_cls() -> type[AttentionBackend]:
+            backend_cls_list = [
+                layer.get_attn_backend() for layer in attn_layers.values()
+            ]
+            backend_cls_dict = {
+                backend_cls.get_name(): backend_cls for backend_cls in backend_cls_list
+            }
+            SSM_ATTN_BACKEND_NAMES = [
+                "MAMBA2_ATTN",
+                "MAMBA1_ATTN",
+                "GDN_ATTN",
+                "LINEAR_ATTN",
+                "SHORT_CONV_ATTN",
+            ]
+            backend_cls_list = [
+                backend_cls
+                for name, backend_cls in backend_cls_dict.items()
+                if name not in SSM_ATTN_BACKEND_NAMES
+            ]
+            if len(backend_cls_list) == 1:
+                return backend_cls_list[0]
+            else:
+                raise ValueError(
+                    f"Multiple attention backends are not supported: {backend_cls_list}"
+                )
+
+        backend_cls = get_full_attn_backend_cls()
         with set_current_vllm_config(vllm_config):
-            preferred = backend_cls.get_preferred_block_size(cls.default_block_size)
-        if preferred != cls.default_block_size:
+            preferred = backend_cls.get_preferred_block_size(
+                CacheConfig.DEFAULT_BLOCK_SIZE
+            )
+        if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
             logger.info(
                 "Setting kv cache block size to %d for %s backend.",
                 preferred,
@@ -488,6 +514,7 @@ class Platform:
         """
         from math import lcm
 
+        from vllm.config.vllm import set_current_vllm_config
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
@@ -524,9 +551,10 @@ class Platform:
             ).page_size_bytes
 
         # Get kernel block alignment from the backend's supported sizes
-        kernel_block_alignment_size = select_common_block_size(
-            cache_config.block_size, [backend_cls]
-        )
+        with set_current_vllm_config(vllm_config):
+            kernel_block_alignment_size = select_common_block_size(
+                cache_config.block_size, [backend_cls]
+            )
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(

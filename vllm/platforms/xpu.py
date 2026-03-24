@@ -37,7 +37,6 @@ class XPUPlatform(Platform):
     ray_device_key: str = "GPU"
     dist_backend: str = "xccl"  # xccl only
     device_control_env_var: str = "ZE_AFFINITY_MASK"
-    default_block_size: int = 64
 
     @classmethod
     def import_kernels(cls) -> None:
