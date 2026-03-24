@@ -15,6 +15,7 @@ pub use lower::{
 };
 pub use output::{DecodedTextEvent, TextDecodeOptions};
 pub use request::{Prompt, SamplingParams, TextRequest};
+use vllm_engine_core_client::EngineCoreClient;
 use vllm_llm::Llm;
 
 mod backend;
@@ -59,6 +60,11 @@ impl TextLlm {
     /// Return the backend model ID when available.
     pub fn model_id(&self) -> Option<&str> {
         self.backend.model_id()
+    }
+
+    /// Expose the underlying engine-core client for low-level utility/admin calls.
+    pub fn engine_core_client(&self) -> &EngineCoreClient {
+        self.llm.engine_core_client()
     }
 
     /// Tokenize if needed, lower to a generate request, and stream incrementally decoded text.

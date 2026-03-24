@@ -35,6 +35,7 @@ mod template;
 
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use tool_parser::ParserFactory as ToolParserFactory;
+use vllm_engine_core_client::EngineCoreClient;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
 
@@ -93,6 +94,11 @@ impl ChatLlm {
     /// Return the model ID reported by the underlying text backend when available.
     pub fn model_id(&self) -> Option<&str> {
         self.text.model_id()
+    }
+
+    /// Expose the underlying engine-core client for low-level utility/admin calls.
+    pub fn engine_core_client(&self) -> &EngineCoreClient {
+        self.text.engine_core_client()
     }
 
     /// Render, tokenize, and submit one chat request.

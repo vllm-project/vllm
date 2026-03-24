@@ -25,6 +25,11 @@ impl Llm {
         Self { client }
     }
 
+    /// Expose the underlying engine-core client for low-level utility/admin calls.
+    pub fn engine_core_client(&self) -> &EngineCoreClient {
+        &self.client
+    }
+
     /// Submit one tokenized generate request and return a per-request output stream.
     pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateOutputStream> {
         let prepared = req.prepare()?;

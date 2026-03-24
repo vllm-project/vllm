@@ -6,6 +6,9 @@ use axum::response::Response;
 use vllm_metrics::{HttpHandlerLabels, HttpRequestLabels, METRICS};
 
 /// Endpoints that will be excluded from HTTP metrics tracking.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/serve/instrumentator/metrics.py#L28-L38>
 const EXCLUDED_HANDLERS: &[&str] = &[
     "/metrics",
     "/health",
@@ -13,6 +16,8 @@ const EXCLUDED_HANDLERS: &[&str] = &[
     "/ping",
     "/version",
     "/server_info",
+    // Rust frontend extra:
+    "/is_sleeping",
 ];
 
 /// Record API-server HTTP metrics with Python-compatible (`PrometheusFastApiInstrumentator` style)
