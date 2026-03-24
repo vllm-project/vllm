@@ -5,6 +5,7 @@ import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
 from typing import Annotated, Literal
+from unittest.mock import patch
 
 import pytest
 from pydantic import Field
@@ -523,3 +524,38 @@ def test_human_readable_model_len():
     for invalid in ["1a", "pwd", "10.24", "1.23M", "1.22T"]:
         with pytest.raises(ArgumentError):
             parser.parse_args(["--max-model-len", invalid])
+
+
+def test_create_engine_config_forwards_hf_config_path_to_speculator_detection():
+    captured_kwargs = {}
+
+    def fake_maybe_override_with_speculators(**kwargs):
+        captured_kwargs.update(kwargs)
+        return kwargs["model"], kwargs["tokenizer"], kwargs["vllm_speculative_config"]
+
+    engine_args = EngineArgs(
+        model="/tmp/model.gguf",
+        tokenizer="/tmp/tokenizer",
+        hf_config_path="/tmp/hf-config",
+    )
+
+    with (
+        patch(
+            "vllm.engine.arg_utils.current_platform.pre_register_and_update",
+            return_value=None,
+        ),
+        patch("vllm.engine.arg_utils.envs.validate_environ", return_value=None),
+        patch(
+            "vllm.engine.arg_utils.maybe_override_with_speculators",
+            side_effect=fake_maybe_override_with_speculators,
+        ),
+        patch.object(
+            EngineArgs,
+            "create_model_config",
+            side_effect=RuntimeError("stop after speculator detection"),
+        ),
+        pytest.raises(RuntimeError, match="stop after speculator detection"),
+    ):
+        engine_args.create_engine_config()
+
+    assert captured_kwargs["hf_config_path"] == "/tmp/hf-config"

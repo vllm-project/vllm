@@ -560,17 +560,21 @@ def maybe_override_with_speculators(
     Returns:
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
     """
-    if check_gguf_file(model):
+    hf_config_path = kwargs.pop("hf_config_path", None)
+
+    if hf_config_path is not None:
+        config_source: str | Path = hf_config_path
+    elif check_gguf_file(model):
         kwargs["gguf_file"] = Path(model).name
-        gguf_model_repo = Path(model).parent
+        config_source = Path(model).parent
     elif is_remote_gguf(model):
         repo_id, _ = split_remote_gguf(model)
-        gguf_model_repo = Path(repo_id)
+        config_source = Path(repo_id)
     else:
-        gguf_model_repo = None
+        config_source = model
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
     config_dict, _ = PretrainedConfig.get_config_dict(
-        model if gguf_model_repo is None else gguf_model_repo,
+        config_source,
         revision=revision,
         **without_trust_remote_code(kwargs),
     )

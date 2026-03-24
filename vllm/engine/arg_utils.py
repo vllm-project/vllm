@@ -1521,6 +1521,7 @@ class EngineArgs:
                     revision=self.revision,
                     trust_remote_code=self.trust_remote_code,
                     vllm_speculative_config=self.speculative_config,
+                    hf_config_path=self.hf_config_path,
                 )
             )
 
