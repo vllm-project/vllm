@@ -77,7 +77,8 @@ class EngineCoreRequest(
     arrival_time: float
     lora_request: LoRARequest | None
     cache_salt: str | None
-    data_parallel_rank: int | None
+    shared_prefix_tokens: int = 0
+    data_parallel_rank: int | None = None
     prompt_embeds: torch.Tensor | None = None
 
     # Index of the client, used to ensure outputs are sent back to the same

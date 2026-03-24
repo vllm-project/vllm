@@ -286,7 +286,8 @@ class BlockPool:
 
             # Generate extra keys for each block individually.
             # Each block may have different extra_keys (e.g., different MM
-            # features, or cache_salt only for the first block).
+            # features, or cache_salt at block 0 for flat salt / at the
+            # boundary block for hierarchical salt).
             # Skip null blocks to match the length of new_hashes.
             extra_keys_list: list[tuple[Any, ...] | None] = []
             curr_mm_idx = 0

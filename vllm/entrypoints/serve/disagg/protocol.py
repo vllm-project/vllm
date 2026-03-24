@@ -92,6 +92,20 @@ class GenerateRequest(BaseModel):
             "to 256 bit)."
         ),
     )
+    shared_prefix_tokens: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "When positive and cache_salt is set, the salt is applied "
+            "starting at the block containing this token offset instead of "
+            "block 0. Blocks before this boundary are hashed without the "
+            "salt and can be shared across tenants (e.g., a common system "
+            "prompt). Blocks at and after the boundary inherit tenant "
+            "isolation through the parent-hash chain. The offset refers to "
+            "the final tokenized prompt; the effective shared region is "
+            "rounded down to the nearest block boundary."
+        ),
+    )
     priority: int = Field(
         default=0,
         ge=-(2**63),

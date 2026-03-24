@@ -62,6 +62,7 @@ def make_request(
     prompt_logprobs: int | None = None,
     cache_salt: str | None = None,
     lora_request: LoRARequest | None = None,
+    shared_prefix_tokens: int = 0,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -86,6 +87,7 @@ def make_request(
         pooling_params=None,
         lora_request=lora_request,
         cache_salt=cache_salt,
+        shared_prefix_tokens=shared_prefix_tokens,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
     )
 
@@ -1710,6 +1712,86 @@ def test_cache_key_salting():
     assert block_hashes[2] == sha256(
         (block_hashes[1], tuple(token_ids[block_size * 2 : block_size * 3]), None)
     )
+
+
+def test_hierarchical_cache_key_salting():
+    """
+    When shared_prefix_tokens > 0, blocks before the boundary are unsalted
+    and can be shared across tenants, while blocks at/after the boundary are
+    isolated via the parent-hash chain.
+    """
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 20),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    # 3 shared-prefix blocks + 1 private block (11 tokens).
+    shared_len = 3 * block_size  # 48 tokens shared
+    common_token_ids = [i for i in range(3) for _ in range(block_size)]
+    token_ids_a = common_token_ids + [3] * 11
+    token_ids_b = common_token_ids + [3] * 11  # same content, different salt
+
+    req_a = make_request(
+        "a",
+        token_ids_a,
+        block_size,
+        sha256,
+        cache_salt="salt_A",
+        shared_prefix_tokens=shared_len,
+    )
+    req_b = make_request(
+        "b",
+        token_ids_b,
+        block_size,
+        sha256,
+        cache_salt="salt_B",
+        shared_prefix_tokens=shared_len,
+    )
+
+    # Pre-boundary block hashes should be identical (shared, no salt).
+    assert req_a.block_hashes[0] == req_b.block_hashes[0]
+    assert req_a.block_hashes[1] == req_b.block_hashes[1]
+    assert req_a.block_hashes[2] == req_b.block_hashes[2]
+
+    # Boundary block (block 3) should differ due to different salts.
+    # Block 3 starts at token 48 = shared_len, so salt is injected here.
+    # With 11 tokens in the 4th block it's incomplete so no block_hash[3]
+    # in the initial hashing. Instead verify via get_computed_blocks.
+
+    # Allocate blocks for req_a first.
+    computed_a, num_a = manager.get_computed_blocks(req_a)
+    assert len(computed_a.blocks[0]) == 0  # nothing cached yet
+    blocks_a = manager.allocate_slots(
+        req_a,
+        len(token_ids_a) - num_a,
+        num_a,
+        computed_a,
+    )
+    assert blocks_a is not None
+    req_a.num_computed_tokens = len(token_ids_a)
+
+    # Now req_b should share the first 3 blocks (pre-boundary).
+    # But NOT match after the boundary because salt differs.
+    computed_b, num_b = manager.get_computed_blocks(req_b)
+    # The first 3 blocks are shared (same hash, no salt).
+    assert len(computed_b.blocks[0]) == 3
+    assert num_b == 3 * block_size
+
+    # Compare with flat salt: nothing should be shared.
+    req_flat = make_request(
+        "c",
+        token_ids_b,
+        block_size,
+        sha256,
+        cache_salt="salt_B",
+        shared_prefix_tokens=0,
+    )
+    computed_flat, num_flat = manager.get_computed_blocks(req_flat)
+    assert len(computed_flat.blocks[0]) == 0  # flat salt: block 0 differs
+    assert num_flat == 0
 
 
 def test_prefill_not_enough_free_blocks_with_computed_blocks():

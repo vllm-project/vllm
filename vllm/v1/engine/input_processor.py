@@ -328,6 +328,12 @@ class InputProcessor:
             arrival_time=arrival_time,
             lora_request=lora_request,
             cache_salt=decoder_inputs.get("cache_salt"),
+            shared_prefix_tokens=min(
+                int(decoder_inputs.get("shared_prefix_tokens", 0)),
+                len(prompt_token_ids)
+                if prompt_token_ids
+                else (prompt_embeds.shape[0] if prompt_embeds is not None else 0),
+            ),
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,

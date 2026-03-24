@@ -73,6 +73,7 @@ def make_request(
     mm_hashes: list[str] | None = None,
     cache_salt: str | None = None,
     prompt_embeds: torch.Tensor | None = None,
+    shared_prefix_tokens: int = 0,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -97,6 +98,7 @@ def make_request(
         pooling_params=None,
         lora_request=None,
         cache_salt=cache_salt,
+        shared_prefix_tokens=shared_prefix_tokens,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
         prompt_embeds=prompt_embeds,
     )
@@ -515,6 +517,84 @@ def test_generate_block_hash_extra_keys_cache_salt():
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request_mm, 0, 5, 0)
     assert extra_keys == (("hash1", 0), "salt")
     assert next_mm_idx == 1
+
+
+def test_generate_block_hash_extra_keys_hierarchical_salt():
+    """When shared_prefix_tokens > 0, salt is injected at the boundary block
+    instead of block 0.  Blocks before the boundary carry no salt and can be
+    shared across tenants."""
+    block_size = 5
+
+    # -- pre-boundary blocks: no salt
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=[_ for _ in range(20)],
+        block_size=block_size,
+        cache_salt="tenant_A",
+        shared_prefix_tokens=10,
+    )
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
+    assert extra_keys is None  # block [0,5) before boundary
+    extra_keys, _ = generate_block_hash_extra_keys(request, 5, 10, 0)
+    assert extra_keys is None  # block [5,10) before boundary
+
+    # -- boundary block: salt injected
+    extra_keys, _ = generate_block_hash_extra_keys(request, 10, 15, 0)
+    assert extra_keys == ("tenant_A",)  # block [10,15) is boundary
+
+    # -- post-boundary blocks: no extra salt (inherited via parent chain)
+    extra_keys, _ = generate_block_hash_extra_keys(request, 15, 20, 0)
+    assert extra_keys is None
+
+    # -- spt=0 falls back to flat salt (block 0 gets salt)
+    request_flat = make_request(
+        request_id="1",
+        prompt_token_ids=[_ for _ in range(20)],
+        block_size=block_size,
+        cache_salt="tenant_A",
+        shared_prefix_tokens=0,
+    )
+    extra_keys, _ = generate_block_hash_extra_keys(request_flat, 0, 5, 0)
+    assert extra_keys == ("tenant_A",)  # flat: block 0 gets salt
+
+    # -- no cache_salt with spt > 0: no salt anywhere
+    request_nosalt = make_request(
+        request_id="2",
+        prompt_token_ids=[_ for _ in range(20)],
+        block_size=block_size,
+        shared_prefix_tokens=10,
+    )
+    extra_keys, _ = generate_block_hash_extra_keys(request_nosalt, 10, 15, 0)
+    assert extra_keys is None
+
+    # -- spt mid-block: salt goes on the block containing spt
+    request_mid = make_request(
+        request_id="3",
+        prompt_token_ids=[_ for _ in range(20)],
+        block_size=block_size,
+        cache_salt="s",
+        shared_prefix_tokens=7,
+    )
+    extra_keys, _ = generate_block_hash_extra_keys(request_mid, 0, 5, 0)
+    assert extra_keys is None  # block [0,5): 0<=7<5 is False
+    extra_keys, _ = generate_block_hash_extra_keys(request_mid, 5, 10, 0)
+    assert extra_keys == ("s",)  # block [5,10): 5<=7<10 is True
+
+    # -- different salts produce different boundary blocks but same
+    #    pre-boundary blocks
+    request_b = make_request(
+        request_id="4",
+        prompt_token_ids=[_ for _ in range(20)],
+        block_size=block_size,
+        cache_salt="tenant_B",
+        shared_prefix_tokens=10,
+    )
+    ea, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
+    eb, _ = generate_block_hash_extra_keys(request_b, 0, 5, 0)
+    assert ea == eb  # both None — pre-boundary shared
+    ea, _ = generate_block_hash_extra_keys(request, 10, 15, 0)
+    eb, _ = generate_block_hash_extra_keys(request_b, 10, 15, 0)
+    assert ea == ("tenant_A",) and eb == ("tenant_B",)
 
 
 def test_generate_block_hash_extra_keys_prompt_embeds():
