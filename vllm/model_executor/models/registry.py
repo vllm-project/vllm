@@ -529,6 +529,10 @@ _MULTIMODAL_MODELS = {
         "cohere_asr",
         "CohereASRForConditionalGeneration",
     ),
+    "CohereAsrForConditionalGeneration": (
+        "cohere_asr",
+        "CohereASRForConditionalGeneration",
+    ),
     "NemotronParseForConditionalGeneration": (
         "nemotron_parse",
         "NemotronParseForConditionalGeneration",

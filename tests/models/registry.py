@@ -1129,9 +1129,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     # [Encoder-decoder]
     "CohereASRForConditionalGeneration": _HfExamplesInfo(
-        "/host/engines/vllm/audio/2b-release",
+        "CohereLabs/cohere-transcribe-03-2026",
         trust_remote_code=True,
-        is_available_online=False,  # TODO (ekagra): revert after asr release
+        is_available_online=True,
     ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-Parse-v1.1", trust_remote_code=True
