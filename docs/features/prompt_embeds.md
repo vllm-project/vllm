@@ -16,7 +16,7 @@ To input multi-modal data, follow this schema in [vllm.inputs.EmbedsPrompt][]:
 
 You can pass prompt embeddings from Hugging Face Transformers models to the  `'prompt_embeds'` field of the prompt embedding dictionary, as shown in the following examples:
 
-[examples/offline_inference/prompt_embed_inference.py](../../examples/offline_inference/prompt_embed_inference.py)
+[examples/basic/offline_inference/prompt_embed_inference.py](../../examples/basic/offline_inference/prompt_embed_inference.py)
 
 ## Online Serving
 

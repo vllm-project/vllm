@@ -47,7 +47,7 @@ the third parameter is the path to the LoRA adapter.
     )
     ```
 
-Check out [examples/offline_inference/multilora_inference.py](../../examples/offline_inference/multilora_inference.py) for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
+Check out [examples/basic/offline_inference/multilora_inference.py](../../examples/basic/offline_inference/multilora_inference.py) for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
 
 ## Serving LoRA Adapters
 

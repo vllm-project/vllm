@@ -125,7 +125,7 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
-A code example can be found here: [examples/offline_inference/basic/embed.py](../../../examples/basic/offline_inference/embed.py)
+A code example can be found here: [examples/basic/offline_inference/basic/embed.py](../../../examples/basic/offline_inference/embed.py)
 
 ### `LLM.encode`
 

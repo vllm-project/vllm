@@ -11,7 +11,7 @@ Automatic Prefix Caching (APC in short) caches the KV cache of existing queries,
 
 Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an example:
 
-[examples/offline_inference/automatic_prefix_caching.py](../../examples/offline_inference/automatic_prefix_caching.py)
+[examples/basic/offline_inference/automatic_prefix_caching.py](../../examples/basic/offline_inference/automatic_prefix_caching.py)
 
 ## Example workloads
 
