@@ -119,8 +119,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
         : reinterpret_cast<int *>(params.cache_indices_ptr);
     const int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id];
-    // cache_index == params.null_block_id is defined as padding, so we exit early
-    if (cache_indices != nullptr && cache_index == params.null_block_id){
+    // Skip batch entries whose cache index maps to the null block (padding).
+    // Disabled in APC mode where cache_index is invalid and unused.
+    if (!params.cache_enabled && cache_indices != nullptr && cache_index == params.null_block_id){
         return;
     }
     input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + sequence_start_index * params.u_batch_stride
