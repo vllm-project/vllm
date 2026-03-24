@@ -542,6 +542,7 @@ def maybe_override_with_speculators(
     trust_remote_code: bool,
     revision: str | None = None,
     vllm_speculative_config: dict[str, Any] | None = None,
+    hf_token: bool | str | None = None,
     **kwargs,
 ) -> tuple[str, str | None, dict[str, Any] | None]:
     """
@@ -556,6 +557,7 @@ def maybe_override_with_speculators(
         trust_remote_code: Whether to trust remote code
         revision: Model revision
         vllm_speculative_config: Existing vLLM speculative config
+        hf_token: HuggingFace token for authenticated model access
 
     Returns:
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
@@ -572,6 +574,7 @@ def maybe_override_with_speculators(
     config_dict, _ = PretrainedConfig.get_config_dict(
         model if gguf_model_repo is None else gguf_model_repo,
         revision=revision,
+        token=hf_token,
         **without_trust_remote_code(kwargs),
     )
     speculators_config = config_dict.get("speculators_config")
@@ -1054,6 +1057,7 @@ def try_get_generation_config(
     trust_remote_code: bool,
     revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
+    hf_token: bool | str | None = None,
 ) -> GenerationConfig | None:
     # GGUF files don't have generation_config.json - their config is embedded
     # in the file header. Skip all filesystem lookups to avoid re-reading the
@@ -1066,6 +1070,7 @@ def try_get_generation_config(
         return GenerationConfig.from_pretrained(
             model,
             revision=revision,
+            token=hf_token,
         )
     except OSError:  # Not found
         try:
@@ -1074,6 +1079,7 @@ def try_get_generation_config(
                 trust_remote_code=trust_remote_code,
                 revision=revision,
                 config_format=config_format,
+                token=hf_token,
             )
             return GenerationConfig.from_model_config(config)
         except OSError:  # Not found
