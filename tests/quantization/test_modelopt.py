@@ -123,11 +123,13 @@ def test_modelopt_fp8_checkpoint_setup(default_vllm_config, vllm_runner):
     not is_quant_method_supported("modelopt"),
     reason="ModelOpt FP8 is not supported on this GPU type.",
 )
-def test_modelopt_fp8_pc_pt_checkpoint_setup(vllm_runner):
+def test_modelopt_fp8_pc_pt_checkpoint_setup(default_vllm_config, vllm_runner):
     """Test ModelOpt FP8_PER_CHANNEL_PER_TOKEN checkpoint setup."""
     model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pc-pt"
     model_path = _snapshot_download_or_skip(model_id)
 
+    # Set model config as model_config.dtype is required in ModelOptFp8LinearMethod.
+    default_vllm_config.model_config = ModelConfig()
     with vllm_runner(model_path, quantization="modelopt", enforce_eager=True) as llm:
 
         def check_model(model):
@@ -184,11 +186,13 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(vllm_runner):
     not is_quant_method_supported("modelopt"),
     reason="ModelOpt FP8 is not supported on this GPU type.",
 )
-def test_modelopt_fp8_pb_wo_checkpoint_setup(vllm_runner):
+def test_modelopt_fp8_pb_wo_checkpoint_setup(default_vllm_config, vllm_runner):
     """Test ModelOpt FP8_PB_WO checkpoint setup."""
     model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pb-wo"
     model_path = _snapshot_download_or_skip(model_id)
 
+    # Set model config as model_config.dtype is required in ModelOptFp8LinearMethod.
+    default_vllm_config.model_config = ModelConfig()
     with vllm_runner(model_path, quantization="modelopt", enforce_eager=True) as llm:
 
         def check_model(model):
