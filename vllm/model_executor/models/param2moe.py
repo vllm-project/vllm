@@ -624,11 +624,22 @@ class Param2MoEMixtureOfExperts(MixtureOfExperts):
             if hasattr(fused, "update_expert_map"):
                 fused.update_expert_map()
 
-    def set_eplb_state(self, eplb_state) -> None:
-        self.eplb_state = eplb_state
-        for moe in self.moe_layers:
-            if hasattr(moe, "set_eplb_state"):
-                moe.set_eplb_state(eplb_state)
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        self.expert_weights.clear()
+        for layer_idx, layer in enumerate(self.moe_layers):
+            self.expert_weights.append(layer.get_expert_weights())
+            if hasattr(layer, "set_eplb_state"):
+                layer.set_eplb_state(
+                    moe_layer_idx=layer_idx,
+                    expert_load_view=expert_load_view,
+                    logical_to_physical_map=logical_to_physical_map,
+                    logical_replica_count=logical_replica_count,
+                )
 
 
 class Param2MoEForCausalLM(
