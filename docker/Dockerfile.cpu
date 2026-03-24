@@ -161,7 +161,7 @@ RUN ln -s /usr/bin/clangd-14 /usr/bin/clangd
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -e tests/vllm_test_utils
+    uv pip install --no-build-isolation -e tests/vllm_test_utils
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
