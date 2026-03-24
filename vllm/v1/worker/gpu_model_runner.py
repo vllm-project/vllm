@@ -417,6 +417,11 @@ class GPUModelRunner(
             cache_config.cache_dtype, self.model_config
         )
 
+        # Resolve the structured output backend once at init time.
+        self._structured_output_backend = current_platform.get_structured_output_backend(
+            vllm_config.structured_outputs_config.structured_output_backend
+        )
+
         self.is_pooling_model = model_config.runner_type == "pooling"
         self.enable_prompt_embeds = model_config.enable_prompt_embeds
         self.is_multimodal_raw_input_only_model = (
@@ -4142,7 +4147,8 @@ class GPUModelRunner(
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
             apply_grammar_bitmask(
-                scheduler_output, grammar_output, self.input_batch, logits
+                scheduler_output, grammar_output, self.input_batch, logits,
+                structured_output_backend=self._structured_output_backend,
             )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):

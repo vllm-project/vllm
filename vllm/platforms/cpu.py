@@ -466,6 +466,26 @@ class CpuPlatform(Platform):
         return True
 
     @classmethod
+    def get_supported_structured_output_backends(cls) -> list[str]:
+        return ["auto", "cpu"]
+
+    @classmethod
+    def get_structured_output_backend(cls, backend: str = "auto") -> str:
+        if backend != "auto":
+            supported = cls.get_supported_structured_output_backends()
+            if backend not in supported:
+                raise ValueError(
+                    f"Structured output backend '{backend}' is not supported on CPU. "
+                    f"Supported: {supported}"
+                )
+            logger.info_once(
+                "Using user-specified structured output backend: %s", backend
+            )
+            return backend
+        # CPU platform always uses "cpu" backend
+        return "cpu"
+
+    @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
 
