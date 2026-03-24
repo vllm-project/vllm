@@ -173,6 +173,8 @@ class SchedulerStats:
 
     num_running_reqs: int = 0
     num_waiting_reqs: int = 0
+    approximate_uncached_tokens_waiting: int = 0
+    num_tokens_waiting: int = 0
 
     # These are used for internal DP load-balancing.
     step_counter: int = 0

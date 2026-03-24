@@ -325,6 +325,12 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             self.last_scheduler_stats.num_waiting_reqs += (
                 last_scheduler_stats.num_waiting_reqs
             )
+            self.last_scheduler_stats.approximate_uncached_tokens_waiting += (
+                last_scheduler_stats.approximate_uncached_tokens_waiting
+            )
+            self.last_scheduler_stats.num_tokens_waiting += (
+                last_scheduler_stats.num_tokens_waiting
+            )
             self.last_scheduler_stats.num_running_reqs += (
                 last_scheduler_stats.num_running_reqs
             )
@@ -451,6 +457,26 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.gauge_scheduler_waiting = create_metric_per_engine(
             gauge_scheduler_waiting, per_engine_labelvalues
+        )
+
+        gauge_scheduler_waiting_tokens = self._gauge_cls(
+            name="vllm:approximate_uncached_tokens_waiting",
+            documentation="Approximate number of uncached tokens waiting to be processed.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_scheduler_waiting_tokens = create_metric_per_engine(
+            gauge_scheduler_waiting_tokens, per_engine_labelvalues
+        )
+
+        gauge_num_tokens_waiting = self._gauge_cls(
+            name="vllm:num_tokens_waiting",
+            documentation="Number of raw prompt tokens waiting to be processed.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_num_tokens_waiting = create_metric_per_engine(
+            gauge_num_tokens_waiting, per_engine_labelvalues
         )
 
         gauge_engine_sleep_state = self._gauge_cls(
@@ -1042,6 +1068,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.gauge_scheduler_waiting[engine_idx].set(
                 scheduler_stats.num_waiting_reqs
+            )
+            self.gauge_scheduler_waiting_tokens[engine_idx].set(
+                scheduler_stats.approximate_uncached_tokens_waiting
+            )
+            self.gauge_num_tokens_waiting[engine_idx].set(
+                scheduler_stats.num_tokens_waiting
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
 
