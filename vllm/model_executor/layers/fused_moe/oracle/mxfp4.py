@@ -212,12 +212,8 @@ def select_mxfp4_moe_backend(
             # ROCm: Triton mxfp4 LoRA hits GPU memory faults due to
             # triton_kernels.tensor.Tensor / HIP read-only page issues
             # during weight swizzle and LoRA forward. Needs work from
-            # the triton_kernels/aiter side. This matches pre-#37128.
-            raise NotImplementedError(
-                "Mxfp4 LoRA is only supported on CUDA. "
-                "ROCm support is blocked by triton_kernels.tensor.Tensor "
-                "read-only memory issues (HIP GPU memory access fault)."
-            )
+            # the triton_kernels/aiter side.
+            raise NotImplementedError("Mxfp4 LoRA is currently only supported on CUDA.")
         if envs.VLLM_MXFP4_USE_MARLIN is False and triton_kernels_supported:
             logger.info_once("Using Triton backend for mxfp4 lora")
             return Mxfp4MoeBackend.TRITON_UNFUSED, backend_to_kernel_cls(
