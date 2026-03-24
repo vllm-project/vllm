@@ -116,7 +116,7 @@ def stream(to_stream: torch.cuda.Stream, from_stream: torch.cuda.Stream):
     avoids current_stream and device lookups.
     """
     try:
-        torch.cuda.set_stream(to_stream)
+        torch.accelerator.set_stream(to_stream)
         yield
     finally:
-        torch.cuda.set_stream(from_stream)
+        torch.accelerator.set_stream(from_stream)
