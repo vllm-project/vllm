@@ -48,7 +48,11 @@ class Glm4MoeModelToolParser(ToolParser):
     rather than waiting for the complete </arg_value> tag.
     """
 
-    def __init__(self, tokenizer: TokenizerLike, tools=None):
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[ChatCompletionToolsParam] | None = None,
+    ):
         super().__init__(tokenizer, tools=tools)
         # Stateful streaming fields
         self.current_tool_name_sent: bool = False

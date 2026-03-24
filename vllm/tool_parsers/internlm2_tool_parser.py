@@ -10,6 +10,7 @@ from partial_json_parser.core.options import Allow
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -30,7 +31,11 @@ logger = init_logger(__name__)
 
 
 class Internlm2ToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike, tools=None):
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[ChatCompletionToolsParam] | None = None,
+    ):
         super().__init__(tokenizer, tools=tools)
         self.position = 0
 

@@ -1167,7 +1167,11 @@ class StreamingXMLToolCallParser:
 
 
 class Qwen3XMLToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike, tools=None):
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[ChatCompletionToolsParam] | None = None,
+    ):
         super().__init__(tokenizer, tools=tools)
         self.parser = StreamingXMLToolCallParser()
         if self.tools:

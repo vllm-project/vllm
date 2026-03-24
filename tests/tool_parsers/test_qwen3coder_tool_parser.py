@@ -30,23 +30,19 @@ def qwen3_tokenizer():
     return get_tokenizer(tokenizer_name=MODEL)
 
 
-@pytest.fixture
-def qwen3_tool_parser(qwen3_tokenizer):
-    return Qwen3CoderToolParser(qwen3_tokenizer)
-
-
-@pytest.fixture
-def qwen3_xml_tool_parser(qwen3_tokenizer):
-    return Qwen3XMLToolParser(qwen3_tokenizer)
-
-
 @pytest.fixture(params=["xml"])
-def qwen3_tool_parser_parametrized(qwen3_tool_parser, qwen3_xml_tool_parser, request):
-    """Parameterized fixture that provides both parser types for testing"""
+def qwen3_parser_cls(request):
+    """Parameterized fixture that provides parser class for testing"""
     if request.param == "original":
-        return qwen3_tool_parser
+        return Qwen3CoderToolParser
     else:
-        return qwen3_xml_tool_parser
+        return Qwen3XMLToolParser
+
+
+@pytest.fixture
+def qwen3_tool_parser_parametrized(qwen3_tokenizer, qwen3_parser_cls):
+    """Parser instance without tools (for tests that don't need them)"""
+    return qwen3_parser_cls(qwen3_tokenizer)
 
 
 @pytest.fixture
@@ -336,17 +332,16 @@ circle
     ],
 )
 def test_extract_tool_calls(
-    qwen3_tool_parser_parametrized,
+    qwen3_parser_cls,
+    qwen3_tokenizer,
     sample_tools,
     model_output,
     expected_tool_calls,
     expected_content,
 ):
-    qwen3_tool_parser_parametrized.tools = sample_tools
+    parser = qwen3_parser_cls(qwen3_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
-    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
     assert extracted_tool_calls.tools_called
 
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
@@ -355,7 +350,7 @@ def test_extract_tool_calls(
 
 
 def test_extract_tool_calls_fallback_no_tags(
-    qwen3_tool_parser_parametrized, sample_tools
+    qwen3_parser_cls, qwen3_tokenizer, sample_tools
 ):
     """Test fallback parsing when XML tags are missing"""
     model_output = """<function=get_current_weather>
@@ -367,18 +362,16 @@ TX
 </parameter>
 </function>"""
 
-    qwen3_tool_parser_parametrized.tools = sample_tools
+    parser = qwen3_parser_cls(qwen3_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
-    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     assert extracted_tool_calls.tools_called
     assert len(extracted_tool_calls.tool_calls) == 1
     assert extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
 
 
-def test_extract_tool_calls_type_conversion(qwen3_tool_parser_parametrized):
+def test_extract_tool_calls_type_conversion(qwen3_parser_cls, qwen3_tokenizer):
     """Test parameter type conversion based on tool schema"""
     tools = [
         ChatCompletionToolsParam(
@@ -419,11 +412,9 @@ hello world
 </function>
 </tool_call>"""
 
-    qwen3_tool_parser_parametrized.tools = tools
+    parser = qwen3_parser_cls(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["int_param"] == 42
@@ -609,7 +600,7 @@ circle
     ],
 )
 def test_extract_tool_calls_streaming(
-    qwen3_tool_parser_parametrized,
+    qwen3_parser_cls,
     qwen3_tokenizer,
     sample_tools,
     model_output,
@@ -617,14 +608,14 @@ def test_extract_tool_calls_streaming(
     expected_content,
 ):
     """Test incremental streaming behavior including typed parameters"""
-    qwen3_tool_parser_parametrized.tools = sample_tools
+    parser = qwen3_parser_cls(qwen3_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
     tool_states = {}  # Track state per tool index
 
     for delta_message in stream_delta_message_generator(
-        qwen3_tool_parser_parametrized, qwen3_tokenizer, model_output, request
+        parser, qwen3_tokenizer, model_output, request
     ):
         # role should never be streamed from tool parser
         assert not delta_message.role
@@ -668,9 +659,7 @@ def test_extract_tool_calls_streaming(
 
     # Verify we got all expected tool calls
     assert len(tool_states) == len(expected_tool_calls)
-    assert len(qwen3_tool_parser_parametrized.prev_tool_call_arr) == len(
-        expected_tool_calls
-    )
+    assert len(parser.prev_tool_call_arr) == len(expected_tool_calls)
 
     # Verify each tool call
     for idx, expected_tool in enumerate(expected_tool_calls):
@@ -688,7 +677,7 @@ def test_extract_tool_calls_streaming(
 
 
 def test_extract_tool_calls_missing_closing_parameter_tag(
-    qwen3_tool_parser_parametrized, sample_tools
+    qwen3_parser_cls, qwen3_tokenizer, sample_tools
 ):
     """Test handling of missing closing </parameter> tag"""
     # Using get_current_weather from sample_tools but with malformed XML
@@ -706,11 +695,9 @@ fahrenheit
 </function>
 </tool_call>"""
 
-    qwen3_tool_parser_parametrized.tools = sample_tools
+    parser = qwen3_parser_cls(qwen3_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
-    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     # The parser should handle the malformed XML gracefully
     assert extracted_tool_calls.tools_called
@@ -731,7 +718,7 @@ fahrenheit
 
 
 def test_extract_tool_calls_streaming_missing_closing_tag(
-    qwen3_tool_parser_parametrized, qwen3_tokenizer, sample_tools
+    qwen3_parser_cls, qwen3_tokenizer, sample_tools
 ):
     """Test streaming with missing closing </parameter> tag"""
     # Using get_current_weather from sample_tools but with malformed XML
@@ -749,14 +736,14 @@ fahrenheit
 </function>
 </tool_call>"""
 
-    qwen3_tool_parser_parametrized.tools = sample_tools
+    parser = qwen3_parser_cls(qwen3_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
     tool_states = {}
 
     for delta_message in stream_delta_message_generator(
-        qwen3_tool_parser_parametrized, qwen3_tokenizer, model_output, request
+        parser, qwen3_tokenizer, model_output, request
     ):
         if delta_message.content:
             other_content += delta_message.content
@@ -791,7 +778,7 @@ fahrenheit
     assert "Let me check the weather for you:" in other_content
     # Verify we got the tool call
     assert len(tool_states) == 1
-    assert len(qwen3_tool_parser_parametrized.prev_tool_call_arr) == 1
+    assert len(parser.prev_tool_call_arr) == 1
 
     state = tool_states[0]
     assert state["id"] is not None
@@ -807,7 +794,7 @@ fahrenheit
 
 
 def test_extract_tool_calls_streaming_incremental(
-    qwen3_tool_parser_parametrized, qwen3_tokenizer, sample_tools
+    qwen3_parser_cls, qwen3_tokenizer, sample_tools
 ):
     """Test that streaming is truly incremental"""
     model_output = """I'll check the weather.<tool_call>
@@ -821,12 +808,12 @@ TX
 </function>
 </tool_call>"""
 
-    qwen3_tool_parser_parametrized.tools = sample_tools
+    parser = qwen3_parser_cls(qwen3_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     chunks = []
     for delta_message in stream_delta_message_generator(
-        qwen3_tool_parser_parametrized, qwen3_tokenizer, model_output, request
+        parser, qwen3_tokenizer, model_output, request
     ):
         chunks.append(delta_message)
 
@@ -866,7 +853,8 @@ TX
 
 
 def test_extract_tool_calls_complex_type_with_single_quote(
-    qwen3_tool_parser_parametrized,
+    qwen3_parser_cls,
+    qwen3_tokenizer,
 ):
     """Test parameter type conversion based on tool schema"""
     tools = [
@@ -896,18 +884,16 @@ def test_extract_tool_calls_complex_type_with_single_quote(
 </function>
 </tool_call>"""
 
-    qwen3_tool_parser_parametrized.tools = tools
+    parser = qwen3_parser_cls(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["obj_param"] == {"key": "value"}
 
 
 def test_extract_tool_calls_streaming_missing_opening_tag(
-    qwen3_tool_parser_parametrized, qwen3_tokenizer, sample_tools
+    qwen3_parser_cls, qwen3_tokenizer, sample_tools
 ):
     """Test streaming with missing opening <tool_call> tag
 
@@ -929,14 +915,14 @@ fahrenheit
 </function>
 </tool_call>"""
 
-    qwen3_tool_parser_parametrized.tools = sample_tools
+    parser = qwen3_parser_cls(qwen3_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
     tool_states = {}
 
     for delta_message in stream_delta_message_generator(
-        qwen3_tool_parser_parametrized, qwen3_tokenizer, model_output, request
+        parser, qwen3_tokenizer, model_output, request
     ):
         if delta_message.content:
             other_content += delta_message.content
@@ -972,7 +958,7 @@ fahrenheit
 
     # Verify we got the tool call
     assert len(tool_states) == 1
-    assert len(qwen3_tool_parser_parametrized.prev_tool_call_arr) == 1
+    assert len(parser.prev_tool_call_arr) == 1
 
     state = tool_states[0]
     assert state["id"] is not None

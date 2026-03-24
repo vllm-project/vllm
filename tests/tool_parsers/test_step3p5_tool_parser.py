@@ -85,7 +85,7 @@ def assert_tool_calls(
 
 
 def stream_delta_message_generator(
-    step3p5_tool_parser,
+    parser,
     step3p5_tokenizer: TokenizerLike,
     model_output: str,
     request: ChatCompletionRequest | None = None,
@@ -115,7 +115,7 @@ def stream_delta_message_generator(
 
         current_text = previous_text + delta_text
 
-        delta_message = step3p5_tool_parser.extract_tool_calls_streaming(
+        delta_message = parser.extract_tool_calls_streaming(
             previous_text,
             current_text,
             delta_text,
@@ -136,7 +136,7 @@ def stream_delta_message_generator(
 
 
 def stream_delta_message_generator_from_chunks(
-    step3p5_tool_parser,
+    parser,
     step3p5_tokenizer: TokenizerLike,
     delta_text_chunks: list[str],
     request: ChatCompletionRequest | None = None,
@@ -149,7 +149,7 @@ def stream_delta_message_generator_from_chunks(
         current_text = previous_text + delta_text
         current_token_ids = previous_token_ids + delta_token_ids
 
-        delta_message = step3p5_tool_parser.extract_tool_calls_streaming(
+        delta_message = parser.extract_tool_calls_streaming(
             previous_text,
             current_text,
             delta_text,
@@ -348,17 +348,15 @@ circle
     ],
 )
 def test_extract_tool_calls(
-    step3p5_tool_parser,
+    step3p5_tokenizer,
     sample_tools,
     model_output,
     expected_tool_calls,
     expected_content,
 ):
-    step3p5_tool_parser.tools = sample_tools
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
-    extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
     assert extracted_tool_calls.tools_called
 
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
@@ -366,7 +364,7 @@ def test_extract_tool_calls(
     assert extracted_tool_calls.content == expected_content
 
 
-def test_extract_tool_calls_fallback_no_tags(step3p5_tool_parser, sample_tools):
+def test_extract_tool_calls_fallback_no_tags(step3p5_tokenizer, sample_tools):
     """Test fallback parsing when XML tags are missing"""
     model_output = """<function=get_current_weather>
 <parameter=city>
@@ -377,18 +375,16 @@ TX
 </parameter>
 </function>"""
 
-    step3p5_tool_parser.tools = sample_tools
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
-    extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     assert extracted_tool_calls.tools_called
     assert len(extracted_tool_calls.tool_calls) == 1
     assert extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
 
 
-def test_extract_tool_calls_type_conversion(step3p5_tool_parser):
+def test_extract_tool_calls_type_conversion(step3p5_tokenizer):
     """Test parameter type conversion based on tool schema"""
     tools = [
         ChatCompletionToolsParam(
@@ -429,11 +425,9 @@ hello world
 </function>
 </tool_call>"""
 
-    step3p5_tool_parser.tools = tools
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["int_param"] == 42
@@ -619,7 +613,6 @@ circle
     ],
 )
 def test_extract_tool_calls_streaming(
-    step3p5_tool_parser,
     step3p5_tokenizer,
     sample_tools,
     model_output,
@@ -627,14 +620,14 @@ def test_extract_tool_calls_streaming(
     expected_content,
 ):
     """Test incremental streaming behavior including typed parameters"""
-    step3p5_tool_parser.tools = sample_tools
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
     tool_states = {}  # Track state per tool index
 
     for delta_message in stream_delta_message_generator(
-        step3p5_tool_parser, step3p5_tokenizer, model_output, request
+        parser, step3p5_tokenizer, model_output, request
     ):
         # role should never be streamed from tool parser
         assert not delta_message.role
@@ -695,7 +688,7 @@ def test_extract_tool_calls_streaming(
 
 
 def test_extract_tool_calls_missing_closing_parameter_tag(
-    step3p5_tool_parser, sample_tools
+    step3p5_tokenizer, sample_tools
 ):
     """Test handling of missing closing </parameter> tag"""
     # Using get_current_weather from sample_tools but with malformed XML
@@ -713,11 +706,9 @@ fahrenheit
 </function>
 </tool_call>"""
 
-    step3p5_tool_parser.tools = sample_tools
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
-    extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     # The parser should handle the malformed XML gracefully
     assert extracted_tool_calls.tools_called
@@ -738,7 +729,7 @@ fahrenheit
 
 
 def test_extract_tool_calls_streaming_missing_closing_tag(
-    step3p5_tool_parser, step3p5_tokenizer, sample_tools
+    step3p5_tokenizer, sample_tools
 ):
     """Test streaming with missing closing </parameter> tag"""
     # Using get_current_weather from sample_tools but with malformed XML
@@ -756,14 +747,14 @@ fahrenheit
 </function>
 </tool_call>"""
 
-    step3p5_tool_parser.tools = sample_tools
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
     tool_states = {}
 
     for delta_message in stream_delta_message_generator(
-        step3p5_tool_parser, step3p5_tokenizer, model_output, request
+        parser, step3p5_tokenizer, model_output, request
     ):
         if delta_message.content:
             other_content += delta_message.content
@@ -812,9 +803,7 @@ fahrenheit
     assert args["unit"] == "fahrenheit"
 
 
-def test_extract_tool_calls_streaming_incremental(
-    step3p5_tool_parser, step3p5_tokenizer, sample_tools
-):
+def test_extract_tool_calls_streaming_incremental(step3p5_tokenizer, sample_tools):
     """Test that streaming is truly incremental"""
     model_output = """I'll check the weather.<tool_call>
 <function=get_current_weather>
@@ -827,12 +816,12 @@ TX
 </function>
 </tool_call>"""
 
-    step3p5_tool_parser.tools = sample_tools
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     chunks = []
     for delta_message in stream_delta_message_generator(
-        step3p5_tool_parser, step3p5_tokenizer, model_output, request
+        parser, step3p5_tokenizer, model_output, request
     ):
         chunks.append(delta_message)
 
@@ -871,7 +860,7 @@ TX
     assert parsed_args["state"] == "TX"
 
 
-def test_extract_tool_calls_complex_type_with_single_quote(step3p5_tool_parser):
+def test_extract_tool_calls_complex_type_with_single_quote(step3p5_tokenizer):
     """Test parameter type conversion based on tool schema"""
     tools = [
         ChatCompletionToolsParam(
@@ -900,18 +889,16 @@ def test_extract_tool_calls_complex_type_with_single_quote(step3p5_tool_parser):
 </function>
 </tool_call>"""
 
-    step3p5_tool_parser.tools = tools
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["obj_param"] == {"key": "value"}
 
 
 def test_extract_tool_calls_streaming_mixed_content_and_multiple_tool_calls(
-    step3p5_tool_parser, step3p5_tokenizer, sample_tools
+    step3p5_tokenizer, sample_tools
 ):
     """Test mixed content with multiple complete tool calls.
 
@@ -940,14 +927,14 @@ rectangle
 </function>
 </tool_call>"""
 
-    step3p5_tool_parser.tools = sample_tools
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
     tool_states = {}
 
     for delta_message in stream_delta_message_generator(
-        step3p5_tool_parser, step3p5_tokenizer, model_output, request
+        parser, step3p5_tokenizer, model_output, request
     ):
         if delta_message.content:
             other_content += delta_message.content
@@ -1018,7 +1005,7 @@ rectangle
 
 
 def test_extract_tool_calls_non_streaming_mixed_content_and_multiple_tool_calls(
-    step3p5_tool_parser, sample_tools
+    step3p5_tokenizer, sample_tools
 ):
     """Test non-streaming extraction with mixed content and multiple tool calls.
 
@@ -1047,12 +1034,10 @@ rectangle
 </function>
 </tool_call>"""
 
-    step3p5_tool_parser.tools = sample_tools
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
-    extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     # Should have exactly two complete tool calls
     assert extracted_tool_calls.tools_called
@@ -1096,7 +1081,7 @@ rectangle
 
 
 def test_extract_tool_calls_streaming_full_input_mixed_content_and_multiple_tool_calls(
-    step3p5_tool_parser, step3p5_tokenizer, sample_tools
+    step3p5_tokenizer, sample_tools
 ):
     """Test streaming with entire input as single delta_text.
 
@@ -1126,7 +1111,7 @@ rectangle
 </function>
 </tool_call>"""
 
-    step3p5_tool_parser.tools = sample_tools
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
@@ -1154,7 +1139,7 @@ rectangle
     delta_text = current_text
 
     # Call parser once with all tokens including EOS
-    delta_result = step3p5_tool_parser.extract_tool_calls_streaming(
+    delta_result = parser.extract_tool_calls_streaming(
         previous_text,
         current_text,
         delta_text,
@@ -1228,7 +1213,7 @@ rectangle
 
 
 def test_extract_tool_calls_streaming_multiple_tool_calls_no_content_between(
-    step3p5_tool_parser, step3p5_tokenizer, sample_tools
+    step3p5_tokenizer, sample_tools
 ):
     """Test multiple tool calls with no content between them.
 
@@ -1258,14 +1243,14 @@ rectangle
 </function>
 </tool_call>"""
 
-    step3p5_tool_parser.tools = sample_tools
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
     tool_states = {}
 
     for delta_message in stream_delta_message_generator(
-        step3p5_tool_parser, step3p5_tokenizer, model_output, request
+        parser, step3p5_tokenizer, model_output, request
     ):
         if delta_message.content:
             other_content += delta_message.content
@@ -1327,10 +1312,10 @@ rectangle
 
 
 def test_extract_tool_calls_streaming_multi_token_chunk_boundary(
-    step3p5_tool_parser, step3p5_tokenizer, sample_tools
+    step3p5_tokenizer, sample_tools
 ):
     """Ensure fallback doesn't close a new tool_call when boundary is in one chunk."""
-    step3p5_tool_parser.tools = sample_tools
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
     delta_text_chunks = [
         """<tool_call>
@@ -1355,7 +1340,7 @@ rectangle""",
 
     tool_states = {}
     for delta_message in stream_delta_message_generator_from_chunks(
-        step3p5_tool_parser, step3p5_tokenizer, delta_text_chunks, request
+        parser, step3p5_tokenizer, delta_text_chunks, request
     ):
         print(delta_message)
         if delta_message.tool_calls:
@@ -1379,7 +1364,7 @@ rectangle""",
 
 
 def test_extract_tool_calls_non_streaming_multiple_tool_calls_no_content_between(
-    step3p5_tool_parser, sample_tools
+    step3p5_tokenizer, sample_tools
 ):
     """Test non-streaming extraction with tool calls and no content between them.
 
@@ -1409,12 +1394,10 @@ rectangle
 </function>
 </tool_call>"""
 
-    step3p5_tool_parser.tools = sample_tools
+    parser = Step3p5ToolParser(step3p5_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
-    extracted_tool_calls = step3p5_tool_parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     # Should have exactly two complete tool calls
     assert extracted_tool_calls.tools_called

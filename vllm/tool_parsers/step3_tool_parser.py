@@ -10,6 +10,7 @@ import regex as re
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -43,7 +44,11 @@ class Step3ToolParser(ToolParser):
     TOOL_SEP = "<｜tool_sep｜>"
     SPECIAL_TOKENS = [TOOL_CALLS_BEGIN, TOOL_CALLS_END, TOOL_CALL_BEGIN, TOOL_CALL_END]
 
-    def __init__(self, tokenizer: TokenizerLike, tools=None):
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[ChatCompletionToolsParam] | None = None,
+    ):
         super().__init__(tokenizer, tools=tools)
         self.position = 0
         # Explicit state flags for robust streaming

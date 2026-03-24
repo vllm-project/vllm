@@ -674,7 +674,7 @@ def test_streaming_json_escape_in_string(glm4_moe_tool_parser, mock_request):
     assert '"' in parsed["message"] or "world" in parsed["message"]
 
 
-def test_streaming_long_content_incremental(glm4_moe_tool_parser):
+def test_streaming_long_content_incremental(glm4_moe_tokenizer):
     """Test incremental streaming of long content (Issue #32829).
 
     This is the core fix: for long string values like code (4000+ chars),
@@ -724,7 +724,7 @@ if __name__ == "__main__":
             ),
         ),
     ]
-    glm4_moe_tool_parser.tools = write_tools
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=write_tools)
     request = ChatCompletionRequest(
         model=MODEL,
         messages=[],
@@ -749,7 +749,7 @@ if __name__ == "__main__":
     # Count argument fragments
     fragment_count = 0
     for chunk in chunks:
-        result = glm4_moe_tool_parser.extract_tool_calls_streaming(
+        result = parser.extract_tool_calls_streaming(
             previous_text="",
             current_text="",
             delta_text=chunk,
@@ -777,8 +777,8 @@ if __name__ == "__main__":
     )
 
     # Verify final result is valid JSON
-    assert len(glm4_moe_tool_parser.streamed_args_for_tool) == 1
-    args_json = glm4_moe_tool_parser.streamed_args_for_tool[0]
+    assert len(parser.streamed_args_for_tool) == 1
+    args_json = parser.streamed_args_for_tool[0]
     parsed = json.loads(args_json)
     assert parsed["file_path"] == "/tmp/bubble_sort.py"
     assert "def bubble_sort" in parsed["content"]

@@ -36,7 +36,11 @@ class SeedOssToolParser(ToolParser):
     TOOL_CALL_START = "<seed:tool_call>"
     TOOL_CALL_END = "</seed:tool_call>"
 
-    def __init__(self, tokenizer: TokenizerLike, tools=None):
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[ChatCompletionToolsParam] | None = None,
+    ):
         super().__init__(tokenizer, tools=tools)
 
         # --- streaming state ---

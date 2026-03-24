@@ -44,7 +44,11 @@ class DeepSeekV32ToolParser(ToolParser):
     </｜DSML｜function_calls>
     """
 
-    def __init__(self, tokenizer: TokenizerLike, tools=None):
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[ChatCompletionToolsParam] | None = None,
+    ):
         super().__init__(tokenizer, tools=tools)
 
         self.prev_tool_call_arr: list[dict] = []

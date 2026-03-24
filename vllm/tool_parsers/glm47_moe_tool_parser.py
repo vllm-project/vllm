@@ -14,6 +14,9 @@ This parser overrides the parent regex patterns to handle both formats.
 
 import regex as re
 
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionToolsParam,
+)
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.glm4_moe_tool_parser import Glm4MoeModelToolParser
@@ -22,7 +25,11 @@ logger = init_logger(__name__)
 
 
 class Glm47MoeModelToolParser(Glm4MoeModelToolParser):
-    def __init__(self, tokenizer: TokenizerLike, tools=None):
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[ChatCompletionToolsParam] | None = None,
+    ):
         super().__init__(tokenizer, tools=tools)
         # GLM-4.7 format: <tool_call>func_name[<arg_key>...]*</tool_call>
         # The function name can be followed by a newline, whitespace, or

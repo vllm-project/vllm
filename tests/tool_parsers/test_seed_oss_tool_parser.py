@@ -218,17 +218,15 @@ def test_extract_tool_calls_no_tools(seed_oss_tool_parser):
     ],
 )
 def test_extract_tool_calls(
-    seed_oss_tool_parser,
+    seed_oss_tokenizer,
     sample_tools,
     model_output,
     expected_tool_calls,
     expected_content,
 ):
-    seed_oss_tool_parser.tools = sample_tools
+    parser = SeedOssToolParser(seed_oss_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
-    extracted_tool_calls = seed_oss_tool_parser.extract_tool_calls(
-        model_output, request=request
-    )  # type: ignore[arg-type]
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)  # type: ignore[arg-type]
     assert extracted_tool_calls.tools_called
 
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
@@ -424,7 +422,6 @@ def stream_delta_message_generator(
     ],
 )
 def test_streaming_tool_calls(
-    seed_oss_tool_parser,
     seed_oss_tokenizer,
     sample_tools,
     model_output,
@@ -432,14 +429,14 @@ def test_streaming_tool_calls(
     expected_content,
 ):
     """Test incremental streaming behavior"""
-    seed_oss_tool_parser.tools = sample_tools
+    parser = SeedOssToolParser(seed_oss_tokenizer, tools=sample_tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
     tool_states = {}  # Track state per tool index
 
     for delta_message in stream_delta_message_generator(
-        seed_oss_tool_parser, seed_oss_tokenizer, model_output, request
+        parser, seed_oss_tokenizer, model_output, request
     ):
         # role should never be streamed from tool parser
         assert not delta_message.role

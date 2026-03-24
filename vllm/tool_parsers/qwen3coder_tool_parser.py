@@ -30,7 +30,11 @@ logger = init_logger(__name__)
 
 
 class Qwen3CoderToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike, tools=None):
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[ChatCompletionToolsParam] | None = None,
+    ):
         super().__init__(tokenizer, tools=tools)
 
         self.current_tool_name_sent: bool = False

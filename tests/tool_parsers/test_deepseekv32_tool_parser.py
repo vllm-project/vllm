@@ -274,7 +274,7 @@ class TestExtractToolCallsStreaming:
         content = "".join(d.content for d in deltas if d.content is not None)
         assert "Thinking" in content
 
-    def test_type_conversion_in_streaming(self, parser):
+    def test_type_conversion_in_streaming(self):
         tool = make_tool_param(
             "add",
             {
@@ -285,7 +285,7 @@ class TestExtractToolCallsStreaming:
                 },
             },
         )
-        parser.tools = [tool]
+        parser = DeepSeekV32ToolParser(MOCK_TOKENIZER, tools=[tool])
         full_text = build_tool_call("add", {"x": "3", "y": "4"})
         deltas = self._stream(parser, full_text)
         args_str = self._reconstruct_args(deltas)
