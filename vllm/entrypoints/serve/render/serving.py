@@ -250,6 +250,64 @@ class OpenAIServingRender:
 
         return conversation, engine_prompts
 
+    async def render_batch_chat(
+        self,
+        request: ChatCompletionRequest,
+    ) -> tuple[list[list[ConversationMessage]], list[ProcessorInputs]] | ErrorResponse:
+        """Preprocess a batch of conversations from a single ChatCompletionRequest.
+
+        Performs shared validation once (chat template, tool config) then calls
+        preprocess_chat for each conversation in request.get_conversations().
+
+        :returns: A tuple of (all_conversations, engine_prompts) where each list
+            has one entry per conversation, or an ErrorResponse on failure.
+        """
+        tokenizer = self.renderer.tokenizer
+        tool_parser = self.tool_parser
+
+        if is_mistral_tokenizer(tokenizer):
+            _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
+            _mt.truncate_tool_call_ids(request)  # type: ignore[arg-type]
+            _mt.validate_request_params(request)
+
+        tool_dicts = (
+            None
+            if request.tools is None
+            else [tool.model_dump() for tool in request.tools]
+        )
+
+        if not self.use_harmony:
+            error_check_ret = self.validate_chat_template(
+                request_chat_template=request.chat_template,
+                chat_template_kwargs=request.chat_template_kwargs,
+                trust_request_chat_template=self.trust_request_chat_template,
+            )
+            if error_check_ret is not None:
+                return error_check_ret
+
+        all_conversations: list[list[ConversationMessage]] = []
+        all_engine_prompts: list[ProcessorInputs] = []
+
+        for messages in request.get_conversations():
+            if self.use_harmony:
+                conversation, engine_prompts = self._make_request_with_harmony(
+                    request, should_include_tools=tool_dicts is not None
+                )
+            else:
+                conversation, engine_prompts = await self.preprocess_chat(
+                    request,
+                    messages,
+                    default_template=self.chat_template,
+                    default_template_content_format=self.chat_template_content_format,
+                    default_template_kwargs=self.default_chat_template_kwargs,
+                    tool_dicts=tool_dicts,
+                    tool_parser=tool_parser,
+                )
+            all_conversations.append(conversation)
+            all_engine_prompts.append(engine_prompts[0])
+
+        return all_conversations, all_engine_prompts
+
     async def render_completion_request(
         self,
         request: CompletionRequest,

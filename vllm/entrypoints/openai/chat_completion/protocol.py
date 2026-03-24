@@ -150,7 +150,7 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
-    messages: list[ChatCompletionMessageParam]
+    messages: list[ChatCompletionMessageParam] | list[list[ChatCompletionMessageParam]]
     model: str | None = None
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
@@ -357,6 +357,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # --8<-- [end:chat-completion-extra-params]
 
+    @property
+    def is_batched(self) -> bool:
+        """Return True when messages is a list of conversations."""
+        return bool(self.messages) and isinstance(self.messages[0], list)
+
+    def get_conversations(self) -> list[list[ChatCompletionMessageParam]]:
+        """Return all conversations. Wraps a single conversation in a list."""
+        if self.is_batched:
+            return self.messages  # type: ignore[return-value]
+        return [self.messages]  # type: ignore[return-value]
+
     def build_chat_params(
         self,
         default_template: str | None,
@@ -522,6 +533,29 @@ class ChatCompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_batch_mode(cls, data):
+        messages = data.get("messages", [])
+        is_batched = bool(messages) and isinstance(messages[0], list)
+        if is_batched:
+            if data.get("stream"):
+                raise VLLMValidationError(
+                    "Streaming is not supported with batched messages.",
+                    parameter="messages",
+                )
+            if data.get("use_beam_search"):
+                raise VLLMValidationError(
+                    "Beam search is not supported with batched messages.",
+                    parameter="messages",
+                )
+            if data.get("tools"):
+                raise VLLMValidationError(
+                    "Tool use is not supported with batched messages.",
+                    parameter="messages",
+                )
+        return data
 
     @model_validator(mode="before")
     @classmethod
