@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from math import prod
+
 import numpy as np
 import pytest
 import torch
@@ -8,6 +10,7 @@ import torch
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
+    LoadConfig,
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
@@ -24,12 +27,13 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import get_dtype_size, set_random_seed
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -1303,4 +1307,218 @@ def test_cudagraph_sizes_capped_for_mamba_cache():
         assert (
             compilation_config.cudagraph_capture_sizes[-1]
             == compilation_config.max_cudagraph_capture_size
+        )
+
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="Attention backend FLASHINFER is not supported on ROCm.",
+)
+@pytest.mark.parametrize("pack_size", [1, 2, 4])
+def test_hybrid_attention_mamba_kv_cache_pack_size(pack_size: int):
+    """
+    Test that KV cache layout for Attention layers in a hybrid (Attention+Mamba)
+    model correctly reflects pack_size settings (1, 2, 4) after calling
+    get_kv_cache_configs() and initialize_kv_cache().
+
+    Verifications:
+    1. Attention layer kv_cache logical shape equals
+       (num_blocks, 2, block_size, num_kv_heads, head_size).
+    2. Attention layer kv_cache stride at dim-0 (block dim) equals
+       base_stride * pack_size, reflecting the packed layout.
+    3. When pack_size > 1, all Attention layers in a pack share the same
+       underlying storage; storage_offset of layer i equals
+       i * num_element_per_attn_pack.
+    4. Writes to one packed Attention layer's region do NOT corrupt sibling
+       layers (write-isolation check).
+    5. Mamba layer kv_cache block count is independent of pack_size.
+    """
+    set_random_seed(42)
+
+    update_environment_variables(
+        {
+            "RANK": "0",
+            "LOCAL_RANK": "0",
+            "WORLD_SIZE": "1",
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": "12345",
+        }
+    )
+    from tests.utils import ensure_current_vllm_config
+
+    with ensure_current_vllm_config():
+        init_distributed_environment()
+        initialize_model_parallel(tensor_model_parallel_size=1)
+    torch.set_default_dtype(torch.float16)
+
+    model_config = ModelConfig(
+        model="ibm-granite/granite-4.0-tiny-preview",
+        dtype="float16",
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=10,
+        max_num_batched_tokens=512,
+        max_model_len=512,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+    )
+    cache_config = CacheConfig(
+        block_size=BLOCK_SIZE,
+        gpu_memory_utilization=0.9,
+        cache_dtype="auto",
+        mamba_num_attn_pages=pack_size,
+    )
+    parallel_config = ParallelConfig()
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        cache_config=cache_config,
+        scheduler_config=scheduler_config,
+        parallel_config=parallel_config,
+        attention_config=AttentionConfig(backend=AttentionBackendEnum.FLASHINFER),
+        load_config=LoadConfig(load_format="dummy"),
+    )
+
+    attn_layer_names = [
+        "model.layers.0.self_attn.attn",
+        "model.layers.1.self_attn.attn",
+        "model.layers.2.self_attn.attn",
+        "model.layers.3.self_attn.attn",
+    ]
+    mamba_layer_names = [
+        "model.layers.4.mixer",
+        "model.layers.5.mixer",
+        "model.layers.6.mixer",
+        "model.layers.7.mixer",
+    ]
+
+    with set_current_vllm_config(vllm_config):
+        hf_config = vllm_config.model_config.hf_config
+        for key in attn_layer_names:
+            Attention(
+                num_heads=model_config.get_num_attention_heads(parallel_config),
+                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                head_size=model_config.get_head_size(),
+                scale=1.0,
+                prefix=key,
+            )
+        for key in mamba_layer_names:
+            MambaMixer2(
+                hidden_size=hf_config.hidden_size,
+                ssm_state_size=hf_config.mamba_d_state,
+                conv_kernel_size=hf_config.mamba_d_conv,
+                intermediate_size=hf_config.mamba_expand * hf_config.hidden_size,
+                use_conv_bias=hf_config.mamba_conv_bias,
+                use_bias=hf_config.mamba_proj_bias,
+                n_groups=hf_config.mamba_n_groups,
+                num_heads=hf_config.mamba_n_heads,
+                head_dim=hf_config.mamba_d_head,
+                rms_norm_eps=hf_config.rms_norm_eps,
+                activation=hf_config.hidden_act,
+                cache_config=cache_config,
+                model_config=model_config,
+                prefix=key,
+            )
+        vllm_ctx = vllm_config.compilation_config.static_forward_context
+
+        runner = GPUModelRunner(vllm_config, DEVICE)
+        kv_cache_spec = runner.get_kv_cache_spec()
+
+        available_memory = 5 * GiB_bytes
+        kv_cache_config = get_kv_cache_configs(
+            vllm_config, [kv_cache_spec], [available_memory]
+        )[0]
+        runner.initialize_kv_cache(kv_cache_config)
+
+    num_blocks = kv_cache_config.num_blocks
+
+    # After `get_kv_cache_configs()`, the merged AttentionSpec
+    # (with `pack_size` set to `attn_pack_size`) is stored in
+    # `kv_cache_config.kv_cache_groups[].kv_cache_spec`.
+    # Use it as the authoritative spec for layout calculations;
+    # `runner.get_kv_cache_spec()` always returns per-layer specs
+    # with pack_size=1 and is unaffected by the merge.
+    attn_group_spec = next(
+        g.kv_cache_spec
+        for g in kv_cache_config.kv_cache_groups
+        if isinstance(g.kv_cache_spec, AttentionSpec)
+    )
+    assert attn_group_spec.pack_size == pack_size, (
+        f"attn_group_spec.pack_size expected {pack_size}, "
+        f"got {attn_group_spec.pack_size}"
+    )
+
+    kv0 = vllm_ctx[attn_layer_names[0]].kv_cache[0]
+    # FlashInfer logical shape:
+    #   (kernel_num_blocks, 2, kernel_block_size, num_kv_heads, head_size)
+    expected_attn_shape = tuple(kv0.shape)
+    base_block_stride = prod(expected_attn_shape[1:])
+    expected_block_stride = base_block_stride * pack_size
+
+    dtype_size = get_dtype_size(attn_group_spec.dtype)
+    kernel_block_size = expected_attn_shape[2]  # dim-2 of FlashInfer shape
+    num_blocks_per_kv_block = attn_group_spec.block_size // kernel_block_size
+    num_element_per_attn_pack = (
+        attn_group_spec.page_size_bytes
+        // dtype_size
+        // num_blocks_per_kv_block
+        // attn_group_spec.pack_size
+    )
+
+    # --- 1 & 2. Verify shape and dim-0 stride for all Attention layers ---
+    for layer_name in attn_layer_names:
+        kv = vllm_ctx[layer_name].kv_cache[0]
+        assert tuple(kv.shape) == expected_attn_shape, (
+            f"pack_size={pack_size}, {layer_name}: "
+            f"expected shape {expected_attn_shape}, got {tuple(kv.shape)}"
+        )
+        assert kv.stride(0) == expected_block_stride, (
+            f"pack_size={pack_size}, {layer_name}: "
+            f"dim-0 stride expected {expected_block_stride}, got {kv.stride(0)}"
+        )
+
+    # --- 3 & 4. Verify storage sharing, offsets, and write isolation ---
+    for pack_start in range(0, len(attn_layer_names), pack_size):
+        pack_layers = attn_layer_names[pack_start : pack_start + pack_size]
+        kv_tensors = [vllm_ctx[ln].kv_cache[0] for ln in pack_layers]
+
+        if pack_size > 1:
+            # All layers in a pack share the same underlying storage.
+            base_ptr = kv_tensors[0].storage().data_ptr()
+            for i, (ln, kv) in enumerate(zip(pack_layers, kv_tensors)):
+                assert kv.storage().data_ptr() == base_ptr, (
+                    f"pack_size={pack_size}, {ln}: storage not shared with pack leader"
+                )
+                # Layer at pack position i has offset i * num_element_per_attn_pack.
+                expected_offset = i * num_element_per_attn_pack
+                assert kv.storage_offset() == expected_offset, (
+                    f"pack_size={pack_size}, {ln} (pack_idx={i}): "
+                    f"storage_offset expected {expected_offset}, "
+                    f"got {kv.storage_offset()}"
+                )
+            # Write-isolation: filling block-0 of layer i must not corrupt layer j.
+            for i, kv in enumerate(kv_tensors):
+                kv[0].fill_(float(i + 1))
+            for i, (ln, kv) in enumerate(zip(pack_layers, kv_tensors)):
+                fill_val = float(i + 1)
+                assert (
+                    kv[0].min().item() == fill_val and kv[0].max().item() == fill_val
+                ), f"pack_size={pack_size}, {ln}: block 0 corrupted by sibling writes"
+        else:
+            # pack_size == 1: independent storage, offset must be 0.
+            for ln, kv in zip(pack_layers, kv_tensors):
+                assert kv.storage_offset() == 0, (
+                    f"pack_size=1, {ln}: storage_offset expected 0, "
+                    f"got {kv.storage_offset()}"
+                )
+
+    # --- 5. Verify Mamba layer block count is independent of pack_size ---
+    for layer_name in mamba_layer_names:
+        conv_state = vllm_ctx[layer_name].kv_cache[0][0]
+        ssm_state = vllm_ctx[layer_name].kv_cache[0][1]
+        assert conv_state.shape[0] == num_blocks, (
+            f"pack_size={pack_size}, {layer_name}: "
+            f"conv_state.shape[0] expected {num_blocks}, got {conv_state.shape[0]}"
+        )
+        assert ssm_state.shape[0] == num_blocks, (
+            f"pack_size={pack_size}, {layer_name}: "
+            f"ssm_state.shape[0] expected {num_blocks}, got {ssm_state.shape[0]}"
         )
