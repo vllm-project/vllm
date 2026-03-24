@@ -3,10 +3,10 @@
 """Unit tests for Cohere embed protocol: build_typed_embeddings and its
 underlying packing helpers, plus Cohere-specific serving helpers."""
 
-import base64
 import struct
 
 import numpy as np
+import pybase64 as base64
 import pytest
 
 from vllm.entrypoints.pooling.embed.protocol import (

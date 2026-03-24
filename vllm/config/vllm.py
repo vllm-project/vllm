@@ -120,7 +120,7 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
         and current_platform.is_cuda()
         and has_flashinfer()
         and (
-            current_platform.is_device_capability(100)
+            current_platform.is_device_capability_family(100)
             or current_platform.is_device_capability(90)
         )
         # tp-dp combination broken:
@@ -243,15 +243,15 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 }
 
 
-@config(config=ConfigDict(arbitrary_types_allowed=True))
-class VllmConfig:
+@config(config=ConfigDict(arbitrary_types_allowed=True))  # type: ignore[arg-type,misc]
+class VllmConfig:  # type: ignore[misc]
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
     """
 
     # TODO: use default_factory once default constructing ModelConfig doesn't
     # try to download a model
-    model_config: ModelConfig = Field(default=None)
+    model_config: ModelConfig = Field(default=None)  # type: ignore[assignment]
     """Model configuration."""
     cache_config: CacheConfig = Field(default_factory=CacheConfig)
     """Cache configuration."""
@@ -682,12 +682,11 @@ class VllmConfig:
                 self.model_config, self.load_config
             )
 
+        from vllm.v1.executor.abstract import Executor
+
         executor_backend = self.parallel_config.distributed_executor_backend
-        executor_supports_async_sched = executor_backend in (
-            "mp",
-            "uni",
-            "external_launcher",
-        )
+        executor_class = Executor.get_class(self)
+        executor_supports_async_sched = executor_class.supports_async_scheduling()
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
@@ -711,9 +710,7 @@ class VllmConfig:
                     )
             if not executor_supports_async_sched:
                 raise ValueError(
-                    "Currently, async scheduling only supports `mp`, `uni`, or "
-                    "`external_launcher` distributed executor backend, but you chose "
-                    f"`{executor_backend}`."
+                    f"`{executor_backend}` does not support async scheduling yet."
                 )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
@@ -742,8 +739,7 @@ class VllmConfig:
             elif not executor_supports_async_sched:
                 logger.warning_once(
                     "Async scheduling will be disabled because it is not supported "
-                    "with the `%s` distributed executor backend (only `mp`, `uni`, and "
-                    "`external_launcher` are supported).",
+                    "with the `%s` distributed executor backend. ",
                     executor_backend,
                     scope="local",
                 )
@@ -769,6 +765,30 @@ class VllmConfig:
                 self.parallel_config.disable_nccl_for_dp_synchronization = True
             else:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
+
+        if (
+            self.speculative_config is not None
+            and self.scheduler_config.async_scheduling
+            and self.model_config is not None
+            and not self.model_config.disable_cascade_attn
+        ):
+            logger.warning_once(
+                "Disabling cascade attention (not yet compatible with "
+                "async speculative decoding).",
+                scope="local",
+            )
+            self.model_config.disable_cascade_attn = True
+
+        if (
+            self.model_config is not None
+            and self.model_config.multimodal_config is not None
+            and self.model_config.multimodal_config.mm_tensor_ipc == "torch_shm"
+            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
+        ):
+            raise ValueError(
+                "torch_shm is known to fail without "
+                "VLLM_WORKER_MULTIPROC_METHOD set to spawn"
+            )
 
         from vllm.platforms import current_platform
 
@@ -876,7 +896,7 @@ class VllmConfig:
 
                     tp_size = self.parallel_config.tensor_parallel_size
                     hidden_size = self.model_config.get_hidden_size()
-                    element_size = self.model_config.dtype.itemsize
+                    element_size = self.model_config.dtype.itemsize  # type: ignore[union-attr]
                     pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
                         hidden_size, tp_size, element_size
                     )
@@ -989,8 +1009,6 @@ class VllmConfig:
                 "--kv-sharing-fast-prefill requires changes on model side for "
                 "correctness and to realize prefill savings."
             )
-        # TODO: Move after https://github.com/vllm-project/vllm/pull/26847 lands
-        self._set_compile_ranges()
 
         if (
             self.model_config
@@ -1026,6 +1044,10 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
+        # Re-compute compile ranges after platform-specific config updates
+        # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
+        self._set_compile_ranges()
+
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (
             self.parallel_config.data_parallel_size
@@ -1052,7 +1074,7 @@ class VllmConfig:
 
             is_fullgraph = (
                 self.compilation_config.use_inductor_graph_partition
-                or len(self.compilation_config.splitting_ops) == 0
+                or len(self.compilation_config.splitting_ops or []) == 0
             )
             if self.parallel_config.pipeline_parallel_size > 1 or not is_fullgraph:
                 if "-rms_norm" not in self.compilation_config.custom_ops:
@@ -1090,11 +1112,9 @@ class VllmConfig:
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
-        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
-
         if (
             self.model_config
-            and vllm_is_batch_invariant()
+            and envs.VLLM_BATCH_INVARIANT
             and not self.model_config.disable_cascade_attn
         ):
             self.model_config.disable_cascade_attn = True
@@ -1207,7 +1227,7 @@ class VllmConfig:
                 )
             self.compilation_config.debug_dump_path = env_path
 
-        def has_blocked_weights():
+        def has_blocked_weights():  # type: ignore[no-redef]
             if self.quant_config is not None:
                 if hasattr(self.quant_config, "weight_block_size"):
                     return self.quant_config.weight_block_size is not None
@@ -1465,7 +1485,7 @@ class VllmConfig:
             if max_size is not None:
                 max_token_num = max_size // (
                     self.model_config.get_hidden_size()
-                    * self.model_config.dtype.itemsize
+                    * self.model_config.dtype.itemsize  # type: ignore[union-attr]
                 )
                 if compile_range_end is not None and max_token_num < compile_range_end:
                     computed_compile_ranges_endpoints.append(max_token_num)
@@ -1488,7 +1508,7 @@ class VllmConfig:
 
                 tp_size = self.parallel_config.tensor_parallel_size
                 hidden_size = self.model_config.get_hidden_size()
-                element_size = self.model_config.dtype.itemsize
+                element_size = self.model_config.dtype.itemsize  # type: ignore[union-attr]
                 pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
                     hidden_size, tp_size, element_size
                 )
