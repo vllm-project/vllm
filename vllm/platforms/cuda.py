@@ -60,7 +60,7 @@ def _get_backend_priorities(
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     if not use_mla and has_sink and _GPT_OSS_MODEL_ARCH in model_architectures:
-        if device_capability.major == 10:
+        if device_capability.major >= 10:
             logger.info_once(
                 "Using GPT-OSS CUDA attention policy for SM100+: "
                 "prioritizing FlashInfer/TRTLLM because GPT-OSS requires "
@@ -74,7 +74,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLEX_ATTENTION,
             ]
 
-        if device_capability >= DeviceCapability(9, 0):
+        if device_capability.major == 9:
             logger.info_once(
                 "Using GPT-OSS CUDA attention policy for SM90/SM9x: "
                 "prioritizing FlashAttention because GPT-OSS requires "
@@ -89,19 +89,20 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLEX_ATTENTION,
             ]
 
-        logger.info_once(
-            "Using GPT-OSS CUDA attention policy for SM8x: "
-            "prioritizing Triton because GPT-OSS requires attention sinks, "
-            "FlashAttention sink support starts at SM90, and FlashInfer "
-            "sink support depends on TRTLLM attention.",
-            scope="local",
-        )
-        return [
-            AttentionBackendEnum.TRITON_ATTN,
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.FLASHINFER,
-            AttentionBackendEnum.FLEX_ATTENTION,
-        ]
+        if device_capability.major == 8:
+            logger.info_once(
+                "Using GPT-OSS CUDA attention policy for SM8x: "
+                "prioritizing Triton because GPT-OSS requires attention sinks, "
+                "FlashAttention sink support starts at SM90, and FlashInfer "
+                "sink support depends on TRTLLM attention.",
+                scope="local",
+            )
+            return [
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.FLASHINFER,
+                AttentionBackendEnum.FLEX_ATTENTION,
+            ]
 
     if use_mla:
         if device_capability.major == 10:
