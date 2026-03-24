@@ -741,11 +741,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # TP=4 yields intermediate_size_per_partition=384), AITER raises:
         # "device_gemm ... does not support this GEMM problem".
         # Fall back to emulation in that case.
+        # For gpt_oss models, create_weights rounds up the dimensions
+        # internally, so the alignment check is skipped.
         if (
             not self.emulate
             and self.use_rocm_aiter_moe
             and self.ocp_mx_scheme is not None
             and self.ocp_mx_scheme.startswith("w_mxfp4")
+            and self.model_type != "gpt_oss"
             and moe.intermediate_size_per_partition % CK_MXFP4_MOE_DIM_ALIGNMENT != 0
         ):
             logger.warning_once(
