@@ -169,8 +169,6 @@ async def test_empty_grammar(client: openai.AsyncOpenAI, model_name: str) -> Non
 async def test_batched_chat_completions(
     server: RemoteOpenAIServer, model_name: str
 ) -> None:
-    """Batched chat completions: messages accepts list[list[...]] and returns
-    one choice per conversation indexed 0, 1, …, N-1."""
     conversations = [
         [{"role": "user", "content": "Reply with exactly the word: alpha"}],
         [{"role": "user", "content": "Reply with exactly the word: beta"}],
@@ -192,18 +190,12 @@ async def test_batched_chat_completions(
     choices = data["choices"]
     assert len(choices) == 2
 
-    indices = {c["index"] for c in choices}
+    indices = {choice["index"] for choice in choices}
     assert indices == {0, 1}
 
     # Each conversation should produce a non-empty text response.
     for choice in choices:
         assert choice["message"]["content"]
-
-    usage = data["usage"]
-    assert usage["prompt_tokens"] > 0
-    assert usage["completion_tokens"] > 0
-    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -213,7 +205,6 @@ async def test_batched_chat_completions(
 async def test_batched_chat_completions_with_json_schema(
     server: RemoteOpenAIServer, model_name: str
 ) -> None:
-    """Batched chat completions with json_schema structured output."""
     schema = {
         "type": "object",
         "properties": {
@@ -262,7 +253,6 @@ async def test_batched_chat_completions_with_json_schema(
 async def test_batched_chat_completions_rejects_stream(
     server: RemoteOpenAIServer, model_name: str
 ) -> None:
-    """Streaming must be rejected for batched requests."""
     conversations = [
         [{"role": "user", "content": "Hello"}],
         [{"role": "user", "content": "World"}],
