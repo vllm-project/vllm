@@ -16,29 +16,39 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 
 @dataclass(frozen=True)
-class ConvDecomp:
-    """Per-rank sizes of the x, B, C sub-projections in the Mamba conv state.
+class MambaConvSplitInfo:
+    """Per-rank byte sizes of x, B, C sub-projections in the Mamba conv state.
 
-    Fields are LOCAL to this engine's TP (already divided by TP size).
+    Used by both P and D sides for NIXL descriptor registration.
+    All fields are LOCAL to this engine's TP (already divided by TP size).
+
+    DS memory layout within one page (contiguous in memory):
+        |--- x (x_local * conv_rows) ---|- B (b_local * conv_rows) -|- C -|
     """
 
-    conv_rows: int  # conv_kernel - 1 (e.g. 3)
-    x_local: int  # intermediate_size / TP  (columns for x projection)
-    b_local: int  # groups_ss / TP  (columns for B; C is identical)
-    conv_dtype_size: int  # torch element_size() of conv state dtype
+    conv_rows: int  # conv_kernel - 1 (typically 3)
+    x_local: int  # intermediate_size / TP  (columns for x)
+    b_local: int  # groups_ss / TP  (columns for B; C is same size)
+    conv_dtype_size: int  # bytes per element (e.g. 2 for float16)
 
     @property
     def conv_dim_local(self) -> int:
+        """Total conv columns per rank: x + B + C."""
         return self.x_local + 2 * self.b_local
 
     def x_bytes(self) -> int:
+        """Byte size of the x sub-projection for one rank."""
         return self.x_local * self.conv_rows * self.conv_dtype_size
 
     def b_bytes(self) -> int:
+        """Byte size of the B (or C) sub-projection for one rank."""
         return self.b_local * self.conv_rows * self.conv_dtype_size
 
     def local_conv_offsets(self) -> list[tuple[int, int]]:
-        """Return (byte_offset, byte_size) of x, B, C within one local page."""
+        """(byte_offset, byte_size) of x, B, C within this engine's page.
+
+        Used by both P and D for local descriptor registration.
+        """
         xb = self.x_bytes()
         bb = self.b_bytes()
         return [(0, xb), (xb, bb), (xb + bb, bb)]
@@ -46,12 +56,20 @@ class ConvDecomp:
     def remote_conv_offsets(
         self, local_rank_offset: int, tp_ratio: int
     ) -> list[tuple[int, int]]:
-        """Return (byte_offset, byte_size) of this rank's x, B, C slice
-        within one remote page whose conv dim is tp_ratio times larger."""
+        """(byte_offset, byte_size) of this D rank's x, B, C slice within
+        one P page whose conv dim is ``tp_ratio`` times larger.
+
+        Used by D side only, during remote descriptor registration.
+
+        Args:
+            local_rank_offset: which slice this D rank reads (tp_rank %
+                tp_ratio).  E.g. with tp_ratio=4, ranks 0-3 read slices 0-3.
+            tp_ratio: D_TP / P_TP (>= 1).
+        """
         xb = self.x_bytes()
         bb = self.b_bytes()
-        xr = xb * tp_ratio  # full remote x section
-        br = bb * tp_ratio  # full remote B section
+        xr = xb * tp_ratio  # full remote x section in bytes
+        br = bb * tp_ratio  # full remote B section in bytes
         return [
             (local_rank_offset * xb, xb),
             (xr + local_rank_offset * bb, bb),
@@ -59,20 +77,25 @@ class ConvDecomp:
         ]
 
 
-def derive_conv_decomp(
+def derive_mamba_conv_split(
     mamba_spec: MambaSpec,
     local_tp: int,
-) -> ConvDecomp:
-    """Extract per-rank x/B/C column counts from a MambaSpec.
+) -> MambaConvSplitInfo:
+    """Derive per-rank x/B/C byte sizes from a MambaSpec.
+
+    Called once at init on both P and D.  Decomposes the conv dimension
+    (= intermediate_size + 2 * groups_ss) into its x, B, C parts.
 
     Args:
-        mamba_spec: contains conv shape ``(conv_dim_local, conv_rows)`` or
-            ``(conv_rows, conv_dim_local)`` and temporal shape
-            ``(local_num_heads, head_dim)``.
+        mamba_spec: MambaSpec whose shapes are:
+            shapes[0] = conv state: (conv_dim_local, conv_rows) for DS
+                        layout, or (conv_rows, conv_dim_local) for SD.
+            shapes[1] = SSM temporal: (local_num_heads, head_dim).
         local_tp: this engine's tensor-parallel size.
 
     Returns:
-        ConvDecomp with x_local, b_local, conv_rows, and conv_dtype_size.
+        MambaConvSplitInfo with per-rank x_local, b_local, conv_rows, and
+        conv_dtype_size.
     """
     conv_shape = mamba_spec.shapes[0]
     assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
@@ -109,7 +132,7 @@ def derive_conv_decomp(
         dtype=mamba_spec.dtypes[0],  # type: ignore[misc]
     ).element_size()
 
-    return ConvDecomp(
+    return MambaConvSplitInfo(
         conv_rows=conv_rows,
         x_local=intermediate_size // local_tp,
         b_local=groups_ss // local_tp,
@@ -118,9 +141,13 @@ def derive_conv_decomp(
 
 
 def compute_mamba_phys_ratio(ssm_sizes: tuple[int, ...], block_len: int) -> int:
-    """Return ceil((conv_bytes + ssm_bytes) / block_len).
+    """Physical kernel blocks per logical mamba block.
 
-    This is how many physical kernel blocks one logical mamba block spans,
-    which can differ between P and D engines under HMA padding.
+    Called during P/D handshake to learn the remote engine's ratio.
+    Under HMA, P and D may pad differently, so this can differ per engine.
+
+    Args:
+        ssm_sizes: (conv_state_bytes, ssm_state_bytes) from NixlAgentMetadata.
+        block_len: the engine's block_len in bytes.
     """
     return math.ceil((ssm_sizes[0] + ssm_sizes[1]) / block_len)

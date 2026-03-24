@@ -41,10 +41,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.conv_decomp_utils import (
-    ConvDecomp,
+from vllm.distributed.kv_transfer.kv_connector.v1.mamba_conv_transfer_utils import (
+    MambaConvSplitInfo,
     compute_mamba_phys_ratio,
-    derive_conv_decomp,
+    derive_mamba_conv_split,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -1074,14 +1074,14 @@ class NixlConnectorWorker:
         # Conv state sub-projection decomposition (None when no Mamba).
         # The 3-read transfer requires DS (dim, state_len) conv layout so
         # that x/B/C sub-projections are contiguous in memory.
-        self._conv_decomp: ConvDecomp | None = None
+        self._conv_decomp: MambaConvSplitInfo | None = None
         if self._has_mamba:
             assert is_conv_state_dim_first(), (
                 "3-read Mamba conv transfer requires DS conv state layout. "
                 "Set VLLM_SSM_CONV_STATE_LAYOUT=DS"
             )
             local_tp = vllm_config.parallel_config.tensor_parallel_size
-            self._conv_decomp = derive_conv_decomp(mamba_spec, local_tp)
+            self._conv_decomp = derive_mamba_conv_split(mamba_spec, local_tp)
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -1190,8 +1190,12 @@ class NixlConnectorWorker:
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
         self.dst_num_blocks: dict[EngineId, int] = {}
-        # P and D may pad mamba blocks differently (HMA), so we track each
-        # engine's phys-blocks-per-logical-block to compute correct offsets.
+        # When the user-configured block_size differs from the attention
+        # kernel's required block size (e.g. 128 vs 16), each logical block
+        # is split into multiple physical blocks.  Different TP sizes can
+        # lead to different block_size choices, so the split ratio can vary
+        # across engines.  We store each engine's ratio to convert between
+        # logical block IDs and physical descriptor offsets during transfer.
         self._mamba_phys_ratio: dict[EngineId, int] = {}
         # 4 regions per mamba layer: x, B, C (conv sub-projections) + ssm.
         self._mamba_num_regions: int = 0
@@ -1783,7 +1787,7 @@ class NixlConnectorWorker:
             agent_metadata_bytes=encoder.encode(agent_metadata),
         )
 
-    def _register_mamba_3read_local(
+    def _register_mamba_local(
         self,
         blocks_data: list[tuple[int, int, int]],
         base_addresses: list[int],
@@ -1815,7 +1819,7 @@ class NixlConnectorWorker:
                     )
                 )
 
-    def _register_mamba_3read_remote(
+    def _register_mamba_remote(
         self,
         blocks_data: list[tuple[int, int, int]],
         nixl_agent_meta: NixlAgentMetadata,
@@ -1936,8 +1940,8 @@ class NixlConnectorWorker:
             # registration (register_blocks mamba=True) when no hetero-TP
             # remote has been seen.  Currently we always register 4 regions
             # because local descs are created before knowing the remote TP.
-            logger.debug("Registering additional local Mamba 3-read blocks")
-            self._register_mamba_3read_local(
+            logger.debug("Registering local Mamba descriptors (4 regions/layer)")
+            self._register_mamba_local(
                 blocks_data, local_base_addresses, block_size_ratio
             )
 
@@ -2159,10 +2163,13 @@ class NixlConnectorWorker:
                 self.tp_rank,
             )
 
+        # TODO (ZhanqiuHu): refactor register_blocks / register_remote_blocks
+        # so FA and Mamba paths are separated more cleanly (e.g. dedicated
+        # register_fa_descs / register_mamba_descs) instead of a `mamba` flag.
         register_remote_blocks(blocks_data, mamba=False)
         if self._has_mamba:
-            logger.debug("Registering remote Mamba 3-read blocks")
-            self._register_mamba_3read_remote(
+            logger.debug("Registering remote Mamba descriptors (4 regions/layer)")
+            self._register_mamba_remote(
                 blocks_data,
                 nixl_agent_meta,
                 tp_ratio,
