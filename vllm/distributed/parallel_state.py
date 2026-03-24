@@ -358,23 +358,10 @@ def fused_flashinfer_scaled_matmul_reduce_scatter_fake(
     out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     out_dtype = out_dtype or A.dtype
-    C = torch.ops.vllm.bmm_fp8(
-        A.flatten(0, -2).contiguous().unsqueeze(0),
-        B.unsqueeze(0),
-        A_scale,
-        B_scale,
-        out_dtype,
-        "auto",
-    ).squeeze(0)
-    C = C.view(*output_shape[:-1], B.shape[1])
-    res = funcol.reduce_scatter_tensor(
-        C,
-        reduce_op,
-        orig_scatter_dim,
-        group_name,
-    )
-    res = funcol.wait_tensor(res)
-    return res
+    rs_shape = list(output_shape)
+    group_size = get_tensor_model_parallel_world_size()
+    rs_shape[orig_scatter_dim] = rs_shape[orig_scatter_dim] // max(group_size, 1)
+    return torch.empty(rs_shape, dtype=out_dtype, device=A.device)
 
 
 direct_register_custom_op(
@@ -421,17 +408,16 @@ def fused_all_gather_flashinfer_scaled_matmul_fake(
     out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     out_dtype = out_dtype or A_shard.dtype
-    A = funcol.all_gather_tensor(A_shard, gather_dim, group_name)
-    A = funcol.wait_tensor(A)
-    mm_out = torch.ops.vllm.bmm_fp8(
-        A.unsqueeze(0),
-        B.unsqueeze(0),
-        A_scale,
-        B_scale,
-        out_dtype,
-        "auto",
-    ).squeeze(0)
-    return A, mm_out
+    gathered_shape = list(A_shard.shape)
+    group_size = get_tensor_model_parallel_world_size()
+    gathered_shape[gather_dim] = gathered_shape[gather_dim] * max(group_size, 1)
+    gathered = torch.empty(gathered_shape, dtype=A_shard.dtype, device=A_shard.device)
+    mm_out = torch.empty(
+        (gathered_shape[0], B.shape[1]),
+        dtype=out_dtype,
+        device=A_shard.device,
+    )
+    return gathered, mm_out
 
 
 direct_register_custom_op(
