@@ -38,6 +38,7 @@ pub(super) async fn completions(
     let response_id = prepared.response_id.clone();
     let response_model = prepared.response_model.clone();
     let created = unix_timestamp();
+    let echo = prepared.echo.clone();
     info!(
         request_id = %response_id,
         model = %response_model,
@@ -63,6 +64,7 @@ pub(super) async fn completions(
             response_model,
             created,
             prepared.include_usage,
+            echo,
         );
         let sse_stream = completion_sse_stream(chunk_stream);
 
@@ -71,7 +73,8 @@ pub(super) async fn completions(
             .into_response()
     } else {
         let response =
-            match collect_completion(text_stream, response_id, response_model, created).await {
+            match collect_completion(text_stream, response_id, response_model, created, echo).await
+            {
                 Ok(response) => response,
                 Err(error) => return error.into_response(),
             };
@@ -85,6 +88,7 @@ async fn collect_completion(
     response_id: String,
     response_model: String,
     created: u64,
+    echo: Option<String>,
 ) -> Result<CompletionResponse, ApiError> {
     let collected = stream
         .collect_output()
@@ -94,13 +98,18 @@ async fn collect_completion(
         server_error!("completion stream terminated without a terminal finish reason")
     })?;
 
+    let text = match echo {
+        None => collected.text,
+        Some(prompt) => format!("{prompt}{}", collected.text),
+    };
+
     Ok(CompletionResponse {
         id: response_id,
         object: "text_completion".to_string(),
         created,
         model: response_model,
         choices: vec![CompletionChoice {
-            text: collected.text,
+            text,
             index: 0,
             logprobs: None,
             finish_reason: Some(completion_finish_reason_to_openai(finish_reason)?.into()),
@@ -147,6 +156,7 @@ async fn completion_chunk_stream(
     response_model: String,
     created: u64,
     include_usage: bool,
+    echo: Option<String>,
 ) {
     pin_mut!(stream);
 
@@ -154,6 +164,14 @@ async fn completion_chunk_stream(
         match next {
             Ok(DecodedTextEvent::Start) => {
                 debug!(request_id = %response_id, "completion stream started");
+                if let Some(prompt) = echo.as_ref() {
+                    yield CompletionSseChunk::Chunk(delta_chunk(
+                        &response_id,
+                        &response_model,
+                        created,
+                        prompt.clone(),
+                    ));
+                }
             }
             Ok(DecodedTextEvent::TextDelta { delta, .. }) => {
                 yield CompletionSseChunk::Chunk(delta_chunk(

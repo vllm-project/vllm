@@ -1207,6 +1207,44 @@ async fn non_stream_completions_return_json_response() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn non_stream_completions_echo_prepends_prompt_text() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "echo": true,
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["choices"][0]["text"], "hellohi");
+    assert_eq!(json["usage"]["prompt_tokens"], 5);
+    assert_eq!(json["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_chat_uses_final_only_output_kind() {
     let handshake_address = unique_tcp_endpoint();
     let engine_identity = b"engine-openai-chat-final-only".to_vec();
@@ -1401,6 +1439,68 @@ async fn completions_happy_path_returns_sse_stream() {
     let usage_chunk: serde_json::Value =
         serde_json::from_str(payloads[usage_index]).expect("usage chunk json");
     assert_eq!(usage_chunk["choices"], json!([]));
+    assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_echo_stream_emits_separate_prompt_chunk() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "echo": true,
+                        "stream": true,
+                        "stream_options": {"include_usage": true}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_data_payloads(&text);
+    let hello_index = payloads
+        .iter()
+        .position(|payload| payload.contains("\"text\":\"hello\""))
+        .expect("prompt echo chunk");
+    let h_index = payloads
+        .iter()
+        .position(|payload| payload.contains("\"text\":\"h\""))
+        .expect("first generation chunk");
+
+    assert!(hello_index < h_index, "{text}");
+    assert!(
+        payloads
+            .iter()
+            .any(|payload| payload.contains("\"text\":\"i\"")),
+        "{text}"
+    );
+
+    let usage_chunk: serde_json::Value = serde_json::from_str(
+        payloads
+            .iter()
+            .find(|payload| payload.contains("\"usage\":"))
+            .expect("usage chunk"),
+    )
+    .expect("usage chunk json");
+    assert_eq!(usage_chunk["usage"]["prompt_tokens"], 5);
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
 }
 

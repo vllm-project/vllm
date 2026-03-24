@@ -64,6 +64,8 @@ pub struct PreparedRequest {
     pub include_usage: bool,
     /// Lowered text request for the shared `vllm-text` facade.
     pub text_request: TextRequest,
+    /// Original text prompt that should be echoed back northbound when `echo=true`.
+    pub echo: Option<String>,
 }
 
 /// Validate and lower one OpenAI completions request into the internal text-generation format.
@@ -77,6 +79,10 @@ pub fn prepare_completion_request(
     let include_usage = (request.inner.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
+    let echo = request.inner.echo.then(|| match &request.prompt {
+        Prompt::Text(text) => text.clone(),
+        Prompt::TokenIds(_) => unreachable!("validated above"),
+    });
 
     let text_request = TextRequest {
         request_id: response_id.clone(),
@@ -109,6 +115,7 @@ pub fn prepare_completion_request(
         response_model: configured_model.to_string(),
         include_usage,
         text_request,
+        echo,
     })
 }
 
@@ -133,8 +140,15 @@ fn validate_request_compat(
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
-    if request.inner.echo {
-        bail_invalid_request!(param = "echo", "echo is not supported.");
+    if request.inner.max_tokens == Some(0) {
+        bail_invalid_request!(param = "max_tokens", "max_tokens must be greater than 0.");
+    }
+
+    if request.inner.echo && matches!(request.prompt, Prompt::TokenIds(_)) {
+        bail_invalid_request!(
+            param = "echo",
+            "echo is not supported with token-ID prompts."
+        );
     }
 
     if request.inner.suffix.is_some() {
@@ -298,6 +312,37 @@ mod tests {
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
         assert!(!prepared.text_request.decode_options.skip_special_tokens);
+    }
+
+    #[test]
+    fn prepare_completion_request_accepts_text_echo() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": true,
+            "echo": true,
+            "max_tokens": 7
+        }))
+        .expect("parse request");
+
+        let prepared =
+            prepare_completion_request(&request, "Qwen/Qwen1.5-0.5B-Chat").expect("prepare");
+
+        assert_eq!(prepared.echo, Some("hello".to_string()));
+        assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(7));
+    }
+
+    #[test]
+    fn prepare_completion_request_rejects_token_id_prompt_echo() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": [11, 22, 33],
+            "stream": true,
+            "echo": true
+        }))
+        .expect("parse request");
+
+        assert!(prepare_completion_request(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
     }
 
     #[test]
