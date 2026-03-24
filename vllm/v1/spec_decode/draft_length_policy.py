@@ -2,14 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pluggable policies for dynamically deciding the number of draft tokens.
 
-A DraftLengthPolicy is called once per draft step via ``update()`` with no
-GPU→CPU synchronisation.  All state is maintained on the GPU.  After the
-draft loop completes, the caller initiates a single async D→H copy of
-``k_valid_gpu`` and reads the result later (after all K steps have run), so
-the K draft model forward passes pipeline without interruption.
+Design (async early-exit loop, isolating while condition):
 
-Reducing from K blocking syncs (the old ``should_continue().item()`` style)
-to 1 deferred sync is the key performance improvement over the previous design.
+  * ``update()`` performs only GPU tensor ops then kicks off an async D→H copy
+    of ``_exited_gpu`` (a single bool scalar) on a dedicated stream.
+  * The loop checks ``policy.exited`` at the *start* of the *next* iteration.
+    By then Python loop overhead is enough for the copy to complete, so
+    ``event.synchronize()`` has near-zero additional latency.
+  * Only ``k_valid`` draft-model forward passes actually run; the GPU tensor
+    is zero-padded back to ``[B, K]`` after the loop so that
+    ``_prepare_input_ids`` can keep its fixed ``num_speculative_tokens`` stride.
+
+This reduces K blocking syncs (old ``should_continue().item()`` style) to at
+most K−2 near-free async syncs, while actually skipping K−k_valid forward
+passes.
 
 Example usage (see SpecDecodeBaseProposer.__init__)::
 
@@ -62,6 +68,15 @@ class DraftLengthPolicy(Protocol):
         ``None`` means "always full K" (AlwaysContinuePolicy)."""
         ...
 
+    @property
+    def exited(self) -> bool:
+        """Return the exit decision recorded at the previous ``update()``.
+
+        Syncs the async D→H event recorded by ``update()``.  Should be called
+        once per loop iteration, after any GPU setup work so the event is
+        already signalled and the sync is effectively free."""
+        ...
+
 
 class ConfidenceThresholdPolicy:
     """Mean-confidence early-exit policy (DISCO-style), GPU-async variant.
@@ -100,18 +115,49 @@ class ConfidenceThresholdPolicy:
         # _exited_gpu: GPU bool scalar gate — once True, k_valid is frozen.
         self._exited_gpu = torch.tensor(False, dtype=torch.bool, device=device)
 
+        # Async D→H infrastructure for per-step exit check.
+        # _exited_cpu is pinned so the D→H transfer is DMA-accelerated.
+        self._exited_cpu: torch.Tensor = torch.zeros(1, dtype=torch.bool).pin_memory()
+        self._exit_copy_stream = torch.cuda.Stream(device=device)
+        self._exit_event = torch.cuda.Event()
+
     def reset(self) -> None:
         self._k_valid_gpu.fill_(self.num_spec_tokens)
         self._exited_gpu.fill_(False)
+        self._exited_cpu.fill_(False)
 
     def update(self, step: int, token_probs: torch.Tensor) -> None:
-        """GPU-only update.  No CPU sync."""
+        """GPU tensor ops + async D→H copy of the exit flag.  No blocking sync.
+
+        After all GPU ops complete on the default stream, a dedicated copy
+        stream transfers ``_exited_gpu`` (1 byte) to the pinned ``_exited_cpu``
+        buffer and records ``_exit_event``.  The event will be signalled by the
+        time the caller checks ``self.exited`` at the start of the next loop
+        iteration (Python loop overhead is sufficient for a 1-byte transfer).
+        """
         mean_conf_below = token_probs.mean() < self.threshold  # GPU bool scalar
         # Gate: only update on the first exit (prevents overwriting k_valid).
         first_exit = mean_conf_below & (~self._exited_gpu)
         # step + 2 = seed token + (step + 1) drafted tokens.
         self._k_valid_gpu.masked_fill_(first_exit, step + 2)
         self._exited_gpu.logical_or_(mean_conf_below)
+        # Kick off async D→H copy so the NEXT iteration can read the result
+        # from CPU without blocking the GPU main stream.
+        default_stream = torch.cuda.current_stream()
+        with torch.cuda.stream(self._exit_copy_stream):
+            self._exit_copy_stream.wait_stream(default_stream)
+            self._exited_cpu.copy_(self._exited_gpu, non_blocking=True)
+            self._exit_event.record()
+
+    @property
+    def exited(self) -> bool:
+        """Sync the async D→H event and return the CPU exit flag.
+
+        In practice the 1-byte transfer completes during Python loop overhead
+        between iterations, so this sync has near-zero additional latency.
+        """
+        self._exit_event.synchronize()
+        return bool(self._exited_cpu.item())  # plain CPU read, no GPU sync
 
     @property
     def k_valid_gpu(self) -> torch.Tensor:
@@ -131,6 +177,10 @@ class AlwaysContinuePolicy:
 
     def update(self, step: int, token_probs: torch.Tensor) -> None:
         pass
+
+    @property
+    def exited(self) -> bool:
+        return False
 
     @property
     def k_valid_gpu(self) -> None:

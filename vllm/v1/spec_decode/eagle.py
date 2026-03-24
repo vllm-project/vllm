@@ -713,6 +713,13 @@ class SpecDecodeBaseProposer:
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
         for token_index in range(self.num_speculative_tokens - 1):
+            # DSL async early exit: check whether the previous step decided to
+            # exit.  update() already staged the D→H copy of _exited_gpu;
+            # event.synchronize() here is near-free (1-byte copy completed
+            # during Python loop overhead between iterations).
+            if dsl_enabled and token_index > 0 and self.draft_length_policy.exited:
+                break
+
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
@@ -830,11 +837,22 @@ class SpecDecodeBaseProposer:
                 draft_token_ids_probs = draft_probs.gather(
                     1, draft_token_ids.unsqueeze(1)
                 ).squeeze(-1)
-                # GPU-only update; no sync here.
+                # GPU ops + async D→H copy of exit flag; no blocking sync.
                 self.draft_length_policy.update(token_index, draft_token_ids_probs)
 
-        # [batch_size, num_speculative_tokens] — always K tokens (no break).
+        # Stack drafted tokens.  Shape is [batch_size, k_generated] where
+        # k_generated ≤ num_speculative_tokens when DSL exited early.
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
+
+        # Pad back to [batch_size, num_speculative_tokens] so that
+        # _prepare_input_ids can use its fixed num_speculative_tokens stride.
+        # Padded zeros are trimmed from the CPU list by take_draft_token_ids()
+        # and are never accepted by the verifier.
+        if dsl_enabled and draft_token_ids.shape[1] < self.num_speculative_tokens:
+            pad_width = self.num_speculative_tokens - draft_token_ids.shape[1]
+            draft_token_ids = torch.nn.functional.pad(
+                draft_token_ids, (0, pad_width), value=0
+            )
 
         # DSL: initiate async D→H copy of k_valid_gpu.
         # sync_dsl_k_valid() (called from get_dsl_metrics_delta or
