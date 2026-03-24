@@ -236,7 +236,14 @@ class cmake_build_ext(build_ext):
         targets = []
 
         def target_name(s: str) -> str:
-            return s.removeprefix("vllm.").removeprefix("vllm_flash_attn.")
+            # The CMake target name is the last component of the
+            # dotted extension name (e.g. "vllm.third_party.deep_gemm
+            # ._deep_gemm_C" -> "_deep_gemm_C").  For backwards compat
+            # with the flash-attn prefix stripping, keep that path too.
+            stripped = s.removeprefix("vllm.").removeprefix("vllm_flash_attn.")
+            if "." in stripped:
+                return stripped.rsplit(".", 1)[-1]
+            return stripped
 
         # Build all the extensions
         for ext in self.extensions:
