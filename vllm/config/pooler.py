@@ -21,9 +21,9 @@ TOK_POOLING_TYPES: tuple[TokenPoolingType, ...] = get_args(TokenPoolingType)
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
 
-    pooling_task: PoolingTask | None = None
+    task: PoolingTask | None = None
     """
-    The pooling task used for pooling.
+    The task used for pooling.
     """
 
     pooling_type: SequencePoolingType | TokenPoolingType | None = None

@@ -1415,11 +1415,11 @@ class ModelConfig:  # type: ignore[misc]
         if self.pooler_config is None:
             return None
 
-        pooling_task = self.pooler_config.pooling_task
+        pooling_task = self.pooler_config.task
 
         if pooling_task is not None:
-            if self.pooler_config.pooling_task in supported_tasks:
-                return self.pooler_config.pooling_task
+            if self.pooler_config.task in supported_tasks:
+                return self.pooler_config.task
             else:
                 raise RuntimeError(
                     f"Unsupported task: {pooling_task!r} "
