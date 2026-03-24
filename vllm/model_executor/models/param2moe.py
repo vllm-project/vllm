@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from itertools import islice
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -61,10 +60,6 @@ from .utils import (
     maybe_prefix,
 )
 
-# ---------------------------------------------------------------------------
-# Weight-name helpers
-# ---------------------------------------------------------------------------
-
 
 def _is_expert_bias_name(name: str) -> bool:
     """True when the weight is the MoE router's per-expert score bias."""
@@ -91,25 +86,19 @@ def _rename_and_normalize_weights(
       *.attention.query_layernorm.*        → *.self_attn.q_layernorm.*
       *.attention.key_layernorm.*          → *.self_attn.k_layernorm.*
       *.mlp.gate.expert_bias               → *.mlp.gate.e_score_correction_bias
-        (also zero-meaned for load balance)
+        (also zero-meant for load balance)
     """
     for name, w in weights:
         # Embedding table
         name = name.replace("model.word_embeddings.", "model.embed_tokens.")
         # Fused QKV projection  (HF: query_key_value → vLLM: qkv_proj)
-        name = name.replace(
-            ".attention.query_key_value.", ".self_attn.qkv_proj."
-        )
+        name = name.replace(".attention.query_key_value.", ".self_attn.qkv_proj.")
         # Output projection  (HF: dense → vLLM: o_proj)
         name = name.replace(".attention.dense.", ".self_attn.o_proj.")
         # Per-head query norm
-        name = name.replace(
-            ".attention.query_layernorm.", ".self_attn.q_layernorm."
-        )
+        name = name.replace(".attention.query_layernorm.", ".self_attn.q_layernorm.")
         # Per-head key norm
-        name = name.replace(
-            ".attention.key_layernorm.", ".self_attn.k_layernorm."
-        )
+        name = name.replace(".attention.key_layernorm.", ".self_attn.k_layernorm.")
         # Catch any remaining .attention. → .self_attn. prefixes
         # (e.g. future bias params on the projection layers)
         name = name.replace(".attention.", ".self_attn.")
@@ -123,11 +112,6 @@ def _rename_and_normalize_weights(
             w = _zero_mean_tensor(w)
 
         yield name, w
-
-
-# ---------------------------------------------------------------------------
-# Attention
-# ---------------------------------------------------------------------------
 
 
 class Param2MoEAttention(nn.Module):
@@ -144,8 +128,8 @@ class Param2MoEAttention(nn.Module):
     def __init__(
         self,
         config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -174,9 +158,6 @@ class Param2MoEAttention(nn.Module):
 
         self.scaling = self.head_dim**-0.5
 
-        # ------------------------------------------------------------------
-        # Projections
-        # ------------------------------------------------------------------
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.hidden_size,
             head_size=self.head_dim,
@@ -195,20 +176,12 @@ class Param2MoEAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        # ------------------------------------------------------------------
-        # Optional per-head QK norms (applied before RoPE, per-head)
-        # ------------------------------------------------------------------
         if self.use_qk_norm:
             self.q_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             self.k_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-        # ------------------------------------------------------------------
-        # Rotary embeddings
-        # ------------------------------------------------------------------
         # `partial_rotary_factor` defaults to 1.0 (full RoPE) if not in config
-        partial_rotary_factor: float = getattr(
-            config, "partial_rotary_factor", 1.0
-        )
+        partial_rotary_factor: float = getattr(config, "partial_rotary_factor", 1.0)
         rope_dim = int(self.head_dim * partial_rotary_factor)
 
         # This vLLM branch expects a rope_parameters dict instead of
@@ -230,9 +203,6 @@ class Param2MoEAttention(nn.Module):
             is_neox_style=True,
         )
 
-        # ------------------------------------------------------------------
-        # Core attention
-        # ------------------------------------------------------------------
         self.attn = Attention(
             num_heads=self.num_heads,
             head_size=self.head_dim,
@@ -259,9 +229,9 @@ class Param2MoEAttention(nn.Module):
         #    Reshape to (T, num_local_heads, head_dim), norm, reshape back.
         if self.use_qk_norm:
             T = q.shape[0]
-            q = self.q_layernorm(
-                q.view(T, self.num_local_heads, self.head_dim)
-            ).view(T, self.q_size_local)
+            q = self.q_layernorm(q.view(T, self.num_local_heads, self.head_dim)).view(
+                T, self.q_size_local
+            )
             k = self.k_layernorm(
                 k.view(T, self.num_local_kv_heads, self.head_dim)
             ).view(T, self.kv_size_local)
@@ -277,11 +247,6 @@ class Param2MoEAttention(nn.Module):
         return output
 
 
-# ---------------------------------------------------------------------------
-# Dense MLP (used for the first `first_k_dense_replace` layers)
-# ---------------------------------------------------------------------------
-
-
 class Param2MoEMLP(nn.Module):
     """SwiGLU feed-forward block used for dense layers."""
 
@@ -289,7 +254,7 @@ class Param2MoEMLP(nn.Module):
         self,
         intermediate_size: int,
         config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
     ) -> None:
@@ -319,11 +284,6 @@ class Param2MoEMLP(nn.Module):
         return x
 
 
-# ---------------------------------------------------------------------------
-# MoE block
-# ---------------------------------------------------------------------------
-
-
 class Param2MoEMoEBlock(nn.Module):
     """
     Mixture-of-Experts block for Param2MoE.
@@ -340,7 +300,7 @@ class Param2MoEMoEBlock(nn.Module):
     def __init__(
         self,
         config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -355,24 +315,15 @@ class Param2MoEMoEBlock(nn.Module):
             config, "routed_scaling_factor", 1.0
         )
 
-        self.n_group: Optional[int] = getattr(config, "n_group", None)
-        self.topk_group: Optional[int] = getattr(config, "topk_group", None)
+        self.n_group: int | None = getattr(config, "n_group", None)
+        self.topk_group: int | None = getattr(config, "topk_group", None)
         self.use_grouped_topk: bool = (
             self.n_group is not None and self.topk_group is not None
         )
 
         self.norm_expert_prob: bool = getattr(config, "norm_topk_prob", True)
-        self.score_function: str = getattr(
-            config, "score_function", "sigmoid"
-        )
+        self.score_function: str = getattr(config, "score_function", "sigmoid")
 
-        # ------------------------------------------------------------------
-        # Router gate
-        #   HF stores the routing weight as nn.Parameter (gate.weight) and
-        #   the per-expert bias as a buffer (gate.expert_bias).
-        #   In vLLM we model this as nn.Linear + e_score_correction_bias
-        #   so that the names match after weight renaming.
-        # ------------------------------------------------------------------
         self.gate = nn.Linear(
             self.hidden_size,
             self.num_experts,
@@ -386,12 +337,7 @@ class Param2MoEMoEBlock(nn.Module):
         else:
             self.gate.e_score_correction_bias = None  # type: ignore[assignment]
 
-        # ------------------------------------------------------------------
-        # Shared experts (always active, not gated)
-        # ------------------------------------------------------------------
-        self.num_shared_experts: int = getattr(
-            config, "num_shared_experts", 1
-        )
+        self.num_shared_experts: int = getattr(config, "num_shared_experts", 1)
         if self.num_shared_experts > 0:
             # If moe_shared_expert_intermediate_size is present in the config
             # it already encodes the TOTAL intermediate size across all shared
@@ -404,9 +350,7 @@ class Param2MoEMoEBlock(nn.Module):
             ):
                 shared_int: int = config.moe_shared_expert_intermediate_size
             else:
-                shared_int = (
-                    config.moe_intermediate_size * self.num_shared_experts
-                )
+                shared_int = config.moe_intermediate_size * self.num_shared_experts
             self.shared_experts = Param2MoEMLP(
                 intermediate_size=shared_int,
                 config=config,
@@ -417,9 +361,6 @@ class Param2MoEMoEBlock(nn.Module):
         else:
             self.shared_experts = None  # type: ignore[assignment]
 
-        # ------------------------------------------------------------------
-        # Fused routed experts
-        # ------------------------------------------------------------------
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_experts,
             num_experts=self.num_experts,
@@ -469,18 +410,11 @@ class Param2MoEMoEBlock(nn.Module):
             expert_output = expert_output + shared_output
 
         if self.tp_size > 1:
-            expert_output = (
-                self.experts.maybe_all_reduce_tensor_model_parallel(
-                    expert_output
-                )
+            expert_output = self.experts.maybe_all_reduce_tensor_model_parallel(
+                expert_output
             )
 
         return expert_output.view(num_tokens, hidden_dim)
-
-
-# ---------------------------------------------------------------------------
-# Decoder layer
-# ---------------------------------------------------------------------------
 
 
 class Param2MoEDecoderLayer(nn.Module):
@@ -512,14 +446,10 @@ class Param2MoEDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-        self.post_attention_layernorm = RMSNorm(
-            hidden_size, eps=config.rms_norm_eps
-        )
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
 
         first_k_dense: int = getattr(config, "first_k_dense_replace", 1)
-        is_moe_layer = (
-            config.num_experts is not None and layer_idx >= first_k_dense
-        )
+        is_moe_layer = config.num_experts is not None and layer_idx >= first_k_dense
 
         if is_moe_layer:
             self.mlp = Param2MoEMoEBlock(
@@ -540,16 +470,14 @@ class Param2MoEDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Pre-norm + attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual
-            )
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
             positions=positions,
@@ -557,16 +485,9 @@ class Param2MoEDecoderLayer(nn.Module):
         )
 
         # Pre-norm + MLP
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual
-        )
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
-
-
-# ---------------------------------------------------------------------------
-# Core model
-# ---------------------------------------------------------------------------
 
 
 class Param2MoEModel(nn.Module):
@@ -584,9 +505,7 @@ class Param2MoEModel(nn.Module):
         self.config = config
         self.vocab_size = config.vocab_size
         self.embed_dim = config.hidden_size
-        self.tie_word_embeddings: bool = getattr(
-            config, "tie_word_embeddings", False
-        )
+        self.tie_word_embeddings: bool = getattr(config, "tie_word_embeddings", False)
 
         # Embedding  (HF name: word_embeddings → vLLM name: embed_tokens)
         if get_pp_group().is_first_rank or (
@@ -610,10 +529,8 @@ class Param2MoEModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size
-            )
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size
         )
 
         if get_pp_group().is_last_rank:
@@ -628,8 +545,8 @@ class Param2MoEModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -666,17 +583,10 @@ class Param2MoEModel(nn.Module):
         )
 
 
-# ---------------------------------------------------------------------------
-# MixtureOfExperts protocol implementation
-# ---------------------------------------------------------------------------
-
-
 class Param2MoEMixtureOfExperts(MixtureOfExperts):
     """Implements the vLLM MixtureOfExperts protocol for Param2MoE."""
 
-    def extract_moe_parameters(
-        self, example_moe: Optional[Param2MoEMoEBlock]
-    ) -> None:
+    def extract_moe_parameters(self, example_moe: Param2MoEMoEBlock | None) -> None:
         if example_moe is None:
             raise RuntimeError(
                 "No Param2MoEMoEBlock found in model.layers. "
@@ -697,9 +607,7 @@ class Param2MoEMixtureOfExperts(MixtureOfExperts):
     ) -> None:
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = (
-            num_physical_experts - self.num_logical_experts
-        )
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
 
         for moe in self.moe_mlp_layers:
             moe.n_physical_experts = num_physical_experts
@@ -721,11 +629,6 @@ class Param2MoEMixtureOfExperts(MixtureOfExperts):
         for moe in self.moe_layers:
             if hasattr(moe, "set_eplb_state"):
                 moe.set_eplb_state(eplb_state)
-
-
-# ---------------------------------------------------------------------------
-# Top-level CausalLM wrapper
-# ---------------------------------------------------------------------------
 
 
 class Param2MoEForCausalLM(
@@ -776,9 +679,7 @@ class Param2MoEForCausalLM(
             prefix=maybe_prefix(prefix, "model"),
         )
 
-        self.tie_word_embeddings: bool = getattr(
-            config, "tie_word_embeddings", False
-        )
+        self.tie_word_embeddings: bool = getattr(config, "tie_word_embeddings", False)
         if get_pp_group().is_last_rank:
             if self.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
@@ -798,15 +699,12 @@ class Param2MoEForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
-        # ------------------------------------------------------------------
-        # Collect MoE layer references for the MixtureOfExperts protocol
-        # ------------------------------------------------------------------
         self.expert_weights: list = []
         self.num_moe_layers: int = 0
         self.moe_layers: list = []
         self.moe_mlp_layers: list = []
 
-        example_moe: Optional[Param2MoEMoEBlock] = None
+        example_moe: Param2MoEMoEBlock | None = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
@@ -818,10 +716,6 @@ class Param2MoEForCausalLM(
 
         self.extract_moe_parameters(example_moe)
 
-    # ------------------------------------------------------------------
-    # Forward
-    # ------------------------------------------------------------------
-
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
@@ -829,8 +723,8 @@ class Param2MoEForCausalLM(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         return self.model(
             input_ids=input_ids,
@@ -842,14 +736,10 @@ class Param2MoEForCausalLM(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         if not get_pp_group().is_last_rank:
             return None
         return self.logits_processor(self.lm_head, hidden_states)
-
-    # ------------------------------------------------------------------
-    # Weight loading
-    # ------------------------------------------------------------------
 
     def load_weights(
         self,
@@ -870,10 +760,8 @@ class Param2MoEForCausalLM(
         config = self.config
         num_heads: int = config.num_attention_heads
         num_kv_heads: int = config.num_key_value_heads
-        head_dim: int = config.head_dim or (
-            config.hidden_size // num_heads
-        )
-        q_split = num_heads * head_dim      # Q slice rows
+        head_dim: int = config.head_dim or (config.hidden_size // num_heads)
+        q_split = num_heads * head_dim  # Q slice rows
         kv_split = num_kv_heads * head_dim  # K (or V) slice rows
 
         # Stacked params: fuse separate gate_proj / up_proj from the
@@ -890,7 +778,6 @@ class Param2MoEForCausalLM(
         expert_params_mapping = self.model.get_expert_mapping()
 
         for name, loaded_weight in _rename_and_normalize_weights(weights):
-
             # ----------------------------------------------------------------
             # 1. Special handling: fused QKV  (query_key_value → qkv_proj)
             #    The HF weight has shape:
@@ -905,12 +792,10 @@ class Param2MoEForCausalLM(
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 q_w = loaded_weight[:q_split, :]
-                k_w = loaded_weight[q_split: q_split + kv_split, :]
-                v_w = loaded_weight[q_split + kv_split:, :]
+                k_w = loaded_weight[q_split : q_split + kv_split, :]
+                v_w = loaded_weight[q_split + kv_split :, :]
 
                 weight_loader(param, q_w, "q")
                 weight_loader(param, k_w, "k")
@@ -937,9 +822,7 @@ class Param2MoEForCausalLM(
                     continue
 
                 param = params_dict[new_name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(new_name)
                 matched_stacked = True
@@ -967,9 +850,7 @@ class Param2MoEForCausalLM(
                     continue
 
                 param = params_dict[new_name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(
                     param,
                     loaded_weight,
@@ -995,9 +876,7 @@ class Param2MoEForCausalLM(
                 continue
 
             param = params_dict[name]
-            weight_loader = getattr(
-                param, "weight_loader", default_weight_loader
-            )
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             try:
                 weight_loader(param, loaded_weight)
             except Exception as e:
