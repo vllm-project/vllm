@@ -1727,8 +1727,9 @@ class NixlConnectorWorker:
             # then duplicate it logically to be able to index SSM/Conv separately.
             self.num_regions *= 2
 
-        # 3-read: mamba blocks have 4 regions (x, B, C, ssm) per layer.
-        self._mamba_num_regions = self.num_regions * 2 if self._has_mamba else 0
+        # 3-read mamba always uses exactly 4 regions per layer (x, B, C, ssm),
+        # independent of how many regions FA uses (which varies by layout).
+        self._mamba_num_regions = 4 if self._has_mamba else 0
 
         # TODO (NickLucche) Adapt to different descs views (engine_id->tp_rank) to
         # support heterogeneous TP.
@@ -1846,8 +1847,10 @@ class NixlConnectorWorker:
         num_blocks = nixl_agent_meta.num_blocks // remote_ratio
         device_id = nixl_agent_meta.device_id
 
-        for base_addr in nixl_agent_meta.kv_caches_base_addr:
-            page_stride = nixl_agent_meta.block_lens[0] * remote_ratio
+        # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
+        # block lengths vary across layers (e.g. MLA).
+        for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
+            page_stride = nixl_agent_meta.block_lens[i] * remote_ratio
             for off, sz in conv_offsets:
                 for blk in range(num_blocks):
                     blocks_data.append(

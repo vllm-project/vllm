@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.v1.kv_cache_interface import MambaSpec
 
 
@@ -88,8 +89,7 @@ def derive_mamba_conv_split(
 
     Args:
         mamba_spec: MambaSpec whose shapes are:
-            shapes[0] = conv state: (conv_dim_local, conv_rows) for DS
-                        layout, or (conv_rows, conv_dim_local) for SD.
+            shapes[0] = conv state: (conv_dim_local, conv_rows) in DS layout.
             shapes[1] = SSM temporal: (local_num_heads, head_dim).
         local_tp: this engine's tensor-parallel size.
 
@@ -100,24 +100,15 @@ def derive_mamba_conv_split(
     conv_shape = mamba_spec.shapes[0]
     assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
 
-    # DS layout: (conv_dim_local, conv_rows), SD layout: (conv_rows, conv_dim_local).
-    # We need to identify which axis is conv_rows (small, e.g. 3) and which is dim.
-    # SSM temporal shape[1] gives head_dim, shape[0] gives local_num_heads.
+    # NOTE (ZhanqiuHu): 3-read requires DS layout, which is already asserted
+    # in nixl_connector __init__.  Use it directly instead of heuristic detection.
+    assert is_conv_state_dim_first(), "3-read requires DS conv state layout"
+    local_conv_dim = conv_shape[0]  # DS: (conv_dim_local, conv_rows)
+    conv_rows = conv_shape[1]
+
     head_dim = mamba_spec.shapes[1][1]
     local_num_heads = mamba_spec.shapes[1][0]
     intermediate_size = local_num_heads * local_tp * head_dim
-
-    # Determine conv_dim_local and conv_rows from the 2D shape.
-    # conv_dim_local * local_tp must be >= intermediate_size (because it's
-    # intermediate_size + 2*groups_ss).
-    if conv_shape[0] * local_tp >= intermediate_size:
-        # DS layout: (conv_dim_local, conv_rows)
-        local_conv_dim = conv_shape[0]
-        conv_rows = conv_shape[1]
-    else:
-        # SD layout: (conv_rows, conv_dim_local)
-        conv_rows = conv_shape[0]
-        local_conv_dim = conv_shape[1]
 
     remainder = local_conv_dim * local_tp - intermediate_size
     assert remainder > 0 and remainder % 2 == 0, (
