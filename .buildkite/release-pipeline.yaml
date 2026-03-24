@@ -637,7 +637,7 @@ steps:
     depends_on:
       - build-rocm-release-image
     agents:
-      queue: small_cpu_queue_postmerge
+      queue: small_cpu_queue_release
     commands:
       - "bash .buildkite/scripts/push-nightly-builds-rocm.sh"
       # Clean up old nightly builds (keep only last 14)
