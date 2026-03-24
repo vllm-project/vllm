@@ -43,9 +43,10 @@ class ScaleUpExistingEngineState(enum.IntEnum):
 
 
 class ScaleUpNewEngineState(enum.IntEnum):
-    PREPARE = 0
-    EPLB_RESHUFFLE = 1
-    COMPLETE = 2
+    PRE_KV_INIT = 0
+    PREPARE = 1
+    EPLB_RESHUFFLE = 2
+    COMPLETE = 3
 
 
 class ScaleDownRemainingEngineState(enum.IntEnum):
@@ -104,7 +105,7 @@ class ElasticEPScalingState:
         self.state: EngineState
         if scale_type == "scale_up":
             self.state = (
-                ScaleUpNewEngineState.PREPARE
+                ScaleUpNewEngineState.PRE_KV_INIT
                 if worker_type == "new"
                 else ScaleUpExistingEngineState.WAIT_NEW_CORE_ENGINES_INIT
             )
@@ -141,6 +142,12 @@ class ElasticEPScalingState:
             if self.worker_type == "removing"
             else self._progress_remaining_engine()
         )
+
+    def run_pre_kv_init_states(self) -> None:
+        assert self.scale_type == "scale_up" and self.worker_type == "new"
+        assert self.state == ScaleUpNewEngineState.PRE_KV_INIT
+        assert self.progress()
+        assert self.state == ScaleUpNewEngineState.PREPARE
 
     def _execute_tcp_store_barrier(
         self, dp_store, group_rank, group_size, barrier_id, timeout=None
@@ -303,7 +310,23 @@ class ElasticEPScalingState:
         state = self.state
         assert self.new_dp_group is not None and self.new_dp_store is not None
 
-        if state == ScaleUpNewEngineState.PREPARE:
+        if state == ScaleUpNewEngineState.PRE_KV_INIT:
+            self.engine_core._eep_send_engine_core_notification(
+                EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY
+            )
+            self.model_executor.collective_rpc(
+                "elastic_ep_execute", args=("receive_weights",)
+            )
+            self.engine_core.available_gpu_memory_for_kv_cache = (
+                ParallelConfig.sync_kv_cache_memory_size(self.new_dp_group, -1)
+            )
+            self.model_executor.collective_rpc(
+                "elastic_ep_execute", args=("prepare_new_worker",)
+            )
+            self.state = ScaleUpNewEngineState.PREPARE
+            return True
+
+        elif state == ScaleUpNewEngineState.PREPARE:
             tensor = torch.tensor([0, 0, 0], dtype=torch.int32, device="cpu")
             torch.distributed.all_reduce(
                 tensor,
@@ -403,7 +426,6 @@ class ElasticEPScalingState:
             self.engine_core._eep_send_engine_core_notification(
                 EEPNotificationType.SHUTDOWN_COMPLETE
             )
-            self.engine_core.shutdown()
             return True
 
         else:
@@ -525,7 +547,7 @@ class ElasticEPScalingState:
         self.model_executor.collective_rpc(
             "elastic_ep_execute",
             args=(
-                "perform_eplb_reshuffle",
+                "perform_scale_down_eplb_reshuffle",
                 self.reconfig_request.new_data_parallel_size,
             ),
         )

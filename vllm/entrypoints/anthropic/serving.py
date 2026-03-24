@@ -72,6 +72,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         tool_parser: str | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -87,6 +88,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             tool_parser=tool_parser,
             enable_prompt_tokens_details=enable_prompt_tokens_details,
             enable_force_include_usage=enable_force_include_usage,
+            default_chat_template_kwargs=default_chat_template_kwargs,
         )
         self.stop_reason_map = {
             "stop": "end_turn",
@@ -331,6 +333,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
+            kv_transfer_params=anthropic_request.kv_transfer_params,
         )
 
     @classmethod
@@ -441,6 +444,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 input_tokens=generator.usage.prompt_tokens,
                 output_tokens=generator.usage.completion_tokens,
             ),
+            kv_transfer_params=generator.kv_transfer_params,
         )
         choice = generator.choices[0]
         if choice.finish_reason == "stop":

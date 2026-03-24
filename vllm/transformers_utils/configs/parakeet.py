@@ -6,11 +6,21 @@ from transformers import ParakeetEncoderConfig, PretrainedConfig
 
 
 class ParakeetConfig(ParakeetEncoderConfig):
-    llm_hidden_size: int
-    projection_hidden_size: int
-    projection_bias: bool
-    projection_eps: float = 1e-5
-    sampling_rate: int
+    def __init__(
+        self,
+        llm_hidden_size: int,
+        projection_hidden_size: int,
+        projection_bias: bool,
+        sampling_rate: int,
+        projection_eps: float = 1e-5,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.llm_hidden_size = llm_hidden_size
+        self.projection_hidden_size = projection_hidden_size
+        self.projection_bias = projection_bias
+        self.sampling_rate = sampling_rate
+        self.projection_eps = projection_eps
 
     @staticmethod
     def from_hf_config(
