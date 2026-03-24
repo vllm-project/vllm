@@ -75,12 +75,14 @@ from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 # NOTE lang support is based on what is written here:
 # https://huggingface.co/ibm-granite/granite-speech-3.3-2b
+# https://huggingface.co/ibm-granite/granite-4.0-1b-speech
 # Though this may vary from model to model, and also many langs
 # work pretty well with zero shot.
 ISO639_1_SUPPORTED_LANGS = {
     "en": "English",
     "fr": "French",
     "de": "German",
+    "ja": "Japanese",
     "pt": "Portuguese",
     "es": "Spanish",
 }
