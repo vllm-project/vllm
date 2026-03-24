@@ -27,10 +27,15 @@ def enable_scoring_api(
     supported_tasks: tuple["SupportedTask", ...],
     model_config: ModelConfig | None = None,
 ) -> bool:
-    if any(t in supported_tasks for t in ("embed", "token_embed")):
+    if model_config is None:
+        return False
+
+    pooling_task = model_config.get_pooling_task(supported_tasks)
+
+    if pooling_task in ("embed", "token_embed"):
         return True
 
-    if model_config is not None and "classify" in supported_tasks:
+    if pooling_task == "classify":
         num_labels = getattr(model_config.hf_config, "num_labels", 0)
         if num_labels != 1:
             logger.debug_once("Score API is only enabled for num_labels == 1.")
@@ -45,18 +50,24 @@ def register_pooling_api_routers(
     supported_tasks: tuple["SupportedTask", ...],
     model_config: ModelConfig | None = None,
 ):
-    from vllm.entrypoints.pooling.pooling.api_router import router as pooling_router
+    if model_config is None:
+        return
 
-    app.include_router(pooling_router)
+    pooling_task = model_config.get_pooling_task(supported_tasks)
 
-    if "classify" in supported_tasks:
+    if pooling_task is not None:
+        from vllm.entrypoints.pooling.pooling.api_router import router as pooling_router
+
+        app.include_router(pooling_router)
+
+    if pooling_task == "classify":
         from vllm.entrypoints.pooling.classify.api_router import (
             router as classify_router,
         )
 
         app.include_router(classify_router)
 
-    if "embed" in supported_tasks:
+    if pooling_task == "embed":
         from vllm.entrypoints.pooling.embed.api_router import router as embed_router
 
         app.include_router(embed_router)
@@ -79,10 +90,13 @@ def init_pooling_state(
     from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
     from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
     from vllm.entrypoints.pooling.score.serving import ServingScores
-    from vllm.tasks import POOLING_TASKS
 
     model_config = engine_client.model_config
 
+    if model_config is None:
+        return
+
+    pooling_task = model_config.get_pooling_task(supported_tasks)
     resolved_chat_template = load_chat_template(args.chat_template)
 
     state.serving_pooling = (
@@ -91,13 +105,14 @@ def init_pooling_state(
                 engine_client,
                 state.openai_serving_models,
                 state.openai_serving_render,
+                supported_tasks=supported_tasks,
                 request_logger=request_logger,
                 chat_template=resolved_chat_template,
                 chat_template_content_format=args.chat_template_content_format,
                 trust_request_chat_template=args.trust_request_chat_template,
             )
         )
-        if any(t in supported_tasks for t in POOLING_TASKS)
+        if pooling_task is not None
         else None
     )
     state.serving_embedding = (
@@ -109,7 +124,7 @@ def init_pooling_state(
             chat_template_content_format=args.chat_template_content_format,
             trust_request_chat_template=args.trust_request_chat_template,
         )
-        if "embed" in supported_tasks
+        if pooling_task == "embed"
         else None
     )
     state.serving_classification = (
@@ -121,7 +136,7 @@ def init_pooling_state(
             chat_template_content_format=args.chat_template_content_format,
             trust_request_chat_template=args.trust_request_chat_template,
         )
-        if "classify" in supported_tasks
+        if pooling_task == "classify"
         else None
     )
     state.serving_scores = (

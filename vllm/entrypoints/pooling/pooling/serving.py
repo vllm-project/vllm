@@ -37,6 +37,7 @@ from vllm.inputs import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.renderers.inputs.preprocess import prompt_to_seq
+from vllm.tasks import SupportedTask
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
@@ -49,6 +50,7 @@ class OpenAIServingPooling(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         openai_serving_render: OpenAIServingRender,
+        supported_tasks: tuple[SupportedTask, ...],
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
@@ -60,7 +62,8 @@ class OpenAIServingPooling(OpenAIServing):
             models=models,
             request_logger=request_logger,
         )
-
+        self.supported_tasks = supported_tasks
+        self.pooling_task = self.model_config.get_pooling_task(supported_tasks)
         self.openai_serving_render = openai_serving_render
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -86,8 +89,24 @@ class OpenAIServingPooling(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
+        if request.task is None:
+            request.task = self.pooling_task
+
         if getattr(request, "dimensions", None) is not None:
             return self.create_error_response("dimensions is currently not supported")
+
+        # plugin task uses io_processor.parse_request to verify inputs
+        if request.task != "plugin" and request.task != self.pooling_task:
+            if request.task not in self.supported_tasks:
+                raise ValueError(
+                    f"Unsupported task: {request.task!r} "
+                    f"Supported tasks: {self.pooling_task}"
+                )
+            else:
+                raise ValueError(
+                    "Try switching the model's pooling_task "
+                    'via --pooler-config {"pooling_task": "' + request.task + '"\})'
+                )
 
         engine_prompts: Sequence[ProcessorInputs]
         if use_io_processor := isinstance(request, IOProcessorRequest):

@@ -146,7 +146,7 @@ def test_multi_vector_retrieval_models_using_normalize(
         model,
         max_model_len=512,
         dtype=dtype,
-        pooler_config=PoolerConfig(use_activation=False),
+        pooler_config=PoolerConfig(use_activation=False, pooling_task="token_embed"),
     ) as vllm_model:
         wo_normalize = vllm_model.token_embed(example_prompts)
 
@@ -154,7 +154,7 @@ def test_multi_vector_retrieval_models_using_normalize(
         model,
         max_model_len=512,
         dtype=dtype,
-        pooler_config=PoolerConfig(use_activation=True),
+        pooler_config=PoolerConfig(use_activation=True, pooling_task="token_embed"),
     ) as vllm_model:
         w_normalize = vllm_model.token_embed(example_prompts)
 
