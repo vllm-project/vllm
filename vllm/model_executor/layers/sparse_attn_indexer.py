@@ -5,6 +5,7 @@
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -31,7 +32,6 @@ if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
 elif current_platform.is_xpu():
     from vllm._xpu_ops import xpu_ops
-
 logger = init_logger(__name__)
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
@@ -499,21 +499,7 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
-        return torch.ops.vllm.sparse_attn_indexer(
-            hidden_states,
-            self.k_cache.prefix,
-            self.k_cache.kv_cache[0],
-            q_fp8,
-            k,
-            weights,
-            self.quant_block_size,
-            self.scale_fmt,
-            self.topk_tokens,
-            self.head_dim,
-            self.max_model_len,
-            self.max_total_seq_len,
-            self.topk_indices_buffer,
-        )
+        return self.forward_cuda(hidden_states, q_fp8, k, weights)
 
     def forward_hip(
         self,
