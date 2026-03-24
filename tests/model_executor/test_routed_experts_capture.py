@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import types
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -8,8 +10,30 @@ import torch
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer,
+)
 
 pytestmark = pytest.mark.cpu_test
+
+_REC_MODULE = "vllm.model_executor.layers.fused_moe.routed_experts_capturer"
+
+
+def _capturer_with_buffer(
+    *,
+    max_tokens: int = 8,
+    num_layers: int = 4,
+    num_experts_per_tok: int = 2,
+    dp_rank: int = 0,
+) -> RoutedExpertsCapturer:
+    c = RoutedExpertsCapturer()
+    c.dp_rank = dp_rank
+    c._device_buffer = torch.full(
+        (max_tokens, num_layers, num_experts_per_tok),
+        -1,
+        dtype=torch.int32,
+    )
+    return c
 
 
 class DummyRouter(BaseRouter):
@@ -159,3 +183,60 @@ def test_gpu_model_runner_binding_stage(monkeypatch):
     assert callable(dummy_module.router.capture_fn)
     dummy_module.router.capture_fn(torch.tensor([[9, 10]]))
     assert len(capturer.calls) == 1
+
+
+def test_routed_experts_capturer_single_dp_no_metadata():
+    """dp_metadata is None: capture writes the full topk_ids rows."""
+    capturer = _capturer_with_buffer(dp_rank=0)
+    topk = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
+    ctx = SimpleNamespace(dp_metadata=None)
+    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+        capturer.capture(layer_id=0, topk_ids=topk)
+    assert torch.equal(capturer._device_buffer[:3, 0, :], topk)
+    assert capturer._device_buffer[3, 0, 0].item() == -1
+
+
+def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
+    """n == sum(num_tokens_dp): slice this rank's segment from concatenated topk."""
+    capturer = _capturer_with_buffer(dp_rank=1)
+    num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
+    ctx = SimpleNamespace(
+        dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
+    )
+    # Concatenated order: rank0 rows then rank1 rows.
+    topk = torch.tensor(
+        [[0, 1], [2, 3], [10, 11], [12, 13], [14, 15]], dtype=torch.int32
+    )
+    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+        capturer.capture(layer_id=0, topk_ids=topk)
+    want = topk[2:5]
+    assert torch.equal(capturer._device_buffer[:3, 0, :], want)
+
+
+def test_routed_experts_capturer_dp_modular_local_tokens():
+    """n == token_num_per_dp: topk is already local to this DP rank."""
+    capturer = _capturer_with_buffer(dp_rank=1)
+    num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
+    ctx = SimpleNamespace(
+        dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
+    )
+    topk = torch.tensor([[10, 11], [12, 13], [14, 15]], dtype=torch.int32)
+    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+        capturer.capture(layer_id=0, topk_ids=topk)
+    assert torch.equal(capturer._device_buffer[:3, 0, :], topk)
+
+
+def test_routed_experts_capturer_dp_unexpected_batch_skips(caplog):
+    """Mismatch between topk batch dim and DP layout: skip capture and log."""
+    capturer = _capturer_with_buffer(dp_rank=0)
+    num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
+    ctx = SimpleNamespace(
+        dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
+    )
+    # total=5, local=2: n=1 matches neither naive (5) nor modular (2).
+    topk = torch.tensor([[1, 2]], dtype=torch.int32)
+    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+        with caplog.at_level("WARNING"):
+            capturer.capture(layer_id=0, topk_ids=topk)
+    assert capturer._device_buffer[0, 0, 0].item() == -1
+    assert "unexpected topk_ids batch dim" in caplog.text
