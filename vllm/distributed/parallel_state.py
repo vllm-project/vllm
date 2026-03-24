@@ -427,6 +427,19 @@ direct_register_custom_op(
 )
 
 
+def _register_inductor_lowering_for_flashinfer_collective_fp8_ops() -> None:
+    """Register explicit Inductor lowerings for FlashInfer AsyncTP custom ops."""
+    import torch._inductor.lowering as _lowering
+
+    ops = (
+        torch.ops.vllm.fused_flashinfer_scaled_matmul_reduce_scatter.default,
+        torch.ops.vllm.fused_all_gather_flashinfer_scaled_matmul.default,
+    )
+    for op in ops:
+        if op not in _lowering.lowerings:
+            _lowering.make_fallback(op)
+
+
 class GroupCoordinator:
     """
     PyTorch ProcessGroup wrapper for a group of processes.
