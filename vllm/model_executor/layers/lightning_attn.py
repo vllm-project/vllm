@@ -603,6 +603,7 @@ def _linear_attn_decode_kernel(
     cache_h_stride,
     cache_d0_stride,
     cache_d1_stride,
+    pad_slot_id: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """
@@ -618,7 +619,7 @@ def _linear_attn_decode_kernel(
     slot_id = tl.load(slot_idx + pid_b).to(tl.int64)
 
     # Skip if slot_id is PAD_SLOT_ID (padding)
-    if slot_id == PAD_SLOT_ID:
+    if slot_id == pad_slot_id:
         return
 
     batch_id = pid_b
@@ -728,6 +729,7 @@ def linear_decode_forward_triton(
         cache_h_stride,
         cache_d0_stride,
         cache_d1_stride,
+        pad_slot_id=PAD_SLOT_ID,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 
