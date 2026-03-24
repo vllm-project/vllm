@@ -113,12 +113,13 @@ def _remap_mistral_vision_args(config: dict) -> dict:
 
 def _remap_mistral_yarn_args(config: dict) -> dict:
     yarn_config_map = {
-        "factor": "factor",
-        "original_max_position_embeddings": "original_max_position_embeddings",
-        "beta": "beta_fast",
-        "alpha": "beta_slow",
-        "apply_scale": "apply_yarn_scaling",
+        "factor": ("factor", float),
+        "original_max_position_embeddings": ("original_max_position_embeddings", int),
+        "beta": ("beta_fast", float),
+        "alpha": ("beta_slow", float),
+        "apply_scale": ("apply_yarn_scaling", bool),
     }
+
     yarn_config = config.get("yarn") or {}
     config["rope_parameters"] = {
         "rope_type": "yarn",
@@ -128,9 +129,10 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
     if rope_theta := config.pop("rope_theta", None):
         config["rope_parameters"]["rope_theta"] = rope_theta
 
-    for old_name, new_name in yarn_config_map.items():
+    for old_name, (new_name, cast) in yarn_config_map.items():
         if old_name in yarn_config:
-            config["rope_parameters"][new_name] = yarn_config.pop(old_name)
+            # Cast to remove Transformers > v5 type warnings
+            config["rope_parameters"][new_name] = cast(yarn_config.pop(old_name))
 
     assert len(yarn_config) == 0, f"Unparsed yarn config: {yarn_config}"
 
@@ -154,6 +156,7 @@ def _remap_general_mistral_args(config: dict) -> dict:
         "tie_word_embeddings": ("tied_embeddings", False),
         "max_seq_len": ("max_seq_len", config.get("max_position_embeddings", 128_000)),
         "max_position_embeddings": ("max_position_embeddings", 128_000),
+        "dtype": ("dtype", config.get("dtype")),
     }
 
     for key, new_key in config_mapping.items():
@@ -254,7 +257,6 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             encoder_attention_heads=encoder_args["n_heads"],
             encoder_head_dim=encoder_args["head_dim"],
             vocab_size=encoder_args["vocab_size"],
-            max_source_positions=encoder_args["max_source_positions"],
             is_encoder_decoder=False,  # Override WhisperConfig default
             is_causal=encoder_args.get("causal", False),
             sliding_window=encoder_args.get("sliding_window", None),
@@ -267,6 +269,10 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             max_position_embeddings=block_pool_size * config["max_position_embeddings"],
         ),
     }
+    # Sometimes max_source_positions is explicitly set to None in params.json but this
+    # is not a valid value for WhisperConfig (or downstream code that uses it).
+    if (max_source_positions := encoder_args.get("max_source_positions")) is not None:
+        config["audio_config"].max_source_positions = max_source_positions
     if quant_config:
         config["quantization_config"] = quant_config
     return config

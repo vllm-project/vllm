@@ -79,7 +79,7 @@ from vllm.config.model import (
     RunnerOption,
     TokenizerMode,
 )
-from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
+from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MMTensorIPC
 from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import (
     All2AllBackend,
@@ -108,6 +108,7 @@ from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -243,6 +244,14 @@ NEEDS_HELP = (
 )
 
 
+def _maybe_add_docs_url(cls: Any) -> str:
+    """Generate API docs URL for a vllm config class."""
+    if not cls.__module__.startswith("vllm.config"):
+        return ""
+    version = f"v{VLLM_VERSION}" if "dev" not in VLLM_VERSION else "latest"
+    return f"\n\nAPI docs: https://docs.vllm.ai/en/{version}/api/vllm/config/#vllm.config.{cls.__name__}"
+
+
 @functools.lru_cache(maxsize=30)
 def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     # Save time only getting attr docs if we're generating help text
@@ -293,6 +302,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                     raise argparse.ArgumentTypeError(repr(e)) from e
 
             kwargs[name]["type"] = parse_dataclass
+            kwargs[name]["help"] += _maybe_add_docs_url(dataclass_cls)
             kwargs[name]["help"] += f"\n\n{json_tip}"
         elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
@@ -419,6 +429,7 @@ class EngineArgs:
     data_parallel_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
     moe_backend: MoEBackend = KernelConfig.moe_backend
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
@@ -498,6 +509,7 @@ class EngineArgs:
     io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
+    mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -506,6 +518,7 @@ class EngineArgs:
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
+    lora_target_modules: list[str] | None = LoRAConfig.target_modules
     enable_tower_connector_lora: bool = LoRAConfig.enable_tower_connector_lora
     specialize_active_lora: bool = LoRAConfig.specialize_active_lora
 
@@ -606,12 +619,15 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
+    shutdown_timeout: int = 0
+
     weight_transfer_config: WeightTransferConfig | None = get_field(
         VllmConfig,
         "weight_transfer_config",
     )
 
     fail_on_environ_validation: bool = False
+    gdn_prefill_backend: Literal["flashinfer", "triton"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -899,6 +915,10 @@ class EngineArgs:
             **parallel_kwargs["enable_expert_parallel"],
         )
         parallel_group.add_argument(
+            "--enable-ep-weight-filter",
+            **parallel_kwargs["enable_ep_weight_filter"],
+        )
+        parallel_group.add_argument(
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
         )
         parallel_group.add_argument("--enable-dbo", **parallel_kwargs["enable_dbo"])
@@ -1078,6 +1098,9 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"]
         )
+        multimodal_group.add_argument(
+            "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
+        )
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -1103,6 +1126,9 @@ class EngineArgs:
         lora_group.add_argument("--max-cpu-loras", **lora_kwargs["max_cpu_loras"])
         lora_group.add_argument(
             "--fully-sharded-loras", **lora_kwargs["fully_sharded_loras"]
+        )
+        lora_group.add_argument(
+            "--lora-target-modules", **lora_kwargs["target_modules"]
         )
         lora_group.add_argument("--default-mm-loras", **lora_kwargs["default_mm_loras"])
         lora_group.add_argument(
@@ -1308,6 +1334,21 @@ class EngineArgs:
             default=False,
             action=argparse.BooleanOptionalAction,
         )
+
+        parser.add_argument(
+            "--shutdown-timeout",
+            type=int,
+            default=0,
+            help="Shutdown timeout in seconds. 0 = abort, >0 = wait.",
+        )
+
+        parser.add_argument(
+            "--gdn-prefill-backend",
+            dest="gdn_prefill_backend",
+            choices=["flashinfer", "triton"],
+            default=None,
+            help="Select GDN prefill backend.",
+        )
         return parser
 
     @classmethod
@@ -1386,6 +1427,7 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
+            mm_tensor_ipc=self.mm_tensor_ipc,
             io_processor_plugin=self.io_processor_plugin,
         )
 
@@ -1709,6 +1751,7 @@ class EngineArgs:
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             is_moe_model=model_config.is_moe,
             enable_expert_parallel=self.enable_expert_parallel,
+            enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
             enable_dbo=self.enable_dbo,
@@ -1782,6 +1825,7 @@ class EngineArgs:
                 default_mm_loras=self.default_mm_loras,
                 fully_sharded_loras=self.fully_sharded_loras,
                 lora_dtype=self.lora_dtype,
+                target_modules=self.lora_target_modules,
                 enable_tower_connector_lora=self.enable_tower_connector_lora,
                 specialize_active_lora=self.specialize_active_lora,
                 max_cpu_loras=self.max_cpu_loras
@@ -1880,7 +1924,7 @@ class EngineArgs:
             )
 
         offload_config = OffloadConfig(
-            offload_backend=self.offload_backend,
+            offload_backend=self.offload_backend,  # type: ignore[arg-type]
             uva=UVAOffloadConfig(
                 cpu_offload_gb=self.cpu_offload_gb,
                 cpu_offload_params=self.cpu_offload_params,
@@ -1892,6 +1936,9 @@ class EngineArgs:
                 offload_params=self.offload_params,
             ),
         )
+
+        if self.gdn_prefill_backend is not None:
+            self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
 
         config = VllmConfig(
             model_config=model_config,
@@ -1916,6 +1963,7 @@ class EngineArgs:
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
+            shutdown_timeout=self.shutdown_timeout,
         )
 
         return config
