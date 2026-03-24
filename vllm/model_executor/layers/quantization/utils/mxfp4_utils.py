@@ -52,10 +52,12 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
         value_layout = StridedLayout
         if on_gfx950():
             try:
+                # triton < 3.6
                 from triton_kernels.tensor_details.layout import GFX950MXScaleLayout
 
                 scale_layout = GFX950MXScaleLayout
             except ImportError:
+                # triton >= 3.6
                 from triton_kernels.tensor_details.layout import CDNA4MXScaleLayout
 
                 scale_layout = CDNA4MXScaleLayout
