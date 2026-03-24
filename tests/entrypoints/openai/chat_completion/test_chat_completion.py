@@ -197,6 +197,7 @@ async def test_batched_chat_completions(
     for choice in choices:
         assert choice["message"]["content"]
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
