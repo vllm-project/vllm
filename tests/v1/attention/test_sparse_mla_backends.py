@@ -780,9 +780,7 @@ def test_split_indexer_prefill_chunks(
 
 
 def test_split_indexer_prefill_chunks_single_request_overflow():
-    """Test that single request exceeding budget is still processed."""
-    # Single request: M=100, N=1000 -> 100000 elems = 400000 bytes
-    # Budget is only 1000 bytes (250 elems), so each request is its own chunk
+    """Test that single request exceeding budget is sub-chunked on query dim."""
     seq_lens = torch.tensor([1000, 50])
     query_lens = torch.tensor([100, 5])
 
