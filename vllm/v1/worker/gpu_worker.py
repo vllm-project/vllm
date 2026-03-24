@@ -223,12 +223,8 @@ class Worker(WorkerBase):
             parallel_config = self.parallel_config
             if (
                 parallel_config.distributed_executor_backend
-                not in ("ray", "external_launcher")
+                not in ("external_launcher",)
                 and parallel_config.data_parallel_backend != "ray"
-                and parallel_config.nnodes_within_dp == 1
-            ) or (
-                envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND
-                and parallel_config.distributed_executor_backend == "ray"
                 and parallel_config.data_parallel_size > 1
                 and parallel_config.nnodes_within_dp == 1
             ):

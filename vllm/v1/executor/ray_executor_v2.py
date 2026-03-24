@@ -231,12 +231,18 @@ class RayExecutorV2(MultiprocExecutor):
             )
 
             # Prevent Ray from setting CUDA_VISIBLE_DEVICES
-            runtime_env = {
-                "env_vars": {
-                    env_var: "1"
-                    for env_var in current_platform.ray_noset_device_env_vars
-                },
+            env_vars = {
+                env_var: "1"
+                for env_var in current_platform.ray_noset_device_env_vars
             }
+            # Propagate V2 executor flag and DP local rank to workers
+            if envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND:
+                env_vars["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] = "1"
+                if envs.VLLM_DP_RANK_LOCAL >= 0:
+                    env_vars["VLLM_DP_RANK_LOCAL"] = str(
+                        envs.VLLM_DP_RANK_LOCAL
+                    )
+            runtime_env = {"env_vars": env_vars}
 
             actor_name = build_actor_name(
                 instance_id, bundle["rank"], tp_size, pp_size, pcp_size

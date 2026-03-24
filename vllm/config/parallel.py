@@ -671,10 +671,29 @@ class ParallelConfig:
                 )
             if not self.enable_elastic_ep:
                 if not self._data_parallel_master_port_list:
-                    self._data_parallel_master_port_list = get_open_ports_list(5)
-                self.data_parallel_master_port = (
-                    self._data_parallel_master_port_list.pop()
-                )
+                    if (
+                        envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND
+                        and self.distributed_executor_backend == "ray"
+                    ):
+                        # Under RayExecutorV2 each DP replica lives in a
+                        # separate process with its own ParallelConfig.
+                        # Random ports would differ across replicas, but
+                        # all workers must join the same torch.distributed
+                        # world. Derive the starting port deterministically
+                        # from data_parallel_rpc_port (coordinated across
+                        # all DP replicas by the launcher). +1 to avoid
+                        # the rpc_port itself (bound by ZMQ over TCP).
+                        self.data_parallel_master_port = (
+                            self.data_parallel_rpc_port + 1
+                        )
+                    else:
+                        self._data_parallel_master_port_list = (
+                            get_open_ports_list(5)
+                        )
+                if self._data_parallel_master_port_list:
+                    self.data_parallel_master_port = (
+                        self._data_parallel_master_port_list.pop()
+                    )
 
             if not (0 <= self.data_parallel_rank < self.data_parallel_size):
                 raise ValueError(
