@@ -23,6 +23,8 @@ use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
 
+const SPECIAL_STOP_TOKEN_ID: u32 = 256;
+
 fn unique_tcp_endpoint() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -67,6 +69,12 @@ fn request_output(
 
 fn bytes_to_token_ids(bytes: &[u8]) -> Vec<u32> {
     bytes.iter().map(|byte| u32::from(*byte)).collect()
+}
+
+fn bytes_with_special_stop_token(bytes: &[u8]) -> Vec<u32> {
+    let mut token_ids = bytes_to_token_ids(bytes);
+    token_ids.push(SPECIAL_STOP_TOKEN_ID);
+    token_ids
 }
 
 async fn send_outputs(push: &mut PushSocket, outputs: EngineCoreOutputs) {
@@ -178,8 +186,17 @@ impl TextBackend for FakeChatBackend {
         Ok(text.bytes().map(u32::from).collect())
     }
 
-    fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> vllm_text::Result<String> {
-        let bytes = token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>();
+    fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> vllm_text::Result<String> {
+        let bytes = token_ids
+            .iter()
+            .filter_map(|id| {
+                if skip_special_tokens && *id == SPECIAL_STOP_TOKEN_ID {
+                    None
+                } else {
+                    Some(*id as u8)
+                }
+            })
+            .collect::<Vec<_>>();
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
@@ -245,6 +262,7 @@ fn sample_request(request_id: &str) -> ChatRequest {
         tools: Vec::new(),
         tool_choice: ChatToolChoice::None,
         decode_options: Default::default(),
+        intermediate: true,
     }
 }
 
@@ -808,23 +826,21 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
         let engine_identity = engine_identity.clone();
         async move {
             let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
-            for request_id in ["chat-collect", "chat-collect-2"] {
-                let _ = recv_engine_message(&mut dealer).await;
-                send_outputs(
-                    &mut push,
-                    EngineCoreOutputs {
-                        outputs: vec![request_output(
-                            request_id,
-                            bytes_to_token_ids(b"<think>inner</think>outer"),
-                            Some(FinishReason::Length),
-                            None,
-                        )],
-                        finished_requests: Some(BTreeSet::from([request_id.to_string()])),
-                        ..Default::default()
-                    },
-                )
-                .await;
-            }
+            let _ = recv_engine_message(&mut dealer).await;
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    outputs: vec![request_output(
+                        "chat-collect",
+                        bytes_to_token_ids(b"<think>inner</think>outer"),
+                        Some(FinishReason::Length),
+                        None,
+                    )],
+                    finished_requests: Some(BTreeSet::from(["chat-collect".to_string()])),
+                    ..Default::default()
+                },
+            )
+            .await;
         }
     });
 
@@ -839,17 +855,17 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
         .collect_message()
         .await
         .unwrap();
-    assert_eq!(message.reasoning().unwrap(), "inner");
-    assert_eq!(message.text(), "outer");
-
-    let text = chat
-        .chat(sample_request("chat-collect-2"))
-        .await
-        .unwrap()
-        .collect_message()
-        .await
-        .unwrap();
-    assert_eq!(text.text(), "outer");
+    assert_eq!(message.message.reasoning().unwrap(), "inner");
+    assert_eq!(message.message.text(), "outer");
+    assert_eq!(message.finish_reason, Some(FinishReason::Length));
+    assert_eq!(
+        message.prompt_token_count,
+        "system: You are terse.\nuser: Say hi\nassistant:".len() as u32
+    );
+    assert_eq!(
+        message.token_ids,
+        bytes_to_token_ids(b"<think>inner</think>outer")
+    );
 
     chat.shutdown().await.unwrap();
     engine_task.await.unwrap();
@@ -946,9 +962,9 @@ async fn chat_stream_parses_tool_calls_automatically() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn chat_stream_separates_reasoning_before_tool_calls() {
+async fn chat_collect_message_preserves_tool_call_arguments_in_final_only_mode() {
     let handshake_address = unique_tcp_endpoint();
-    let engine_identity = b"engine-chat-reasoning-tool".to_vec();
+    let engine_identity = b"engine-chat-final-only-tool".to_vec();
 
     let engine_task = tokio::spawn({
         let engine_handshake = handshake_address.clone();
@@ -961,23 +977,21 @@ async fn chat_stream_separates_reasoning_before_tool_calls() {
                 EngineCoreOutputs {
                     outputs: vec![
                         request_output(
-                            "chat-reasoning-tool",
-                            bytes_to_token_ids(
-                                b"<think>need weather lookup</think><tool_call>\n{\"name\":\"get_weather\", ",
-                            ),
+                            "chat-final-only-tool",
+                            bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
                             None,
                             None,
                         ),
                         request_output(
-                            "chat-reasoning-tool",
-                            bytes_to_token_ids(
+                            "chat-final-only-tool",
+                            bytes_with_special_stop_token(
                                 b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>",
                             ),
                             Some(FinishReason::Stop),
-                            None,
+                            Some(StopReason::TokenId(SPECIAL_STOP_TOKEN_ID)),
                         ),
                     ],
-                    finished_requests: Some(BTreeSet::from(["chat-reasoning-tool".to_string()])),
+                    finished_requests: Some(BTreeSet::from(["chat-final-only-tool".to_string()])),
                     ..Default::default()
                 },
             )
@@ -988,18 +1002,23 @@ async fn chat_stream_separates_reasoning_before_tool_calls() {
     let backend: Arc<dyn ChatTextBackend> =
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
     let chat = connect_chat_llm(handshake_address, backend).await;
+    let mut request = sample_tool_request("chat-final-only-tool");
+    request.intermediate = false;
+
     let message = chat
-        .chat(sample_tool_request("chat-reasoning-tool"))
+        .chat(request)
         .await
         .unwrap()
         .collect_message()
         .await
         .unwrap();
 
-    assert_eq!(message.reasoning().as_deref(), Some("need weather lookup"));
-    assert_eq!(message.text(), "");
-    assert_eq!(message.tool_calls().count(), 1);
-    assert_eq!(message.tool_calls().next().unwrap().name, "get_weather");
+    assert_eq!(message.finish_reason, Some(FinishReason::Stop));
+    assert_eq!(message.message.tool_calls().count(), 1);
+    assert_eq!(
+        message.message.tool_calls().next().unwrap().arguments,
+        r#"{"city":"Paris"}"#
+    );
 
     chat.shutdown().await.unwrap();
     engine_task.await.unwrap();

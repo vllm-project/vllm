@@ -12,8 +12,11 @@ pub(super) fn validate_request_compat(
         return Err(ApiError::model_not_found(request.model.clone()));
     }
 
-    if !request.stream {
-        bail_invalid_request!(param = "stream", "Only stream=true is supported.");
+    if request.stream_options.is_some() && !request.stream {
+        bail_invalid_request!(
+            param = "stream_options",
+            "stream_options are only supported when stream=true."
+        );
     }
 
     if request.n.unwrap_or(1) > 1 {

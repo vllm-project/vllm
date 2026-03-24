@@ -103,6 +103,9 @@ impl StructuredEventState {
     /// Finalize one tool call and append it to the assembled assistant message.
     fn end_tool_call(&mut self, call: AssistantToolCall) -> Vec<ChatEvent> {
         let mut events = Vec::new();
+        // It's possible that a tool call is finalized without an explicit start event (e.g. if the
+        // parser emits a complete tool call on the first delta), so we assign it an index
+        // and emit an end event regardless of whether there's an open tool call or not.
         let index = self
             .open_tool_call
             .as_ref()

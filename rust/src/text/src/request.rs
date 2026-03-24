@@ -84,6 +84,8 @@ pub struct TextRequest {
     pub sampling_params: SamplingParams,
     /// Incremental detokenization options for the response path.
     pub decode_options: TextDecodeOptions,
+    /// Whether to surface intermediate northbound outputs before the terminal result.
+    pub intermediate: bool,
 }
 
 impl TextRequest {

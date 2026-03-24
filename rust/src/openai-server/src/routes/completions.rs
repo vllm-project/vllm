@@ -3,19 +3,22 @@ mod convert;
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
 use openai_protocol::common::Usage;
-use openai_protocol::completion::{CompletionStreamChoice, CompletionStreamResponse};
+use openai_protocol::completion::{
+    CompletionChoice, CompletionResponse, CompletionStreamChoice, CompletionStreamResponse,
+};
 use openai_protocol::validated::ValidatedJson;
 use serde::Serialize;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info};
 use vllm_engine_core_client::protocol::FinishReason;
-use vllm_text::{DecodedTextEvent, TextOutputStream};
+use vllm_text::{DecodedTextEvent, TextOutputStream, TextOutputStreamExt as _};
 
 use super::utils::unix_timestamp;
 use crate::error::{ApiError, bail_server_error, server_error};
@@ -35,7 +38,12 @@ pub(super) async fn completions(
     let response_id = prepared.response_id.clone();
     let response_model = prepared.response_model.clone();
     let created = unix_timestamp();
-    info!(request_id = %response_id, model = %response_model, "streaming completion");
+    info!(
+        request_id = %response_id,
+        model = %response_model,
+        stream = body.inner.stream,
+        "completion"
+    );
 
     let text_stream = match state.chat.text().generate(prepared.text_request).await {
         Ok(stream) => stream,
@@ -47,18 +55,63 @@ pub(super) async fn completions(
             .into_response();
         }
     };
-    let chunk_stream = completion_chunk_stream(
-        text_stream,
-        response_id,
-        response_model,
-        created,
-        prepared.include_usage,
-    );
-    let sse_stream = completion_sse_stream(chunk_stream);
 
-    Sse::new(sse_stream)
-        .keep_alive(KeepAlive::default())
-        .into_response()
+    if body.inner.stream {
+        let chunk_stream = completion_chunk_stream(
+            text_stream,
+            response_id,
+            response_model,
+            created,
+            prepared.include_usage,
+        );
+        let sse_stream = completion_sse_stream(chunk_stream);
+
+        Sse::new(sse_stream)
+            .keep_alive(KeepAlive::default())
+            .into_response()
+    } else {
+        let response =
+            match collect_completion(text_stream, response_id, response_model, created).await {
+                Ok(response) => response,
+                Err(error) => return error.into_response(),
+            };
+
+        Json(response).into_response()
+    }
+}
+
+async fn collect_completion(
+    stream: impl TextOutputStream,
+    response_id: String,
+    response_model: String,
+    created: u64,
+) -> Result<CompletionResponse, ApiError> {
+    let collected = stream
+        .collect_output()
+        .await
+        .map_err(|error| server_error!("completion stream failed: {}", error.to_report_string()))?;
+    let finish_reason = collected.finish_reason.ok_or_else(|| {
+        server_error!("completion stream terminated without a terminal finish reason")
+    })?;
+
+    Ok(CompletionResponse {
+        id: response_id,
+        object: "text_completion".to_string(),
+        created,
+        model: response_model,
+        choices: vec![CompletionChoice {
+            text: collected.text,
+            index: 0,
+            logprobs: None,
+            finish_reason: Some(completion_finish_reason_to_openai(finish_reason)?.into()),
+            matched_stop: None,
+        }],
+        usage: Some(Usage::from_counts(
+            collected.prompt_token_count,
+            collected.token_ids.len() as u32,
+        )),
+        system_fingerprint: None,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -179,13 +232,7 @@ fn final_chunk(
 ) -> Result<CompletionStreamResponse, ApiError> {
     // Match the chat route's finish-reason policy so engine-native abort/error termination still
     // becomes an OpenAI-style streamed error rather than an invalid terminal chunk.
-    let finish_reason = match finish_reason {
-        FinishReason::Stop | FinishReason::Repetition => "stop",
-        FinishReason::Length => "length",
-        FinishReason::Abort | FinishReason::Error => {
-            bail_server_error!("stream terminated without a valid OpenAI finish reason");
-        }
-    };
+    let finish_reason = completion_finish_reason_to_openai(finish_reason)?;
 
     Ok(CompletionStreamResponse {
         id: response_id.to_string(),
@@ -200,6 +247,18 @@ fn final_chunk(
             finish_reason: Some(finish_reason.to_string()),
         }],
     })
+}
+
+fn completion_finish_reason_to_openai(
+    finish_reason: FinishReason,
+) -> Result<&'static str, ApiError> {
+    match finish_reason {
+        FinishReason::Stop | FinishReason::Repetition => Ok("stop"),
+        FinishReason::Length => Ok("length"),
+        FinishReason::Abort | FinishReason::Error => {
+            bail_server_error!("stream terminated without a valid OpenAI finish reason");
+        }
+    }
 }
 
 fn usage_chunk(

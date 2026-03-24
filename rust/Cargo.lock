@@ -4366,6 +4366,7 @@ name = "vllm-text"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "easy-ext",
  "expect-test",
  "fastokens",
  "futures",

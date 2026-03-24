@@ -93,6 +93,7 @@ async fn main() -> Result<()> {
         tools: Vec::new(),
         tool_choice: ChatToolChoice::None,
         decode_options: Default::default(),
+        intermediate: true,
     };
 
     println!("request_id={request_id}");

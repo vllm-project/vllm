@@ -5,20 +5,24 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
 use openai_protocol::chat::{
-    ChatCompletionRequest, ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice,
+    ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse,
+    ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice,
 };
-use openai_protocol::common::{FunctionCallDelta, ToolCallDelta, Usage};
+use openai_protocol::common::{
+    FunctionCallDelta, FunctionCallResponse, ToolCall, ToolCallDelta, Usage,
+};
 use openai_protocol::validated::ValidatedJson;
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info};
-use vllm_chat::{AssistantBlockKind, ChatEvent, ChatEventStream};
+use vllm_chat::{AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream};
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
 use crate::error::{ApiError, bail_server_error, server_error};
@@ -39,7 +43,12 @@ pub(super) async fn chat_completions(
     let response_id = prepared.response_id.clone();
     let response_model = prepared.response_model.clone();
     let created = unix_timestamp();
-    info!(request_id = %response_id, model = %response_model, "streaming chat completion");
+    info!(
+        request_id = %response_id,
+        model = %response_model,
+        stream = body.stream,
+        "chat completion"
+    );
 
     let chat_stream = match state.chat.chat(prepared.chat_request).await {
         Ok(stream) => stream,
@@ -51,18 +60,93 @@ pub(super) async fn chat_completions(
             .into_response();
         }
     };
-    let chunk_stream = chat_completion_chunk_stream(
-        chat_stream,
-        response_id,
-        response_model,
-        created,
-        prepared.include_usage,
-    );
-    let sse_stream = chat_completion_sse_stream(chunk_stream);
 
-    Sse::new(sse_stream)
-        .keep_alive(KeepAlive::default())
-        .into_response()
+    if body.stream {
+        let chunk_stream = chat_completion_chunk_stream(
+            chat_stream,
+            response_id,
+            response_model,
+            created,
+            prepared.include_usage,
+        );
+        let sse_stream = chat_completion_sse_stream(chunk_stream);
+
+        Sse::new(sse_stream)
+            .keep_alive(KeepAlive::default())
+            .into_response()
+    } else {
+        let response = match collect_chat_completion(
+            chat_stream,
+            response_id,
+            response_model,
+            created,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => return error.into_response(),
+        };
+
+        Json(response).into_response()
+    }
+}
+
+async fn collect_chat_completion(
+    stream: ChatEventStream,
+    response_id: String,
+    response_model: String,
+    created: u64,
+) -> Result<ChatCompletionResponse, ApiError> {
+    let collected = stream.collect_message().await.map_err(|error| {
+        server_error!(
+            "failed to collect chat completion response: {}",
+            error.to_report_string()
+        )
+    })?;
+    let finish_reason = collected
+        .finish_reason
+        .ok_or_else(|| server_error!("chat stream terminated without a terminal finish reason"))?;
+    let saw_tool_calls = collected.message.tool_calls().next().is_some();
+    let finish_reason = chat_finish_reason_to_openai(finish_reason, saw_tool_calls)?.to_string();
+    let matched_stop = collected.stop_reason.map(stop_reason_to_json);
+    let tool_calls = collected
+        .message
+        .tool_calls()
+        .map(|call| ToolCall {
+            id: call.id.clone(),
+            tool_type: "function".to_string(),
+            function: FunctionCallResponse {
+                name: call.name.clone(),
+                arguments: Some(call.arguments.clone()),
+            },
+        })
+        .collect::<Vec<_>>();
+    let usage = Usage::from_counts(
+        collected.prompt_token_count,
+        collected.token_ids.len() as u32,
+    );
+
+    Ok(ChatCompletionResponse {
+        id: response_id,
+        object: "chat.completion".to_string(),
+        created,
+        model: response_model,
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatCompletionMessage {
+                role: "assistant".to_string(),
+                content: Some(collected.message.text()).filter(|text| !text.is_empty()),
+                tool_calls: Some(tool_calls).filter(|calls| !calls.is_empty()),
+                reasoning_content: collected.message.reasoning(),
+            },
+            logprobs: None,
+            finish_reason: Some(finish_reason),
+            matched_stop,
+            hidden_states: None,
+        }],
+        usage: Some(usage),
+        system_fingerprint: None,
+    })
 }
 
 /// Convert one internal chat event stream into OpenAI chat-completion chunks.
@@ -393,15 +477,7 @@ fn final_chunk(
     stop_reason: Option<StopReason>,
     saw_tool_calls: bool,
 ) -> Result<ChatCompletionStreamResponse, ApiError> {
-    let finish_reason = match finish_reason {
-        FinishReason::Stop if saw_tool_calls => "tool_calls",
-        FinishReason::Stop => "stop",
-        FinishReason::Length => "length",
-        FinishReason::Repetition => "stop",
-        FinishReason::Abort | FinishReason::Error => {
-            bail_server_error!("stream terminated without a valid OpenAI finish reason");
-        }
-    };
+    let finish_reason = chat_finish_reason_to_openai(finish_reason, saw_tool_calls)?;
 
     debug!(
         request_id = %response_id,
@@ -418,6 +494,21 @@ fn final_chunk(
             .add_choice_finish_reason(0, finish_reason, matched_stop)
             .build(),
     )
+}
+
+fn chat_finish_reason_to_openai(
+    finish_reason: FinishReason,
+    saw_tool_calls: bool,
+) -> Result<&'static str, ApiError> {
+    match finish_reason {
+        FinishReason::Stop if saw_tool_calls => Ok("tool_calls"),
+        FinishReason::Stop => Ok("stop"),
+        FinishReason::Length => Ok("length"),
+        FinishReason::Repetition => Ok("stop"),
+        FinishReason::Abort | FinishReason::Error => {
+            bail_server_error!("stream terminated without a valid OpenAI finish reason");
+        }
+    }
 }
 
 /// Convert one internal stop reason into the OpenAI-compatible `matched_stop` JSON shape.

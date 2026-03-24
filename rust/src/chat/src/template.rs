@@ -256,6 +256,7 @@ mod tests {
             tools: Vec::new(),
             tool_choice: ChatToolChoice::None,
             decode_options: Default::default(),
+            intermediate: true,
         }
     }
 

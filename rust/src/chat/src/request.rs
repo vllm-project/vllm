@@ -271,6 +271,8 @@ pub struct ChatRequest {
     pub tool_choice: ChatToolChoice,
     /// Text decode options for incremental detokenization.
     pub decode_options: TextDecodeOptions,
+    /// Whether to surface intermediate northbound outputs before the terminal result.
+    pub intermediate: bool,
 }
 
 impl ChatRequest {

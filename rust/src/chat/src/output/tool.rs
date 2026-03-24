@@ -196,6 +196,82 @@ fn generate_tool_call_id() -> String {
     format!("call_{}", &Uuid::new_v4().simple().to_string()[..24])
 }
 
+/// Tool parsing when `intermediate=false` (`FinalOnly` mode).
+///
+/// We keep this separate because some parsers may not correctly handle the full text passed to
+/// `parse_incremental`, which can result in tool arguments being lost in some cases. In this
+/// separate path, we call `parse_complete` once on the full text when the stream is done, which is
+/// more likely to succeed.
+#[try_stream(ok = AssistantEvent, error = Error)]
+async fn final_only_tool_event_stream(
+    stream: impl ContentEventStream,
+    parser: Box<dyn ToolParser>,
+) {
+    pin_mut!(stream);
+
+    let mut final_text = String::new();
+
+    while let Some(event) = stream.next().await.transpose()? {
+        match event {
+            ContentEvent::Start => yield AssistantEvent::Start,
+            ContentEvent::TextDelta { kind, delta } => {
+                if kind == AssistantBlockKind::Text {
+                    final_text.push_str(&delta);
+                } else {
+                    yield AssistantEvent::TextDelta { kind, delta };
+                }
+            }
+            ContentEvent::Done {
+                prompt_token_count,
+                token_ids,
+                finish_reason,
+                stop_reason,
+            } => {
+                match parser.parse_complete(&final_text).await {
+                    Ok((normal_text, tool_calls)) => {
+                        if !normal_text.is_empty() {
+                            yield AssistantEvent::TextDelta {
+                                kind: AssistantBlockKind::Text,
+                                delta: normal_text,
+                            };
+                        }
+                        for tool_call in tool_calls {
+                            let function = tool_call.function;
+                            // It's okay to only emit `ToolCallEnd` without a preceding
+                            // `ToolCallStart` or `ToolCallArgumentsDelta`.
+                            yield AssistantEvent::ToolCallEnd {
+                                call: AssistantToolCall {
+                                    id: generate_tool_call_id(),
+                                    name: function.name,
+                                    arguments: function.arguments,
+                                },
+                            };
+                        }
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error.as_report(),
+                            "tool parser full-output parse failed; falling back to plain text"
+                        );
+                        yield AssistantEvent::TextDelta {
+                            kind: AssistantBlockKind::Text,
+                            delta: final_text,
+                        };
+                    }
+                }
+
+                yield AssistantEvent::Done {
+                    prompt_token_count,
+                    token_ids,
+                    finish_reason,
+                    stop_reason,
+                };
+                return Ok(());
+            }
+        }
+    }
+}
+
 /// Wrap one semantic assistant stream into the internal tool-aware assistant
 /// stream.
 #[try_stream(ok = AssistantEvent, error = Error)]
@@ -204,16 +280,26 @@ pub(crate) async fn tool_event_stream(
     request: ChatRequest,
     parser: Option<Box<dyn ToolParser>>,
 ) {
-    pin_mut!(stream);
-
     // Without a parser, pass through the input stream unchanged.
     let Some(parser) = parser else {
+        pin_mut!(stream);
         while let Some(event) = stream.next().await.transpose()? {
             yield event.into();
         }
         return Ok(());
     };
 
+    // `FinalOnly` needs one-shot parsing over the final text.
+    if !request.intermediate {
+        let final_stream = final_only_tool_event_stream(stream, parser);
+        pin_mut!(final_stream);
+        while let Some(event) = final_stream.next().await.transpose()? {
+            yield event;
+        }
+        return Ok(());
+    }
+
+    pin_mut!(stream);
     let mut state = ToolState::new(&request, parser);
 
     while let Some(event) = stream.next().await.transpose()? {
@@ -323,6 +409,7 @@ mod tests {
             }],
             tool_choice: ChatToolChoice::Auto,
             decode_options: Default::default(),
+            intermediate: true,
         }
     }
 
@@ -389,7 +476,7 @@ mod tests {
         .collect_message()
         .await
         .expect("collect_message should succeed");
-        assert_eq!(message.text(), "abcdef");
-        assert!(message.tool_calls().next().is_none());
+        assert_eq!(message.message.text(), "abcdef");
+        assert!(message.message.tool_calls().next().is_none());
     }
 }

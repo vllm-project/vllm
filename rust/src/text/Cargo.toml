@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+easy-ext.workspace = true
 fastokens.workspace = true
 futures.workspace = true
 futures-async-stream.workspace = true

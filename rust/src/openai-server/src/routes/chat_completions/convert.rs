@@ -72,6 +72,7 @@ pub fn prepare_chat_request(
             skip_special_tokens: request.skip_special_tokens,
             include_stop_str_in_output: false,
         },
+        intermediate: request.stream,
     };
 
     Ok(PreparedRequest {
@@ -298,6 +299,7 @@ mod tests {
                     skip_special_tokens: false,
                     include_stop_str_in_output: false,
                 },
+                intermediate: true,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -345,6 +347,7 @@ mod tests {
                     skip_special_tokens: false,
                     include_stop_str_in_output: false,
                 },
+                intermediate: true,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -409,6 +412,7 @@ mod tests {
                     skip_special_tokens: false,
                     include_stop_str_in_output: false,
                 },
+                intermediate: true,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -501,6 +505,7 @@ mod tests {
                     skip_special_tokens: false,
                     include_stop_str_in_output: false,
                 },
+                intermediate: true,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
@@ -612,6 +617,7 @@ mod tests {
                     skip_special_tokens: false,
                     include_stop_str_in_output: false,
                 },
+                intermediate: true,
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);

@@ -24,6 +24,7 @@ pub fn lower_text_request(
     sampling_hints: SamplingHints,
 ) -> Result<PreparedTextRequest> {
     let prompt_len = prompt_token_ids.len() as u32;
+    let intermediate = request.intermediate;
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
         prompt_token_ids,
@@ -31,6 +32,7 @@ pub fn lower_text_request(
             request.sampling_params.clone(),
             sampling_hints,
             prompt_len,
+            intermediate,
         )?,
         // Fields below are currently placeholders.
         arrival_time: None,
@@ -64,6 +66,7 @@ pub fn lower_sampling_params(
         max_model_len,
     }: SamplingHints,
     prompt_len: u32,
+    intermediate: bool,
 ) -> Result<EngineCoreSamplingParams> {
     let SamplingParams {
         temperature,
@@ -119,7 +122,12 @@ pub fn lower_sampling_params(
         stop_token_ids,
         eos_token_id: (!ignore_eos).then_some(primary_eos_token_id).flatten(),
         all_stop_token_ids,
-        output_kind: RequestOutputKind::Delta,
+        // Only request intermediate deltas if the caller explicitly opts in.
+        output_kind: if intermediate {
+            RequestOutputKind::Delta
+        } else {
+            RequestOutputKind::FinalOnly
+        },
     })
 }
 
@@ -181,6 +189,7 @@ mod tests {
             prompt: Prompt::TokenIds(vec![1, 2, 3]),
             sampling_params: SamplingParams::default(),
             decode_options: Default::default(),
+            intermediate: true,
         }
     }
 
@@ -354,6 +363,7 @@ mod tests {
                 max_model_len: None,
             },
             3,
+            true,
         )
         .unwrap();
 
@@ -414,6 +424,7 @@ mod tests {
                 max_model_len: None,
             },
             3,
+            true,
         )
         .unwrap();
 
@@ -454,6 +465,7 @@ mod tests {
                 max_model_len: None,
             },
             3,
+            true,
         )
         .unwrap();
 
@@ -482,6 +494,29 @@ mod tests {
     fn resolve_max_tokens_caps_by_model_len() {
         let result = resolve_max_tokens(Some(150), None, Some(200), 100);
         assert_eq!(result.unwrap(), 100);
+    }
+
+    #[test]
+    fn lower_sampling_params_uses_final_only_when_intermediate_is_false() {
+        let params = lower_sampling_params(
+            SamplingParams::default(),
+            SamplingHints {
+                primary_eos_token_id: None,
+                extra_eos_token_ids: BTreeSet::new(),
+                default_temperature: None,
+                default_top_p: None,
+                default_top_k: None,
+                default_min_p: None,
+                default_repetition_penalty: None,
+                default_max_tokens: None,
+                max_model_len: None,
+            },
+            3,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(params.output_kind, RequestOutputKind::FinalOnly);
     }
 
     #[test]

@@ -101,6 +101,7 @@ pub fn prepare_completion_request(
             // token visible in decoded output.
             include_stop_str_in_output: request.inner.no_stop_trim,
         },
+        intermediate: request.inner.stream,
     };
 
     Ok(PreparedRequest {
@@ -121,8 +122,11 @@ fn validate_request_compat(
         return Err(ApiError::model_not_found(request.inner.model.clone()));
     }
 
-    if !request.inner.stream {
-        bail_invalid_request!(param = "stream", "Only stream=true is supported.");
+    if request.inner.stream_options.is_some() && !request.inner.stream {
+        bail_invalid_request!(
+            param = "stream_options",
+            "stream_options are only supported when stream=true."
+        );
     }
 
     if request.inner.n.unwrap_or(1) > 1 {

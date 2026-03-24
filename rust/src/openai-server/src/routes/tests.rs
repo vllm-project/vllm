@@ -16,7 +16,8 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
-    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason,
+    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, RequestOutputKind,
+    StopReason,
 };
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig,
@@ -55,6 +56,15 @@ fn request_output(
     new_token_ids: Vec<u32>,
     finish_reason: Option<FinishReason>,
 ) -> EngineCoreOutput {
+    request_output_with_stop_reason(request_id, new_token_ids, finish_reason, None)
+}
+
+fn request_output_with_stop_reason(
+    request_id: &str,
+    new_token_ids: Vec<u32>,
+    finish_reason: Option<FinishReason>,
+    stop_reason: Option<StopReason>,
+) -> EngineCoreOutput {
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
@@ -62,7 +72,7 @@ fn request_output(
         new_prompt_logprobs_tensors: None,
         pooling_output: None,
         finish_reason,
-        stop_reason: None,
+        stop_reason,
         events: None,
         kv_transfer_params: None,
         trace_headers: None,
@@ -590,6 +600,7 @@ async fn invalid_request_returns_openai_error() {
                     json!({
                         "model": "Qwen/Qwen1.5-0.5B-Chat",
                         "stream": false,
+                        "stream_options": {"include_usage": true},
                         "messages": [{"role": "user", "content": "hello"}]
                     })
                     .to_string(),
@@ -605,6 +616,54 @@ async fn invalid_request_returns_openai_error() {
         .expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["error"]["type"], "invalid_request_error");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_returns_json_response() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json"))
+    );
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["object"], "chat.completion");
+    assert_eq!(json["choices"][0]["message"]["role"], "assistant");
+    assert_eq!(json["choices"][0]["message"]["content"], "hi");
+    assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    assert_eq!(json["usage"]["prompt_tokens"], 22);
+    assert_eq!(json["usage"]["completion_tokens"], 3);
+    assert_eq!(json["usage"]["total_tokens"], 25);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -742,6 +801,7 @@ async fn http_metrics_group_error_statuses() {
                     json!({
                         "model": "Qwen/Qwen1.5-0.5B-Chat",
                         "stream": false,
+                        "stream_options": {"include_usage": true},
                         "messages": [{"role": "user", "content": "hello"}]
                     })
                     .to_string(),
@@ -1082,7 +1142,8 @@ async fn completions_invalid_request_returns_openai_error() {
                     json!({
                         "model": "Qwen/Qwen1.5-0.5B-Chat",
                         "prompt": "hello",
-                        "stream": false
+                        "stream": false,
+                        "stream_options": {"include_usage": true}
                     })
                     .to_string(),
                 ))
@@ -1097,6 +1158,181 @@ async fn completions_invalid_request_returns_openai_error() {
         .expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["error"]["type"], "invalid_request_error");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_return_json_response() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json"))
+    );
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["object"], "text_completion");
+    assert_eq!(json["choices"][0]["text"], "hi");
+    assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    assert_eq!(json["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_uses_final_only_output_kind() {
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-openai-chat-final-only".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let add = recv_engine_message(&mut dealer).await;
+            let request: EngineCoreRequest =
+                rmp_serde::from_slice(&add[1]).expect("decode request");
+            assert_eq!(
+                request
+                    .sampling_params
+                    .as_ref()
+                    .expect("sampling params")
+                    .output_kind,
+                RequestOutputKind::FinalOnly
+            );
+            send_outputs(
+                &mut push,
+                engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
+            )
+            .await;
+        }
+    });
+
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
+        handshake_address,
+        model_name: "test-model".to_string(),
+        local_host: "127.0.0.1".to_string(),
+        ready_timeout: Duration::from_secs(2),
+        client_index: 0,
+    })
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_use_final_only_output_kind() {
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-openai-completion-final-only".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let add = recv_engine_message(&mut dealer).await;
+            let request: EngineCoreRequest =
+                rmp_serde::from_slice(&add[1]).expect("decode request");
+            assert_eq!(
+                request
+                    .sampling_params
+                    .as_ref()
+                    .expect("sampling params")
+                    .output_kind,
+                RequestOutputKind::FinalOnly
+            );
+            send_outputs(
+                &mut push,
+                engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
+            )
+            .await;
+        }
+    });
+
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
+        handshake_address,
+        model_name: "test-model".to_string(),
+        local_host: "127.0.0.1".to_string(),
+        ready_timeout: Duration::from_secs(2),
+        client_index: 0,
+    })
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1184,6 +1420,7 @@ async fn chat_harness_streams_text_events() {
             tools: Vec::new(),
             tool_choice: ChatToolChoice::None,
             decode_options: Default::default(),
+            intermediate: true,
         })
         .await
         .expect("submit chat request");

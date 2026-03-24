@@ -22,7 +22,7 @@ pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
     ChatToolChoice, SamplingParams,
 };
-pub use stream::ChatEventStream;
+pub use stream::{ChatEventStream, CollectedAssistantMessage};
 
 mod backend;
 pub mod backends;
@@ -111,6 +111,7 @@ impl ChatLlm {
             prompt: Prompt::Text(prompt),
             sampling_params: request.sampling_params.clone(),
             decode_options: request.decode_options.clone(),
+            intermediate: request.intermediate,
         };
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from);
         let structured_stream = output::output_stream(
