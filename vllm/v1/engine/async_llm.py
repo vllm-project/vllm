@@ -86,6 +86,7 @@ class AsyncLLM(EngineClient):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        shared_stats_buffer: "Any" = None,  # SharedStatsBuffer
     ) -> None:
         """
         Create an AsyncLLM.
@@ -169,7 +170,9 @@ class AsyncLLM(EngineClient):
                 custom_stat_loggers=custom_stat_loggers,
                 enable_default_loggers=log_stats,
                 client_count=client_count,
+                client_index=client_index,
                 aggregate_engine_logging=aggregate_engine_logging,
+                shared_stats_buffer=shared_stats_buffer,
             )
             self.logger_manager.log_engine_initialized()
 
@@ -220,6 +223,7 @@ class AsyncLLM(EngineClient):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        shared_stats_buffer: "Any" = None,
     ) -> "AsyncLLM":
         # Create the LLMEngine.
         return cls(
@@ -234,6 +238,7 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
+            shared_stats_buffer=shared_stats_buffer,
         )
 
     @classmethod

@@ -193,6 +193,11 @@ class APIServerProcessManager:
         self.sock = sock
         self.args = args
 
+        # Create shared stats buffer for cross-server metrics aggregation
+        from vllm.v1.metrics.shared_stats import SharedStatsBuffer
+
+        self.shared_stats_buffer = SharedStatsBuffer(num_servers)
+
         # Start API servers
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []
@@ -205,6 +210,7 @@ class APIServerProcessManager:
                 "output_address": out_addr,
                 "client_count": num_servers,
                 "client_index": i,
+                "shared_stats_buffer": self.shared_stats_buffer,
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address

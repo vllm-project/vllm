@@ -131,6 +131,7 @@ async def build_async_engine_client_from_engine_args(
     client_config = dict(client_config) if client_config else {}
     client_count = client_config.pop("client_count", 1)
     client_index = client_config.pop("client_index", 0)
+    shared_stats_buffer = client_config.pop("shared_stats_buffer", None)
 
     try:
         async_llm = AsyncLLM.from_vllm_config(
@@ -142,6 +143,7 @@ async def build_async_engine_client_from_engine_args(
             client_addresses=client_config,
             client_count=client_count,
             client_index=client_index,
+            shared_stats_buffer=shared_stats_buffer,
         )
 
         # Don't keep the dummy data in memory

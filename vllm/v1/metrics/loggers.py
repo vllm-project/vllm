@@ -5,8 +5,12 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from prometheus_client import Counter, Gauge, Histogram
+
+if TYPE_CHECKING:
+    from vllm.v1.metrics.shared_stats import SharedStatsBuffer
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphLogging
@@ -344,6 +348,177 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
                 len(self.engine_indexes),
                 self.vllm_config.cache_config.num_gpu_blocks,
             )
+
+
+class MultiServerLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
+    """Stats logger that aggregates metrics from multiple API servers.
+
+    Uses shared memory to collect stats from all API server processes,
+    then logs the aggregated totals. Only the primary server (index 0)
+    emits log messages to avoid duplication.
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        engine_indexes: list[int],
+        shared_stats_buffer: "SharedStatsBuffer",  # type: ignore
+        server_index: int,
+        num_servers: int,
+        log_barrier: "Any" = None,  # multiprocessing.Barrier
+    ):
+        from vllm.v1.metrics.shared_stats import SharedStatsBuffer
+
+        self.server_index = server_index
+        self.num_servers = num_servers
+        self.shared_stats: SharedStatsBuffer = shared_stats_buffer
+        self.log_barrier = log_barrier
+        self.is_primary_server = server_index == 0
+        self.engine_indexes = engine_indexes
+
+        LoggingStatLogger.__init__(self, vllm_config, engine_index=-1)
+        self.aggregated = True
+
+    @property
+    def log_prefix(self):
+        if self.is_primary_server:
+            return "All {} API Servers: ".format(self.num_servers)
+        else:
+            return "API Server {}: ".format(self.server_index)
+
+    def record(
+        self,
+        scheduler_stats: SchedulerStats | None,
+        iteration_stats: IterationStats | None,
+        mm_cache_stats: MultiModalCacheStats | None = None,
+        engine_idx: int = 0,
+    ):
+        """Record stats locally and update shared memory snapshot values."""
+        # Track iteration stats locally (cumulative counters)
+        if iteration_stats:
+            self._track_iteration_stats(iteration_stats)
+
+        # Call parent to handle caching metrics, etc.
+        LoggingStatLogger.record(
+            self,
+            scheduler_stats,
+            iteration_stats,
+            mm_cache_stats=mm_cache_stats,
+            engine_idx=engine_idx,
+        )
+
+        # Update shared buffer with snapshot values immediately
+        if scheduler_stats is not None:
+            self.shared_stats.record(
+                server_idx=self.server_index,
+                running_reqs=scheduler_stats.num_running_reqs,
+                waiting_reqs=scheduler_stats.num_waiting_reqs,
+                kv_cache_usage=scheduler_stats.kv_cache_usage,
+                cpu_cache_usage=getattr(scheduler_stats, "cpu_cache_usage", 0.0),
+            )
+
+    def log(self):
+        """Log aggregated stats (only primary server logs)."""
+        # First, update shared buffer with cumulative counters from this server
+        self.shared_stats.record(
+            server_idx=self.server_index,
+            prompt_tokens=self.num_prompt_tokens,
+            generation_tokens=self.num_generation_tokens,
+            preemptions=self.num_preemptions,
+            corrupted_reqs=self.num_corrupted_reqs,
+        )
+
+        # Only primary server logs (to avoid duplicate log messages)
+        if not self.is_primary_server:
+            # Still need to reset local counters and update timestamps
+            self._reset(time.monotonic())
+            return
+
+        # Get aggregated stats from all servers
+        now = time.monotonic()
+        delta_time = now - self.last_log_time
+
+        aggregated = self.shared_stats.get_aggregated_stats(reset_counters=True)
+
+        # Calculate throughput
+        if delta_time > 0:
+            prompt_throughput = aggregated["total_prompt_tokens"] / delta_time
+            generation_throughput = aggregated["total_generation_tokens"] / delta_time
+        else:
+            prompt_throughput = generation_throughput = 0.0
+
+        # Reset timing for next interval
+        self._reset(now)
+
+        # Check if system is idle
+        self.engine_is_idle = not any(
+            (
+                prompt_throughput,
+                generation_throughput,
+                self.last_prompt_throughput,
+                self.last_generation_throughput,
+            )
+        )
+
+        self.last_prompt_throughput = prompt_throughput
+        self.last_generation_throughput = generation_throughput
+
+        # Use debug log if idle to reduce noise
+        log_fn = logger.debug if self.engine_is_idle else logger.info
+
+        # Format log message (similar to LoggingStatLogger.log())
+        log_parts = [
+            "Avg prompt throughput: %.1f tokens/s",
+            "Avg generation throughput: %.1f tokens/s",
+            "Running: %d reqs",
+            "Waiting: %d reqs",
+        ]
+        log_args: list[int | float | str] = [
+            prompt_throughput,
+            generation_throughput,
+            aggregated["total_running_reqs"],
+            aggregated["total_waiting_reqs"],
+        ]
+
+        if aggregated["total_preemptions"] > 0:
+            log_parts.append("Preemptions: %d")
+            log_args.append(aggregated["total_preemptions"])
+
+        log_parts.extend(
+            [
+                "GPU KV cache usage: %.1f%%",
+                "Prefix cache hit rate: %.1f%%",
+            ]
+        )
+        log_args.extend(
+            [
+                aggregated["avg_kv_cache_usage"] * 100,
+                self.prefix_caching_metrics.hit_rate * 100,
+            ]
+        )
+
+        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+            log_parts.append("Corrupted: %d reqs")
+            log_args.append(aggregated["total_corrupted_reqs"])
+
+        if not self.connector_prefix_caching_metrics.empty:
+            log_parts.append("External prefix cache hit rate: %.1f%%")
+            log_args.append(self.connector_prefix_caching_metrics.hit_rate * 100)
+
+        if not self.mm_caching_metrics.empty:
+            log_parts.append("MM cache hit rate: %.1f%%")
+            log_args.append(self.mm_caching_metrics.hit_rate * 100)
+
+        log_fn(
+            self.log_prefix + ", ".join(log_parts),
+            *log_args,
+        )
+
+        # Log additional metrics (spec decoding, kv connector, etc.)
+        self.spec_decoding_logging.log(log_fn=log_fn)
+        self.kv_connector_logging.log(log_fn=log_fn)
+        if self.cudagraph_logging is not None:
+            self.cudagraph_logging.log(log_fn=log_fn)
 
 
 class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
@@ -1252,6 +1427,8 @@ class StatLoggerManager:
         enable_default_loggers: bool = True,
         aggregate_engine_logging: bool = False,
         client_count: int = 1,
+        client_index: int = 0,
+        shared_stats_buffer: "SharedStatsBuffer | None" = None,  # type: ignore
     ):
         self.engine_indexes = engine_idxs if engine_idxs else [0]
         self.stat_loggers: list[AggregateStatLoggerBase] = []
@@ -1260,10 +1437,27 @@ class StatLoggerManager:
             stat_logger_factories.extend(custom_stat_loggers)
         if enable_default_loggers and logger.isEnabledFor(logging.INFO):
             if client_count > 1:
-                logger.warning(
-                    "AsyncLLM created with api_server_count more than 1; "
-                    "disabling stats logging to avoid incomplete stats."
-                )
+                # Multi-server mode: use shared memory aggregation if available
+                if shared_stats_buffer is not None:
+                    logger.info(
+                        "Using multi-server stats aggregation for %d API servers",
+                        client_count,
+                    )
+                    # Create MultiServerLoggingStatLogger directly (not a factory)
+                    multi_server_logger = MultiServerLoggingStatLogger(
+                        vllm_config=vllm_config,
+                        engine_indexes=self.engine_indexes,
+                        shared_stats_buffer=shared_stats_buffer,
+                        server_index=client_index,
+                        num_servers=client_count,
+                    )
+                    self.stat_loggers.append(multi_server_logger)
+                else:
+                    logger.warning(
+                        "AsyncLLM created with api_server_count more than 1; "
+                        "disabling stats logging to avoid incomplete stats. "
+                        "Pass shared_stats_buffer to enable aggregated logging."
+                    )
             else:
                 default_logger_factory = (
                     AggregatedLoggingStatLogger
