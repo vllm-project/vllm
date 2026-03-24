@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.worker.mamba_utils import preprocess_mamba
+from vllm.v1.worker.mamba_utils import MambaProcessContext, preprocess_mamba
 
 
 def _make_scheduler_output(
@@ -50,20 +50,20 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
         resumed_req_ids={"resumed"},
     )
 
+    ctx = MambaProcessContext(
+        kv_cache_config=MagicMock(),
+        mamba_state_idx=mamba_state_idx,
+        input_batch=input_batch,
+        requests={},
+        forward_context={},
+        mamba_state_copy_funcs=(),
+        copy_bufs=copy_bufs,
+    )
+
     with patch(
         "vllm.v1.worker.mamba_utils.get_mamba_groups",
         return_value=([0], spec),
     ):
-        preprocess_mamba(
-            sched,
-            MagicMock(),
-            cache_config,
-            mamba_state_idx,
-            input_batch,
-            {},
-            {},
-            (),
-            copy_bufs,
-        )
+        preprocess_mamba(sched, cache_config, ctx)
 
     assert mamba_state_idx == {"keep": 99}

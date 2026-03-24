@@ -1446,16 +1446,16 @@ class GPUModelRunner(
                 self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
             ):
                 self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
-            mamba_utils.postprocess_mamba(
-                scheduler_output,
-                self.kv_cache_config,
-                self.input_batch,
-                self.requests,
-                self.mamba_state_idx,
-                self.compilation_config.static_forward_context,
-                self.model.get_mamba_state_copy_func(),
-                self._get_mamba_copy_bufs(),
+            mamba_ctx = mamba_utils.MambaProcessContext(
+                kv_cache_config=self.kv_cache_config,
+                mamba_state_idx=self.mamba_state_idx,
+                input_batch=self.input_batch,
+                requests=self.requests,
+                forward_context=self.compilation_config.static_forward_context,
+                mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+                copy_bufs=self._get_mamba_copy_bufs(),
             )
+            mamba_utils.postprocess_mamba(scheduler_output, mamba_ctx)
         else:
             self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
                 self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
@@ -3914,16 +3914,17 @@ class GPUModelRunner(
                 if deferred_state_corrections_fn:
                     deferred_state_corrections_fn()
                     deferred_state_corrections_fn = None
+                mamba_ctx = mamba_utils.MambaProcessContext(
+                    kv_cache_config=self.kv_cache_config,
+                    mamba_state_idx=self.mamba_state_idx,
+                    input_batch=self.input_batch,
+                    requests=self.requests,
+                    forward_context=self.compilation_config.static_forward_context,
+                    mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+                    copy_bufs=self._get_mamba_copy_bufs(),
+                )
                 mamba_utils.preprocess_mamba(
-                    scheduler_output,
-                    self.kv_cache_config,
-                    self.cache_config,
-                    self.mamba_state_idx,
-                    self.input_batch,
-                    self.requests,
-                    self.compilation_config.static_forward_context,
-                    self.model.get_mamba_state_copy_func(),
-                    self._get_mamba_copy_bufs(),
+                    scheduler_output, self.cache_config, mamba_ctx
                 )
                 # preprocess_mamba resets num_accepted_tokens_cpu to 1
                 # for requests whose state was copied to a new block.

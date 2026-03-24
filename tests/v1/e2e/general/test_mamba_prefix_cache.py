@@ -15,7 +15,6 @@ from tests.utils import create_new_process_for_each_test
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import CacheConfig
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -27,7 +26,6 @@ from vllm.v1.request import Request
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker import mamba_utils
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 from vllm.v1.worker.mamba_utils import get_mamba_groups
@@ -318,65 +316,34 @@ def get_fake_process_mamba_fn(
 
     def fake_preprocess_mamba_fn(
         scheduler_output: SchedulerOutput,
-        kv_cache_config: KVCacheConfig,
         cache_config: CacheConfig,
-        mamba_state_idx: dict[str, int],
-        input_batch: GPUInputBatch,
-        requests: dict[str, CachedRequestState],
-        forward_context: dict[str, Any],
-        mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
-        copy_bufs: mamba_utils.MambaCopyBuffers,
+        ctx: mamba_utils.MambaProcessContext,
     ):
         nonlocal copy_info
         copy_info = None
-        ret = original_preprocess_mamba_fn(
-            scheduler_output,
-            kv_cache_config,
-            cache_config,
-            mamba_state_idx,
-            input_batch,
-            requests,
-            forward_context,
-            mamba_state_copy_funcs,
-            copy_bufs,
-        )
+        ret = original_preprocess_mamba_fn(scheduler_output, cache_config, ctx)
         if cur_step_action is not None:
             check_copy_info(
                 cur_step_action.preprocess_copy_idx,
-                kv_cache_config,
-                forward_context,
-                input_batch,
+                ctx.kv_cache_config,
+                ctx.forward_context,
+                ctx.input_batch,
             )
         return ret
 
     def fake_post_process_mamba_fn(
         scheduler_output: SchedulerOutput,
-        kv_cache_config: KVCacheConfig,
-        input_batch: GPUInputBatch,
-        requests: dict[str, CachedRequestState],
-        mamba_state_idx: dict[str, int],
-        forward_context: dict[str, Any],
-        mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
-        copy_bufs: mamba_utils.MambaCopyBuffers,
+        ctx: mamba_utils.MambaProcessContext,
     ):
         nonlocal copy_info
         copy_info = None
-        ret = original_post_process_mamba_fn(
-            scheduler_output,
-            kv_cache_config,
-            input_batch,
-            requests,
-            mamba_state_idx,
-            forward_context,
-            mamba_state_copy_funcs,
-            copy_bufs,
-        )
+        ret = original_post_process_mamba_fn(scheduler_output, ctx)
         if cur_step_action is not None:
             check_copy_info(
                 cur_step_action.postprocess_copy_idx,
-                kv_cache_config,
-                forward_context,
-                input_batch,
+                ctx.kv_cache_config,
+                ctx.forward_context,
+                ctx.input_batch,
             )
         return ret
 
