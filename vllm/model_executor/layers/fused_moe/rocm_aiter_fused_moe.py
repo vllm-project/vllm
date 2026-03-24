@@ -10,7 +10,6 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
-    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
@@ -335,7 +334,15 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             (kFp8StaticChannelSym, kFp8DynamicTokenSym),
             (kMxfp4Static, None),
         ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
+        if (weight_key, activation_key) not in SUPPORTED_W_A:
+            return False
+        # CK MXFP4 MoE kernels are only supported on gfx950.
+        if weight_key == kMxfp4Static:
+            from vllm.platforms.rocm import on_gfx950
+
+            if not on_gfx950():
+                return False
+        return True
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -351,30 +358,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
-
-    @staticmethod
-    def is_supported_config(
-        cls: type[mk.FusedMoEExperts],
-        moe_config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[bool, str | None]:
-        supported, reason = mk.FusedMoEExpertsModular.is_supported_config(
-            cls, moe_config, weight_key, activation_key, activation_format
-        )
-        if not supported:
-            return supported, reason
-        # CK MXFP4 MoE kernels are only supported on gfx950.
-        # Dimension alignment is handled later by
-        # mxfp4_round_up_hidden_size_and_intermediate_size, so we only
-        # gate on the hardware here.
-        if weight_key == kMxfp4Static:
-            from vllm.platforms.rocm import on_gfx950
-
-            if not on_gfx950():
-                return False, ("kernel does not support MXFP4 on non-gfx950 ROCm")
-        return True, None
 
     def supports_expert_map(self):
         return True
