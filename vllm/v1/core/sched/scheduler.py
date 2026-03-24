@@ -55,7 +55,12 @@ from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutp
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    KVConnectorOutput,
+    LogprobsLists,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -1470,6 +1475,43 @@ class Scheduler(SchedulerInterface):
                                 ff_tokens = ff_tokens[: i + 1]
                                 break
                         self.pending_ff_tokens[req_id] = ff_tokens
+
+                        # Extend logprobs for ff_tokens: each is
+                        # deterministic (logprob=0, all others=-inf),
+                        # mirroring what the model would produce if
+                        # the grammar bitmask allowed only one token.
+                        if new_logprobs is not None:
+                            n = len(ff_tokens)
+                            width = new_logprobs.logprob_token_ids.shape[1]
+                            ff_token_ids = np.zeros(
+                                (n, width),
+                                dtype=new_logprobs.logprob_token_ids.dtype,
+                            )
+                            ff_token_ids[:, 0] = ff_tokens
+                            ff_logprobs = np.full(
+                                (n, width),
+                                -np.inf,
+                                dtype=new_logprobs.logprobs.dtype,
+                            )
+                            ff_logprobs[:, 0] = 0.0
+                            ff_ranks = np.zeros(
+                                n,
+                                dtype=new_logprobs.sampled_token_ranks.dtype,
+                            )
+                            new_logprobs = LogprobsLists(
+                                np.concatenate(
+                                    [new_logprobs.logprob_token_ids,
+                                     ff_token_ids]
+                                ),
+                                np.concatenate(
+                                    [new_logprobs.logprobs, ff_logprobs]
+                                ),
+                                np.concatenate(
+                                    [new_logprobs.sampled_token_ranks,
+                                     ff_ranks]
+                                ),
+                                None,
+                            )
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
