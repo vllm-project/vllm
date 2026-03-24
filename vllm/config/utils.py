@@ -11,13 +11,13 @@ import os
 import pathlib
 import textwrap
 from collections.abc import Callable, Mapping, Sequence, Set
-from dataclasses import MISSING, field, fields, is_dataclass
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 import torch
 from pydantic import ConfigDict
-from pydantic.dataclasses import dataclass
+from pydantic.dataclasses import dataclass as pydantic_dataclass
 from pydantic.fields import Field as PydanticField
 from pydantic.fields import FieldInfo
 from typing_extensions import dataclass_transform, runtime_checkable
@@ -58,8 +58,8 @@ def config(
     if config is not None:
         merged_config.update(config)
 
-    def decorator(cls):
-        return dataclass(cls, config=merged_config, **kwargs)
+    def decorator(cls: type[ConfigT]) -> type[ConfigT]:
+        return pydantic_dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value]
 
     # Called with arguments: @config(config=...)
     if cls is None:
