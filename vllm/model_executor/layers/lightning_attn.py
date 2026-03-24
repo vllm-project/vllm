@@ -5,6 +5,7 @@ import torch
 from einops import rearrange
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
 @triton.jit
@@ -616,8 +617,8 @@ def _linear_attn_decode_kernel(
     # Load slot index for the current batch
     slot_id = tl.load(slot_idx + pid_b).to(tl.int64)
 
-    # Skip if slot_id is 0 (null block, used for padding)
-    if slot_id == 0:
+    # Skip if slot_id is PAD_SLOT_ID (padding)
+    if slot_id == PAD_SLOT_ID:
         return
 
     batch_id = pid_b

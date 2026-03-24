@@ -119,8 +119,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
         : reinterpret_cast<int *>(params.cache_indices_ptr);
     const int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id]; 
-    // cache_index == params.pad_slot_id is defined as padding, so we exit early
-    if (cache_index == params.pad_slot_id){
+    // cache_index == params.null_block_id is defined as padding, so we exit early
+    if (cache_index == params.null_block_id){
         return;
     }
     input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + sequence_start_index * params.u_batch_stride
@@ -527,7 +527,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         const std::optional<at::Tensor>& cache_indices,
                         const std::optional<at::Tensor>& has_initial_state,
                         bool varlen,
-                        int64_t pad_slot_id,
+                        int64_t null_block_id,
                         int64_t block_size,
                         const std::optional<torch::Tensor> &block_idx_first_scheduled_token,
                         const std::optional<torch::Tensor> &block_idx_last_scheduled_token,
@@ -544,7 +544,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.dstate = dstate;
     params.n_groups = n_groups;
     params.dim_ngroups_ratio = dim / n_groups;
-    params.pad_slot_id = pad_slot_id;
+    params.null_block_id = null_block_id;
 
     params.delta_softplus = delta_softplus;
 
@@ -658,7 +658,7 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   const torch::Tensor &ssm_states,
                   // used to identify padding entries if cache_indices provided
                   // in case of padding, the kernel will return early
-                  int64_t pad_slot_id,
+                  int64_t null_block_id,
                   int64_t block_size,
                   const std::optional<torch::Tensor> &block_idx_first_scheduled_token,
                   const std::optional<torch::Tensor> &block_idx_last_scheduled_token,
@@ -805,7 +805,7 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                        cache_indices,
                        has_initial_state,
                        varlen,
-                       pad_slot_id,
+                       null_block_id,
                        block_size,
                        block_idx_first_scheduled_token,
                        block_idx_last_scheduled_token,
