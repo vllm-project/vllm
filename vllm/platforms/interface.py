@@ -500,12 +500,12 @@ class Platform:
         from vllm.model_executor.models import ModelRegistry
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+        from vllm.v1.attention.backend import MultipleOf
         from vllm.v1.kv_cache_interface import (
             FullAttentionSpec,
             MambaSpec,
             MLAAttentionSpec,
         )
-        from vllm.v1.worker.utils import select_common_block_size
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -532,12 +532,6 @@ class Platform:
                 dtype=kv_cache_dtype,
             ).page_size_bytes
 
-        # Get kernel block alignment from the backend's supported sizes
-        with set_current_vllm_config(vllm_config):
-            kernel_block_alignment_size = select_common_block_size(
-                cache_config.block_size, [backend_cls]
-            )
-
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(
             model_config.architecture,
@@ -554,6 +548,16 @@ class Platform:
 
         # Save user's mamba_block_size before we potentially overwrite it
         mamba_block_size = cache_config.mamba_block_size
+
+        # Get kernel block alignment from the backend's supported sizes
+        with set_current_vllm_config(vllm_config):
+            kernel_block_alignment_size = max(
+                min(
+                    s.base if isinstance(s, MultipleOf) else s
+                    for s in backend_cls.get_supported_kernel_block_sizes()
+                ),
+                cache_config.block_size,
+            )
 
         if cache_config.mamba_cache_mode == "all":
             # With prefix caching, align to mamba chunk size for kernel perf
