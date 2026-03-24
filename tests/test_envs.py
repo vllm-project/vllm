@@ -457,7 +457,6 @@ class TestVllmConfigureLogging:
 
 
 class TestVllmMaxNSequences:
-
     def test_default_value(self):
         """Test that VLLM_MAX_N_SEQUENCES defaults to 64."""
         with patch.dict(os.environ, {}, clear=False):
@@ -476,7 +475,8 @@ class TestVllmMaxNSequences:
         assert envs.VLLM_MAX_N_SEQUENCES == 128
 
     def test_sampling_params_respects_limit(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ):
         """Test that SamplingParams rejects n above the limit."""
         from vllm.sampling_params import SamplingParams
@@ -492,7 +492,8 @@ class TestVllmMaxNSequences:
             SamplingParams(n=max_n + 1)
 
     def test_sampling_params_respects_custom_limit(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ):
         """Test that SamplingParams uses the overridden env var limit."""
         from vllm.sampling_params import SamplingParams
