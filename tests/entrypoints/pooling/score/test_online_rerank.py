@@ -206,7 +206,12 @@ async def test_pooling_classify(server: RemoteOpenAIServer, model_name: str):
 async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: str):
     response = requests.post(
         server.url_for("pooling"),
-        json={"model": model_name, "input": input_text, "encoding_format": "float"},
+        json={
+            "model": model_name,
+            "task": "token_classify",
+            "input": input_text,
+            "encoding_format": "float",
+        },
     )
 
     poolings = PoolingResponse.model_validate(response.json())
