@@ -32,7 +32,6 @@ from .deepseek_v2 import (
     DeepseekV2MoE,
     get_spec_layer_idx_from_weight_name,
 )
-from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
@@ -181,7 +180,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
 
 
 @support_torch_compile
-class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
+class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -214,7 +213,7 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
@@ -245,6 +244,7 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         ]
 
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -316,7 +316,11 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                     # Determine split axis based on op type
                     # gate/up: ColumnParallel → split along dim 0
                     # down: RowParallel → split along dim 1
-                    split_dim = 1 if "down_proj.weight" in name else 0
+                    split_dim = (
+                        1
+                        if ("down_proj.weight" in name and loaded_weight.ndim > 1)
+                        else 0
+                    )
                     total = loaded_weight.shape[split_dim]
                     assert total % num_chunks == 0, (
                         f"Shared expert weight dim {total} "
@@ -329,14 +333,13 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                     weight_to_load = loaded_weight
 
                     if is_fusion_moe_shared_experts_layer:
-                        if split_dim == 0:
-                            weight_to_load = loaded_weight[
-                                j * chunk_size : (j + 1) * chunk_size, :
-                            ]
+                        chunk_slice = slice(j * chunk_size, (j + 1) * chunk_size)
+                        if loaded_weight.ndim == 1:
+                            weight_to_load = loaded_weight[chunk_slice]
+                        elif split_dim == 0:
+                            weight_to_load = loaded_weight[chunk_slice, :]
                         else:
-                            weight_to_load = loaded_weight[
-                                :, j * chunk_size : (j + 1) * chunk_size
-                            ]
+                            weight_to_load = loaded_weight[:, chunk_slice]
                         # Synthesize an expert-style name so expert mapping
                         # can route it
                         chunk_name = name.replace(
@@ -412,6 +415,26 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                         weight_loader(param, loaded_weight)
             if not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
+
+        # Validate that weights were loaded for each expected MTP layer.
+        loaded_layers: set[int] = set()
+        for param_name in loaded_params:
+            spec_layer = get_spec_layer_idx_from_weight_name(self.config, param_name)
+            if spec_layer is not None:
+                loaded_layers.add(spec_layer)
+        for layer_idx in range(
+            self.model.mtp_start_layer_idx,
+            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
+        ):
+            if layer_idx not in loaded_layers:
+                raise ValueError(
+                    f"MTP speculative decoding layer {layer_idx} weights "
+                    f"missing from checkpoint. The checkpoint may have "
+                    f"been quantized without including the MTP layers. "
+                    f"Use a checkpoint that includes MTP layer weights, "
+                    f"or disable speculative decoding."
+                )
+
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:

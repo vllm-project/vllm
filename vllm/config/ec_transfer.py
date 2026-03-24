@@ -5,17 +5,14 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from pydantic.dataclasses import dataclass
-
 from vllm.config.utils import config
 
-ECProducer = Literal["ec_producer"]
-ECConsumer = Literal["ec_consumer"]
+ECProducer = Literal["ec_producer", "ec_both"]
+ECConsumer = Literal["ec_consumer", "ec_both"]
 ECRole = Literal[ECProducer, ECConsumer]
 
 
 @config
-@dataclass
 class ECTransferConfig:
     """Configuration for distributed EC cache transfer."""
 
@@ -36,7 +33,7 @@ class ECTransferConfig:
 
     ec_role: ECRole | None = None
     """Whether this vLLM instance produces, consumes EC cache, or both. Choices
-    are 'ec_producer', 'ec_consumer'."""
+    are 'ec_producer', 'ec_consumer', 'ec_both'."""
 
     ec_rank: int | None = None
     """The rank of this vLLM instance in the EC cache transfer. Typical value:

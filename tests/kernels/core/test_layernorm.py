@@ -7,14 +7,16 @@ import torch
 from tests.kernels.quant_utils import FP8_DTYPE
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
 HIDDEN_SIZES = [8, 768, 769, 5120, 5125, 8192]  # Arbitrary values for testing
 ADD_RESIDUAL = [False, True]
 SEEDS = [0]
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -26,6 +28,7 @@ CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 e
 @pytest.mark.parametrize("strided_input", [False, True])
 @torch.inference_mode()
 def test_rms_norm(
+    default_vllm_config,
     num_tokens: int,
     hidden_size: int,
     add_residual: bool,
@@ -34,7 +37,7 @@ def test_rms_norm(
     device: str,
     strided_input: bool,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     layer = RMSNorm(hidden_size).to(dtype=dtype)
     layer.weight.data.normal_(mean=1.0, std=0.1)
@@ -88,7 +91,7 @@ def test_fused_rms_norm_quant(
     device: str,
     strided_input: bool,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
 
     weight = torch.empty(hidden_size, dtype=dtype).normal_(mean=1.0, std=0.1)
@@ -126,7 +129,7 @@ def test_fused_rms_norm_quant(
             out_quant, x_unfused.contiguous(), quant_scale_t
         )
 
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         torch.testing.assert_close(residual_fused, residual, atol=1e-2, rtol=1e-2)
         opcheck(
             torch.ops._C.fused_add_rms_norm_static_fp8_quant,

@@ -102,7 +102,7 @@ SEEDS = [0]
     itertools.product(M, N, K, E, TOP_KS, DTYPES, SEEDS),
 )
 @torch.inference_mode()
-def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
+def test_w8a8_fp8_fused_moe(default_vllm_config, M, N, K, E, topk, dtype, seed):
     torch.manual_seed(seed)
     # Initialize int8 quantization parameters
     factor_for_scale = 1e-2

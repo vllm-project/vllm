@@ -1,19 +1,122 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.sampling_params import SamplingParams
+import torch
+
+from vllm.config import VllmConfig, replace
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import (
+    CommonAttentionMetadata,
+)
 
-_SAMPLING_EPS = 1e-5
+PADDING_SLOT_ID = -1
 
 
-def is_spec_decode_unsupported(sampling_params: SamplingParams) -> bool:
-    """True if request is incompatible with speculative decoding"""
-    return (
-        sampling_params.frequency_penalty != 0.0
-        or sampling_params.presence_penalty != 0.0
-        or sampling_params.repetition_penalty != 1.0
-        or sampling_params.min_p > _SAMPLING_EPS
-        or sampling_params.logprobs is not None
+@triton.jit
+def eagle_step_slot_mapping_metadata_kernel(
+    positions_ptr,  # [batch_size] - current positions (1D view for M-RoPE)
+    block_table_ptr,  # [batch_size, n_blocks_per_req]
+    block_table_stride,  # stride for block_table dim 1
+    seq_lens_ptr,  # [batch_size] - read and write
+    out_clamped_positions_ptr,  # [batch_size] (output)
+    out_slot_mapping_ptr,  # [input_batch_size] (output)
+    block_size: tl.constexpr,
+    max_model_len: tl.constexpr,
+    n_blocks_per_req: tl.constexpr,
+    PAD_ID: tl.constexpr,
+    batch_size,
+):
+    """
+    Fused kernel for EAGLE autoregressive step: updates positions, slot mapping,
+    and sequence lengths in a single kernel to reduce launch overhead.
+
+    Launched with input_batch_size threads. Threads with req_idx >= batch_size
+    are cudagraph padding slots and only write PADDING_SLOT_ID.
+
+    Each real thread handles one request in the batch. Computes:
+    - new_position = position + 1, clamped if exceeds max_model_len
+    - slot_mapping from block table lookup
+    - seq_lens += 1, or 1 if position exceeds max
+    """
+    req_idx = tl.program_id(0)
+
+    if req_idx >= batch_size:
+        tl.store(out_slot_mapping_ptr + req_idx, PAD_ID)
+        return
+
+    # Load current position and increment
+    position = tl.load(positions_ptr + req_idx)
+    new_position = position + 1
+
+    # Check bounds and compute clamped position
+    exceeds_max = new_position >= max_model_len
+    clamped_position = tl.where(exceeds_max, 0, new_position)
+
+    # Block table lookup: block_number = position // block_size
+    # Clamp block_number to avoid OOB when position is at max
+    block_number = clamped_position // block_size
+    block_number = tl.minimum(block_number, n_blocks_per_req - 1)
+
+    block_id = tl.load(block_table_ptr + req_idx * block_table_stride + block_number)
+    slot_id = block_id * block_size + (clamped_position % block_size)
+    slot_id = tl.where(exceeds_max, PAD_ID, slot_id)
+
+    # Update seq_lens: +1 normally, or 1 if exceeded
+    seq_len = tl.load(seq_lens_ptr + req_idx)
+    new_seq_len = tl.where(exceeds_max, 1, seq_len + 1)
+    new_seq_len = tl.minimum(new_seq_len, max_model_len)
+
+    # Store outputs
+    tl.store(out_clamped_positions_ptr + req_idx, clamped_position)
+    tl.store(out_slot_mapping_ptr + req_idx, slot_id)
+    tl.store(seq_lens_ptr + req_idx, new_seq_len)
+
+
+def eagle_step_update_slot_mapping_and_metadata(
+    positions_1d: torch.Tensor,
+    block_table_tensor: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+    max_model_len: int,
+    out_clamped_positions: torch.Tensor,
+    out_slot_mapping: torch.Tensor,
+    input_batch_size: int | None = None,
+) -> None:
+    """
+    Fused update of slot mapping and metadata for one EAGLE autoregressive step.
+    Updates seq_lens in place. Writes to out_clamped_positions and out_slot_mapping.
+
+    When input_batch_size > batch_size, threads beyond batch_size write
+    PADDING_SLOT_ID to out_slot_mapping for cudagraph padding.
+
+    Args:
+        positions_1d: [batch_size] current positions (use positions[0] for M-RoPE)
+        block_table_tensor: [batch_size, n_blocks_per_req]
+        seq_lens: [batch_size] updated in place
+        block_size: KV cache block size
+        max_model_len: max model length for clamping
+        out_clamped_positions: [batch_size] output buffer for clamped positions
+        out_slot_mapping: [input_batch_size] output buffer for slot mapping
+        input_batch_size: total batch size including cudagraph padding;
+            defaults to batch_size (no padding)
+    """
+    batch_size = positions_1d.shape[0]
+    if input_batch_size is None:
+        input_batch_size = batch_size
+    n_blocks_per_req = block_table_tensor.shape[1]
+
+    eagle_step_slot_mapping_metadata_kernel[(input_batch_size,)](
+        positions_1d,
+        block_table_tensor,
+        block_table_tensor.stride(0),
+        seq_lens,
+        out_clamped_positions,
+        out_slot_mapping,
+        block_size=block_size,
+        max_model_len=max_model_len,
+        n_blocks_per_req=n_blocks_per_req,
+        PAD_ID=PADDING_SLOT_ID,
+        batch_size=batch_size,
     )
 
 
@@ -23,6 +126,7 @@ def eagle_prepare_inputs_padded_kernel(
     valid_sampled_tokens_count_ptr,  # [num_reqs]
     query_start_loc_gpu_ptr,  # [num_reqs + 1]
     token_indices_to_sample_ptr,  # [num_reqs] (output)
+    num_rejected_tokens_gpu_ptr,  # [num_reqs] (output)
     num_reqs,  # tl.int32
 ):
     """
@@ -56,6 +160,7 @@ def eagle_prepare_inputs_padded_kernel(
 
     index_to_sample = q_last_tok_idx - num_rejected_tokens
     tl.store(token_indices_to_sample_ptr + req_idx, index_to_sample)
+    tl.store(num_rejected_tokens_gpu_ptr + req_idx, num_rejected_tokens)
 
 
 @triton.jit
@@ -119,3 +224,276 @@ def eagle_prepare_next_token_padded_kernel(
             tl.store(next_token_ids_ptr + req_idx, backup_token)
 
         tl.store(valid_sampled_tokens_count_ptr + req_idx, valid_count)
+
+
+def compute_new_slot_mapping(
+    cad: CommonAttentionMetadata,
+    new_positions: torch.Tensor,
+    is_rejected_token_mask: torch.Tensor,
+    block_size: int,
+    num_new_tokens: int,
+    max_model_len: int,
+):
+    batch_size, n_blocks_per_req = cad.block_table_tensor.shape
+    req_indices = torch.arange(batch_size, device=cad.query_start_loc.device)
+    req_indices = torch.repeat_interleave(
+        req_indices,
+        cad.naive_query_lens() + num_new_tokens,
+        output_size=len(new_positions),
+    )
+    # Clamp the positions to prevent an out-of-bounds error when indexing
+    # into block_table_tensor.
+    clamped_positions = torch.clamp(new_positions, max=max_model_len - 1)
+    block_table_indices = (
+        req_indices * n_blocks_per_req + clamped_positions // block_size
+    )
+    block_nums = cad.block_table_tensor.view(-1)[block_table_indices]
+    block_offsets = clamped_positions % block_size
+    new_slot_mapping = block_nums * block_size + block_offsets
+    # Mask out the position ids that exceed the max model length.
+    exceeds_max_model_len = new_positions >= max_model_len
+    new_slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
+    # Mask out rejected tokens to prevent saves to the KV cache.
+    new_slot_mapping.masked_fill_(is_rejected_token_mask, PADDING_SLOT_ID)
+    return new_slot_mapping
+
+
+def create_vllm_config_for_draft_model(
+    target_model_vllm_config: VllmConfig,
+) -> VllmConfig:
+    """The vllm_config is configured for the target model, e.g.
+    its quant_config and parallel_config. But the draft model is potentially
+    quantized differently, and has potentially different tensor_parallel_size.
+    This function creates a new vllm_config configured for the drafter.
+    The vllm_config is useful when loading the draft model with get_model().
+    """
+    old = target_model_vllm_config
+    assert old.speculative_config is not None, "speculative_config is not set"
+    old_spec_config = old.speculative_config
+    new_parallel_config = replace(
+        old_spec_config.draft_parallel_config, rank=old.parallel_config.rank
+    )
+    new: VllmConfig = replace(
+        old,
+        quant_config=None,
+        parallel_config=new_parallel_config,
+        model_config=old_spec_config.draft_model_config,
+    )
+    return new
+
+
+def extend_all_queries_by_N(
+    common_attn_metadata: CommonAttentionMetadata,
+    N: int,
+    arange: torch.Tensor,
+    new_slot_mapping: torch.Tensor,
+) -> CommonAttentionMetadata:
+    """
+    Creates a new CommonAttentionMetadata with all query lengths increased by N.
+    Also all seq lens are increased by N.
+    This is useful e.g. in speculative decoding with parallel drafting, where we
+    extend each sequence by N tokens and predict all tokens in one pass.
+    The slot mapping is computed externally, as it requires more information.
+    """
+    cad = common_attn_metadata
+    # query start loc must be increased by [+0, +N, +2N, ..., +batch_size * N]
+    new_query_start_loc = cad.query_start_loc + N * arange[: len(cad.query_start_loc)]
+    new_query_start_loc_cpu = cad.query_start_loc_cpu + N * torch.arange(
+        len(cad.query_start_loc_cpu), dtype=torch.int32
+    )
+    new_cad = cad.replace(
+        query_start_loc=new_query_start_loc,
+        query_start_loc_cpu=new_query_start_loc_cpu,
+        seq_lens=cad.seq_lens + N,
+        # each request is extended by N tokens -> batch_size * N tokens are added
+        num_actual_tokens=cad.num_actual_tokens + cad.batch_size() * N,
+        # All query lens increase by N, so max query len increases by N
+        max_query_len=cad.max_query_len + N,
+        max_seq_len=cad.max_seq_len + N,
+        slot_mapping=new_slot_mapping,
+    )
+    return new_cad
+
+
+# Unified copy/expand kernel
+@triton.jit
+def copy_and_expand_eagle_inputs_kernel(
+    # (Padded) Inputs from the target model
+    target_token_ids_ptr,  # [total_tokens_in_batch]
+    target_positions_ptr,  # [total_tokens_in_batch]
+    next_token_ids_ptr,  # [num_reqs]
+    # Outputs to the drafting buffers
+    out_input_ids_ptr,  # [total_draft_tokens_in_batch] (output)
+    out_positions_ptr,  # [total_draft_tokens_in_batch] (output)
+    out_is_rejected_token_mask_ptr,  # [total_draft_tokens_in_batch] (output)
+    out_is_masked_token_mask_ptr,  # [total_draft_tokens_in_batch] (output)
+    out_new_token_indices_ptr,  # [num_padding_slots_per_request * num_reqs] (output)
+    out_hidden_state_mapping_ptr,  # [total_tokens_in_batch]
+    # Input metadata
+    query_start_loc_ptr,  # [num_reqs + 1], last value is the total num input tokens
+    query_end_loc_ptr,  # [num_reqs]
+    padding_token_id,  # tl.int32
+    parallel_drafting_token_id,  # tl.int32
+    # Sizing info
+    total_input_tokens,  # tl.int32
+    num_padding_slots_per_request,  # tl.int32
+    shift_input_ids,  # tl.bool
+    BLOCK_SIZE_TOKENS: tl.constexpr,  # Blocks along token dim to handle prefills
+):
+    """
+    Copy and expand inputs from the target model to the drafting buffers for Eagle
+    speculative decoding. This kernel handles padding slots and parallel drafting
+    tokens, if enabled.
+    """
+    request_idx = tl.program_id(axis=0)
+    token_batch_idx = tl.program_id(axis=1)
+
+    # Load query locations
+    query_start_loc = tl.load(query_start_loc_ptr + request_idx)
+    next_query_start_loc = tl.load(query_start_loc_ptr + request_idx + 1)
+    query_end_loc = tl.load(query_end_loc_ptr + request_idx)
+
+    # Calculate number of valid tokens to copy and input offset
+    # With shift_input_ids=True, we skip the first token
+    # Output layout: each request gets (input_len + num_padding_slots_per_request) slots
+    # But with shift, we lose one token per request
+    if shift_input_ids:
+        num_valid_tokens = query_end_loc - query_start_loc
+        input_offset = 1
+        output_start = query_start_loc + request_idx * (
+            num_padding_slots_per_request - 1
+        )
+    else:
+        num_valid_tokens = query_end_loc - query_start_loc + 1
+        input_offset = 0
+        output_start = query_start_loc + request_idx * num_padding_slots_per_request
+
+    # Number of rejected tokens from previous speculation
+    num_rejected = next_query_start_loc - query_end_loc - 1
+
+    # Total output tokens for this request
+    total_output_tokens = (
+        num_valid_tokens + num_padding_slots_per_request + num_rejected
+    )
+
+    # Process tokens in this block
+    j = token_batch_idx * BLOCK_SIZE_TOKENS + tl.arange(0, BLOCK_SIZE_TOKENS)
+
+    # Compute masks for different output regions:
+    # [0, num_valid_tokens): valid tokens copied from input
+    # [num_valid_tokens]: bonus token from next_token_ids
+    # (num_valid_tokens, num_valid_tokens + num_padding_slots_per_request):
+    #     parallel drafting slots
+    # [num_valid_tokens + num_padding_slots_per_request, total_output_tokens):
+    #     rejected slots
+    in_bounds = j < total_output_tokens
+    is_valid_region = j < num_valid_tokens
+    is_bonus_region = j == num_valid_tokens
+    is_parallel_draft_region = (j > num_valid_tokens) & (
+        j < num_valid_tokens + num_padding_slots_per_request
+    )
+    is_rejected_region = j >= num_valid_tokens + num_padding_slots_per_request
+
+    # Compute output indices
+    out_idx = output_start + j
+
+    # For valid tokens, compute input index
+    in_idx = query_start_loc + input_offset + j
+    # Clamp to avoid out-of-bounds access (masked loads still need valid addresses)
+    in_idx_clamped = tl.minimum(in_idx, total_input_tokens - 1)
+
+    # Load input tokens (masked to valid region)
+    token_ids = tl.load(
+        target_token_ids_ptr + in_idx_clamped, mask=is_valid_region & in_bounds, other=0
+    )
+
+    # Load the starting position for this request (first position in the sequence)
+    start_pos = tl.load(target_positions_ptr + query_start_loc)
+
+    # Load bonus token for this request
+    bonus_token = tl.load(next_token_ids_ptr + request_idx)
+
+    # Build final token_ids based on region
+    token_ids = tl.where(is_bonus_region, bonus_token, token_ids)
+    token_ids = tl.where(
+        is_parallel_draft_region, parallel_drafting_token_id, token_ids
+    )
+    token_ids = tl.where(is_rejected_region, padding_token_id, token_ids)
+
+    # Build final positions:
+    # Positions are NOT shifted - they start from the first input position and increment
+    # Output position j gets start_pos + j
+    # (e.g., input positions [5,6,7] -> output [5,6,7,8,9,...])
+    positions = start_pos + j
+    # Rejected positions are don't-care, set to 0
+    positions = tl.where(is_rejected_region, 0, positions)
+
+    # Compute output masks
+    is_rejected_out = is_rejected_region & in_bounds
+    is_masked_out = is_parallel_draft_region & in_bounds
+
+    # Compute indices of new tokens (bonus + parallel drafting) for sampling
+    # New tokens are at positions
+    #     [num_valid_tokens, num_valid_tokens + num_padding_slots_per_request)
+    is_new_token_region = (j >= num_valid_tokens) & (
+        j < num_valid_tokens + num_padding_slots_per_request
+    )
+    new_token_local_idx = (
+        j - num_valid_tokens
+    )  # 0 for bonus, 1, 2, ... for parallel drafting
+    new_token_out_idx = (
+        request_idx * num_padding_slots_per_request + new_token_local_idx
+    )
+
+    # Compute hidden state mapping (source index -> destination index)
+    # This maps each input position to its corresponding output position
+    # Hidden states don't get shifted, so we map all input tokens (including rejected)
+    if shift_input_ids:
+        num_input_tokens_this_request = next_query_start_loc - query_start_loc
+        is_input_region = j < num_input_tokens_this_request
+        src_idx = query_start_loc + j
+        tl.store(out_hidden_state_mapping_ptr + src_idx, out_idx, mask=is_input_region)
+
+    # Store outputs
+    tl.store(out_input_ids_ptr + out_idx, token_ids, mask=in_bounds)
+    tl.store(out_positions_ptr + out_idx, positions, mask=in_bounds)
+    tl.store(out_is_rejected_token_mask_ptr + out_idx, is_rejected_out, mask=in_bounds)
+    tl.store(out_is_masked_token_mask_ptr + out_idx, is_masked_out, mask=in_bounds)
+    tl.store(
+        out_new_token_indices_ptr + new_token_out_idx,
+        out_idx,
+        mask=is_new_token_region & in_bounds,
+    )
+
+
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+def update_num_computed_tokens_for_batch_change(
+    num_computed_tokens: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    prev_positions: torch.Tensor,
+    valid_sampled_token_count: torch.Tensor,
+    prev_num_draft_tokens: torch.Tensor,
+    cpu_num_computed_tokens: torch.Tensor,
+) -> None:
+    """Correct num_computed_tokens for async spec decode drift.
+
+    Requests that had drafts: corrected = prev_gpu + valid_count.
+    New requests or non-draft (e.g. prefills): use CPU value directly.
+    """
+    # Clamp because prev_positions can be -1 for new requests
+    gather_indices = prev_positions.clamp(min=0)
+
+    valid_counts = valid_sampled_token_count[gather_indices]
+    prev_computed = num_computed_tokens[gather_indices]
+    prev_drafts = prev_num_draft_tokens[gather_indices]
+
+    participating = (prev_positions >= 0) & (prev_drafts > 0)
+    corrected = prev_computed + valid_counts.int()
+
+    n = prev_positions.shape[0]
+    num_computed_tokens[:n].copy_(
+        torch.where(participating, corrected, cpu_num_computed_tokens)
+    )
+    num_accepted_tokens.copy_(
+        torch.where(participating, valid_counts, num_accepted_tokens)
+    )

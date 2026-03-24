@@ -138,7 +138,7 @@ Note that the sampler will access the logits processors via `SamplingMetadata.lo
             # ...return sampler output data structure...
 
 
-        def sample(self, logits, sampling_metadta)
+        def sample(self, logits, sampling_metadata)
 
             ...
 
@@ -352,7 +352,7 @@ The `BatchUpdate` abstraction models the persistent batch as a list of requests,
         (s, d, UNIDIRECTIONAL or SWAP)
         ```
 
-    * If the Move specifies `UNIDRECTIONAL`:
+    * If the Move specifies `UNIDIRECTIONAL`:
 
         * The request at index `s` is moved to index `d`; index `s` becomes an empty slot
 

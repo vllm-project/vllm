@@ -37,7 +37,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 set(PYTHON_SUPPORTED_VERSIONS "3.10" "3.11" "3.12" "3.13")
 
 # Supported AMD GPU architectures.
-set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151")
+set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201")
 
 # ROCm installation prefix. Default to /opt/rocm but allow override via
 # -DROCM_PATH=/your/rocm/path when invoking cmake.
@@ -56,8 +56,8 @@ endif()
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from docker/Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.9.1")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.9.1")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.10.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.10.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -282,6 +282,7 @@ endif()
 set(VLLM_EXT_SRC
   "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
   "csrc/cache_kernels.cu"
+  "csrc/cache_kernels_fused.cu"
   "csrc/attention/paged_attention_v1.cu"
   "csrc/attention/paged_attention_v2.cu"
   "csrc/attention/merge_attn_states.cu"
@@ -292,6 +293,7 @@ set(VLLM_EXT_SRC
   "csrc/fused_qknorm_rope_kernel.cu"
   "csrc/layernorm_quant_kernels.cu"
   "csrc/sampler.cu"
+  "csrc/topk.cu"
   "csrc/cuda_view.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/w8a8/int8/scaled_quant.cu"
@@ -338,11 +340,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/awq/gemm_kernels.cu"
-    "csrc/permute_cols.cu"
     "csrc/quantization/w8a8/cutlass/scaled_mm_entry.cu"
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
     "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
-    "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
     "csrc/cutlass_extensions/common.cpp"
     "csrc/quantization/w8a8/fp8/per_token_group_quant.cu"
     "csrc/quantization/w8a8/int8/per_token_group_quant.cu")
@@ -376,7 +376,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     # preselected input type pairs and schedules.
     # Generate sources:
     set(MARLIN_GEN_SCRIPT
-      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/gptq_marlin/generate_kernels.py)
+      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/marlin/generate_kernels.py)
     file(MD5 ${MARLIN_GEN_SCRIPT} MARLIN_GEN_SCRIPT_HASH)
     list(JOIN CUDA_ARCHS "," CUDA_ARCHS_STR)
     set(MARLIN_GEN_SCRIPT_HASH_AND_ARCH "${MARLIN_GEN_SCRIPT_HASH}(ARCH:${CUDA_ARCHS_STR})")
@@ -411,7 +411,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
 
     if (MARLIN_ARCHS)
-      file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/quantization/gptq_marlin/sm80_kernel_*_float16.cu")
+      file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/quantization/marlin/sm80_kernel_*_float16.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_TEMPLATE_KERNEL_SRC}"
         CUDA_ARCHS "${MARLIN_ARCHS}")
@@ -421,7 +421,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       endif()
       list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
 
-      file(GLOB MARLIN_TEMPLATE_BF16_KERNEL_SRC "csrc/quantization/gptq_marlin/sm80_kernel_*_bfloat16.cu")
+      file(GLOB MARLIN_TEMPLATE_BF16_KERNEL_SRC "csrc/quantization/marlin/sm80_kernel_*_bfloat16.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_TEMPLATE_BF16_KERNEL_SRC}"
         CUDA_ARCHS "${MARLIN_BF16_ARCHS}")
@@ -432,8 +432,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_BF16_KERNEL_SRC})
     endif()
 
-    if (MARLIN_SM75_ARCHS) 
-      file(GLOB MARLIN_TEMPLATE_SM75_KERNEL_SRC "csrc/quantization/gptq_marlin/sm75_kernel_*.cu")
+    if (MARLIN_SM75_ARCHS)
+      file(GLOB MARLIN_TEMPLATE_SM75_KERNEL_SRC "csrc/quantization/marlin/sm75_kernel_*.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_TEMPLATE_SM75_KERNEL_SRC}"
         CUDA_ARCHS "${MARLIN_SM75_ARCHS}")
@@ -444,8 +444,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_SM75_KERNEL_SRC})
     endif()
 
-    if (MARLIN_FP8_ARCHS) 
-      file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/gptq_marlin/sm89_kernel_*.cu")
+    if (MARLIN_FP8_ARCHS)
+      file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/marlin/sm89_kernel_*.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_TEMPLATE_FP8_KERNEL_SRC}"
         CUDA_ARCHS "${MARLIN_FP8_ARCHS}")
@@ -457,11 +457,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
 
     set(MARLIN_SRCS
-       "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
-       "csrc/quantization/gptq_marlin/gptq_marlin.cu"
-       "csrc/quantization/gptq_marlin/marlin_int4_fp8_preprocess.cu"
-       "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
-       "csrc/quantization/gptq_marlin/awq_marlin_repack.cu")
+       "csrc/quantization/marlin/marlin.cu"
+       "csrc/quantization/marlin/marlin_int4_fp8_preprocess.cu"
+       "csrc/quantization/marlin/gptq_marlin_repack.cu"
+       "csrc/quantization/marlin/awq_marlin_repack.cu")
     set_gencode_flags_for_srcs(
       SRCS "${MARLIN_SRCS}"
       CUDA_ARCHS "${MARLIN_OTHER_ARCHS}")
@@ -619,31 +618,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
-  #
-  # 2:4 Sparse Kernels
-
-  # The 2:4 sparse kernels cutlass_scaled_sparse_mm and cutlass_compressor
-  # require CUDA 12.2 or later (and only work on Hopper).
-  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.2 AND SCALED_MM_ARCHS)
-    set(SRCS "csrc/sparse/cutlass/sparse_scaled_mm_c3x.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${SRCS}"
-      CUDA_ARCHS "${SCALED_MM_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SPARSE_SCALED_MM_C3X=1")
-    message(STATUS "Building sparse_scaled_mm_c3x for archs: ${SCALED_MM_ARCHS}")
-  else()
-    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.2 AND SCALED_MM_ARCHS)
-      message(STATUS "Not building sparse_scaled_mm_c3x kernels as CUDA Compiler version is "
-                     "not >= 12.2, we recommend upgrading to CUDA 12.2 or later "
-                     "if you intend on running FP8 sparse quantized models on Hopper.")
-    else()
-      message(STATUS "Not building sparse_scaled_mm_c3x as no compatible archs found "
-                     "in CUDA target architectures")
-    endif()
-  endif()
-
   # The nvfp4_scaled_mm_sm120 kernels for Geforce Blackwell SM120 require
   # CUDA 12.8 or later
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
@@ -724,7 +698,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # CUTLASS MoE kernels
 
   # The MoE kernel cutlass_moe_mm requires CUDA 12.3 or later (and ONLY works
-  # on Hopper). get_cutlass_(pplx_)moe_mm_data should only be compiled
+  # on Hopper). get_cutlass_(batched_)moe_mm_data should only be compiled
   # if it's possible to compile MoE kernels that use its output.
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
@@ -768,6 +742,51 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       message(STATUS "Not building grouped_mm_c3x as no compatible archs found "
                      "in CUDA target architectures.")
     endif()
+  endif()
+
+  # Expert-specialization MXFP8 blockscaled grouped kernels (SM100+).
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(ES_MXFP8_GROUPED_MM_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(ES_MXFP8_GROUPED_MM_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND ES_MXFP8_GROUPED_MM_ARCHS)
+    set(SRCS
+      "csrc/moe/mxfp8_moe/cutlass_mxfp8_grouped_mm.cu"
+      "csrc/moe/mxfp8_moe/mxfp8_experts_quant.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${ES_MXFP8_GROUPED_MM_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_ES_MXFP8_GROUPED_MM_SM100=1")
+    message(STATUS "Building ES MXFP8 grouped kernels for archs: ${ES_MXFP8_GROUPED_MM_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8
+        AND ES_MXFP8_GROUPED_MM_ARCHS)
+      message(STATUS "Not building ES MXFP8 grouped kernels as CUDA Compiler version is "
+                     "not >= 12.8.")
+    else()
+      message(STATUS "Not building ES MXFP8 grouped kernels as no compatible archs found "
+                     "in CUDA target architectures.")
+    endif()
+  endif()
+
+  # DeepSeek V3 fused A GEMM kernel (requires SM 9.0+, Hopper and later)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0f;11.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND DSV3_FUSED_A_GEMM_ARCHS)
+    set(DSV3_FUSED_A_GEMM_SRC "csrc/dsv3_fused_a_gemm.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${DSV3_FUSED_A_GEMM_SRC}"
+      CUDA_ARCHS "${DSV3_FUSED_A_GEMM_ARCHS}")
+    list(APPEND VLLM_EXT_SRC ${DSV3_FUSED_A_GEMM_SRC})
+    message(STATUS "Building dsv3_fused_a_gemm for archs: ${DSV3_FUSED_A_GEMM_ARCHS}")
+  else()
+    message(STATUS "Not building dsv3_fused_a_gemm as no compatible archs found "
+                   "in CUDA target architectures.")
   endif()
 
   # moe_data.cu is used by all CUTLASS MoE kernels.
@@ -940,6 +959,48 @@ define_extension_target(
 # Setting this variable sidesteps the issue by calling the driver directly.
 target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 
+# add OR VLLM_GPU_LANG STREQUAL "HIP" here once
+# https://github.com/vllm-project/vllm/issues/35163 is resolved
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  #
+  # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)
+  #
+  set(VLLM_STABLE_EXT_SRC
+    "csrc/libtorch_stable/torch_bindings.cpp")
+
+  if(VLLM_GPU_LANG STREQUAL "CUDA")
+    list(APPEND VLLM_STABLE_EXT_SRC "csrc/libtorch_stable/permute_cols.cu")
+  endif()
+
+  if(VLLM_GPU_LANG STREQUAL "CUDA")
+    set_gencode_flags_for_srcs(
+      SRCS "${VLLM_STABLE_EXT_SRC}"
+      CUDA_ARCHS "${CUDA_ARCHS}")
+  endif()
+
+  message(STATUS "Enabling C_stable extension.")
+  define_extension_target(
+    _C_stable_libtorch
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_STABLE_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    USE_SABI 3
+    WITH_SOABI)
+
+  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
+  # This ensures we only use C-shim APIs available in PyTorch 2.10.
+  # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
+  # which is currently set to 2.10.
+  target_compile_definitions(_C_stable_libtorch PRIVATE
+    TORCH_TARGET_VERSION=0x020A000000000000ULL)
+
+  # Needed to use cuda APIs from C-shim
+  target_compile_definitions(_C_stable_libtorch PRIVATE
+    USE_CUDA)
+endif()
+
 #
 # _moe_C extension
 #
@@ -952,7 +1013,9 @@ set(VLLM_MOE_EXT_SRC
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
     "csrc/moe/moe_wna16.cu"
-    "csrc/moe/grouped_topk_kernels.cu")
+    "csrc/moe/grouped_topk_kernels.cu"
+    "csrc/moe/gpt_oss_router_gemm.cu"
+    "csrc/moe/router_gemm.cu")
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -1042,7 +1105,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_SRC})
     endif()
 
-    if (MARLIN_MOE_SM75_ARCHS) 
+    if (MARLIN_MOE_SM75_ARCHS)
       file(GLOB MARLIN_MOE_SM75_SRC "csrc/moe/marlin_moe_wna16/sm75_kernel_*.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_MOE_SM75_SRC}"
@@ -1080,6 +1143,27 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
                    " in CUDA target architectures")
+  endif()
+
+  # DeepSeek V3 router GEMM kernel - requires SM90+
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(DSV3_ROUTER_GEMM_ARCHS "9.0a;10.0f;11.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(DSV3_ROUTER_GEMM_ARCHS "9.0a;10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND DSV3_ROUTER_GEMM_ARCHS)
+    set(DSV3_ROUTER_GEMM_SRC
+      "csrc/moe/dsv3_router_gemm_entry.cu"
+      "csrc/moe/dsv3_router_gemm_float_out.cu"
+      "csrc/moe/dsv3_router_gemm_bf16_out.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${DSV3_ROUTER_GEMM_SRC}"
+      CUDA_ARCHS "${DSV3_ROUTER_GEMM_ARCHS}")
+    list(APPEND VLLM_MOE_EXT_SRC "${DSV3_ROUTER_GEMM_SRC}")
+    message(STATUS "Building DSV3 router GEMM kernel for archs: ${DSV3_ROUTER_GEMM_ARCHS}")
+  else()
+    message(STATUS "Not building DSV3 router GEMM kernel as no compatible archs found"
+                   " (requires SM90+ and CUDA >= 12.0)")
   endif()
 endif()
 

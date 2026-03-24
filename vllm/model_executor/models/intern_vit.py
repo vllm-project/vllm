@@ -15,7 +15,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -24,6 +23,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -34,7 +34,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from .vision import run_dp_sharded_vision_model
+from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 NORM2FN = {
     "rms_norm": RMSNorm,
@@ -148,7 +148,6 @@ class InternParallelAttention(nn.Module):
         *,
         num_dummy_heads: int = 0,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
@@ -163,9 +162,14 @@ class InternParallelAttention(nn.Module):
                 f" {self.num_heads})."
             )
 
-        self.tp_size = (
-            1 if use_data_parallel else get_tensor_model_parallel_world_size()
+        use_data_parallel = is_vit_use_data_parallel()
+        # if the number of heads is not divisible by tp_size,
+        # we also disable Attention's TP
+        tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
+        use_data_parallel = (
+            use_data_parallel or (self.num_heads + num_dummy_heads) % tp_size != 0
         )
+        self.tp_size = 1 if use_data_parallel else tp_size
         self.tp_rank = 0 if use_data_parallel else get_tensor_model_parallel_rank()
 
         # Additional dummy heads are used to enable TP for common GPU counts.
@@ -208,7 +212,10 @@ class InternParallelAttention(nn.Module):
         )
 
         self.attn = MMEncoderAttention(
-            self.num_heads_per_partition, self.head_dim, self.scale
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
         )
 
     def _apply_qk_norm(self, q: torch.Tensor, k: torch.Tensor):
@@ -242,12 +249,12 @@ class InternMLP(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
+        use_data_parallel = is_vit_use_data_parallel()
         self.fc1 = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
@@ -281,27 +288,25 @@ class InternVisionEncoderLayer(nn.Module):
         *,
         num_dummy_heads: int = 0,
         prefix: str = "",
-        use_data_parallel: bool = False,
+        attn_cls: type[InternParallelAttention] = InternParallelAttention,
     ) -> None:
         super().__init__()
-
         self.embed_dim = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.norm_type = config.norm_type
+        self.attn_cls = attn_cls
 
         self.attn = self._init_attn(
             config,
             quant_config,
             num_dummy_heads=num_dummy_heads,
             prefix=f"{prefix}.attn",
-            use_data_parallel=use_data_parallel,
         )
 
         self.mlp = InternMLP(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
-            use_data_parallel=use_data_parallel,
         )
         self.norm1 = NORM2FN[self.norm_type](self.embed_dim, eps=config.layer_norm_eps)
         self.norm2 = NORM2FN[self.norm_type](self.embed_dim, eps=config.layer_norm_eps)
@@ -316,23 +321,12 @@ class InternVisionEncoderLayer(nn.Module):
         *,
         num_dummy_heads: int,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
-        # fallback to sdpa attention if tp unavailable
-        tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
-        num_heads = config.num_attention_heads
-
-        # if the number of heads is not divisible by tp_size,
-        # we also disable Attention's TP
-        use_data_parallel = (
-            use_data_parallel or (num_heads + num_dummy_heads) % tp_size != 0
-        )
-        return InternParallelAttention(
+        return self.attn_cls(
             config,
             quant_config=quant_config,
             num_dummy_heads=num_dummy_heads,
             prefix=prefix,
-            use_data_parallel=use_data_parallel,
         )
 
     def forward(
@@ -355,11 +349,12 @@ class InternVisionEncoder(nn.Module):
         num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
-        use_data_parallel: bool = False,
+        layer_cls: type[InternVisionEncoderLayer] = InternVisionEncoderLayer,
     ):
         super().__init__()
 
         self.config = config
+        self.layer_cls = layer_cls
 
         if num_hidden_layers_override is None:
             num_hidden_layers = config.num_hidden_layers
@@ -368,12 +363,11 @@ class InternVisionEncoder(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                InternVisionEncoderLayer(
+                self.layer_cls(
                     config,
                     quant_config,
                     num_dummy_heads=num_dummy_heads,
                     prefix=f"{prefix}.layers.{layer_idx}",
-                    use_data_parallel=use_data_parallel,
                 )
                 for layer_idx in range(num_hidden_layers)
             ]
@@ -400,12 +394,11 @@ class InternVisionModel(nn.Module):
         num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
         self.config = config
-        self.use_data_parallel = use_data_parallel
+        self.use_data_parallel = is_vit_use_data_parallel()
 
         self.embeddings = InternVisionEmbeddings(config)
         self.encoder = InternVisionEncoder(
@@ -414,7 +407,6 @@ class InternVisionModel(nn.Module):
             num_hidden_layers_override=num_hidden_layers_override,
             num_dummy_heads=num_dummy_heads,
             prefix=f"{prefix}.encoder",
-            use_data_parallel=use_data_parallel,
         )
 
     def get_input_embeddings(self):

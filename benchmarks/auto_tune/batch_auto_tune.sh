@@ -64,7 +64,7 @@ for i in $(seq 0 $(($num_runs - 1))); do
   else
     STATUS="FAILURE"
     ((FAILURE_COUNT++))
-    FAILED_RUNS+=("Run #$((i+1)): $(echo $run_object | jq -c .)")
+    FAILED_RUNS+=("Run #$((i+1)): $(echo "$run_object" | jq -c .)")
   fi
 
   RUN_OUTPUT=$(<"$RUN_OUTPUT_FILE")

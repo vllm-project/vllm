@@ -10,16 +10,20 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.attention.ops.chunked_prefill_paged_decode import chunked_prefill_paged_decode
-from vllm.attention.ops.prefix_prefill import context_attention_fwd
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
+from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
+    chunked_prefill_paged_decode,
+)
+from vllm.v1.attention.ops.prefix_prefill import context_attention_fwd
 
 NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 64]
 HEAD_SIZES = [24, 128]
 DTYPES = [torch.float16]
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 SLIDING_WINDOW = [0, 16, 2048]
 KV_CACHE_DTYPES = ["auto", "fp8", "fp8_e5m2"]
 
@@ -112,6 +116,7 @@ def test_contexted_kv_attention(
     kv_cache_dtype: str,
     device: str,
     op: Callable,
+    block_size: int = 32,
 ) -> None:
     if "fp8" in kv_cache_dtype and not current_platform.has_device_capability(89):
         pytest.skip(
@@ -125,20 +130,19 @@ def test_contexted_kv_attention(
     ):
         pytest.skip("ROCm custom paged attention does not support fp8_e5m2 KV cache")
 
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     torch.set_default_device(device)
 
     # Need this, otherwise when we capture the graph the process
     # for GPU 1 would run on both GPU0 and GPU1 and things would hang
     #
     # see also similar issue: https://github.com/Dao-AILab/flash-attention/issues/523
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     MAX_SEQ_LEN = 1024
     MAX_CTX_LEN = 1024
     BS = 10
     cache_size = 640
-    block_size = 32
     max_block_per_request = 64
     query_lens = [random.randint(16, MAX_SEQ_LEN) for _ in range(BS)]
     # ensure one sequence in batch is a decode
@@ -237,7 +241,7 @@ def test_contexted_kv_attention(
         v_scale,
         sliding_window=sliding_window,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     start_time = time.time()
     op(
         query,
@@ -256,7 +260,7 @@ def test_contexted_kv_attention(
         v_scale,
         sliding_window=sliding_window,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     end_time = time.time()
     print(f"triton Time: {(end_time - start_time) * 1000:.2f} ms")
 
@@ -296,7 +300,7 @@ def test_contexted_kv_attention(
         dropout_p=0.0,
         scale=scale,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     start_time = time.time()
     output_ref = F.scaled_dot_product_attention(
         query_sdpa,
@@ -306,7 +310,7 @@ def test_contexted_kv_attention(
         dropout_p=0.0,
         scale=scale,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     end_time = time.time()
     print(f"PyTorch SDPA Time: {(end_time - start_time) * 1000:.2f} ms")
 
@@ -333,6 +337,7 @@ def test_contexted_kv_attention_alibi(
     kv_cache_dtype: str,
     device: str,
     op: Callable,
+    block_size: int = 32,
 ) -> None:
     if "fp8" in kv_cache_dtype and not current_platform.has_device_capability(89):
         pytest.skip(
@@ -346,14 +351,14 @@ def test_contexted_kv_attention_alibi(
     ):
         pytest.skip("ROCm custom paged attention does not support fp8_e5m2 KV cache")
 
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     torch.set_default_device(device)
 
     # Need this, otherwise when we capture the graph the process
     # for GPU 1 would run on both GPU0 and GPU1 and things would hang
     #
     # see also similar issue: https://github.com/Dao-AILab/flash-attention/issues/523
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
         # Fork from: vllm/vllm/model_executor/models/bloom.py#L44
@@ -385,7 +390,6 @@ def test_contexted_kv_attention_alibi(
     MAX_CTX_LEN = 1024
     BS = 10
     cache_size = 640
-    block_size = 32
     max_block_per_request = 64
     query_lens = [random.randint(16, MAX_SEQ_LEN) for _ in range(BS)]
     ctx_lens = [random.randint(16, MAX_CTX_LEN) for _ in range(BS)]
@@ -480,7 +484,7 @@ def test_contexted_kv_attention_alibi(
         v_scale,
         alibi_slopes=alibi_slopes,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     start_time = time.time()
     op(
         query,
@@ -499,7 +503,7 @@ def test_contexted_kv_attention_alibi(
         v_scale,
         alibi_slopes=alibi_slopes,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     end_time = time.time()
     print(f"triton Time: {(end_time - start_time) * 1000:.2f} ms")
     scale = float(1.0 / (head_size**0.5))
@@ -515,7 +519,7 @@ def test_contexted_kv_attention_alibi(
 
     output_ref = torch.empty_like(output)
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     start_time = time.time()
 
     query_start = 0
@@ -570,7 +574,7 @@ def test_contexted_kv_attention_alibi(
         query_start = query_end
         key_start = key_end
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     end_time = time.time()
     print(f"PyTorch SDPA Time: {(end_time - start_time) * 1000:.2f} ms")
     atol = 1e-3 if "fp8" in kv_cache_dtype else 1e-6
@@ -636,4 +640,35 @@ def test_contexted_kv_attention_alibi_f32(
 ) -> None:
     test_contexted_kv_attention_alibi(
         num_heads, num_queries_per_kv, head_size, dtype, kv_cache_dtype, device, op
+    )
+
+
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("op", OPS)
+@torch.inference_mode()
+def test_qwen3_nonstandard_block_size(
+    head_size: int,
+    dtype: torch.dtype,
+    device: str,
+    op: Callable,
+) -> None:
+    """
+    A separate test function specifically added
+    for Qwen3-Next-80B (Block Size 544).
+    """
+    if not current_platform.is_rocm():
+        pytest.skip("544 block size optimization is only for ROCm.")
+
+    test_contexted_kv_attention(
+        num_heads=64,
+        num_queries_per_kv=1,
+        head_size=head_size,
+        block_size=544,
+        sliding_window=0,
+        dtype=dtype,
+        kv_cache_dtype="auto",
+        device=device,
+        op=op,
     )

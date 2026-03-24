@@ -18,6 +18,7 @@ from vllm.lora.layers import (
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.model_manager import (
+    DEFAULT_LANGUAGE_WRAPPER_KEY,
     LoRAMapping,
     LoRAModelManager,
     LRUCacheLoRAModelManager,
@@ -36,7 +37,7 @@ EMBEDDING_MODULES = {
 
 
 DEVICES = (
-    [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+    [f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)]
     if current_platform.is_cuda_alike()
     else ["cpu"]
 )
@@ -110,7 +111,7 @@ def create_packed_lora(
     return LoRAModel(lora_id, 8, loras)
 
 
-def test_replace_submodules(dist_init, dummy_model):
+def test_replace_submodules(default_vllm_config, dist_init, dummy_model):
     model = dummy_model
     manager = LoRAModelManager(
         model,
@@ -132,7 +133,7 @@ def test_replace_submodules(dist_init, dummy_model):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lora_model_manager(dist_init, dummy_model, device):
+def test_lora_model_manager(default_vllm_config, dist_init, dummy_model, device):
     model = dummy_model
     model_lora1 = create_lora(
         1, model, ["layer1.dense1", "dense2", "lm_head"], device=device
@@ -183,9 +184,11 @@ def test_lora_model_manager(dist_init, dummy_model, device):
     assert manager.activate_adapter(2)
     assert manager.lora_index_to_id[0] == 3
     assert manager.lora_index_to_id[1] == 2
-
     assert manager.device == device
-    assert manager.punica_wrapper.device == device
+    assert (
+        manager.punica_wrapper_mapping.get(DEFAULT_LANGUAGE_WRAPPER_KEY).device
+        == device
+    )
     assert hasattr(manager, "supported_lora_modules")
     assert sorted(manager.supported_lora_modules) == [
         "dense1",
@@ -196,7 +199,9 @@ def test_lora_model_manager(dist_init, dummy_model, device):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lora_lru_cache_model_manager(dist_init, dummy_model, device):
+def test_lora_lru_cache_model_manager(
+    default_vllm_config, dist_init, dummy_model, device
+):
     model = dummy_model
     model_lora1 = create_lora(
         1, model, ["layer1.dense1", "dense2", "lm_head"], device=device
@@ -278,13 +283,15 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model, device):
     assert manager.remove_adapter(3)
     with pytest.raises(ValueError):
         assert manager.pin_adapter(3)
-
-    assert manager.punica_wrapper.device == device
+    assert (
+        manager.punica_wrapper_mapping.get(DEFAULT_LANGUAGE_WRAPPER_KEY).device
+        == device
+    )
     assert manager.device == device
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lru_lora_model_manager(dist_init, dummy_model, device):
+def test_lru_lora_model_manager(default_vllm_config, dist_init, dummy_model, device):
     # This tests just the LRU cache functionality, everything else is
     # tested in test_lora_model_manager
     model = dummy_model
@@ -402,12 +409,17 @@ def test_lru_lora_model_manager(dist_init, dummy_model, device):
         assert manager.remove_oldest_adapter()
 
     assert set(manager.list_adapters()) == {1}
-    assert manager.punica_wrapper.device == device
+    assert (
+        manager.punica_wrapper_mapping.get(DEFAULT_LANGUAGE_WRAPPER_KEY).device
+        == device
+    )
     assert manager.device == device
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_path):
+def test_lru_cache_worker_adapter_manager(
+    default_vllm_config, dist_init, dummy_model, device, tmp_path
+):
     lora_config = LoRAConfig(
         max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
     )
@@ -514,11 +526,16 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
         )
 
     assert worker_adapter_manager.device == device
-    assert worker_adapter_manager._adapter_manager.punica_wrapper.device == device
+    punica_wrapper = worker_adapter_manager._adapter_manager.punica_wrapper_mapping.get(
+        DEFAULT_LANGUAGE_WRAPPER_KEY
+    )
+    assert punica_wrapper.device == device
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path):
+def test_worker_adapter_manager(
+    default_vllm_config, dist_init, dummy_model_gate_up, device, tmp_path
+):
     # Should remove every LoRA not specified in the request.
     lora_config = LoRAConfig(
         max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
@@ -618,11 +635,14 @@ def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path
         )
 
     assert worker_adapter_manager.device == device
-    assert worker_adapter_manager._adapter_manager.punica_wrapper.device == device
+    punica_wrapper = worker_adapter_manager._adapter_manager.punica_wrapper_mapping.get(
+        DEFAULT_LANGUAGE_WRAPPER_KEY
+    )
+    assert punica_wrapper.device == device
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_packed_loras(dist_init, dummy_model_gate_up, device):
+def test_packed_loras(default_vllm_config, dist_init, dummy_model_gate_up, device):
     model = dummy_model_gate_up
     model_lora = create_packed_lora(
         1,
@@ -691,3 +711,192 @@ def test_packed_loras(dist_init, dummy_model_gate_up, device):
     torch.testing.assert_close(
         packed_lora1.lora_b[1], model_lora_clone1.get_lora("up_proj").lora_b
     )
+
+
+def _test_target_modules(
+    model,
+    target_modules: list[str] | None,
+    device: str,
+    expected_lora: list[tuple[str, type]],
+    expected_no_lora: list[tuple[str, type]],
+):
+    """Create a LoRAModelManager and assert which modules have LoRA applied."""
+    LoRAModelManager(
+        model,
+        2,
+        2,
+        2,
+        LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=2,
+            max_loras=2,
+            lora_dtype=DEFAULT_DTYPE,
+            target_modules=target_modules,
+        ),
+        device=device,
+    )
+    for module_path, lora_cls in expected_lora:
+        assert isinstance(model.get_submodule(module_path), lora_cls)
+    for module_path, lora_cls in expected_no_lora:
+        assert not isinstance(model.get_submodule(module_path), lora_cls)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_target_modules_config(default_vllm_config, dist_init, dummy_model, device):
+    """Test that target_modules config restricts which modules get LoRA applied."""
+    _test_target_modules(
+        dummy_model,
+        ["dense1"],
+        device,
+        expected_lora=[
+            ("dense1", ColumnParallelLinearWithLoRA),
+            ("layer1.dense1", ColumnParallelLinearWithLoRA),
+        ],
+        expected_no_lora=[
+            ("dense2", RowParallelLinearWithLoRA),
+            ("layer1.dense2", RowParallelLinearWithLoRA),
+        ],
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_target_modules_multiple(default_vllm_config, dist_init, dummy_model, device):
+    """Test that multiple target_modules work correctly."""
+    _test_target_modules(
+        dummy_model,
+        ["dense1", "dense2"],
+        device,
+        expected_lora=[
+            ("dense1", ColumnParallelLinearWithLoRA),
+            ("layer1.dense1", ColumnParallelLinearWithLoRA),
+            ("dense2", RowParallelLinearWithLoRA),
+            ("layer1.dense2", RowParallelLinearWithLoRA),
+        ],
+        expected_no_lora=[],
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_target_modules_none_uses_all(
+    default_vllm_config, dist_init, dummy_model, device
+):
+    """Test that target_modules=None uses all supported modules."""
+    _test_target_modules(
+        dummy_model,
+        None,
+        device,
+        expected_lora=[
+            ("dense1", ColumnParallelLinearWithLoRA),
+            ("layer1.dense1", ColumnParallelLinearWithLoRA),
+            ("dense2", RowParallelLinearWithLoRA),
+            ("layer1.dense2", RowParallelLinearWithLoRA),
+        ],
+        expected_no_lora=[],
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_load_adapter_warns_on_unsupported_modules(
+    default_vllm_config, dist_init, dummy_model_gate_up, device, tmp_path
+):
+    """Test that _load_adapter warns when a LoRA adapter contains modules
+    not in the model's supported LoRA target modules."""
+    from unittest.mock import patch
+
+    import vllm.lora.worker_manager as wm_module
+
+    lora_config = LoRAConfig(
+        max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
+    )
+
+    dummy_lora_files = f"{tmp_path}/lora_adapter"
+    os.makedirs(dummy_lora_files, exist_ok=True)
+    create_peft_lora(
+        dummy_model_gate_up,
+        save_dir=dummy_lora_files,
+        target_modules=["layer1.dense1", "dense2"],
+        lora_dtype=DEFAULT_DTYPE,
+    )
+
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
+
+    worker_manager = WorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
+    worker_manager.vocab_size = dummy_model_gate_up.unpadded_vocab_size
+    worker_manager.create_lora_manager(dummy_model_gate_up)
+
+    # Patch from_local_checkpoint to inject an unsupported module
+    original_from_checkpoint = LoRAModel.from_local_checkpoint
+
+    def patched_from_checkpoint(*args, **kwargs):
+        lora = original_from_checkpoint(*args, **kwargs)
+        lora.loras["unsupported_module"] = LoRALayerWeights(
+            module_name="unsupported_module",
+            rank=8,
+            lora_alpha=16,
+            lora_a=torch.randn(8, 10),
+            lora_b=torch.randn(10, 8),
+        )
+        return lora
+
+    lora_request = LoRARequest("test", 1, dummy_lora_files)
+    with (
+        patch.object(LoRAModel, "from_local_checkpoint", patched_from_checkpoint),
+        patch.object(wm_module.logger, "warning_once") as mock_warning,
+    ):
+        worker_manager._load_adapter(lora_request)
+        warning_args = mock_warning.call_args_list
+        found = any("unsupported_module" in str(call) for call in warning_args)
+        assert found, (
+            f"Expected warning about 'unsupported_module', got: {warning_args}"
+        )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_load_adapter_warns_on_target_modules_restriction(
+    default_vllm_config, dist_init, dummy_model_gate_up, device, tmp_path
+):
+    """Test that _load_adapter warns when a LoRA adapter contains modules
+    excluded by the deployment-time target_modules restriction."""
+    from unittest.mock import patch
+
+    import vllm.lora.worker_manager as wm_module
+
+    # Restrict to only dense2 — adapter has dense1 which will be excluded
+    lora_config = LoRAConfig(
+        max_lora_rank=8,
+        max_cpu_loras=4,
+        max_loras=4,
+        lora_dtype=DEFAULT_DTYPE,
+        target_modules=["dense2"],
+    )
+
+    dummy_lora_files = f"{tmp_path}/lora_adapter"
+    os.makedirs(dummy_lora_files, exist_ok=True)
+    create_peft_lora(
+        dummy_model_gate_up,
+        save_dir=dummy_lora_files,
+        target_modules=["layer1.dense1", "dense2"],
+        lora_dtype=DEFAULT_DTYPE,
+    )
+
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
+
+    worker_manager = WorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
+    worker_manager.vocab_size = dummy_model_gate_up.unpadded_vocab_size
+    worker_manager.create_lora_manager(dummy_model_gate_up)
+
+    lora_request = LoRARequest("test", 1, dummy_lora_files)
+    with patch.object(wm_module.logger, "warning_once") as mock_warning:
+        worker_manager._load_adapter(lora_request)
+        warning_args = mock_warning.call_args_list
+        # dense1 is supported by the model but excluded by target_modules
+        found = any("target_modules" in str(call) for call in warning_args)
+        assert found, (
+            f"Expected warning about target_modules restriction, got: {warning_args}"
+        )

@@ -10,10 +10,10 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Respons
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.api_server import validate_json_request
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
 )
+from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     GenerateResponse,
@@ -61,15 +61,10 @@ router = APIRouter()
 async def generate(request: GenerateRequest, raw_request: Request):
     handler = generate_tokens(raw_request)
     if handler is None:
-        return tokenization(raw_request).create_error_response(
-            message="The model does not support generate tokens API"
-        )
-    try:
-        generator = await handler.serve_tokens(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        raise NotImplementedError("The model does not support generate tokens API")
+
+    generator = await handler.serve_tokens(request, raw_request)
+
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code

@@ -54,6 +54,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "granite_tool_parser",
         "GraniteToolParser",
     ),
+    "granite4": (
+        "granite4_tool_parser",
+        "Granite4ToolParser",
+    ),
     "hermes": (
         "hermes_tool_parser",
         "Hermes2ProToolParser",
@@ -134,6 +138,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "step3_tool_parser",
         "Step3ToolParser",
     ),
+    "step3p5": (
+        "step3p5_tool_parser",
+        "Step3p5ToolParser",
+    ),
     "xlam": (
         "xlam_tool_parser",
         "xLAMToolParser",
@@ -141,6 +149,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "gigachat3": (
         "gigachat3_tool_parser",
         "GigaChat3ToolParser",
+    ),
+    "functiongemma": (
+        "functiongemma_tool_parser",
+        "FunctionGemmaToolParser",
     ),
 }
 

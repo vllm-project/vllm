@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import random
 from typing import Any
 
 import pytest
 
-from tests.utils import create_new_process_for_each_test
+from tests.utils import create_new_process_for_each_test, set_random_seed
 from tests.v1.logits_processors.utils import (
     DUMMY_LOGITPROC_ARG,
     DUMMY_LOGITPROC_FQCN,
@@ -135,7 +134,7 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
 
     # Test that logitproc info is passed to workers
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
-    random.seed(40)
+    set_random_seed(40)
 
     # Choose LLM args based on logitproc source
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_NONE:
@@ -194,7 +193,7 @@ def test_custom_logitsprocs_req(monkeypatch):
 
     # Test that logitproc info is passed to workers
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
-    random.seed(40)
+    set_random_seed(40)
     _run_test(
         {"logits_processors": [WrappedPerReqLogitsProcessor]}, logitproc_loaded=True
     )
@@ -237,7 +236,7 @@ def test_rejects_custom_logitsprocs(
                         logitproc from
     """
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    random.seed(40)
+    set_random_seed(40)
 
     test_params: dict[str, dict[str, Any]] = {
         "pooling": {
@@ -277,9 +276,12 @@ def test_rejects_custom_logitsprocs(
         monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
         llm = LLM(**llm_kwargs)
-        # Require that no logitsprocs have been loaded
+        # Require that no custom logitsprocs have been loaded
+        # (built-in processors may exist: MinTokensLogitsProcessor,
+        # LogitBiasLogitsProcessor, MinPLogitsProcessor)
         worker = llm.llm_engine.model_executor.driver_worker.worker
-        assert sum([1 for _ in worker.model_runner.input_batch.logitsprocs.all]) == 0
+        for proc in worker.model_runner.input_batch.logitsprocs.all:
+            assert not isinstance(proc, DummyLogitsProcessor)
         return
 
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_FQCN:

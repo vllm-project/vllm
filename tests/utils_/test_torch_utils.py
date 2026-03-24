@@ -99,30 +99,18 @@ def _test_stream_thread(main_expected_stream: torch.cuda.Stream):
 
 
 def test_current_stream_multithread():
-    from vllm.platforms import current_platform
-
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
-    if current_platform.is_rocm():
-        main_dedicated_stream = current_stream()
+    main_dedicated_stream = current_stream()
 
-        assert main_dedicated_stream.cuda_stream != 0, (
-            "ROCm should create a dedicated stream, not use default stream (0x0)"
-        )
+    assert main_dedicated_stream.cuda_stream != 0, (
+        "ROCm/CUDA should create a dedicated stream, not use default stream (0x0)"
+    )
 
-        main_stream_again = current_stream()
-        assert main_stream_again == main_dedicated_stream, (
-            "Multiple calls to current_stream should return the same dedicated stream"
-        )
+    main_stream_again = current_stream()
+    assert main_stream_again == main_dedicated_stream, (
+        "Multiple calls to current_stream should return the same dedicated stream"
+    )
 
-        _test_stream_thread(main_dedicated_stream)
-    else:
-        main_default_stream = torch.cuda.default_stream()
-        main_initial_stream = current_stream()
-
-        assert main_initial_stream == main_default_stream, (
-            "First call to current_stream should return default stream on CUDA"
-        )
-
-        _test_stream_thread(main_default_stream)
+    _test_stream_thread(main_dedicated_stream)
