@@ -12,7 +12,7 @@ In this document we will discuss the:
 * [CUDA Graphs modes](#cudagraphmodes)
 * [Detailed design](#detailed-design)
 * [Example usage of the different CUDA Graphs modes](#usage-guide)
-* [Encoder (ViT) CUDA Graphs](#encoder-vit-cuda-graphs)
+* [Vision Encoder (ViT) CUDA Graphs](#vision-encoder-vit-cuda-graphs)
 
 !!! note
     In this document, we refer to pure decode (`max_query_len=1`) or speculative decode (`max_query_len =1+num_spec_tokens`) as **uniform decode** batches, and the opposite would be **non-uniform** batches (i.e., prefill or mixed prefill-decode batches).
@@ -237,7 +237,7 @@ See the following links for examples:
 * [20059#issuecomment-3188735226](https://github.com/vllm-project/vllm/pull/20059#issuecomment-3188735226)
 * [20059#issuecomment-3219888738](https://github.com/vllm-project/vllm/pull/20059#issuecomment-3219888738)
 
-## Encoder (ViT) CUDA Graphs
+## Vision Encoder (ViT) CUDA Graphs
 
 The CUDA Graphs infrastructure described above targets the **decoder** (language model) forward pass. vLLM also supports capturing the **encoder** (vision transformer) forward pass as CUDA Graphs, independently from the decoder. This is based on <https://github.com/vllm-project/vllm/pull/35963>.
 
