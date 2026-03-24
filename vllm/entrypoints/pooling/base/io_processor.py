@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import Any, Final
 
 from vllm import PoolingRequestOutput, PromptType
@@ -21,7 +21,6 @@ from vllm.entrypoints.pooling.typing import (
 from vllm.inputs.data import ProcessorInputs, SingletonPrompt
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
-from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -167,7 +166,7 @@ class PoolingIOProcessor:
         default_template_content_format: ChatTemplateContentFormatOption,
         default_template_kwargs: dict[str, Any] | None,
         tool_dicts: list[dict[str, Any]] | None = None,
-        tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
+        tool_parser: type[ToolParser] | None = None,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]]:
         renderer = self.renderer
 
