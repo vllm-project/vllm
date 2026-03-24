@@ -168,7 +168,7 @@ def encode_output_frames(obj, *, size_threshold: int = 256) -> list[bytes]:
     def transform(value):
         if isinstance(value, np.ndarray):
             return encode_ndarray(value, buffers, size_threshold=size_threshold)
-        if isinstance(value, tuple) and len(value) == 3 and value[0] in ("int32", "float32"):
+        if isinstance(value, tuple) and len(value) == 3 and value[0] in ("int32", "int64", "float32"):
             dtype, shape, payload = value
             return encode_tensor_like(dtype, shape, payload, buffers, size_threshold=size_threshold)
         if type(value) is list:
@@ -202,9 +202,9 @@ inline_logprobs = engine_outputs_wire(
     engine_output_wire(
         "req-1",
         new_logprobs=(
-            np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int32),
+            np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int64),
             np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32),
-            np.array([1, 2], dtype=np.int32),
+            np.array([1, 2], dtype=np.int64),
             [0, 2],
         ),
     )
@@ -214,9 +214,9 @@ multipart_logprobs = engine_outputs_wire(
     engine_output_wire(
         "req-1",
         new_logprobs=(
-            np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int32),
+            np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int64),
             np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32),
-            np.array([1, 2], dtype=np.int32),
+            np.array([1, 2], dtype=np.int64),
             [0, 2],
         ),
     )
@@ -226,9 +226,9 @@ inline_prompt_logprobs = engine_outputs_wire(
     engine_output_wire(
         "req-1",
         new_prompt_logprobs_tensors=(
-            ("int32", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.int32).tobytes()),
+            ("int64", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.int64).tobytes()),
             ("float32", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.float32).tobytes()),
-            ("int32", [2], np.array([3, 4], dtype=np.int32).tobytes()),
+            ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
             [0, 2],
         ),
     )
@@ -238,9 +238,9 @@ multipart_prompt_logprobs = engine_outputs_wire(
     engine_output_wire(
         "req-1",
         new_prompt_logprobs_tensors=(
-            ("int32", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.int32).tobytes()),
+            ("int64", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.int64).tobytes()),
             ("float32", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.float32).tobytes()),
-            ("int32", [2], np.array([3, 4], dtype=np.int32).tobytes()),
+            ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
             [0, 2],
         ),
     )

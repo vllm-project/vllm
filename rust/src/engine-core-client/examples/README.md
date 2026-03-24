@@ -1,4 +1,4 @@
-# Engine-Core Utility Smoke Test
+# Engine-Core Smoke Tests
 
 Start headless `vllm`:
 
@@ -25,5 +25,16 @@ cargo run -p vllm-engine-core-client --example external_engine_utility_call -- \
   --handshake-address tcp://127.0.0.1:62100 \
   --host 127.0.0.1
 ```
+
+Run the Rust smoke test for sample logprobs decoding through the raw engine-core request path:
+
+```bash
+cargo run -p vllm-engine-core-client --example external_engine_logprobs -- \
+  --handshake-address tcp://127.0.0.1:62100 \
+  --host 127.0.0.1
+```
+
+This smoke requests a small generated-token `logprobs` payload plus prompt logprobs over a much
+longer prompt, so it exercises both the inline and aux-frame decode paths against a real engine.
 
 IMPORTANT: You must restart `vllm` each time you run the smoke test, as the vLLM engine cannot manage frontend closures and subsequent reconnects. In other words, do not reuse existing `vllm` instances, if any.

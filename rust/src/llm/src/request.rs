@@ -167,6 +167,8 @@ mod tests {
                         seed: None,
                         max_tokens: 65536,
                         min_tokens: 0,
+                        logprobs: None,
+                        prompt_logprobs: None,
                         min_p: 0.0,
                         frequency_penalty: 0.0,
                         presence_penalty: 0.0,

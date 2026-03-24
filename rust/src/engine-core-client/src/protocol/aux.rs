@@ -3,6 +3,7 @@ mod array;
 mod tests;
 mod wire;
 
+use std::io::Cursor;
 use std::ops::{Deref, DerefMut};
 
 use enum_as_inner::EnumAsInner;
@@ -24,7 +25,7 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone, PartialEq)]
 pub struct Logprobs {
     /// `[num_reqs x num_generated_tokens, max_num_logprobs + 1]`
-    pub logprob_token_ids: Array2<i32>,
+    pub logprob_token_ids: Array2<i64>,
     /// `[num_reqs x num_generated_tokens, max_num_logprobs + 1]`
     pub logprobs: Array2<f32>,
     /// `[num_reqs x num_generated_tokens]`
@@ -32,7 +33,7 @@ pub struct Logprobs {
     /// Python uses the field name `sampled_token_ranks` for sample logprobs and
     /// `selected_token_ranks` for prompt logprobs. Rust keeps one neutral field because both
     /// payloads share the same wire representation.
-    pub token_ranks: Array1<i32>,
+    pub token_ranks: Array1<i64>,
     /// `[num_reqs]`
     ///
     /// Used for slicing outputs when different requests generated different numbers of tokens in
@@ -145,7 +146,7 @@ impl WireLogprobs {
         Frame: AsRef<[u8]>,
     {
         Ok(Logprobs {
-            logprob_token_ids: array::decode_array2_i32(
+            logprob_token_ids: array::decode_array2_i64(
                 self.logprob_token_ids,
                 &format!("{field_prefix}.logprob_token_ids"),
                 frames,
@@ -155,7 +156,7 @@ impl WireLogprobs {
                 &format!("{field_prefix}.logprobs"),
                 frames,
             )?,
-            token_ranks: array::decode_array1_i32(
+            token_ranks: array::decode_array1_i64(
                 self.token_ranks,
                 &format!("{field_prefix}.token_ranks"),
                 frames,
@@ -175,7 +176,9 @@ where
         .first()
         .ok_or_else(|| Error::ValueDecodeExt("missing output frame".to_string()))?;
 
-    let mut outputs: EngineCoreOutputs = rmp_serde::from_slice(first_frame.as_ref())?;
+    let value = rmpv::decode::read_value(&mut Cursor::new(first_frame.as_ref()))?;
+    let mut outputs: EngineCoreOutputs =
+        rmpv::ext::from_value(value).map_err(|error| Error::ValueDecodeExt(error.to_string()))?;
     outputs.resolve_in_place(frames)?;
     Ok(outputs)
 }

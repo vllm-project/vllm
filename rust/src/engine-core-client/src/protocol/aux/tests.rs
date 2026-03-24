@@ -46,7 +46,8 @@ fn inline_logprobs_value() -> Value {
     let ids = Value::Ext(
         3,
         vec![
-            1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0,
+            1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0,
+            0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0,
         ],
     );
     let probs = Value::Ext(
@@ -55,11 +56,11 @@ fn inline_logprobs_value() -> Value {
             0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 128, 64, 0, 0, 160, 64, 0, 0, 192, 64,
         ],
     );
-    let ranks = Value::Ext(3, vec![1, 0, 0, 0, 2, 0, 0, 0]);
+    let ranks = Value::Ext(3, vec![1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]);
     Value::Array(vec![
-        ndarray_value("<i4", &[2, 3], ids),
+        ndarray_value("<i8", &[2, 3], ids),
         ndarray_value("<f4", &[2, 3], probs),
-        ndarray_value("<i4", &[2], ranks),
+        ndarray_value("<i8", &[2], ranks),
         Value::Array(vec![Value::from(0usize), Value::from(2usize)]),
     ])
 }
@@ -68,7 +69,8 @@ fn inline_prompt_logprobs_value() -> Value {
     let ids = Value::Ext(
         3,
         vec![
-            10, 0, 0, 0, 11, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 14, 0, 0, 0, 15, 0, 0, 0,
+            10, 0, 0, 0, 0, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 13, 0, 0, 0,
+            0, 0, 0, 0, 14, 0, 0, 0, 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 0,
         ],
     );
     let probs = Value::Ext(
@@ -77,11 +79,11 @@ fn inline_prompt_logprobs_value() -> Value {
             0, 0, 32, 65, 0, 0, 48, 65, 0, 0, 64, 65, 0, 0, 80, 65, 0, 0, 96, 65, 0, 0, 112, 65,
         ],
     );
-    let ranks = Value::Ext(3, vec![3, 0, 0, 0, 4, 0, 0, 0]);
+    let ranks = Value::Ext(3, vec![3, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]);
     Value::Array(vec![
-        ndarray_value("int32", &[2, 3], ids),
+        ndarray_value("int64", &[2, 3], ids),
         ndarray_value("float32", &[2, 3], probs),
-        ndarray_value("int32", &[2], ranks),
+        ndarray_value("int64", &[2], ranks),
         Value::Array(vec![Value::from(0usize), Value::from(2usize)]),
     ])
 }
@@ -130,20 +132,21 @@ fn decodes_multipart_new_logprobs() {
     let frames = vec![
         Bytes::from(encode_value(&output_wire_with_custom_fields(
             Some(Value::Array(vec![
-                ndarray_value("<i4", &[2, 3], Value::from(1)),
+                ndarray_value("<i8", &[2, 3], Value::from(1)),
                 ndarray_value("<f4", &[2, 3], Value::from(2)),
-                ndarray_value("<i4", &[2], Value::from(3)),
+                ndarray_value("<i8", &[2], Value::from(3)),
                 Value::Nil,
             ])),
             None,
         ))),
         Bytes::from_static(&[
-            1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0,
+            1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0,
+            0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0,
         ]),
         Bytes::from_static(&[
             0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 128, 64, 0, 0, 160, 64, 0, 0, 192, 64,
         ]),
-        Bytes::from_static(&[1, 0, 0, 0, 2, 0, 0, 0]),
+        Bytes::from_static(&[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]),
     ];
     let decoded = decode_engine_core_outputs(&frames).unwrap();
 

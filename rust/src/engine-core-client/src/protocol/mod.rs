@@ -170,6 +170,14 @@ pub struct EngineCoreSamplingParams {
     pub max_tokens: u32,
     /// Minimum number of tokens to generate before EOS or stop-token handling.
     pub min_tokens: u32,
+    /// Number of log probabilities to return per generated token.
+    ///
+    /// `None` disables sample logprobs. `-1` requests the full vocabulary.
+    pub logprobs: Option<i32>,
+    /// Number of log probabilities to return per prompt token.
+    ///
+    /// `None` disables prompt logprobs. `-1` requests the full vocabulary.
+    pub prompt_logprobs: Option<i32>,
     /// Minimum probability threshold for token sampling.
     pub min_p: f32,
     /// Frequency penalty applied by the sampler.
@@ -213,6 +221,8 @@ impl EngineCoreSamplingParams {
             seed: None,
             max_tokens: 65536,
             min_tokens: 0,
+            logprobs: None,
+            prompt_logprobs: None,
             min_p: 0.0,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
