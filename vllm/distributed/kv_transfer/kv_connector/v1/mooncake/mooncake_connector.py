@@ -75,6 +75,12 @@ class TransferRegion:
 
 
 def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
+    """Return the TP ratio used by heterogeneous TP transfer planning.
+
+    Positive values mean one local rank maps into a larger remote KV region.
+    Negative values mean one local rank must gather from multiple remote KV
+    regions.
+    """
     if local_tp_size >= remote_tp_size:
         assert local_tp_size % remote_tp_size == 0, (
             f"Local tensor parallel size {local_tp_size} is not divisible "
@@ -94,6 +100,7 @@ def _expand_transfer_regions(
     block_lens: list[int],
     is_kv_layout_blocks_first: bool,
 ) -> list[TransferRegion]:
+    """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert len(base_addrs) == len(block_lens), (
         "Mooncake transfer regions require matching numbers of base addresses "
         f"and block lengths, got {len(base_addrs)} and {len(block_lens)}."
@@ -128,6 +135,7 @@ def _compute_sender_transfer_plan(
     remote_kv_block_len: int,
     producer_cache_replicated: bool,
 ) -> tuple[bool, int, int, int]:
+    """Plan one producer-rank to one consumer-rank copy for heterogeneous TP."""
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
 
     if tp_ratio == 1:
@@ -162,6 +170,7 @@ def _can_coalesce_block_transfers(
     dst_region_offset: int,
     transfer_len: int,
 ) -> bool:
+    """Whether a contiguous block group can be emitted as one larger copy."""
     return (
         src_region_offset == 0
         and dst_region_offset == 0
@@ -177,6 +186,12 @@ def _validate_asymmetric_region_lengths(
     remote_tp_size: int,
     producer_cache_replicated: bool,
 ) -> str | None:
+    """Validate transfer-region metadata for a fixed producer/consumer pair.
+
+    This checks registered KV regions, not per-request block counts. A region
+    corresponds to one registered KV tensor, or one K/V half after expansion
+    for layouts that store K and V together.
+    """
     if len(local_regions) != len(remote_regions):
         return (
             "Mooncake asymmetric TP requires matching KV region counts between "
@@ -216,30 +231,6 @@ def _validate_asymmetric_region_lengths(
                 )
 
     return None
-
-
-def _get_debug_head_range(
-    num_heads: int,
-    local_tp_size: int,
-    remote_tp_rank: int,
-    remote_tp_size: int,
-    producer_cache_replicated: bool,
-) -> tuple[int, int]:
-    if producer_cache_replicated:
-        return 0, num_heads
-
-    tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
-    if tp_ratio >= 0:
-        return 0, num_heads
-
-    ratio_abs = -tp_ratio
-    assert num_heads % ratio_abs == 0, (
-        f"Number of KV heads {num_heads} is not divisible by "
-        f"heterogeneous TP ratio {ratio_abs}."
-    )
-    head_chunk = num_heads // ratio_abs
-    head_start = (remote_tp_rank % ratio_abs) * head_chunk
-    return head_start, head_start + head_chunk
 
 
 def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
@@ -360,6 +351,8 @@ class MooncakeConnector(KVConnectorBase_V1):
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
         if vllm_config.model_config is None:
+            # This fallback mostly exists for unit tests that instantiate the
+            # connector without a fully populated model config.
             logger.warning_once(
                 "Unable to detect current VLLM config. "
                 "Fallback to default kv cache layout."
@@ -1100,14 +1093,6 @@ class MooncakeConnectorWorker:
             if num_local_blocks > num_remote_blocks:
                 local_block_ids = local_block_ids[-num_remote_blocks:]
 
-            self._log_debug_cache_sample(
-                req_id=send_meta.p_req_id or d_req_id,
-                block_id=local_block_ids[0],
-                phase="producer_pre_send",
-                remote_tp_rank=agent_meta.remote_tp_rank,
-                remote_tp_size=agent_meta.remote_tp_size,
-            )
-
             # Group by indices
             group_local_block_ids, group_remote_block_ids = group_concurrent_contiguous(
                 local_block_ids, remote_block_ids
@@ -1136,7 +1121,8 @@ class MooncakeConnectorWorker:
                 assert dst_region_offset + transfer_len <= remote_region.kv_block_len, (
                     "Computed destination transfer region exceeds remote KV block size."
                 )
-
+                # Collapse one contiguous block group into a single larger
+                # transfer descriptor when the per-block copy is identical.
                 can_coalesce = _can_coalesce_block_transfers(
                     local_region_block_len=local_region.block_len,
                     remote_region_block_len=remote_region.block_len,
@@ -1429,12 +1415,6 @@ class MooncakeConnectorWorker:
             # No race because we are in async loop.
             pull_meta.pull_tasks_count -= 1
             if pull_meta.pull_tasks_count == 0:
-                if pull_meta.local_block_ids:
-                    self._log_debug_cache_sample(
-                        req_id=pull_meta.d_req_id,
-                        block_id=pull_meta.local_block_ids[0],
-                        phase="consumer_post_recv",
-                    )
                 self.finished_recving_reqs.add(pull_meta.d_req_id)
 
         if ok_reqs:
@@ -1615,76 +1595,6 @@ class MooncakeConnectorWorker:
             cache.is_contiguous(),
             _get_tensor_dense_flag(cache),
             cache.data_ptr(),
-        )
-
-    def _log_debug_cache_sample(
-        self,
-        *,
-        req_id: str,
-        block_id: int,
-        phase: str,
-        remote_tp_rank: int | None = None,
-        remote_tp_size: int | None = None,
-    ) -> None:
-        if not logger.isEnabledFor(logging.DEBUG):
-            return
-        if self.use_mla or not self.kv_topo.split_k_and_v:
-            return
-        if not self.device_kv_caches:
-            return
-
-        first_layer = next(iter(self.device_kv_caches.items()), None)
-        if first_layer is None:
-            return
-        layer_name, cache_or_caches = first_layer
-        cache_list = list(cache_or_caches)
-        if len(cache_list) < 2 or cache_list[0].ndim < 4:
-            return
-        if block_id < 0 or block_id >= cache_list[0].shape[0]:
-            return
-
-        num_heads = cache_list[0].shape[-2]
-        head_start, head_end = 0, num_heads
-        if remote_tp_rank is not None and remote_tp_size is not None:
-            head_start, head_end = _get_debug_head_range(
-                num_heads=num_heads,
-                local_tp_size=self.tp_size,
-                remote_tp_rank=remote_tp_rank,
-                remote_tp_size=remote_tp_size,
-                producer_cache_replicated=self._producer_cache_is_replicated(),
-            )
-
-        k_sample = cache_list[0][block_id, :, head_start:head_end, :]
-        v_sample = cache_list[1][block_id, :, head_start:head_end, :]
-
-        def summarize(sample: torch.Tensor) -> tuple[float, float, list[float]]:
-            flat = sample.flatten().float()
-            return (
-                float(flat.sum().item()),
-                float(flat.abs().sum().item()),
-                flat[:4].cpu().tolist(),
-            )
-
-        k_sum, k_abs_sum, k_first = summarize(k_sample)
-        v_sum, v_abs_sum, v_first = summarize(v_sample)
-        logger.debug(
-            "Mooncake debug sample phase=%s req=%s tp_rank=%d layer=%s "
-            "block=%d remote_tp_rank=%s head_range=[%d,%d) k_sum=%.6f "
-            "k_abs_sum=%.6f k_first=%s v_sum=%.6f v_abs_sum=%.6f v_first=%s",
-            phase,
-            req_id,
-            self.tp_rank,
-            layer_name,
-            block_id,
-            remote_tp_rank,
-            head_start,
-            head_end,
-            k_sum,
-            k_abs_sum,
-            k_first,
-            v_sum,
-            v_abs_sum,
-            v_first,
         )
 
 
