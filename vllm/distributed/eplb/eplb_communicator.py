@@ -18,7 +18,7 @@ from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclDataTypeEnum,
 )
-from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.distributed.parallel_state import GroupCoordinator, is_local_first_rank
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
 
@@ -44,7 +44,8 @@ class EplbCommunicator(ABC):
         self._cuda_stream = cuda_stream
 
     def _log_initialized(self) -> None:
-        logger.info_once("Initialized EPLB communicator: %s.", self.__class__.__name__)
+        if is_local_first_rank():
+            logger.info("Initialized EPLB communicator: %s.", self.__class__.__name__)
 
 
 class TorchDistNcclEplbCommunicator(EplbCommunicator):

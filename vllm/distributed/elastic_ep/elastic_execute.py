@@ -29,8 +29,10 @@ from vllm.distributed.elastic_ep.standby_state import (
     get_standby_ep_group,
     pop_standby_groups,
 )
+from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.parallel_state import (
     _replace_active_groups,
+    get_eplb_group,
     prepare_communication_buffer_for_model,
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
@@ -410,6 +412,13 @@ class ElasticEPScalingExecutor:
                     module.quant_method = module.quant_method.old_quant_method
                     module.runner = module._init_runner()
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
+
+        eplb_model_state.communicator = create_eplb_communicator(
+            group_coordinator=get_eplb_group(),
+            backend=parallel_config.eplb_config.communicator,
+            expert_weights=model.expert_weights[0],
+        )
+
         if (
             self.worker.vllm_config.compilation_config.mode
             == CompilationMode.STOCK_TORCH_COMPILE
