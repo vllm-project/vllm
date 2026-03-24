@@ -1727,9 +1727,12 @@ class NixlConnectorWorker:
             # then duplicate it logically to be able to index SSM/Conv separately.
             self.num_regions *= 2
 
-        # 3-read mamba always uses exactly 4 regions per layer (x, B, C, ssm),
-        # independent of how many regions FA uses (which varies by layout).
-        self._mamba_num_regions = 4 if self._has_mamba else 0
+        # NOTE (ZhanqiuHu): 3-read mamba uses 4 regions per cache tensor
+        # (x, B, C, ssm).  len(block_len_per_layer) == number of unique
+        # cache tensors, independent of the blocks-first doubling that
+        # num_regions may include.
+        num_unique_cache_tensors = len(self.block_len_per_layer)
+        self._mamba_num_regions = num_unique_cache_tensors * 4 if self._has_mamba else 0
 
         # TODO (NickLucche) Adapt to different descs views (engine_id->tp_rank) to
         # support heterogeneous TP.
