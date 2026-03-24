@@ -15,7 +15,8 @@ use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
     EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams, FinishReason,
-    RequestOutputKind, UtilityOutput, UtilityResultEnvelope,
+    MaybeWireLogprobs, RequestOutputKind, UtilityOutput, UtilityResultEnvelope,
+    decode_engine_core_outputs,
 };
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, Error,
@@ -25,6 +26,44 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
 
 static TRACING: Once = Once::new();
+
+fn expect_sample_logprobs(actual: &MaybeWireLogprobs) {
+    expect_test::expect![[r#"
+        Logprobs {
+            logprob_token_ids: [[1, 2, 3],
+             [4, 5, 6]], shape=[2, 3], strides=[3, 1], layout=Cc (0x5), const ndim=2,
+            logprobs: [[1.0, 2.0, 3.0],
+             [4.0, 5.0, 6.0]], shape=[2, 3], strides=[3, 1], layout=Cc (0x5), const ndim=2,
+            token_ranks: [1, 2], shape=[2], strides=[1], layout=CFcf (0xf), const ndim=1,
+            cu_num_generated_tokens: Some(
+                [
+                    0,
+                    2,
+                ],
+            ),
+        }
+    "#]]
+    .assert_debug_eq(actual.as_direct().expect("logprobs resolved"));
+}
+
+fn expect_prompt_logprobs(actual: &MaybeWireLogprobs) {
+    expect_test::expect![[r#"
+        Logprobs {
+            logprob_token_ids: [[10, 11, 12],
+             [13, 14, 15]], shape=[2, 3], strides=[3, 1], layout=Cc (0x5), const ndim=2,
+            logprobs: [[10.0, 11.0, 12.0],
+             [13.0, 14.0, 15.0]], shape=[2, 3], strides=[3, 1], layout=Cc (0x5), const ndim=2,
+            token_ranks: [3, 4], shape=[2], strides=[1], layout=CFcf (0xf), const ndim=1,
+            cu_num_generated_tokens: Some(
+                [
+                    0,
+                    2,
+                ],
+            ),
+        }
+    "#]]
+    .assert_debug_eq(actual.as_direct().expect("prompt logprobs resolved"));
+}
 
 fn unique_tcp_endpoint() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -110,6 +149,12 @@ async fn send_outputs(push: &mut PushSocket, outputs: EngineCoreOutputs) {
         .unwrap();
 }
 
+async fn send_output_frames(push: &mut PushSocket, frames: Vec<bytes::Bytes>) {
+    push.send(ZmqMessage::try_from(frames).unwrap())
+        .await
+        .unwrap();
+}
+
 async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
     dealer.recv().await.unwrap().into_vec()
 }
@@ -191,7 +236,7 @@ fn is_engine_core_dead(error: &Error) -> bool {
 
 fn is_decode_error(error: &Error) -> bool {
     match error {
-        Error::Decode(_) => true,
+        Error::Decode(_) | Error::ValueDecodeExt(_) => true,
         Error::Shared(error) => is_decode_error(error),
         _ => false,
     }
@@ -199,6 +244,54 @@ fn is_decode_error(error: &Error) -> bool {
 
 fn decode_value(bytes: &[u8]) -> Value {
     rmpv::decode::read_value(&mut Cursor::new(bytes)).unwrap()
+}
+
+fn encode_value(value: &Value) -> Vec<u8> {
+    let mut out = Vec::new();
+    rmpv::encode::write_value(&mut out, value).unwrap();
+    out
+}
+
+fn ndarray_value(dtype: &str, shape: &[usize], data: Value) -> Value {
+    Value::Array(vec![
+        Value::from(dtype),
+        Value::Array(shape.iter().copied().map(Value::from).collect()),
+        data,
+    ])
+}
+
+fn multipart_logprob_output_frames(request_id: &str) -> Vec<bytes::Bytes> {
+    let main = Value::Array(vec![
+        Value::from(0),
+        Value::Array(vec![Value::Array(vec![
+            Value::from(request_id),
+            Value::Array(vec![Value::from(7), Value::from(8)]),
+            Value::Array(vec![
+                ndarray_value("<i4", &[2, 3], Value::from(1)),
+                ndarray_value("<f4", &[2, 3], Value::from(2)),
+                ndarray_value("<i4", &[2], Value::from(3)),
+                Value::Array(vec![Value::from(0usize), Value::from(2usize)]),
+            ]),
+            Value::Nil,
+            Value::Nil,
+            Value::from(FinishReason::Length as u8),
+        ])]),
+        Value::Nil,
+        Value::from(0.0),
+        Value::Nil,
+        Value::Array(vec![Value::from(request_id)]),
+    ]);
+
+    vec![
+        bytes::Bytes::from(encode_value(&main)),
+        bytes::Bytes::from_static(&[
+            1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0,
+        ]),
+        bytes::Bytes::from_static(&[
+            0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 128, 64, 0, 0, 160, 64, 0, 0, 192, 64,
+        ]),
+        bytes::Bytes::from_static(&[1, 0, 0, 0, 2, 0, 0, 0]),
+    ]
 }
 
 fn utility_result_value<T>(value: T) -> UtilityResultEnvelope
@@ -616,9 +709,11 @@ async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
         .unwrap_err();
     assert!(is_decode_error(&error_1));
     assert!(is_decode_error(&error_2));
-    assert!(matches!(
-        client.health_error().as_deref(),
-        Some(Error::Decode(_))
+    assert!(is_decode_error(
+        client
+            .health_error()
+            .as_deref()
+            .expect("health error recorded")
     ));
 
     let abort_error = client.abort(&["req-1".to_string()]).await.unwrap_err();
@@ -788,9 +883,11 @@ async fn dispatcher_failure_propagates_to_waiting_utility_calls() {
         .await
         .unwrap_err();
     assert!(is_decode_error(&error));
-    assert!(matches!(
-        client.health_error().as_deref(),
-        Some(Error::Decode(_))
+    assert!(is_decode_error(
+        client
+            .health_error()
+            .as_deref()
+            .expect("health error recorded")
     ));
 
     client.shutdown().await.unwrap();
@@ -908,15 +1005,14 @@ async fn output_loop_failure_marks_client_unhealthy_and_records_first_error() {
         let engine_identity = engine_identity.clone();
         async move {
             let (_dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
-            push.send(
-                ZmqMessage::try_from(vec![
+            send_output_frames(
+                &mut push,
+                vec![
                     bytes::Bytes::from_static(b"frame-1"),
                     bytes::Bytes::from_static(b"frame-2"),
-                ])
-                .unwrap(),
+                ],
             )
-            .await
-            .unwrap();
+            .await;
         }
     });
 
@@ -940,10 +1036,62 @@ async fn output_loop_failure_marks_client_unhealthy_and_records_first_error() {
     .expect("wait for unhealthy client");
 
     assert!(!client.is_healthy());
-    assert!(matches!(
-        client.health_error().as_deref(),
-        Some(Error::UnsupportedAuxFrames { frame_count: 2 })
+    assert!(is_decode_error(
+        client
+            .health_error()
+            .as_deref()
+            .expect("health error recorded")
     ));
+
+    client.shutdown().await.unwrap();
+    engine_task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_decodes_multipart_logprob_outputs() {
+    init_tracing();
+    let handshake_address = unique_tcp_endpoint();
+    let engine_identity = b"engine-multipart-logprobs".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+
+            let add = recv_engine_message(&mut dealer).await;
+            assert_eq!(add[0].as_ref(), &[0x00]);
+            let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+            assert_eq!(request.request_id, "req-1");
+
+            send_output_frames(&mut push, multipart_logprob_output_frames("req-1")).await;
+        }
+    });
+
+    let client = EngineCoreClient::connect(EngineCoreClientConfig {
+        handshake_address,
+        model_name: "test-model".to_string(),
+        local_host: "127.0.0.1".to_string(),
+        ready_timeout: Duration::from_secs(2),
+        client_index: 0,
+    })
+    .await
+    .unwrap();
+
+    let stream = client.call(sample_request()).await.unwrap();
+    let outputs = stream.collect::<Vec<_>>().await;
+    assert_eq!(outputs.len(), 1);
+
+    let output = outputs.into_iter().next().unwrap().unwrap();
+    assert_eq!(output.output.new_token_ids, vec![7, 8]);
+    assert_eq!(output.output.finish_reason, Some(FinishReason::Length));
+    expect_sample_logprobs(
+        output
+            .output
+            .new_logprobs
+            .as_ref()
+            .expect("logprobs decoded"),
+    );
 
     client.shutdown().await.unwrap();
     engine_task.await.unwrap();
@@ -968,6 +1116,16 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let mut lines = stdout.lines();
     let request_hex = lines.next().expect("missing request fixture line");
     let outputs_hex = lines.next().expect("missing outputs fixture line");
+    let inline_logprobs_frames = lines.next().expect("missing inline logprobs fixture line");
+    let multipart_logprobs_frames = lines
+        .next()
+        .expect("missing multipart logprobs fixture line");
+    let inline_prompt_frames = lines
+        .next()
+        .expect("missing inline prompt logprobs fixture line");
+    let multipart_prompt_frames = lines
+        .next()
+        .expect("missing multipart prompt logprobs fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let outputs_bytes = hex::decode(outputs_hex).unwrap();
@@ -1016,4 +1174,45 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         }
     "#]]
     .assert_debug_eq(&decoded_outputs);
+
+    let decode_frames = |line: &str| {
+        line.split_whitespace()
+            .map(|frame| bytes::Bytes::from(hex::decode(frame).unwrap()))
+            .collect::<Vec<_>>()
+    };
+
+    let inline_logprobs =
+        decode_engine_core_outputs(&decode_frames(inline_logprobs_frames)).unwrap();
+    expect_sample_logprobs(
+        inline_logprobs.outputs[0]
+            .new_logprobs
+            .as_ref()
+            .expect("inline logprobs decoded"),
+    );
+
+    let multipart_logprobs =
+        decode_engine_core_outputs(&decode_frames(multipart_logprobs_frames)).unwrap();
+    expect_sample_logprobs(
+        multipart_logprobs.outputs[0]
+            .new_logprobs
+            .as_ref()
+            .expect("multipart logprobs decoded"),
+    );
+
+    let inline_prompt = decode_engine_core_outputs(&decode_frames(inline_prompt_frames)).unwrap();
+    expect_prompt_logprobs(
+        inline_prompt.outputs[0]
+            .new_prompt_logprobs_tensors
+            .as_ref()
+            .expect("inline prompt logprobs decoded"),
+    );
+
+    let multipart_prompt =
+        decode_engine_core_outputs(&decode_frames(multipart_prompt_frames)).unwrap();
+    expect_prompt_logprobs(
+        multipart_prompt.outputs[0]
+            .new_prompt_logprobs_tensors
+            .as_ref()
+            .expect("multipart prompt logprobs decoded"),
+    );
 }

@@ -20,6 +20,7 @@ arc-swap = "1.9.0"
 async-openai = "0.33.1"
 async-trait = "0.1.89"
 axum = "0.8.8"
+byteorder = "1.5.0"
 bytes = "1.11.1"
 clap = { version = "4.5.38", features = ["derive", "env"] }
 easy-ext = "1.0.3"
@@ -32,6 +33,7 @@ hex = "0.4.3"
 hf-hub = { version = "0.5.0", features = ["tokio"] }
 http-body = "1.0.1"
 libc = "0.2.177"
+ndarray = { version = "0.16.1", features = ["serde"] }
 openai-protocol = { version = "1.4.0", features = ["axum"] }
 parking_lot = "0.12.5"
 prometheus-client = "0.24.0"

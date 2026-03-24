@@ -3,12 +3,16 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #   "msgspec>=0.19,<1",
+#   "msgpack>=1,<2",
+#   "numpy>=2,<3",
 # ]
 # ///
 
 from enum import Enum, IntEnum
 
 import msgspec
+import msgpack
+import numpy as np
 
 
 class RequestOutputKind(Enum):
@@ -138,5 +142,123 @@ outputs = EngineCoreOutputs(
     finished_requests={"req-1"},
 )
 
+
+def encode_ndarray(array: np.ndarray, buffers: list[bytes], *, size_threshold: int = 256):
+    arr_data = array.data if array.flags.c_contiguous else array.tobytes()
+    if not array.shape or array.nbytes < size_threshold:
+        data = msgpack.ExtType(3, bytes(arr_data))
+    else:
+        data = len(buffers)
+        buffers.append(bytes(arr_data))
+    return [array.dtype.str, list(array.shape), data]
+
+
+def encode_tensor_like(dtype: str, shape: list[int], payload: bytes, buffers: list[bytes], *, size_threshold: int = 256):
+    if len(payload) < size_threshold:
+        data = msgpack.ExtType(3, payload)
+    else:
+        data = len(buffers)
+        buffers.append(payload)
+    return [dtype, shape, data]
+
+
+def encode_output_frames(obj, *, size_threshold: int = 256) -> list[bytes]:
+    buffers = [b""]
+
+    def transform(value):
+        if isinstance(value, np.ndarray):
+            return encode_ndarray(value, buffers, size_threshold=size_threshold)
+        if isinstance(value, tuple) and len(value) == 3 and value[0] in ("int32", "float32"):
+            dtype, shape, payload = value
+            return encode_tensor_like(dtype, shape, payload, buffers, size_threshold=size_threshold)
+        if type(value) is list:
+            return [transform(v) for v in value]
+        if type(value) is tuple:
+            return [transform(v) for v in value]
+        if type(value) is dict:
+            return {k: transform(v) for k, v in value.items()}
+        return value
+
+    buffers[0] = msgpack.packb(transform(obj), use_bin_type=True)
+    return buffers
+
+
+def engine_output_wire(request_id: str, *, new_logprobs=None, new_prompt_logprobs_tensors=None):
+    return [
+        request_id,
+        [7, 8],
+        new_logprobs,
+        new_prompt_logprobs_tensors,
+        None,
+        int(FinishReason.LENGTH),
+    ]
+
+
+def engine_outputs_wire(output):
+    return [0, [output], None, 0.0, None, ["req-1"]]
+
+
+inline_logprobs = engine_outputs_wire(
+    engine_output_wire(
+        "req-1",
+        new_logprobs=(
+            np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int32),
+            np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32),
+            np.array([1, 2], dtype=np.int32),
+            [0, 2],
+        ),
+    )
+)
+
+multipart_logprobs = engine_outputs_wire(
+    engine_output_wire(
+        "req-1",
+        new_logprobs=(
+            np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int32),
+            np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32),
+            np.array([1, 2], dtype=np.int32),
+            [0, 2],
+        ),
+    )
+)
+
+inline_prompt_logprobs = engine_outputs_wire(
+    engine_output_wire(
+        "req-1",
+        new_prompt_logprobs_tensors=(
+            ("int32", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.int32).tobytes()),
+            ("float32", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.float32).tobytes()),
+            ("int32", [2], np.array([3, 4], dtype=np.int32).tobytes()),
+            [0, 2],
+        ),
+    )
+)
+
+multipart_prompt_logprobs = engine_outputs_wire(
+    engine_output_wire(
+        "req-1",
+        new_prompt_logprobs_tensors=(
+            ("int32", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.int32).tobytes()),
+            ("float32", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.float32).tobytes()),
+            ("int32", [2], np.array([3, 4], dtype=np.int32).tobytes()),
+            [0, 2],
+        ),
+    )
+)
+
 print(msgspec.msgpack.encode(request).hex())
 print(msgspec.msgpack.encode(outputs).hex())
+print(" ".join(frame.hex() for frame in encode_output_frames(inline_logprobs)))
+print(
+    " ".join(
+        frame.hex()
+        for frame in encode_output_frames(multipart_logprobs, size_threshold=1)
+    )
+)
+print(" ".join(frame.hex() for frame in encode_output_frames(inline_prompt_logprobs)))
+print(
+    " ".join(
+        frame.hex()
+        for frame in encode_output_frames(multipart_prompt_logprobs, size_threshold=1)
+    )
+)

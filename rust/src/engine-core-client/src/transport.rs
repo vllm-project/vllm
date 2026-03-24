@@ -11,7 +11,9 @@ use zeromq::{PullSocket, RouterSendHalf, RouterSocket, ZmqMessage};
 
 use crate::error::{Error, Result};
 use crate::protocol::handshake::{HandshakeAddresses, HandshakeInitMessage, ReadyMessage};
-use crate::protocol::{EngineCoreOutputs, decode_msgpack, encode_msgpack};
+use crate::protocol::{
+    EngineCoreOutputs, decode_engine_core_outputs, decode_msgpack, encode_msgpack,
+};
 
 /// Dedicated single-frame sentinel emitted by Python `EngineCoreProc` when the engine dies.
 pub const ENGINE_CORE_DEAD_SENTINEL: &[u8] = b"ENGINE_CORE_DEAD";
@@ -281,25 +283,17 @@ pub async fn run_output_loop(
 
         let frame_count = message.len();
         trace!(frame_count, "received output message");
-        if frame_count != 1 {
-            error!(
-                frame_count,
-                "unsupported auxiliary frames in output message"
-            );
-            let _ = tx
-                .send(Err(Error::UnsupportedAuxFrames { frame_count }))
-                .await;
-            return;
-        }
-
-        let frame = message.into_vec().into_iter().next().unwrap();
+        let frames = message.into_vec();
+        let frame = frames
+            .first()
+            .expect("output message must have at least one frame");
         let frame_len = frame.len();
         if frame.as_ref() == ENGINE_CORE_DEAD_SENTINEL {
             warn!("received ENGINE_CORE_DEAD sentinel from engine");
             let _ = tx.send(Err(Error::EngineCoreDead)).await;
             return;
         }
-        let decoded = match decode_msgpack(frame.as_ref()) {
+        let decoded = match decode_engine_core_outputs(&frames) {
             Ok(decoded) => {
                 trace!(frame_len, outputs = ?decoded, "decoded output message");
                 Ok(decoded)

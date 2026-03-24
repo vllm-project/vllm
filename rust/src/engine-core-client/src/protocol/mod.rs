@@ -24,9 +24,11 @@ use crate::protocol::stats::SchedulerStats;
 /// yet strongly typed in the early-stage Rust client.
 pub type OpaqueValue = Value;
 
+mod aux;
 mod classfied_outputs;
 pub mod handshake;
 pub mod stats;
+pub use aux::{Logprobs, MaybeWireLogprobs, decode_engine_core_outputs};
 pub use classfied_outputs::{
     ClassifiedEngineCoreOutputs, DpControlMessage, OtherEngineCoreOutputs, RequestBatchOutputs,
     UtilityCallOutput,
@@ -333,9 +335,9 @@ pub struct EngineCoreOutput {
     pub request_id: String,
     pub new_token_ids: Vec<u32>,
     #[serde(default)]
-    pub new_logprobs: Option<OpaqueValue>,
+    pub new_logprobs: Option<MaybeWireLogprobs>,
     #[serde(default)]
-    pub new_prompt_logprobs_tensors: Option<OpaqueValue>,
+    pub new_prompt_logprobs_tensors: Option<MaybeWireLogprobs>,
     #[serde(default)]
     pub pooling_output: Option<OpaqueValue>,
     #[serde(default)]
