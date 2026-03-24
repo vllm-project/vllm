@@ -2,34 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3Next model."""
 
-from collections.abc import Iterable
-from itertools import islice
-
 import torch
 from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
 from vllm import envs
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
-    CacheConfig,
-    ModelConfig,
     VllmConfig,
     get_current_vllm_config,
 )
 from vllm.distributed import (
     divide,
-    get_ep_group,
-    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_gather,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 from vllm.model_executor.layers.fla.ops import (
     chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
 )
@@ -38,24 +28,15 @@ from vllm.model_executor.layers.fla.ops import (
     fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
-from vllm.model_executor.layers.layernorm import (
-    GemmaRMSNorm as Qwen3NextRMSNorm,
-)
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
-    QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateCopyFunc,
-    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -64,21 +45,12 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
     sharded_weight_loader,
 )
-from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
-from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
@@ -89,11 +61,8 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-from vllm.model_executor.models.utils import extract_layer_index
-from vllm.model_executor.custom_op import PluggableLayer
-
-
 logger = init_logger(__name__)
+
 
 def fi_chunk_gated_delta_rule(
     q: torch.Tensor,
@@ -236,7 +205,8 @@ class ChunkGatedDeltaRule(CustomOp):
             cu_seqlens=cu_seqlens,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
-        
+
+
 @PluggableLayer.register("gated_delta_net_attention")
 class GatedDeltaNetAttention(PluggableLayer, MambaBase):
     @property
@@ -304,7 +274,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             else 0
         )
         self.gqa_interleaved_layout = gqa_interleaved_layout
-        
+
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
         self.conv1d = ColumnParallelLinear(
@@ -558,7 +528,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             sum(self.in_proj_ba.output_sizes) // self.tp_size,
             self.prefix,
         )
-        
+
         if self.gqa_interleaved_layout:
             # Qwen3-Next: unpack the interleaved GQA layout
             query, key, value, z, b, a = self.fix_query_key_value_ordering(
@@ -710,11 +680,13 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         torch.accelerator.empty_cache()
 
     def _qkvz_output_size(self) -> int:
-        """Per-rank output size of the qkvz projection (used by gdn_in_proj fake impl)."""
+        """Per-rank output size of the qkvz projection (for gdn_in_proj fake impl)."""
         if hasattr(self, "in_proj_qkvz"):
             return sum(self.in_proj_qkvz.output_sizes) // self.tp_size
         # LoRA case: separate in_proj_qkv (q+k+v) and in_proj_z
-        return (sum(self.in_proj_qkv.output_sizes) + self.in_proj_z.output_size) // self.tp_size
+        return (
+            sum(self.in_proj_qkv.output_sizes) + self.in_proj_z.output_size
+        ) // self.tp_size
 
     def _forward_in_proj(
         self, hidden_states: torch.Tensor

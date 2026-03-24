@@ -6,11 +6,8 @@ from collections.abc import Iterable
 from itertools import islice
 
 import torch
-from einops import rearrange
 from torch import nn
-from transformers.activations import ACT2FN
 
-from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -19,51 +16,30 @@ from vllm.config import (
     get_current_vllm_config,
 )
 from vllm.distributed import (
-    divide,
     get_ep_group,
     get_pp_group,
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fla.ops import (
-    chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
-)
-from vllm.model_executor.layers.fla.ops import (
-    fused_recurrent_gated_delta_rule_packed_decode,
-    fused_sigmoid_gating_delta_rule_update,
-)
-from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
 )
-from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
+from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
-from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-    causal_conv1d_fn,
-    causal_conv1d_update,
-)
-from vllm.model_executor.layers.mamba.gdn_linear_attn import GatedDeltaNetAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -73,18 +49,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
-    sharded_weight_loader,
 )
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
-from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from .interfaces import (
     HasInnerState,
@@ -840,4 +809,3 @@ class Qwen3NextForCausalLM(
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
-
