@@ -1443,11 +1443,9 @@ class OpenAIServingResponses(OpenAIServing):
             # instructions are ignored.
             if prev_messages is not None:
                 # Stateless path: messages came from the encrypted_content
-                # state carrier; deserialize dicts back to OpenAIHarmonyMessage.
-                prev_msgs = [
-                    OpenAIHarmonyMessage.model_validate(m) if isinstance(m, dict) else m
-                    for m in prev_messages
-                ]
+                # state carrier; restore wire-format dicts back to
+                # OpenAIHarmonyMessage via the library's typed constructor.
+                prev_msgs = self._restore_harmony_state_messages(prev_messages)
             else:
                 prev_msgs = await self.store.get_messages(prev_response.id) or []
 
@@ -1482,6 +1480,15 @@ class OpenAIServingResponses(OpenAIServing):
                 if isinstance(response_msg, ResponseFunctionToolCall):
                     prev_outputs.append(response_msg)
         return messages
+
+    @staticmethod
+    def _restore_harmony_state_messages(
+        prev_messages: list,
+    ) -> list[OpenAIHarmonyMessage]:
+        return [
+            OpenAIHarmonyMessage.from_dict(m) if isinstance(m, dict) else m
+            for m in prev_messages
+        ]
 
     async def _run_background_request_stream(
         self,
