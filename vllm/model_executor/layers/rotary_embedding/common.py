@@ -263,9 +263,15 @@ class ApplyRotaryEmb(CustomOp):
                 ...
             """
             interleaved = not self.is_neox_style
-            output = self.apply_rotary_emb_flash_attn(
-                x, cos, sin, interleaved=interleaved
-            ).type_as(x)
+            try:
+                output = self.apply_rotary_emb_flash_attn(
+                    x, cos, sin, interleaved=interleaved
+                ).type_as(x)
+            except RuntimeError:
+                self.apply_rotary_emb_flash_attn = None
+                output = self.forward_static(
+                    x, cos, sin, self.is_neox_style, self.enable_fp32_compute
+                )
 
             output = self._post_process(output, origin_shape, origin_dtype)
         else:
