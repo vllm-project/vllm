@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
@@ -1475,17 +1474,6 @@ class ModelConfig:  # type: ignore[misc]
             if self.convert_type == "classify"
             else self._model_info.score_type
         )
-
-    @property
-    def is_causal_lm(self) -> bool:
-        """Check if the model architecture is a CausalLM model.
-        
-        Returns True if any architecture in hf_config.architectures matches
-        the pattern .*ForCausalLM.* (e.g., LlamaForCausalLM, Qwen2ForCausalLM).
-        """
-        architectures = getattr(self.hf_config, "architectures", [])
-        pattern = re.compile(r".*ForCausalLM.*")
-        return any(pattern.match(arch) for arch in architectures)
 
     @property
     def is_pp_supported(self) -> bool:

@@ -484,31 +484,34 @@ Example template file: [examples/pooling/score/template/nemotron-rerank.jinja](.
 
 #### CausalLM Models (Generative Scoring)
 
-When using a CausalLM model (e.g., Llama, Qwen, Mistral) with the Score API, the endpoint computes the probability of specified token IDs appearing as the next token. This is useful for generative scoring tasks, sentiment analysis, or any scenario where you want to score the likelihood of specific tokens.
+When using a CausalLM model (e.g., Llama, Qwen, Mistral) with the Score API, the `/generative_score` endpoint computes the probability of specified token IDs appearing as the next token. Each item (document) is concatenated with the query to form a prompt, and the model predicts how likely each label token is as the next token after that prompt. This lets you score items against a query — for example, asking "Is this the capital of France?" and scoring each city by how likely the model is to answer "Yes".
 
 **Requirements for CausalLM models:**
 
-- The `label_token_ids` parameter is **required** and must contain **exactly 2 token IDs** (for generative scoring).
-- The score is computed as: `P(label_token_ids[0]) / (P(label_token_ids[0]) + P(label_token_ids[1]))`
+- The `label_token_ids` parameter is **required** and must contain **at least 1 token ID**.
+- When 2 label tokens are provided, the score equals `P(label_token_ids[0]) / (P(label_token_ids[0]) + P(label_token_ids[1]))` (softmax over the two labels).
+- When more labels are provided, the score is the softmax-normalized probability of the first label token across all label tokens.
 
 ##### Example: Score with CausalLM
 
 ```bash
-curl -X POST http://localhost:8000/v1/score \
+curl -X POST http://localhost:8000/generative_score \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-0.6B",
-    "queries": "Is this city the capital of France?",
-    "documents": ["Paris", "London", "Berlin"],
+    "query": "Is this city the capital of France?",
+    "items": ["Paris", "London", "Berlin"],
     "label_token_ids": [9454, 2753]
   }'
 ```
+
+Here, each item is appended to the query to form prompts like `"Is this city the capital of France? Paris"`, `"... London"`, etc. The model then predicts the next token, and the score reflects the probability of "Yes" (token 9454) vs "No" (token 2753).
 
 ??? console "Response"
 
     ```json
     {
-      "id": "score-abc123",
+      "id": "generative-score-abc123",
       "object": "list",
       "created": 1234567890,
       "model": "Qwen/Qwen3-0.6B",
@@ -523,11 +526,11 @@ curl -X POST http://localhost:8000/v1/score \
 
 ##### How it works
 
-1. **Prompt Construction**: For each document, builds `prompt = query + document`
-2. **Forward Pass**: Runs the model to get next-token logits
-3. **Probability Extraction**: Extracts logprobs for the 2 specified `label_token_ids`
-4. **Softmax Normalization**: Applies softmax over only the 2 label tokens
-5. **Score Computation**: Returns `P(token[0]) / (P(token[0]) + P(token[1]))` as the score
+1. **Prompt Construction**: For each item, builds `prompt = query + item` (or `item + query` if `item_first=true`)
+2. **Forward Pass**: Runs the model on each prompt to get next-token logits
+3. **Probability Extraction**: Extracts logprobs for the specified `label_token_ids`
+4. **Softmax Normalization**: Applies softmax over only the label tokens (when `apply_softmax=true`)
+5. **Score**: Returns the normalized probability of the first label token
 
 ##### Finding Token IDs
 

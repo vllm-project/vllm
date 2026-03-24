@@ -33,8 +33,7 @@ from vllm.tokenizers import get_tokenizer
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-MODEL_PATH = "/shared/public/elr-models/Qwen/Qwen3-0.6B/e6de91484c29aa9480d55605af694f39b081c455/"
-BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_PATH)]
+BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 
 
 @dataclass
@@ -46,7 +45,7 @@ class MockHFConfig:
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
-    tokenizer = MODEL_PATH
+    tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
     max_model_len = 100
@@ -74,7 +73,7 @@ class MockModelConfig:
 def _create_mock_engine():
     """Create a mock AsyncLLM engine."""
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_PATH)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()

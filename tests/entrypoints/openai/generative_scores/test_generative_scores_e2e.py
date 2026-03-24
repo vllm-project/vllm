@@ -11,7 +11,6 @@ import requests
 from ....utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-MODEL_PATH = "/shared/public/elr-models/Qwen/Qwen3-0.6B/e6de91484c29aa9480d55605af694f39b081c455/"
 
 
 @pytest.fixture(scope="module")
@@ -22,7 +21,7 @@ def server():
         "--enforce-eager",
         "--max-num-seqs", "32",
     ]
-    with RemoteOpenAIServer(MODEL_PATH, args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
