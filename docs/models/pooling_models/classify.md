@@ -89,7 +89,7 @@ probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
 
-A code example can be found here: [examples/basic/offline_inference/basic/classify.py](../../../examples/basic/offline_inference/classify.py)
+A code example can be found here: [examples/basic/offline_inference/classify.py](../../../examples/basic/offline_inference/classify.py)
 
 ### `LLM.encode`
 
