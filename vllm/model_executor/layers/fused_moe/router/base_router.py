@@ -85,7 +85,7 @@ if current_platform.is_cuda_alike():
         numel = topk_ids_in.numel()
         if numel == 0:
             return topk_ids
-        out_flat = torch.empty((numel,), device=topk_ids.device, dtype=torch.int64)
+        out_flat = torch.empty((numel,), device=topk_ids.device, dtype=topk_ids.dtype)
         grid = lambda meta: (triton.cdiv(numel, meta["BLOCK_SIZE"]),)
         _eplb_map_and_record_i32_kernel[grid](
             topk_ids_in,
