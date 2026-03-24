@@ -12,6 +12,8 @@ from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
+from .cache import get_hidden_states_cumsum
+
 SequencePoolingMethodOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 
 
@@ -70,9 +72,7 @@ class MeanPool(SequencePoolingMethod):
             hidden_states.device, non_blocking=True
         )
 
-        # Use float32 for torch.cumsum in MeanPool,
-        # otherwise precision will be lost significantly.
-        cumsum = torch.cumsum(hidden_states, dim=0, dtype=torch.float32)
+        cumsum = get_hidden_states_cumsum(hidden_states)
 
         start_indices = pooling_cursor.first_token_indices_gpu
         end_indices = pooling_cursor.last_token_indices_gpu
