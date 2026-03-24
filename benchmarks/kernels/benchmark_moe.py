@@ -304,19 +304,19 @@ def benchmark_config(
 
     # JIT compilation & warmup
     run()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Capture 10 invocations with CUDA graph
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         for _ in range(10):
             run()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Warmup
     for _ in range(5):
         graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     start_event = torch.Event(enable_timing=True)
     end_event = torch.Event(enable_timing=True)
@@ -324,7 +324,7 @@ def benchmark_config(
     latencies: list[float] = []
     for i in range(num_iters):
         prepare(i)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         start_event.record()
         graph.replay()
@@ -626,7 +626,11 @@ class BenchmarkWorker:
             if visible_device != f"{self.device_id}":
                 need_device_guard = True
 
-        with torch.cuda.device(self.device_id) if need_device_guard else nullcontext():
+        with (
+            torch.accelerator.device_index(self.device_id)
+            if need_device_guard
+            else nullcontext()
+        ):
             for idx, config in enumerate(tqdm(search_space)):
                 try:
                     kernel_time = benchmark_config(
@@ -746,17 +750,20 @@ def get_weight_block_size_safety(config, default_value=None):
 
 
 def get_model_params(config):
-    if config.architectures[0] == "DbrxForCausalLM":
+    architectures = getattr(config, "architectures", None) or [type(config).__name__]
+    architecture = architectures[0]
+
+    if architecture == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
         intermediate_size = config.ffn_config.ffn_hidden_size
         hidden_size = config.hidden_size
-    elif config.architectures[0] == "JambaForCausalLM":
+    elif architecture == "JambaForCausalLM":
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
         hidden_size = config.hidden_size
-    elif config.architectures[0] in (
+    elif architecture in (
         "DeepseekV2ForCausalLM",
         "DeepseekV3ForCausalLM",
         "DeepseekV32ForCausalLM",
@@ -770,7 +777,7 @@ def get_model_params(config):
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         hidden_size = config.hidden_size
-    elif config.architectures[0] in (
+    elif architecture in (
         "Qwen2MoeForCausalLM",
         "Qwen3MoeForCausalLM",
         "Qwen3NextForCausalLM",
@@ -779,23 +786,27 @@ def get_model_params(config):
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         hidden_size = config.hidden_size
-    elif config.architectures[0] == "Qwen3VLMoeForConditionalGeneration":
+    elif architecture in (
+        "Qwen3VLMoeForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+        "Qwen3_5MoeTextConfig",
+    ):
         text_config = config.get_text_config()
         E = text_config.num_experts
         topk = text_config.num_experts_per_tok
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
-    elif config.architectures[0] == "HunYuanMoEV1ForCausalLM":
+    elif architecture == "HunYuanMoEV1ForCausalLM":
         E = config.num_experts
         topk = config.moe_topk[0]
         intermediate_size = config.moe_intermediate_size[0]
         hidden_size = config.hidden_size
-    elif config.architectures[0] == "Qwen3OmniMoeForConditionalGeneration":
+    elif architecture == "Qwen3OmniMoeForConditionalGeneration":
         E = config.thinker_config.text_config.num_experts
         topk = config.thinker_config.text_config.num_experts_per_tok
         intermediate_size = config.thinker_config.text_config.moe_intermediate_size
         hidden_size = config.thinker_config.text_config.hidden_size
-    elif config.architectures[0] == "PixtralForConditionalGeneration":
+    elif architecture == "PixtralForConditionalGeneration":
         # Pixtral can contain different LLM architectures,
         # recurse to get their parameters
         return get_model_params(config.get_text_config())
@@ -808,6 +819,23 @@ def get_model_params(config):
         intermediate_size = config.intermediate_size
         hidden_size = config.hidden_size
     return E, topk, intermediate_size, hidden_size
+
+
+def resolve_dtype(config) -> torch.dtype:
+    if current_platform.is_rocm():
+        return torch.float16
+
+    dtype = getattr(config, "dtype", None)
+    if dtype is not None:
+        return dtype
+
+    if hasattr(config, "get_text_config"):
+        text_config = config.get_text_config()
+        dtype = getattr(text_config, "dtype", None)
+        if dtype is not None:
+            return dtype
+
+    return torch.bfloat16
 
 
 def get_quantization_group_size(config) -> int | None:
@@ -857,7 +885,7 @@ def main(args: argparse.Namespace):
     else:
         ensure_divisibility(intermediate_size, args.tp_size, "intermediate_size")
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-    dtype = torch.float16 if current_platform.is_rocm() else config.dtype
+    dtype = resolve_dtype(config)
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
     use_int8_w8a16 = args.dtype == "int8_w8a16"
     use_int4_w4a16 = args.dtype == "int4_w4a16"

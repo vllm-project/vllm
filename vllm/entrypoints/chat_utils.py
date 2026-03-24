@@ -462,10 +462,15 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     maximum per prompt.
     """
 
-    def __init__(self, model_config: ModelConfig):
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+    ):
         super().__init__()
 
         self._model_config = model_config
+        self._media_io_kwargs = media_io_kwargs
 
         self._items_by_modality = defaultdict[str, list[_T]](list)
         # Track original modality for each vision_chunk item (image or video)
@@ -486,6 +491,14 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsMultiModal], model_cls)
+
+    @property
+    def media_io_kwargs(self) -> dict[str, dict[str, Any]] | None:
+        return self._media_io_kwargs or (
+            self._model_config.multimodal_config.media_io_kwargs
+            if self._model_config.multimodal_config
+            else None
+        )
 
     @property
     def allowed_local_media_path(self):
@@ -551,7 +564,9 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return self.model_cls.get_placeholder_str(modality, num_items)
 
     @abstractmethod
-    def create_parser(self) -> "BaseMultiModalContentParser":
+    def create_parser(
+        self, mm_processor_kwargs: dict[str, Any] | None = None
+    ) -> "BaseMultiModalContentParser":
         raise NotImplementedError
 
 
@@ -677,8 +692,10 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[tuple[object, str | None]]
             dict(self._items_by_modality), self.mm_processor, self._modality_order
         )
 
-    def create_parser(self) -> "BaseMultiModalContentParser":
-        return MultiModalContentParser(self)
+    def create_parser(
+        self, mm_processor_kwargs: dict[str, Any] | None = None
+    ) -> "BaseMultiModalContentParser":
+        return MultiModalContentParser(self, mm_processor_kwargs=mm_processor_kwargs)
 
 
 class AsyncMultiModalItemTracker(
@@ -699,8 +716,12 @@ class AsyncMultiModalItemTracker(
             resolved_items_by_modality, self.mm_processor, self._modality_order
         )
 
-    def create_parser(self) -> "BaseMultiModalContentParser":
-        return AsyncMultiModalContentParser(self)
+    def create_parser(
+        self, mm_processor_kwargs: dict[str, Any] | None = None
+    ) -> "BaseMultiModalContentParser":
+        return AsyncMultiModalContentParser(
+            self, mm_processor_kwargs=mm_processor_kwargs
+        )
 
 
 class BaseMultiModalContentParser(ABC):
@@ -765,19 +786,23 @@ class BaseMultiModalContentParser(ABC):
 
 
 class MultiModalContentParser(BaseMultiModalContentParser):
-    def __init__(self, tracker: MultiModalItemTracker) -> None:
+    def __init__(
+        self,
+        tracker: MultiModalItemTracker,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__()
 
         self._tracker = tracker
-        multimodal_config = self._tracker.model_config.multimodal_config
-        media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None)
 
         self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
             envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=media_io_kwargs,
+            media_io_kwargs=tracker.media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
         )
+
+        self._mm_processor_kwargs = mm_processor_kwargs
 
     @property
     def model_config(self) -> ModelConfig:
@@ -875,20 +900,33 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         placeholder = self._tracker.add("video", (video, uuid))
         self._add_placeholder("video", placeholder)
 
+        # Extract audio from video if use_audio_in_video is True
+        if (
+            video_url
+            and self._mm_processor_kwargs
+            and self._mm_processor_kwargs.get("use_audio_in_video", False)
+        ):
+            audio = self._connector.fetch_audio(video_url) if video_url else None
+            audio_placeholder = self._tracker.add("audio", (audio, uuid))
+            self._add_placeholder("audio", audio_placeholder)
+
 
 class AsyncMultiModalContentParser(BaseMultiModalContentParser):
-    def __init__(self, tracker: AsyncMultiModalItemTracker) -> None:
+    def __init__(
+        self,
+        tracker: AsyncMultiModalItemTracker,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__()
 
         self._tracker = tracker
-        multimodal_config = self._tracker.model_config.multimodal_config
-        media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None)
         self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
             envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=media_io_kwargs,
+            media_io_kwargs=tracker.media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
         )
+        self._mm_processor_kwargs: dict[str, Any] | None = mm_processor_kwargs
 
     @property
     def model_config(self) -> ModelConfig:
@@ -1023,6 +1061,16 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
         placeholder = self._tracker.add("video", coro)
         self._add_placeholder("video", placeholder)
+
+        # Extract audio from video if use_audio_in_video is True
+        if (
+            video_url
+            and self._mm_processor_kwargs
+            and self._mm_processor_kwargs.get("use_audio_in_video", False)
+        ):
+            audio_coro = self._audio_with_uuid_async(video_url, uuid)
+            audio_placeholder = self._tracker.add("audio", audio_coro)
+            self._add_placeholder("audio", audio_placeholder)
 
 
 @dataclass
@@ -1334,10 +1382,11 @@ def _parse_chat_message_content_parts(
     *,
     wrap_dicts: bool,
     interleave_strings: bool,
+    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> list[ConversationMessage]:
     content = list[_ContentPart]()
 
-    mm_parser = mm_tracker.create_parser()
+    mm_parser = mm_tracker.create_parser(mm_processor_kwargs=mm_processor_kwargs)
 
     for part in parts:
         parse_res = _parse_chat_message_content_part(
@@ -1379,6 +1428,8 @@ def _parse_chat_message_content_part(
     with multimodal placeholders.
     """
     if isinstance(part, str):  # Handle plain text parts
+        if wrap_dicts:
+            return {"type": "text", "text": part}
         return part
     # Handle structured dictionary parts
     part_type, content = _parse_chat_message_content_mm_part(part)
@@ -1438,11 +1489,9 @@ def _parse_chat_message_content_part(
     else:
         raise NotImplementedError(f"Unknown part type: {part_type}")
 
-    return (
-        {"type": modality}
-        if wrap_dicts
-        else (MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None)
-    )
+    if wrap_dicts:
+        return {"type": modality}
+    return MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
 
 
 # No need to validate using Pydantic again
@@ -1455,6 +1504,7 @@ def _parse_chat_message_content(
     mm_tracker: BaseMultiModalItemTracker,
     content_format: ChatTemplateContentFormat,
     interleave_strings: bool,
+    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> list[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
@@ -1470,6 +1520,7 @@ def _parse_chat_message_content(
         mm_tracker,
         wrap_dicts=(content_format == "openai"),
         interleave_strings=interleave_strings,
+        mm_processor_kwargs=mm_processor_kwargs,
     )
 
     for result_msg in result:
@@ -1530,13 +1581,15 @@ def parse_chat_messages(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
     content_format: ChatTemplateContentFormat,
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
     MultiModalUUIDDict | None,
 ]:
     conversation: list[ConversationMessage] = []
-    mm_tracker = MultiModalItemTracker(model_config)
+    mm_tracker = MultiModalItemTracker(model_config, media_io_kwargs=media_io_kwargs)
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
@@ -1548,6 +1601,7 @@ def parse_chat_messages(
                 and model_config.multimodal_config is not None
                 and model_config.multimodal_config.interleave_mm_strings
             ),
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
         conversation.extend(sub_messages)
@@ -1563,13 +1617,17 @@ async def parse_chat_messages_async(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
     content_format: ChatTemplateContentFormat,
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
     MultiModalUUIDDict | None,
 ]:
     conversation: list[ConversationMessage] = []
-    mm_tracker = AsyncMultiModalItemTracker(model_config)
+    mm_tracker = AsyncMultiModalItemTracker(
+        model_config, media_io_kwargs=media_io_kwargs
+    )
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
@@ -1581,6 +1639,7 @@ async def parse_chat_messages_async(
                 and model_config.multimodal_config is not None
                 and model_config.multimodal_config.interleave_mm_strings
             ),
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
         conversation.extend(sub_messages)
@@ -1599,6 +1658,20 @@ def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):
             tool_calls = msg.get("tool_calls")
             idx += len(list(tool_calls)) if tool_calls is not None else 0  # noqa
     return idx
+
+
+_KIMI_MODEL_TYPES = ("kimi_k2", "kimi_k25")
+
+
+def get_tool_call_id_type(model_config: ModelConfig) -> str:
+    """Return the tool-call ID type for a given model configuration."""
+    hf_overrides = getattr(model_config, "hf_overrides", None)
+    if model_config.hf_text_config.model_type in _KIMI_MODEL_TYPES or (
+        isinstance(hf_overrides, dict)
+        and hf_overrides.get("model_type") in _KIMI_MODEL_TYPES
+    ):
+        return "kimi_k2"
+    return "random"
 
 
 def make_tool_call_id(id_type: str = "random", func_name=None, idx=None):
