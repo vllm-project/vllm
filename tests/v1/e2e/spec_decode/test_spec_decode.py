@@ -918,22 +918,22 @@ def test_draft_model_engine_args_tensor_parallelism():
             "draft_tensor_parallel_size": 1,  # <<< valid arg name
         },
     )
-    tgt_vllm_config: VllmConfig = engine_args.create_engine_config()
-    assert tgt_vllm_config.parallel_config.tensor_parallel_size == 2
-    assert tgt_vllm_config.quant_config.get_name() == "fp8"
+    target_config: VllmConfig = engine_args.create_engine_config()
+    assert target_config.parallel_config.tensor_parallel_size == 2
+    assert target_config.quant_config.get_name() == "fp8"
 
-    sc = tgt_vllm_config.speculative_config
-    draft_vllm_config: VllmConfig = replace(
-        tgt_vllm_config,
+    speculative_config = target_config.speculative_config
+    draft_config: VllmConfig = replace(
+        target_config,
         quant_config=None,
         parallel_config=replace(
-            sc.draft_parallel_config,
-            rank=tgt_vllm_config.parallel_config.rank,
+            speculative_config.draft_parallel_config,
+            rank=target_config.parallel_config.rank,
         ),
-        model_config=sc.draft_model_config,
+        model_config=speculative_config.draft_model_config,
     )
-    assert draft_vllm_config.parallel_config.tensor_parallel_size == 1
-    assert draft_vllm_config.quant_config is None
+    assert draft_config.parallel_config.tensor_parallel_size == 1
+    assert draft_config.quant_config is None
 
 
 @pytest.mark.parametrize(
@@ -1004,46 +1004,49 @@ def test_draft_moe_backend(
 ):
     """speculative_config.moe_backend must propagate (or inherit) correctly
     across drafting methods."""
-    spec_cfg = {**spec_method_cfg}
+    spec_method_args = {**spec_method_cfg}
     if draft_moe_backend is not None:
-        spec_cfg["moe_backend"] = draft_moe_backend
+        spec_method_args["moe_backend"] = draft_moe_backend
 
     engine_args = EngineArgs(
         model=target_model,
         tensor_parallel_size=tensor_parallel_size,
         trust_remote_code=trust_remote_code,
         moe_backend=target_moe_backend,
-        speculative_config=spec_cfg,
+        speculative_config=spec_method_args,
     )
-    tgt_cfg: VllmConfig = engine_args.create_engine_config()
-    assert tgt_cfg.kernel_config.moe_backend == expected_target
+    target_config: VllmConfig = engine_args.create_engine_config()
+    assert target_config.kernel_config.moe_backend == expected_target
 
     # Base proposer path: override moe_backend from speculative_config
-    sc = tgt_cfg.speculative_config
-    if sc.moe_backend is not None:
+    speculative_config = target_config.speculative_config
+    if speculative_config.moe_backend is not None:
         applied = replace(
-            tgt_cfg,
-            kernel_config=replace(tgt_cfg.kernel_config, moe_backend=sc.moe_backend),
+            target_config,
+            kernel_config=replace(
+                target_config.kernel_config,
+                moe_backend=speculative_config.moe_backend,
+            ),
         )
     else:
-        applied = tgt_cfg
+        applied = target_config
     assert applied.kernel_config.moe_backend == expected_draft
-    assert applied.model_config is tgt_cfg.model_config
-    assert applied.parallel_config is tgt_cfg.parallel_config
+    assert applied.model_config is target_config.model_config
+    assert applied.parallel_config is target_config.parallel_config
     if draft_moe_backend is None:
-        assert applied is tgt_cfg
+        assert applied is target_config
 
     # DraftModelProposer path: extends base with quant/parallel/model overrides
-    draft_cfg = replace(
+    draft_config = replace(
         applied,
         quant_config=None,
         parallel_config=replace(
-            sc.draft_parallel_config,
-            rank=tgt_cfg.parallel_config.rank,
+            speculative_config.draft_parallel_config,
+            rank=target_config.parallel_config.rank,
         ),
-        model_config=sc.draft_model_config,
+        model_config=speculative_config.draft_model_config,
     )
-    assert draft_cfg.kernel_config.moe_backend == expected_draft
+    assert draft_config.kernel_config.moe_backend == expected_draft
 
 
 def test_draft_model_engine_args_rejects_invalid_tp_argname():
