@@ -31,17 +31,21 @@ from vllm.entrypoints.pooling.score.utils import (
     ScoreInputs,
     _cosine_similarity,
     compress_token_type_ids,
-    compute_maxsim_score,
     get_score_prompt,
+    parse_score_data_single,
     validate_score_input,
 )
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import ProcessorInputs, TokensPrompt, token_inputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async, merge_async_iterators
+from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.v1.pool.late_interaction import (
+    build_late_interaction_doc_params,
+    build_late_interaction_query_params,
+)
 
 logger = init_logger(__name__)
 
@@ -60,22 +64,20 @@ class ServingScores(OpenAIServing):
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
-            log_error_stack=log_error_stack,
         )
         self.score_template = score_template
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
-        self.is_cross_encoder = self.model_config.is_cross_encoder
-        self.is_multimodal_model = self.model_config.is_multimodal_model
+        self.score_type = self.model_config.score_type
         self.architecture = self.model_config.architecture
-        self.is_late_interaction = self.model_config.is_late_interaction
+        self.is_multimodal_model = self.model_config.is_multimodal_model
 
-        if self.is_cross_encoder:
+        if self.score_type == "cross-encoder":
             self._score_func = self._cross_encoding_score
-        elif self.is_late_interaction:
+        elif self.score_type == "late-interaction":
             self._score_func = self._late_interaction_score
-        else:
+        else:  # "bi-encoder"
             self._score_func = self._embedding_score
 
     async def _embedding_score(
@@ -108,12 +110,15 @@ class ServingScores(OpenAIServing):
             *(encode_async(t, **tokenization_kwargs) for t in input_texts)
         )
 
-        engine_prompts: list[TokensPrompt] = []
+        engine_prompts: list[ProcessorInputs] = []
         for tok_result, input_text in zip(tokenized_prompts, input_texts):
             text_token_prompt = self._validate_input(request, tok_result, input_text)
 
             engine_prompts.append(
-                TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"])
+                token_inputs(
+                    text_token_prompt["prompt_token_ids"],
+                    prompt=input_text,
+                )
             )
 
         # Schedule the request and get the result generator.
@@ -125,7 +130,7 @@ class ServingScores(OpenAIServing):
 
             self._log_inputs(
                 request_id_item,
-                input_texts[i],
+                engine_prompt,
                 params=pooling_params,
                 lora_request=lora_request,
             )
@@ -171,6 +176,43 @@ class ServingScores(OpenAIServing):
 
         return final_res_batch
 
+    def _preprocess_late_interaction_item(
+        self,
+        data: ScoreData,
+        role: str,
+        request: RerankRequest | ScoreRequest,
+        tokenizer: TokenizerLike,
+        tokenization_kwargs: dict[str, Any],
+    ) -> tuple[str, TokensPrompt]:
+        """Parse a single ScoreData into a text + optional multimodal
+        TokensPrompt for late-interaction encoding.
+
+        For plain strings, tokenises directly.
+        For multimodal content parts, extracts text and multi_modal_data.
+        """
+        model_config = self.model_config
+
+        if isinstance(data, str):
+            text, mm_data, mm_uuids = data, None, None
+        else:
+            text, mm_data, mm_uuids = parse_score_data_single(data, role, model_config)
+
+        prompt_inputs = tokenizer(text, **tokenization_kwargs)
+        self._validate_input(request, prompt_inputs["input_ids"], text)
+
+        engine_prompt = TokensPrompt(
+            prompt_token_ids=prompt_inputs["input_ids"],
+        )
+
+        if mm_data is not None:
+            engine_prompt["multi_modal_data"] = mm_data
+        if mm_uuids is not None:
+            engine_prompt["multi_modal_uuids"] = mm_uuids
+        if request.mm_processor_kwargs is not None:
+            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
+
+        return text, engine_prompt
+
     async def _late_interaction_score(
         self,
         data_1: list[ScoreData],
@@ -186,51 +228,64 @@ class ServingScores(OpenAIServing):
         Encodes queries and documents into per-token embeddings, then computes
         MaxSim: sum over query tokens of max similarity to any document token.
         """
-        input_texts: list[str] = []
-        for text in data_1 + data_2:
-            if not isinstance(text, str):
-                raise NotImplementedError(
-                    "Late interaction scores currently do not support multimodal input."
-                )
-            input_texts.append(text)
-
         model_config = self.model_config
         tokenizer = self.renderer.get_tokenizer()
+        tokenization_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
 
-        encode_async = make_async(
-            tokenizer.encode,
+        all_data = data_1 + data_2
+        roles = ["query"] * len(data_1) + ["document"] * len(data_2)
+
+        preprocess_async = make_async(
+            self._preprocess_late_interaction_item,
             executor=self._tokenizer_executor,
         )
 
-        tokenization_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
-        tokenized_prompts = await asyncio.gather(
-            *(encode_async(t, **tokenization_kwargs) for t in input_texts)
+        preprocessed = await asyncio.gather(
+            *(
+                preprocess_async(
+                    data=d,
+                    role=r,
+                    request=request,
+                    tokenizer=tokenizer,
+                    tokenization_kwargs=tokenization_kwargs,
+                )
+                for d, r in zip(all_data, roles)
+            )
         )
 
-        engine_prompts: list[TokensPrompt] = []
-        for tok_result, input_text in zip(tokenized_prompts, input_texts):
-            text_token_prompt = self._validate_input(request, tok_result, input_text)
+        query_prompts: list[TokensPrompt] = [
+            prompt for _, prompt in preprocessed[: len(data_1)]
+        ]
+        doc_prompts: list[TokensPrompt] = [
+            prompt for _, prompt in preprocessed[len(data_1) :]
+        ]
 
-            engine_prompts.append(
-                TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"])
+        default_pooling_params = request.to_pooling_params("token_embed")
+
+        # stage 1: encode queries and cache token embeddings on workers.
+        query_keys = [f"{request_id}-query-{i}" for i in range(len(query_prompts))]
+        query_uses = [len(doc_prompts) if len(query_prompts) == 1 else 1] * len(
+            query_prompts
+        )
+        query_generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
+        for i, engine_prompt in enumerate(query_prompts):
+            request_id_item = f"{request_id}-query-{i}"
+            pooling_params = default_pooling_params.clone()
+            pooling_params.late_interaction_params = (
+                build_late_interaction_query_params(
+                    query_key=query_keys[i],
+                    query_uses=query_uses[i],
+                )
             )
-
-        # Schedule the request and get the result generator.
-        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
-
-        pooling_params = request.to_pooling_params("token_embed")
-
-        for i, engine_prompt in enumerate(engine_prompts):
-            request_id_item = f"{request_id}-{i}"
 
             self._log_inputs(
                 request_id_item,
-                input_texts[i],
+                engine_prompt,
                 params=pooling_params,
                 lora_request=lora_request,
             )
 
-            generators.append(
+            query_generators.append(
                 self.engine_client.encode(
                     engine_prompt,
                     pooling_params,
@@ -241,54 +296,71 @@ class ServingScores(OpenAIServing):
                 )
             )
 
-        result_generator = merge_async_iterators(*generators)
+        query_outputs: list[PoolingRequestOutput | None] = [None] * len(query_prompts)
+        if query_generators:
+            async for i, res in merge_async_iterators(*query_generators):
+                query_outputs[i] = res
 
-        # Collect token embeddings
-        embeddings: list[PoolingRequestOutput | None] = [None] * len(engine_prompts)
+        assert all(res is not None for res in query_outputs)
+        query_results = [res for res in query_outputs if res is not None]
 
-        async for i, res in result_generator:
-            embeddings[i] = res
+        # stage 2: encode docs and return scalar scores from workers.
+        doc_generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
+        for i, engine_prompt in enumerate(doc_prompts):
+            request_id_item = f"{request_id}-doc-{i}"
+            query_idx = 0 if len(query_prompts) == 1 else i
+            pooling_params = default_pooling_params.clone()
+            pooling_params.late_interaction_params = build_late_interaction_doc_params(
+                query_key=query_keys[query_idx]
+            )
 
-        # Split into query and document embeddings
-        emb_data_1: list[PoolingRequestOutput] = []
-        emb_data_2: list[PoolingRequestOutput] = []
+            self._log_inputs(
+                request_id_item,
+                engine_prompt,
+                params=pooling_params,
+                lora_request=lora_request,
+            )
 
-        for i in range(0, len(data_1)):
-            assert (emb := embeddings[i]) is not None
-            emb_data_1.append(emb)
+            doc_generators.append(
+                self.engine_client.encode(
+                    engine_prompt,
+                    pooling_params,
+                    request_id_item,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    priority=request.priority,
+                )
+            )
 
-        for i in range(len(data_1), len(embeddings)):
-            assert (emb := embeddings[i]) is not None
-            emb_data_2.append(emb)
+        doc_outputs: list[PoolingRequestOutput | None] = [None] * len(doc_prompts)
+        if doc_generators:
+            async for i, res in merge_async_iterators(*doc_generators):
+                doc_outputs[i] = res
 
-        # Expand queries if 1:N scoring
-        if len(emb_data_1) == 1:
-            emb_data_1 = emb_data_1 * len(emb_data_2)
-
-        # Compute MaxSim scores
-        from vllm.outputs import PoolingOutput
+        assert all(res is not None for res in doc_outputs)
+        doc_results = [res for res in doc_outputs if res is not None]
 
         scores: list[PoolingRequestOutput] = []
         padding: list[int] = []
         if (pad_token_id := tokenizer.pad_token_id) is not None:
             padding = [pad_token_id]
 
-        for emb_1, emb_2 in zip(emb_data_1, emb_data_2):
-            # emb_1.outputs.data: [query_len, dim]
-            # emb_2.outputs.data: [doc_len, dim]
-            q_emb = emb_1.outputs.data
-            d_emb = emb_2.outputs.data
+        if len(query_results) == 1:
+            query_results = query_results * len(doc_results)
 
-            maxsim_score = compute_maxsim_score(q_emb, d_emb)
-
-            tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids
+        for query_result, doc_result in zip(query_results, doc_results):
+            tokens = (
+                query_result.prompt_token_ids + padding + doc_result.prompt_token_ids
+            )
 
             scores.append(
                 PoolingRequestOutput(
-                    request_id=f"{emb_1.request_id}_{emb_2.request_id}",
-                    outputs=PoolingOutput(data=maxsim_score),
+                    request_id=f"{query_result.request_id}_{doc_result.request_id}",
+                    outputs=doc_result.outputs,
                     prompt_token_ids=tokens,
-                    num_cached_tokens=emb_1.num_cached_tokens + emb_2.num_cached_tokens,
+                    num_cached_tokens=(
+                        query_result.num_cached_tokens + doc_result.num_cached_tokens
+                    ),
                     finished=True,
                 )
             )
@@ -305,7 +377,7 @@ class ServingScores(OpenAIServing):
         trace_headers: Mapping[str, str] | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
         tokenizer = self.renderer.get_tokenizer()
-        if isinstance(tokenizer, MistralTokenizer):
+        if is_mistral_tokenizer(tokenizer):
             raise ValueError("MistralTokenizer not supported for cross-encoding")
 
         model_config = self.model_config
@@ -341,7 +413,7 @@ class ServingScores(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        default_pooling_params = request.to_pooling_params("score")
+        default_pooling_params = request.to_pooling_params("classify")
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
@@ -474,8 +546,6 @@ class ServingScores(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(e)
 
     async def do_rerank(
         self, request: RerankRequest, raw_request: Request | None = None
@@ -518,8 +588,6 @@ class ServingScores(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(e)
 
     def request_output_to_score_response(
         self,

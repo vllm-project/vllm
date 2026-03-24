@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_triton_kernels
 
 if not has_triton_kernels():
@@ -14,6 +15,7 @@ if not has_triton_kernels():
         allow_module_level=True,
     )
 
+import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
 import triton_kernels.swiglu
 from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 from triton_kernels.numerics import InFlexData
@@ -21,13 +23,18 @@ from triton_kernels.numerics_details.mxfp import downcast_to_mxfp, upcast_from_m
 from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
 from triton_kernels.tensor_details import layout
 from triton_kernels.testing import assert_close
+from triton_kernels.topk import topk as topk_fn
 
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import mxfp4_w4a16_moe_quant_config
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
+    legacy_routing,
+    make_routing_data,
     triton_kernel_moe_forward,
 )
-from vllm.model_executor.layers.utils import shuffle_weight
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import set_random_seed
+
+from .utils import shuffle_weight
 
 
 def deshuffle(w: torch.Tensor):
@@ -298,12 +305,24 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, workspace_init):
         pc2,
     ) = init_compute_data(M, K, N, E, a_dtype, w_dtype, num_warps=8)
 
-    quant_config = FusedMoEQuantConfig.make(
-        w1_bias=w1_bias_tri,
-        w2_bias=w2_bias_tri,
-        w1_scale=pc1,
-        w2_scale=pc2,
-    )
+    if current_platform.is_device_capability_family(100):
+        constraints = {
+            "is_persistent": True,
+        }
+        opt_flags.update_opt_flags_constraints(constraints)
+
+    if a_dtype == "bf16" and w_dtype == "mx4":
+        quant_config = mxfp4_w4a16_moe_quant_config(
+            w1_scale=pc1,
+            w2_scale=pc2,
+            w1_bias=w1_bias_tri,
+            w2_bias=w2_bias_tri,
+        )
+    else:
+        raise NotImplementedError(
+            f"Quantization configuration for activation={a_dtype} and weight={w_dtype} "
+            f"has not been implemented."
+        )
 
     out_triton_monolithic = triton_kernel_moe_forward(
         hidden_states=x_tri,
@@ -348,3 +367,43 @@ def test_unit_shuffle():
     )
 
     assert_close(ref=out_ref, tri=out)
+
+
+@pytest.mark.parametrize("num_tokens", [2, 8, 64])
+@pytest.mark.parametrize("num_experts", [32, 128])
+@pytest.mark.parametrize("topk", [1, 4])
+@pytest.mark.parametrize("renormalize", [True, False])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_legacy_routing(
+    num_tokens: int, num_experts: int, topk: int, renormalize: bool, dtype: torch.dtype
+):
+    set_random_seed(0)
+    gating_output = torch.randn(num_tokens, num_experts, device="cuda", dtype=dtype)
+
+    sm_first = not renormalize
+    logits = gating_output
+    if sm_first:
+        logits = torch.softmax(logits, dim=-1)
+    sparse_logits = topk_fn(logits, topk, apply_softmax=not sm_first)
+    topk_ids = sparse_logits.indx.to(torch.long)
+    topk_weights = sparse_logits.vals
+    routing_data_ref, gather_indx_ref, scatter_indx_ref = make_routing_data(
+        topk_ids, topk_weights, num_experts
+    )
+
+    routing_data, gather_indx, scatter_indx = legacy_routing(
+        gating_output, topk, sm_first=sm_first
+    )
+
+    assert_close(
+        ref=gather_indx_ref.src_indx, tri=gather_indx.src_indx, maxtol=0, rmstol=0
+    )
+    assert_close(
+        ref=gather_indx_ref.dst_indx, tri=gather_indx.dst_indx, maxtol=0, rmstol=0
+    )
+    assert_close(
+        ref=scatter_indx_ref.src_indx, tri=scatter_indx.src_indx, maxtol=0, rmstol=0
+    )
+    assert_close(
+        ref=scatter_indx_ref.dst_indx, tri=scatter_indx.dst_indx, maxtol=0, rmstol=0
+    )

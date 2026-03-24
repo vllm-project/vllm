@@ -7,6 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEParallelConfig,
@@ -23,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kMxfp4Static,
 )
 
 
@@ -184,7 +186,7 @@ def rocm_aiter_fused_experts(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    activation: str = "silu",
+    activation: MoEActivation = MoEActivation.SILU,
     apply_router_weight_on_input: bool = False,
     expert_map: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
@@ -192,12 +194,19 @@ def rocm_aiter_fused_experts(
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
+    """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    activation_method = (
-        ActivationMethod.SILU if activation == "silu" else ActivationMethod.GELU
-    )
+    if activation == MoEActivation.SILU:
+        activation_method = ActivationMethod.SILU
+    elif activation == MoEActivation.GELU:
+        activation_method = ActivationMethod.GELU
+    elif activation == MoEActivation.SWIGLUOAI:
+        activation_method = rocm_aiter_ops.get_aiter_activation_type("swiglu")
+    else:
+        raise ValueError(f"Unsupported activation: {activation}")
+
     # All AITER Fused MoE kernels are expecting the following datatypes
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
@@ -241,8 +250,8 @@ def rocm_aiter_fused_experts(
 
     else:
         quant_method = QuantMethod.NO.value
-        # quark moe for mxfp4 w_dtype mxfp4 a_dtype
-        if quant_config.use_mxfp4_w4a4:
+        # mxfp4: both w4a4 (quark) and w4a16 (oracle CK) use BLOCK_1X32
+        if quant_config.use_mxfp4_w4a4 or quant_config.use_mxfp4_w4a16:
             quant_method = QuantMethod.BLOCK_1X32.value
         # w8a8 block-scaled
         if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
@@ -283,13 +292,20 @@ def rocm_aiter_fused_experts(
             doweight_stage1=apply_router_weight_on_input,
             num_local_tokens=num_local_tokens,
             output_dtype=output_dtype,
+            bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
+            bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
         )
 
 
-class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class AiterExperts(mk.FusedMoEExpertsModular):
     @property
     def expects_unquantized_inputs(self) -> bool:
-        return True
+        # When paired with MoRI, the prepare/finalize handles FP8
+        # quantization during dispatch to reduce network traffic,
+        # so we should not defer input quantization.
+        # Otherwise, AITER fused MoE kernels handle input quantization
+        # internally via a single fused kernel.
+        return not self.moe_config.use_mori_kernels
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -308,31 +324,33 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # TODO(rob): AITER also supports MXFP4, which is not
-        # yet supported via an Oracle. Once it is, we will add
-        # MXFP4 to this list.
         SUPPORTED_W_A = [
             (None, None),
             (kFp8Static128BlockSym, kFp8Dynamic128Sym),
             (kFp8StaticTensorSym, kFp8StaticTensorSym),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
             (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+            (kMxfp4Static, None),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
-    def _supports_activation(activation: str) -> bool:
-        return activation in ["silu", "gelu"]
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.SWIGLUOAI,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not moe_parallel_config.use_fi_all2allv_kernels
+        return not (
+            moe_parallel_config.use_fi_nvl_two_sided_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
+        )
 
     def supports_expert_map(self):
         return True
-
-    def supports_chunking(self):
-        return False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -346,7 +364,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # Workspaces are managed internally by AITER.
         workspace1 = (0,)
@@ -362,7 +380,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -375,7 +393,6 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # TODO(rob): rocm_aiter_fused_experts uses self.quant_config's
         # a_scales for static quantization. Update this to fit better
         # with the interface once all quant integrations are complete.
-        assert a2_scale == self.quant_config.a2_scale
 
         if expert_tokens_meta is not None:
             num_local_tokens = expert_tokens_meta.expert_num_tokens

@@ -342,7 +342,6 @@ class MockEngineCore:
         prompt_logprobs_raw: list[LogprobsTensors] | None = None,
         eos_token_id: int | None = None,
         stop_token_ids: list[int] | None = None,
-        ignore_eos: bool = False,
         request_ids: list[str] | None = None,
     ) -> None:
         self.num_requests = len(tokens_list)
@@ -355,7 +354,6 @@ class MockEngineCore:
         self.request_finished = [False for _ in range(self.num_requests)]
         self.eos_token_id = eos_token_id
         self.stop_token_ids = stop_token_ids
-        self.ignore_eos = ignore_eos
         self.request_ids = (
             request_ids
             if request_ids is not None
@@ -400,7 +398,7 @@ class MockEngineCore:
                 if token_idx == len(token_ids) - 1:
                     output.finish_reason = FinishReason.LENGTH
                     self.request_finished[req_idx] = True
-                if not self.ignore_eos and new_token_id == self.eos_token_id:
+                if new_token_id == self.eos_token_id:
                     output.finish_reason = FinishReason.STOP
                     self.request_finished[req_idx] = True
                 if new_token_id in (self.stop_token_ids or ()):

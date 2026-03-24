@@ -4,7 +4,7 @@
 import enum
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import field
+from dataclasses import field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -87,11 +87,18 @@ class CUDAGraphMode(enum.Enum):
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
 
-    def valid_runtime_modes(self) -> bool:
-        return self in [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+    @classmethod
+    def valid_runtime_modes(cls) -> frozenset["CUDAGraphMode"]:
+        return frozenset({cls.NONE, cls.PIECEWISE, cls.FULL})
+
+    def is_valid_runtime_mode(self) -> bool:
+        return self in CUDAGraphMode.valid_runtime_modes()
 
     def __str__(self) -> str:
         return self.name
+
+    def __bool__(self) -> bool:
+        return self != CUDAGraphMode.NONE
 
 
 @config
@@ -109,24 +116,35 @@ class PassConfig:
     """
 
     # New flags
-    fuse_norm_quant: bool = Field(default=None)
+    fuse_norm_quant: bool | None = Field(default=None)
     """Fuse the custom RMSNorm + quant ops."""
-    fuse_act_quant: bool = Field(default=None)
+    fuse_act_quant: bool | None = Field(default=None)
     """Fuse the custom SiluMul + quant ops."""
-    fuse_attn_quant: bool = Field(default=None)
+    fuse_attn_quant: bool | None = Field(default=None)
     """Fuse the custom attention + quant ops."""
-    eliminate_noops: bool = Field(default=None)
+    eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
-    enable_sp: bool = Field(default=None)
-    """Enable sequence parallelism."""
-    fuse_gemm_comms: bool = Field(default=None)
+    enable_sp: bool | None = Field(default=None)
+    """Enable sequence parallelism. Requires TP>1. Automatically disabled
+    if the model's hidden_size is too small for SP to be beneficial
+    (threshold is device-capability dependent)."""
+    fuse_gemm_comms: bool | None = Field(default=None)
     """Enable async TP."""
-    fuse_allreduce_rms: bool = Field(default=None)
+    fuse_allreduce_rms: bool | None = Field(default=None)
     """Enable flashinfer allreduce fusion."""
+    enable_qk_norm_rope_fusion: bool = False
+    """Enable fused Q/K RMSNorm + RoPE pass."""
 
     # ROCm/AITER specific fusions
-    fuse_act_padding: bool = Field(default=None)
+    fuse_act_padding: bool | None = Field(default=None)
     """Fuse the custom RMSNorm + padding ops."""
+    fuse_rope_kvcache: bool | None = Field(default=None)
+    """Fuse the QK rope + KV cache ops."""
+
+    rope_kvcache_fusion_max_token_num: int = 256
+    """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
+    Larger batch sizes e.g. during prefill will use the unfused kernels.
+    """
 
     fi_allreduce_fusion_max_size_mb: float | None = None
     """The threshold of the communicated tensor sizes under which
@@ -146,8 +164,11 @@ class PassConfig:
                 8: 1,  # 1MB
             },
         }, where key is the device capability"""
-    enable_qk_norm_rope_fusion: bool = False
-    """Enable fused Q/K RMSNorm + RoPE pass."""
+    sp_min_token_num: int | None = None
+    """The minimum number of tokens above which vllm should use
+    sequence parallelism. Specified as an integer token count.
+    Unspecified will fallback to default values which are compute
+    capability and world size dependent."""
 
     # TODO(luka) better pass enabling system.
 
@@ -177,9 +198,10 @@ class PassConfig:
 
         if not current_platform.is_cuda():
             return {}
-        return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(
-            current_platform.get_device_capability().to_int(), {}
-        )
+        capability = current_platform.get_device_capability()
+        if capability is None:
+            return {}
+        return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(capability.to_int(), {})
 
     def compute_hash(self) -> str:
         """
@@ -194,11 +216,11 @@ class PassConfig:
         "fuse_norm_quant",
         "fuse_act_quant",
         "fuse_attn_quant",
-        "eliminate_noops",
         "enable_sp",
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
         "fuse_act_padding",
+        "fuse_rope_kvcache",
         mode="wrap",
     )
     @classmethod
@@ -244,6 +266,30 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_act_padding = False
+        if self.fuse_rope_kvcache and not current_platform.is_rocm():
+            logger.warning_once(
+                "KV cache fusion currently only enabled on ROCm. "
+                "The fusion will be disabled."
+            )
+            self.fuse_rope_kvcache = False
+
+    def log_enabled_passes(self) -> None:
+        """
+        Log the enabled custom fusion passes.
+        This is called at the end of VLLMConfig post_init,
+        after all defaults are finalized.
+        TODO also log the compile ranges for which this is enabled.
+        """
+        enabled_fusions = [
+            f.name[len("fuse_") :]
+            for f in fields(self)
+            if getattr(self, f.name) and f.name.startswith("fuse_")
+        ]
+
+        if enabled_fusions:
+            logger.info_once(
+                "Enabled custom fusions: %s", ", ".join(enabled_fusions), scope="global"
+            )
 
 
 class DynamicShapesType(str, enum.Enum):
@@ -305,7 +351,7 @@ class DynamicShapesConfig:
 
         from vllm.config.utils import get_hash_factors, hash_factors
 
-        factors = get_hash_factors(self, {})
+        factors = get_hash_factors(self, set())
         return hash_factors(factors)
 
 
@@ -317,7 +363,8 @@ class CompilationConfig:
     VLLMConfig's post_init does further initialization. If used outside of the
     VLLMConfig, some fields will be left in an improper state.
 
-    It has three parts:
+    It contains PassConfig, which controls the custom fusion/transformation passes.
+    The rest has three parts:
 
     - Top-level Compilation control:
         - [`mode`][vllm.config.CompilationConfig.mode]
@@ -339,8 +386,8 @@ class CompilationConfig:
         [vllm.config.CompilationConfig.cudagraph_copy_inputs]
     - Inductor compilation:
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
-        - [`compile_ranges_split_points`]
-            [vllm.config.CompilationConfig.compile_ranges_split_points]
+        - [`compile_ranges_endpoints`]
+            [vllm.config.CompilationConfig.compile_ranges_endpoints]
         - [`inductor_compile_config`]
         [vllm.config.CompilationConfig.inductor_compile_config]
         - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
@@ -358,14 +405,7 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    level: int = Field(default=None)
-    """
-    Level is deprecated and will be removed in the next release,
-    either 0.12.0 or 0.11.2 whichever is soonest.
-    Please use mode. Currently all levels are mapped to mode.
-    """
-    # Top-level Compilation control
-    mode: CompilationMode = Field(default=None)
+    mode: CompilationMode = Field(default=None)  # type: ignore[assignment]
     """The compilation approach used for torch.compile-based compilation of the
     model.
 
@@ -450,18 +490,40 @@ class CompilationConfig:
     on selected platforms. Disabled by default until more models
     are supported/tested to work."""
 
+    # Vision encoder CUDA graph
+    cudagraph_mm_encoder: bool = False
+    """Enable CUDA graph capture for multimodal encoder (ViT).
+    When enabled, captures full encoder forward as CUDA graph
+    for each token budget level."""
+
+    encoder_cudagraph_token_budgets: list[int] = field(default_factory=list)
+    """Token budget levels for encoder CUDA graph capture.
+    Each budget defines a fixed token capacity. At runtime, images are greedy-packed
+    into the smallest fitting budget and the corresponding CUDA graph is replayed.
+    If empty (default), auto-inferred from model architecture as power-of-2
+    levels from the model's estimated min budget to max budget.
+    User-provided values override auto-inference.
+    Example: [2048, 4096, 8192, 13824]"""
+
+    encoder_cudagraph_max_images_per_batch: int = 0
+    """Maximum number of images per batch for encoder CUDA graph capture.
+    Determines the fixed batch size used during graph capture.
+    If 0 (default), auto-inferred as max_budget // min_budget from the
+    model's budget range. User-provided positive value overrides
+    auto-inference."""
+
     # Inductor capture
     compile_sizes: list[int | str] | None = None
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
 
-    compile_ranges_split_points: list[int] | None = None
-    """Split points that represent compile ranges for inductor.
+    compile_ranges_endpoints: list[int] | None = None
+    """Endpoints for Inductor compile ranges.
     The compile ranges are
-    [1, split_points[0]],
-    [split_points[0] + 1, split_points[1]], ...,
-    [split_points[-1] + 1, max_num_batched_tokens].
+    [1, endpoints[0]],
+    [endpoints[0] + 1, endpoints[1]], ...,
+    [endpoints[-1] + 1, max_num_batched_tokens].
     Compile sizes are also used single element ranges,
     the range is represented as [compile_sizes[i], compile_sizes[i]].
 
@@ -483,7 +545,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: CUDAGraphMode = Field(default=None)
+    cudagraph_mode: CUDAGraphMode = Field(default=None)  # type: ignore[assignment]
     """
     The mode of the cudagraph:
 
@@ -545,7 +607,7 @@ class CompilationConfig:
     When `enable_lora` is False, this option has no effect.
     """
 
-    use_inductor_graph_partition: bool = Field(default=None)
+    use_inductor_graph_partition: bool = Field(default=None)  # type: ignore[assignment]
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
@@ -568,7 +630,7 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    max_cudagraph_capture_size: int = field(default=None)
+    max_cudagraph_capture_size: int | None = field(default=None)
     """The maximum cudagraph capture size.
 
     If cudagraph_capture_sizes is specified, this will be set to the largest
@@ -649,6 +711,7 @@ class CompilationConfig:
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
         "vllm::gdn_attention_core",
+        "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
@@ -707,7 +770,9 @@ class CompilationConfig:
             exclude["pass_config"] = pass_config_exclude
 
         config = TypeAdapter(CompilationConfig).dump_python(
-            self, exclude=exclude, exclude_unset=True
+            self,
+            exclude=exclude,  # type: ignore[arg-type]
+            exclude_unset=True,
         )
 
         return str(config)
@@ -777,17 +842,6 @@ class CompilationConfig:
         return handler(value)
 
     def __post_init__(self) -> None:
-        if self.level is not None:
-            logger.warning(
-                "Level is deprecated and will be removed in the next release,"
-                "either 0.12.0 or 0.11.2 whichever is soonest."
-                "Use mode instead."
-                "If both level and mode are given,"
-                "only mode will be used."
-            )
-            if self.mode is None:
-                self.mode = self.level
-
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
@@ -821,8 +875,18 @@ class CompilationConfig:
                 func if isinstance(func, InductorPass) else CallableInductorPass(func)
             )
 
-        if self.pass_config.enable_qk_norm_rope_fusion:
+        if (
+            self.pass_config.enable_qk_norm_rope_fusion
+            and "+rotary_embedding" not in self.custom_ops
+        ):
             # TODO(zhuhaoran): support rope native forward match and remove this.
+            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+            self.custom_ops.append("+rotary_embedding")
+        if (
+            self.pass_config.fuse_rope_kvcache
+            and "+rotary_embedding" not in self.custom_ops
+        ):
+            # TODO(Rohan138): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
 
@@ -856,7 +920,7 @@ class CompilationConfig:
                 )
 
         # Currently only eager and inductor backend are supported.
-        # for piecewise compilation. Custom backends are not suppported for
+        # for piecewise compilation. Custom backends are not supported for
         # piecewise compilation. Update when more backends are supported.
         if self.mode == CompilationMode.VLLM_COMPILE and self.backend not in [
             "",
@@ -867,14 +931,32 @@ class CompilationConfig:
                 f"Invalid backend for piecewise compilation: {self.backend}"
             )
 
+        # Validate encoder CUDA graph configuration
+        if (
+            self.cudagraph_mm_encoder
+            and self.encoder_cudagraph_max_images_per_batch < 0
+        ):
+            raise ValueError(
+                "encoder_cudagraph_max_images_per_batch must be "
+                "non-negative (0 = auto-infer)"
+            )
+
         if self.backend == "":
             self.backend = current_platform.get_compile_backend()
 
-    def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
+    def init_backend(
+        self,
+        vllm_config: "VllmConfig",
+        prefix: str = "",
+        is_encoder: bool = False,
+    ) -> str | Callable:
         """
         Initialize the backend for the compilation config from a vllm config.
         Arguments:
             vllm_config: The vllm config to initialize the backend from.
+            prefix: Cache directory prefix for this compiled module.
+            is_encoder: Whether this module is used in an encoder (as
+                opposed to a text backbone).
         Returns:
             The backend for the compilation config.
         """
@@ -904,9 +986,7 @@ class CompilationConfig:
 
         from vllm.compilation.backends import VllmBackend
 
-        # TODO[@lucaskabela]: See if we can forward prefix
-        # https://github.com/vllm-project/vllm/issues/27045
-        return VllmBackend(vllm_config)
+        return VllmBackend(vllm_config, prefix=prefix, is_encoder=is_encoder)
 
     def post_init_cudagraph_sizes(self) -> None:
         """To complete the initialization after cudagraph related
@@ -914,7 +994,7 @@ class CompilationConfig:
         - initialize compile_sizes
         """
 
-        computed_compile_sizes = []
+        computed_compile_sizes: list[int] = []
         if self.compile_sizes is not None:
             # de-duplicate the sizes provided by the config
             self.compile_sizes = list(set(self.compile_sizes))
@@ -924,6 +1004,7 @@ class CompilationConfig:
                         "Unrecognized size type in compile_sizes, "
                         f"expect 'cudagraph_capture_sizes', got {x}"
                     )
+                    assert self.cudagraph_capture_sizes is not None
                     computed_compile_sizes.extend(self.cudagraph_capture_sizes)
                 else:
                     assert isinstance(x, int)
@@ -931,6 +1012,7 @@ class CompilationConfig:
         self.compile_sizes = computed_compile_sizes  # type: ignore
 
         # make sure the sizes are in ascending order
+        assert self.cudagraph_capture_sizes is not None
         self.cudagraph_capture_sizes.sort()
         if self.cudagraph_capture_sizes:
             assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
@@ -973,6 +1055,7 @@ class CompilationConfig:
                 # https://github.com/vllm-project/vllm/issues/33267
                 if not self.use_inductor_graph_partition:
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
+                    self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
             elif len(self.splitting_ops) == 0:
                 if (
@@ -1015,12 +1098,13 @@ class CompilationConfig:
                 "are optimized for prefill and are incompatible with CUDA Graphs. "
                 "In order to use CUDA Graphs for decode-optimized workloads, "
                 "use --all2all-backend with another option, such as "
-                "deepep_low_latency, pplx, or allgather_reducescatter."
+                "deepep_low_latency or allgather_reducescatter."
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.fuse_attn_quant
+        assert self.cudagraph_mode is not None
         if self.splitting_ops is None:
             self.splitting_ops = []
             if self.cudagraph_mode.has_piecewise_cudagraphs():
@@ -1155,12 +1239,61 @@ class CompilationConfig:
         self.max_cudagraph_capture_size = rounded_sizes[-1]
         self.cudagraph_capture_sizes = rounded_sizes
 
+    def adjust_cudagraph_sizes_for_mamba_cache(
+        self, num_mamba_cache_blocks: int
+    ) -> None:
+        """Cap cudagraph capture sizes to available Mamba cache blocks.
+
+        For hybrid Mamba/attention models, the Mamba conv_state and
+        ssm_state tensors have their first dimension equal to num_blocks
+        (from KVCacheConfig). During CUDA graph capture the decode batch
+        size equals num_tokens, so capture sizes exceeding num_blocks
+        would cause out-of-bounds access in Mamba kernels.
+
+        See: https://github.com/vllm-project/vllm/issues/34094
+        """
+        if not self.cudagraph_capture_sizes or num_mamba_cache_blocks <= 0:
+            return
+
+        assert self.max_cudagraph_capture_size is not None
+
+        if num_mamba_cache_blocks >= self.max_cudagraph_capture_size:
+            return
+
+        capped_sizes = [
+            s for s in self.cudagraph_capture_sizes if s <= num_mamba_cache_blocks
+        ]
+
+        if len(capped_sizes) == 0:
+            logger.warning(
+                "No valid cudagraph capture sizes remain after capping "
+                "to Mamba cache blocks (%d). The smallest capture size "
+                "was %d. Disabling cudagraph capture. Consider reducing "
+                "max_num_seqs or increasing available GPU memory.",
+                num_mamba_cache_blocks,
+                self.cudagraph_capture_sizes[0],
+            )
+            self.cudagraph_capture_sizes = []
+            self.max_cudagraph_capture_size = 0
+            return
+
+        logger.warning(
+            "Capping cudagraph capture sizes from max %d to %d to fit "
+            "Mamba cache blocks (%d blocks available). This limits the "
+            "maximum batch size that can use CUDA graphs. To increase "
+            "this limit, reduce max_num_seqs or increase available GPU "
+            "memory.",
+            self.max_cudagraph_capture_size,
+            capped_sizes[-1],
+            num_mamba_cache_blocks,
+        )
+
+        self.max_cudagraph_capture_size = capped_sizes[-1]
+        self.cudagraph_capture_sizes = capped_sizes
+
     def get_compile_ranges(self) -> list[Range]:
         """Get the compile ranges for the compilation config."""
-        if self.compile_ranges_split_points is None:
+        if self.compile_ranges_endpoints is None:
             return []
-        split_points = sorted(set(self.compile_ranges_split_points))
-        return [
-            Range(start=s + 1, end=e)
-            for s, e in zip([0] + split_points[:-1], split_points)
-        ]
+        endpoints = sorted(set(self.compile_ranges_endpoints))
+        return [Range(s + 1, e) for s, e in zip([0] + endpoints[:-1], endpoints)]

@@ -54,7 +54,7 @@ class PoolerConfig:
     Reduce the dimensions of embeddings if model
     support matryoshka representation. Defaults to None.
     """
-    enable_chunked_processing: bool | None = None
+    enable_chunked_processing: bool = False
     """
     Whether to enable chunked processing for long inputs that exceed the model's
     maximum position embeddings. When enabled, long inputs will be split into
@@ -108,14 +108,14 @@ class PoolerConfig:
                     pooling_type,
                     pooling_type,
                 )
-                self.seq_pooling_type = pooling_type
+                self.seq_pooling_type = pooling_type  # type: ignore[assignment]
             elif pooling_type in TOK_POOLING_TYPES:
                 logger.debug(
                     "Resolved `pooling_type=%r` to `tok_pooling_type=%r`.",
                     pooling_type,
                     pooling_type,
                 )
-                self.tok_pooling_type = pooling_type
+                self.tok_pooling_type = pooling_type  # type: ignore[assignment]
             else:
                 raise NotImplementedError(pooling_type)
 

@@ -16,6 +16,10 @@ import torch
 from ray.experimental.tqdm_ray import tqdm
 
 from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -50,7 +54,7 @@ def clear_triton_cache():
 
     # Clear CUDA memory cache
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
     # Try to clear Triton's runtime cache
     try:
@@ -99,13 +103,38 @@ def benchmark_config(
     dtype: torch.dtype,
     use_fp8_w8a8: bool,
     use_int8_w8a16: bool,
+    use_int4_w4a16: bool = False,
     num_iters: int = 100,
     block_quant_shape: list[int] = None,
     use_deep_gemm: bool = False,
 ) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
-    if use_int8_w8a16:
+    if use_int4_w4a16:
+        # Int4 packed weights: 2 int4 values per uint8 byte
+        # K dimension is packed (halved)
+        intermediate_size = shard_intermediate_size // 2  # after silu_and_mul
+        w1 = torch.randint(
+            0,
+            255,
+            (
+                num_experts,
+                shard_intermediate_size,
+                hidden_size // 2,  # int4 packing
+            ),
+            dtype=torch.uint8,
+        )
+        w2 = torch.randint(
+            0,
+            255,
+            (
+                num_experts,
+                hidden_size,
+                intermediate_size // 2,  # int4 packing
+            ),
+            dtype=torch.uint8,
+        )
+    elif use_int8_w8a16:
         w1 = torch.randint(
             -127,
             127,
@@ -139,7 +168,20 @@ def benchmark_config(
     w2_scale = None
     a1_scale = None
     a2_scale = None
-    if use_int8_w8a16:
+    if use_int4_w4a16:
+        if block_quant_shape is None:
+            raise ValueError("block_quant_shape is required for int4_w4a16")
+        group_size = block_quant_shape[1]
+        # Scales shape: (E, N, K // group_size) in fp16
+        w1_scale = torch.rand(
+            (num_experts, shard_intermediate_size, hidden_size // group_size),
+            dtype=dtype,
+        )
+        w2_scale = torch.rand(
+            (num_experts, hidden_size, intermediate_size // group_size),
+            dtype=dtype,
+        )
+    elif use_int8_w8a16:
         w1_scale = torch.randn(
             (num_experts, 2 * shard_intermediate_size), dtype=torch.float32
         )
@@ -198,27 +240,38 @@ def benchmark_config(
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=block_quant_shape,
+            weight_dtype="int4" if use_int4_w4a16 else None,
         )
 
         deep_gemm_experts = None
         if use_deep_gemm:
-            deep_gemm_experts = mk.FusedMoEModularKernel(
-                prepare_finalize=MoEPrepareAndFinalizeNoEP(),
+            moe_config = (
+                FusedMoEConfig(
+                    num_experts=num_experts,
+                    experts_per_token=topk,
+                    hidden_dim=hidden_size,
+                    intermediate_size_per_partition=shard_intermediate_size,
+                    num_local_experts=num_experts,
+                    num_logical_experts=num_experts,
+                    activation=MoEActivation.SILU,
+                    moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+                    in_dtype=init_dtype,
+                    routing_method=RoutingMethodType.TopK,
+                    device="cuda",
+                ),
+            )
+            deep_gemm_experts = mk.FusedMoEKernel(
+                prepare_finalize=maybe_make_prepare_finalize(
+                    moe=moe_config,
+                    quant_config=quant_config,
+                    allow_new_interface=True,
+                    use_monolithic=False,
+                ),
                 fused_experts=TritonOrDeepGemmExperts(
-                    moe_config=FusedMoEConfig(
-                        num_experts=num_experts,
-                        experts_per_token=topk,
-                        hidden_dim=hidden_size,
-                        intermediate_size_per_partition=shard_intermediate_size,
-                        num_local_experts=num_experts,
-                        activation="silu",
-                        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-                        in_dtype=init_dtype,
-                        routing_method=RoutingMethodType.TopK,
-                        device="cuda",
-                    ),
+                    moe_config=moe_config,
                     quant_config=quant_config,
                 ),
+                inplace=not disable_inplace(),
             )
 
         with override_config(config):
@@ -226,9 +279,18 @@ def benchmark_config(
                 x, input_gating, topk, renormalize=not use_deep_gemm
             )
 
+            inplace = not disable_inplace()
             if use_deep_gemm:
-                return deep_gemm_experts(
-                    x, w1, w2, topk_weights, topk_ids, inplace=True
+                return deep_gemm_experts.apply(
+                    x,
+                    w1,
+                    w2,
+                    topk_weights,
+                    topk_ids,
+                    activation=MoEActivation.SILU,
+                    global_num_experts=num_experts,
+                    apply_router_weight_on_input=False,
+                    expert_map=False,
                 )
             return fused_experts(
                 x,
@@ -236,25 +298,25 @@ def benchmark_config(
                 w2,
                 topk_weights,
                 topk_ids,
-                inplace=True,
+                inplace=inplace,
                 quant_config=quant_config,
             )
 
     # JIT compilation & warmup
     run()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Capture 10 invocations with CUDA graph
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         for _ in range(10):
             run()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Warmup
     for _ in range(5):
         graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     start_event = torch.Event(enable_timing=True)
     end_event = torch.Event(enable_timing=True)
@@ -262,7 +324,7 @@ def benchmark_config(
     latencies: list[float] = []
     for i in range(num_iters):
         prepare(i)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         start_event.record()
         graph.replay()
@@ -478,6 +540,7 @@ class BenchmarkWorker:
         dtype: torch.dtype,
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
+        use_int4_w4a16: bool = False,
         block_quant_shape: list[int] = None,
         use_deep_gemm: bool = False,
     ) -> tuple[dict[str, int], float]:
@@ -485,7 +548,10 @@ class BenchmarkWorker:
 
         set_random_seed(self.seed)
         dtype_str = _get_config_dtype_str(
-            dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
+            dtype,
+            use_int8_w8a16=use_int8_w8a16,
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int4_w4a16=use_int4_w4a16,
         )
         # NOTE(woosuk): The current naming convention uses w2.shape[2], which
         # is the intermediate size after silu_and_mul.
@@ -516,6 +582,7 @@ class BenchmarkWorker:
             dtype,
             use_fp8_w8a8,
             use_int8_w8a16,
+            use_int4_w4a16=use_int4_w4a16,
             num_iters=100,
             block_quant_shape=block_quant_shape,
             use_deep_gemm=use_deep_gemm,
@@ -532,6 +599,7 @@ class BenchmarkWorker:
         dtype: torch.dtype,
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
+        use_int4_w4a16: bool,
         search_space: list[dict[str, int]],
         block_quant_shape: list[int],
         use_deep_gemm: bool,
@@ -542,7 +610,7 @@ class BenchmarkWorker:
         best_config = None
         best_time = float("inf")
         if current_platform.is_rocm():
-            is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16)
+            is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16 or use_int4_w4a16)
             search_space = prune_rocm_search_space(
                 num_tokens,
                 shard_intermediate_size,
@@ -558,7 +626,11 @@ class BenchmarkWorker:
             if visible_device != f"{self.device_id}":
                 need_device_guard = True
 
-        with torch.cuda.device(self.device_id) if need_device_guard else nullcontext():
+        with (
+            torch.accelerator.device_index(self.device_id)
+            if need_device_guard
+            else nullcontext()
+        ):
             for idx, config in enumerate(tqdm(search_space)):
                 try:
                     kernel_time = benchmark_config(
@@ -571,6 +643,7 @@ class BenchmarkWorker:
                         dtype,
                         use_fp8_w8a8,
                         use_int8_w8a16,
+                        use_int4_w4a16,
                         num_iters=20,
                         block_quant_shape=block_quant_shape,
                         use_deep_gemm=use_deep_gemm,
@@ -618,6 +691,7 @@ def sort_config(config: BenchmarkConfig) -> BenchmarkConfig:
             else {}
         ),
         **({"kpack": config["kpack"]} if "kpack" in config else {}),
+        **({"SPLIT_K": config["SPLIT_K"]} if "SPLIT_K" in config else {}),
     }
 
 
@@ -630,11 +704,15 @@ def save_configs(
     dtype: torch.dtype,
     use_fp8_w8a8: bool,
     use_int8_w8a16: bool,
+    use_int4_w4a16: bool,
     block_quant_shape: list[int],
     save_dir: str,
 ) -> None:
     dtype_str = _get_config_dtype_str(
-        dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
+        dtype,
+        use_int8_w8a16=use_int8_w8a16,
+        use_fp8_w8a8=use_fp8_w8a8,
+        use_int4_w4a16=use_int4_w4a16,
     )
 
     # NOTE(woosuk): The current naming convention uses w2.shape[2], which
@@ -672,17 +750,20 @@ def get_weight_block_size_safety(config, default_value=None):
 
 
 def get_model_params(config):
-    if config.architectures[0] == "DbrxForCausalLM":
+    architectures = getattr(config, "architectures", None) or [type(config).__name__]
+    architecture = architectures[0]
+
+    if architecture == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
         intermediate_size = config.ffn_config.ffn_hidden_size
         hidden_size = config.hidden_size
-    elif config.architectures[0] == "JambaForCausalLM":
+    elif architecture == "JambaForCausalLM":
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
         hidden_size = config.hidden_size
-    elif config.architectures[0] in (
+    elif architecture in (
         "DeepseekV2ForCausalLM",
         "DeepseekV3ForCausalLM",
         "DeepseekV32ForCausalLM",
@@ -696,7 +777,7 @@ def get_model_params(config):
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         hidden_size = config.hidden_size
-    elif config.architectures[0] in (
+    elif architecture in (
         "Qwen2MoeForCausalLM",
         "Qwen3MoeForCausalLM",
         "Qwen3NextForCausalLM",
@@ -705,23 +786,27 @@ def get_model_params(config):
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         hidden_size = config.hidden_size
-    elif config.architectures[0] == "Qwen3VLMoeForConditionalGeneration":
+    elif architecture in (
+        "Qwen3VLMoeForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+        "Qwen3_5MoeTextConfig",
+    ):
         text_config = config.get_text_config()
         E = text_config.num_experts
         topk = text_config.num_experts_per_tok
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
-    elif config.architectures[0] == "HunYuanMoEV1ForCausalLM":
+    elif architecture == "HunYuanMoEV1ForCausalLM":
         E = config.num_experts
         topk = config.moe_topk[0]
         intermediate_size = config.moe_intermediate_size[0]
         hidden_size = config.hidden_size
-    elif config.architectures[0] == "Qwen3OmniMoeForConditionalGeneration":
+    elif architecture == "Qwen3OmniMoeForConditionalGeneration":
         E = config.thinker_config.text_config.num_experts
         topk = config.thinker_config.text_config.num_experts_per_tok
         intermediate_size = config.thinker_config.text_config.moe_intermediate_size
         hidden_size = config.thinker_config.text_config.hidden_size
-    elif config.architectures[0] == "PixtralForConditionalGeneration":
+    elif architecture == "PixtralForConditionalGeneration":
         # Pixtral can contain different LLM architectures,
         # recurse to get their parameters
         return get_model_params(config.get_text_config())
@@ -734,6 +819,55 @@ def get_model_params(config):
         intermediate_size = config.intermediate_size
         hidden_size = config.hidden_size
     return E, topk, intermediate_size, hidden_size
+
+
+def resolve_dtype(config) -> torch.dtype:
+    if current_platform.is_rocm():
+        return torch.float16
+
+    dtype = getattr(config, "dtype", None)
+    if dtype is not None:
+        return dtype
+
+    if hasattr(config, "get_text_config"):
+        text_config = config.get_text_config()
+        dtype = getattr(text_config, "dtype", None)
+        if dtype is not None:
+            return dtype
+
+    return torch.bfloat16
+
+
+def get_quantization_group_size(config) -> int | None:
+    """Extract the quantization group size from the HF model config.
+
+    This reads directly from the HuggingFace config object (as returned by
+    ``get_config()``), not from vLLM's quantization config classes.
+
+    Supports AWQ/GPTQ-style configs (direct 'group_size' key) and
+    compressed-tensors configs (nested inside 'config_groups').
+    """
+    quantization_config = getattr(config, "quantization_config", {})
+    if not isinstance(quantization_config, dict):
+        return None
+    # AWQ / GPTQ style: group_size is a top-level key
+    gs = quantization_config.get("group_size")
+    if gs is not None:
+        return gs
+    # compressed-tensors style: group_size is nested in config_groups
+    config_groups = quantization_config.get("config_groups", {})
+    if not isinstance(config_groups, dict):
+        return None
+    for group_cfg in config_groups.values():
+        if not isinstance(group_cfg, dict):
+            continue
+        weights = group_cfg.get("weights", {})
+        if not isinstance(weights, dict):
+            continue
+        gs = weights.get("group_size")
+        if gs is not None:
+            return gs
+    return None
 
 
 def main(args: argparse.Namespace):
@@ -751,10 +885,23 @@ def main(args: argparse.Namespace):
     else:
         ensure_divisibility(intermediate_size, args.tp_size, "intermediate_size")
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-    dtype = torch.float16 if current_platform.is_rocm() else config.dtype
+    dtype = resolve_dtype(config)
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
     use_int8_w8a16 = args.dtype == "int8_w8a16"
+    use_int4_w4a16 = args.dtype == "int4_w4a16"
     block_quant_shape = get_weight_block_size_safety(config)
+    if use_int4_w4a16:
+        group_size = get_quantization_group_size(config)
+        if group_size is None:
+            raise ValueError(
+                "Could not determine group_size from model config. "
+                "The model's quantization_config must contain a 'group_size' "
+                "field (AWQ/GPTQ) or 'config_groups.*.weights.group_size' "
+                "(compressed-tensors)."
+            )
+        # For int4_w4a16, block_shape = [0, group_size]
+        # block_shape[0]=0 means no block quantization on N dimension
+        block_quant_shape = [0, group_size]
 
     if args.batch_size is None:
         batch_sizes = [
@@ -808,8 +955,20 @@ def main(args: argparse.Namespace):
         return ray.get(outputs)
 
     if args.tune:
-        is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16)
-        search_space = get_configs_compute_bound(is_fp16, block_quant_shape)
+        # int4_w4a16 weights are uint8-packed, not fp16; treat like fp8 for
+        # search space generation (no matrix_instr_nonkdim/kpack exploration).
+        is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16 or use_int4_w4a16)
+        # For int4_w4a16, the group_size constraint on BLOCK_SIZE_K does not
+        # apply: the gptq_awq kernel handles arbitrary BLOCK_SIZE_K regardless
+        # of group_size. Skip block_quant_shape filtering to keep the full
+        # search space (e.g. BLOCK_SIZE_K=64 with group_size=128).
+        tune_block_quant_shape = None if use_int4_w4a16 else block_quant_shape
+        search_space = get_configs_compute_bound(is_fp16, tune_block_quant_shape)
+        if use_int4_w4a16:
+            # SPLIT_K is a required kernel constexpr for gptq_awq kernel;
+            # only SPLIT_K=1 is used at runtime, so fix it during tuning.
+            for cfg in search_space:
+                cfg["SPLIT_K"] = 1
         print(f"Start tuning over {len(search_space)} configurations...")
         if use_deep_gemm:
             raise ValueError(
@@ -829,6 +988,7 @@ def main(args: argparse.Namespace):
                     dtype,
                     use_fp8_w8a8,
                     use_int8_w8a16,
+                    use_int4_w4a16,
                     search_space,
                     block_quant_shape,
                     use_deep_gemm,
@@ -848,6 +1008,7 @@ def main(args: argparse.Namespace):
             dtype,
             use_fp8_w8a8,
             use_int8_w8a16,
+            use_int4_w4a16,
             block_quant_shape,
             args.save_dir,
         )
@@ -866,6 +1027,7 @@ def main(args: argparse.Namespace):
                     dtype,
                     use_fp8_w8a8,
                     use_int8_w8a16,
+                    use_int4_w4a16,
                     block_quant_shape,
                     use_deep_gemm,
                 )
@@ -888,7 +1050,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--enable-expert-parallel", "-enable-ep", action="store_true")
     parser.add_argument(
-        "--dtype", type=str, choices=["auto", "fp8_w8a8", "int8_w8a16"], default="auto"
+        "--dtype",
+        type=str,
+        choices=["auto", "fp8_w8a8", "int8_w8a16", "int4_w4a16"],
+        default="auto",
     )
     parser.add_argument("--use-deep-gemm", action="store_true")
     parser.add_argument(

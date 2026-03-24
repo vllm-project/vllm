@@ -75,13 +75,15 @@ def make_request(
             )
             mm_features.append(mm_feature)
 
+    sampling_params = SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+
     return Request(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
         mm_features=mm_features if mm_features else None,
-        sampling_params=SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs),
+        sampling_params=sampling_params,
         pooling_params=None,
-        eos_token_id=100,
         lora_request=lora_request,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
@@ -742,6 +744,12 @@ def _make_hybrid_kv_cache_config(
             shapes=(1, 1),
             dtypes=(torch.float32,),
         ),
+        "mamba_align": lambda: MambaSpec(
+            block_size=block_size,
+            shapes=(1, 1),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+        ),
     }
 
     kv_cache_groups = [
@@ -958,6 +966,46 @@ def test_prefill_hybrid_model_combinations_eagle(
 
     manager.free(req0)
     manager.free(req1)
+
+
+def test_prefill_hybrid_model_mamba_align():
+    """Test that MambaManager.cache_blocks() handles null blocks in align mode.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/34361.
+    In mamba_cache_mode="align", allocate_new_blocks() pads req_to_blocks with
+    null blocks. cache_full_blocks() correctly skips them, but
+    MambaManager.cache_blocks() must also skip null blocks when tracking
+    cached_blocks_this_step.
+    """
+    block_size = 16
+    num_blocks = 30
+
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        block_size, num_blocks, ["full", "mamba_align"]
+    )
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    hash_fn = sha256
+
+    # 3 full blocks (48 tokens) + 7 partial tokens = 55 tokens total
+    all_token_ids = [i for i in range(3) for _ in range(block_size)] + [3] * 7
+
+    # First request: allocate_slots should not crash with the assertion error
+    # in MambaManager.cache_blocks() when null blocks are present.
+    req0 = make_request("0", all_token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+
+    blocks = manager.allocate_slots(req0, 55, num_computed_tokens, computed_blocks)
+    assert blocks is not None
+    assert len(blocks.get_block_ids()) == 2  # full_attn + mamba groups
+
+    manager.free(req0)
 
 
 def test_prefill_plp():
@@ -1522,20 +1570,24 @@ def test_mm_prefix_caching():
     block_hashes = req0.block_hashes
     assert len(block_hashes) == 3
     assert block_hashes[0] == sha256(
-        (kv_cache_utils.NONE_HASH, tuple(all_token_ids[:block_size]), ("aaa",))
+        (
+            kv_cache_utils.NONE_HASH,
+            tuple(all_token_ids[:block_size]),
+            (("aaa", 11),),
+        )
     )
     assert block_hashes[1] == sha256(
         (
             block_hashes[0],
             tuple(all_token_ids[block_size : block_size * 2]),
-            ("aaa", "bbb"),
+            (("aaa", -5), ("bbb", 14)),
         )
     )
     assert block_hashes[2] == sha256(
         (
             block_hashes[1],
             tuple(all_token_ids[block_size * 2 : block_size * 3]),
-            ("bbb",),
+            (("bbb", -2),),
         )
     )
 
@@ -1555,7 +1607,11 @@ def test_mm_prefix_caching():
     assert new_blocks is not None and len(new_blocks.blocks[0]) == 0
     assert len(block_hashes) == 4
     assert block_hashes[3] == sha256(
-        (block_hashes[2], tuple(all_token_ids[3 * block_size :] + [8] * 5), ("ccc",))
+        (
+            block_hashes[2],
+            tuple(all_token_ids[3 * block_size :] + [8] * 5),
+            (("ccc", 0),),
+        )
     )
 
     # Cache hit.
@@ -2256,22 +2312,22 @@ def test_block_lookup_cache_single_block_per_key():
     assert cache.get_one_block(key0) is block0
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # No block poped due to block_id mismatch
+    # No block popped due to block_id mismatch
     assert cache.pop(key0, 100) is None
     assert cache.get_one_block(key0) is block0
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # block poped with (key0, block ID 0)
+    # block popped with (key0, block ID 0)
     assert cache.pop(key0, 0) is block0
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # No block poped due to block_id mismatch
+    # No block popped due to block_id mismatch
     assert cache.pop(key0, 1) is None
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # block poped with (key1, block ID 1)
+    # block popped with (key1, block ID 1)
     assert cache.pop(key1, 1) is block1
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is None
