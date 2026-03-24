@@ -321,8 +321,10 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
-        if current_platform.is_cuda() or current_platform.is_xpu():
+        if current_platform.is_cuda():
             return self.forward_cuda(hidden_states, q_fp8, k, weights)
+        elif current_platform.is_xpu():
+            return self.forward_xpu(hidden_states, q_fp8, k, weights)
         elif current_platform.is_rocm():
             return self.forward_hip(hidden_states, q_fp8, k, weights)
         else:
@@ -332,6 +334,29 @@ class SparseAttnIndexer(CustomOp):
             )
 
     def forward_cuda(
+        self,
+        hidden_states: torch.Tensor,
+        q_fp8: torch.Tensor,
+        k: torch.Tensor,
+        weights: torch.Tensor,
+    ):
+        return torch.ops.vllm.sparse_attn_indexer(
+            hidden_states,
+            self.k_cache.prefix,
+            self.k_cache.kv_cache[0],
+            q_fp8,
+            k,
+            weights,
+            self.quant_block_size,
+            self.scale_fmt,
+            self.topk_tokens,
+            self.head_dim,
+            self.max_model_len,
+            self.max_total_seq_len,
+            self.topk_indices_buffer,
+        )
+
+    def forward_xpu(
         self,
         hidden_states: torch.Tensor,
         q_fp8: torch.Tensor,
