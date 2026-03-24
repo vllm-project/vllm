@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.config import VllmConfig, replace
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
@@ -255,45 +254,6 @@ def compute_new_slot_mapping(
     # Mask out rejected tokens to prevent saves to the KV cache.
     new_slot_mapping.masked_fill_(is_rejected_token_mask, PADDING_SLOT_ID)
     return new_slot_mapping
-
-
-def create_vllm_config_for_spec_decode(
-    vllm_config: VllmConfig,
-) -> VllmConfig:
-    """Apply kernel-level overrides (e.g. moe_backend) from speculative_config.
-    Returns the original object unchanged when no override is needed.
-    """
-    spec_config = vllm_config.speculative_config
-    if spec_config is not None and spec_config.moe_backend is not None:
-        new_kernel_config = replace(
-            vllm_config.kernel_config, moe_backend=spec_config.moe_backend
-        )
-        return replace(vllm_config, kernel_config=new_kernel_config)
-    return vllm_config
-
-
-def create_vllm_config_for_draft_model(
-    target_model_vllm_config: VllmConfig,
-) -> VllmConfig:
-    """Extends create_vllm_config_for_spec_decode with quant_config,
-    parallel_config, and model_config overrides for standalone draft models.
-    """
-    old = target_model_vllm_config
-    assert old.speculative_config is not None, "speculative_config is not set"
-    old_spec_config = old.speculative_config
-    new_parallel_config = replace(
-        old_spec_config.draft_parallel_config, rank=old.parallel_config.rank
-    )
-
-    base = create_vllm_config_for_spec_decode(old)
-
-    new: VllmConfig = replace(
-        base,
-        quant_config=None,
-        parallel_config=new_parallel_config,
-        model_config=old_spec_config.draft_model_config,
-    )
-    return new
 
 
 def extend_all_queries_by_N(

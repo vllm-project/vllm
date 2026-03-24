@@ -4,7 +4,7 @@
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, replace
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
@@ -56,9 +56,16 @@ class MedusaProposer:
 
     def load_model(self, target_model: nn.Module) -> None:
         from vllm.compilation.backends import set_model_tag
-        from vllm.v1.spec_decode.utils import create_vllm_config_for_spec_decode
 
-        draft_vllm_config = create_vllm_config_for_spec_decode(self.vllm_config)
+        draft_vllm_config = self.vllm_config
+        if self.spec_config.moe_backend is not None:
+            draft_vllm_config = replace(
+                draft_vllm_config,
+                kernel_config=replace(
+                    draft_vllm_config.kernel_config,
+                    moe_backend=self.spec_config.moe_backend,
+                ),
+            )
         with set_model_tag("medusa_head"):
             self.model = get_model(
                 vllm_config=draft_vllm_config,

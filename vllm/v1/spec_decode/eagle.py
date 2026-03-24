@@ -43,7 +43,6 @@ from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
     compute_new_slot_mapping,
     copy_and_expand_eagle_inputs_kernel,
-    create_vllm_config_for_spec_decode,
     eagle_prepare_inputs_padded_kernel,
     eagle_prepare_next_token_padded_kernel,
     eagle_step_update_slot_mapping_and_metadata,
@@ -1222,7 +1221,16 @@ class SpecDecodeBaseProposer:
         """Return a VllmConfig with kernel-level overrides for the proposer.
         Subclasses may override to apply additional config changes.
         """
-        return create_vllm_config_for_spec_decode(self.vllm_config)
+        spec_cfg = self.speculative_config
+        if spec_cfg.moe_backend is not None:
+            return replace(
+                self.vllm_config,
+                kernel_config=replace(
+                    self.vllm_config.kernel_config,
+                    moe_backend=spec_cfg.moe_backend,
+                ),
+            )
+        return self.vllm_config
 
     def _get_model(self) -> nn.Module:
         """

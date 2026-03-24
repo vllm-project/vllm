@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import pytest
@@ -25,10 +25,6 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.v1.metrics.reader import Metric
-from vllm.v1.spec_decode.utils import (
-    create_vllm_config_for_draft_model,
-    create_vllm_config_for_spec_decode,
-)
 
 MTP_SIMILARITY_RATE = 0.8
 
@@ -926,7 +922,16 @@ def test_draft_model_engine_args_tensor_parallelism():
     assert tgt_vllm_config.parallel_config.tensor_parallel_size == 2
     assert tgt_vllm_config.quant_config.get_name() == "fp8"
 
-    draft_vllm_config: VllmConfig = create_vllm_config_for_draft_model(tgt_vllm_config)
+    sc = tgt_vllm_config.speculative_config
+    draft_vllm_config: VllmConfig = replace(
+        tgt_vllm_config,
+        quant_config=None,
+        parallel_config=replace(
+            sc.draft_parallel_config,
+            rank=tgt_vllm_config.parallel_config.rank,
+        ),
+        model_config=sc.draft_model_config,
+    )
     assert draft_vllm_config.parallel_config.tensor_parallel_size == 1
     assert draft_vllm_config.quant_config is None
 
@@ -997,9 +1002,8 @@ def test_draft_moe_backend(
     tensor_parallel_size: int,
     trust_remote_code: bool,
 ):
-    """Both create_vllm_config_for_spec_decode and create_vllm_config_for_draft_model
-    must propagate (or inherit) moe_backend correctly across drafting
-    methods."""
+    """speculative_config.moe_backend must propagate (or inherit) correctly
+    across drafting methods."""
     spec_cfg = {**spec_method_cfg}
     if draft_moe_backend is not None:
         spec_cfg["moe_backend"] = draft_moe_backend
@@ -1014,31 +1018,32 @@ def test_draft_moe_backend(
     tgt_cfg: VllmConfig = engine_args.create_engine_config()
     assert tgt_cfg.kernel_config.moe_backend == expected_target
 
-    # create_vllm_config_for_spec_decode (used by Eagle/MTP/Medusa proposers)
-    applied = create_vllm_config_for_spec_decode(tgt_cfg)
+    # Base proposer path: override moe_backend from speculative_config
+    sc = tgt_cfg.speculative_config
+    if sc.moe_backend is not None:
+        applied = replace(
+            tgt_cfg,
+            kernel_config=replace(tgt_cfg.kernel_config, moe_backend=sc.moe_backend),
+        )
+    else:
+        applied = tgt_cfg
     assert applied.kernel_config.moe_backend == expected_draft
     assert applied.model_config is tgt_cfg.model_config
     assert applied.parallel_config is tgt_cfg.parallel_config
     if draft_moe_backend is None:
         assert applied is tgt_cfg
 
-    # create_vllm_config_for_draft_model (used by DraftModelProposer)
-    draft_cfg = create_vllm_config_for_draft_model(tgt_cfg)
-    assert draft_cfg.kernel_config.moe_backend == expected_draft
-
-
-def test_create_vllm_config_for_spec_decode_noop_without_spec_config():
-    """create_vllm_config_for_spec_decode is a no-op when there is no
-    speculative_config."""
-    engine_args = EngineArgs(
-        model="Qwen/Qwen3-1.7B",
-        tensor_parallel_size=1,
+    # DraftModelProposer path: extends base with quant/parallel/model overrides
+    draft_cfg = replace(
+        applied,
+        quant_config=None,
+        parallel_config=replace(
+            sc.draft_parallel_config,
+            rank=tgt_cfg.parallel_config.rank,
+        ),
+        model_config=sc.draft_model_config,
     )
-    vllm_config: VllmConfig = engine_args.create_engine_config()
-    assert vllm_config.speculative_config is None
-
-    result = create_vllm_config_for_spec_decode(vllm_config)
-    assert result is vllm_config
+    assert draft_cfg.kernel_config.moe_backend == expected_draft
 
 
 def test_draft_model_engine_args_rejects_invalid_tp_argname():
