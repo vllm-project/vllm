@@ -53,12 +53,6 @@ class SimpleCPUOffloadWorker:
         # Metadata for the current step
         self._connector_metadata: SimpleCPUOffloadMetadata | None = None
 
-        # Two-step deferred store: stash blocks for 2 steps so the DMA
-        # launches without any wait_event/wait_stream (the producing
-        # forward is long done by then).
-        self._deferred_store: tuple[list[int], list[int], int] | None = None
-        self._deferred_store_prev: tuple[list[int], list[int], int] | None = None
-
         # Pending event index sets, populated in bind_connector_metadata
         self._pending_load_event_indices: set[int] = set()
         self._pending_store_event_indices: set[int] = set()
@@ -207,48 +201,39 @@ class SimpleCPUOffloadWorker:
         self,
         finished_req_ids: set[str],
     ) -> tuple[set[str] | None, set[str] | None]:
-        """Updates from worker to scheduler on completed transfer events.
+        """Submit transfers and report completed events to the scheduler.
 
-        Additionally, it will submit deferred load and store transfers after model
-         execution to hide the CPU-side block copy op overhead behind GPU compute.
+        Called after model execution. The manager only schedules stores for
+        blocks whose KV data is confirmed computed, so we launch both loads
+        and stores immediately — no deferral or cross-stream sync needed.
 
         Returns:
             tuple of (finished_sending, finished_recving).
-            - finished_sending is only used by connector scheduler, and we use
-            it to store the finished store event ids rather than req_ids.
-            - finished_recving still tracks the req_ids that have finished loading.
+            - finished_sending: ``__store_done_<idx>`` sentinels for completed
+              store events.
+            - finished_recving: req_ids whose loads have completed.
         """
-        # (1) Submit deferred transfers (if any)
+        # (1) Submit transfers
         metadata = self._connector_metadata
-        if self._is_initialized:
-            # Flush the store deferred from the *previous* step.  By now the
-            # model forward pass that produced those KV values has completed.
-
-            # Flush the store from 2 steps ago — no event sync needed.
-            if self._deferred_store_prev is not None:
-                src, dst, eidx = self._deferred_store_prev
-                self._deferred_store_prev = None
-                self._launch_copy_kernel(src, dst, eidx, is_store=True)
-
-            if metadata is not None:
-                # Launch loads immediately (CPU->GPU, no dependency on compute).
-                self._launch_copy_kernel(
-                    metadata.load_cpu_blocks,
-                    metadata.load_gpu_blocks,
-                    metadata.load_event,
-                    is_store=False,
-                )
-                # Rotate: move current deferred → prev, stash new store.
-                # The prev slot gets flushed in the NEXT step's
-                # bind_connector_metadata (2 steps after the forward
-                # that wrote these blocks).
-                if metadata.store_gpu_blocks:
-                    self._deferred_store_prev = self._deferred_store
-                    self._deferred_store = (
-                        metadata.store_gpu_blocks,
-                        metadata.store_cpu_blocks,
-                        metadata.store_event,
-                    )
+        if self._is_initialized and metadata is not None:
+            # Launch loads (CPU→GPU).
+            self._launch_copy_kernel(
+                metadata.load_cpu_blocks,
+                metadata.load_gpu_blocks,
+                metadata.load_event,
+                is_store=False,
+            )
+            # Launch stores (GPU→CPU). Safe because the manager only includes
+            # blocks with confirmed-computed KV data, and the implicit GPU→CPU
+            # sync from sampling guarantees visibility across streams.
+            self._launch_copy_kernel(
+                metadata.store_gpu_blocks,
+                metadata.store_cpu_blocks,
+                metadata.store_event,
+                is_store=True,
+            )
+            if metadata.store_gpu_blocks:
+                print(f"YIFAN: store blocks {len(metadata.store_gpu_blocks)}")
 
         # (2) Track completed transfer events
         finished_recving: set[str] = set()
@@ -281,7 +266,7 @@ class SimpleCPUOffloadWorker:
         self._flush_and_sync_all()
 
     def drain_pending_transfers(self) -> set[str]:
-        """Flush deferred stores, synchronize events, return completions.
+        """Synchronize in-flight events and return completions.
 
         Returns ``finished_sending`` with ``__store_done_<idx>`` sentinels for
         every pending store event so the scheduler can process the completions.
@@ -292,16 +277,7 @@ class SimpleCPUOffloadWorker:
         return {f"__store_done_{idx}" for idx in pending}
 
     def _flush_and_sync_all(self) -> None:
-        """Flush deferred stores and synchronize all in-flight events."""
-        for slot in (self._deferred_store_prev, self._deferred_store):
-            if slot is not None:
-                src, dst, event_idx = slot
-                # if self.store_stream is not None:
-                #     self.store_stream.wait_stream(torch.cuda.current_stream())
-                self._launch_copy_kernel(src, dst, event_idx, is_store=True)
-        self._deferred_store_prev = None
-        self._deferred_store = None
-
+        """Synchronize all in-flight transfer events."""
         for event_idx, event in self._load_events:
             event.synchronize()
             self._load_hwm = event_idx
