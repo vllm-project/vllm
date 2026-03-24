@@ -106,10 +106,16 @@ def derive_mamba_conv_split(
     local_conv_dim = conv_shape[0]  # DS: (conv_dim_local, conv_rows)
     conv_rows = conv_shape[1]
 
+    # NOTE (ZhanqiuHu): intermediate_size (= global x dim) is not stored
+    # in MambaSpec, so we reconstruct it from the SSM temporal state shape:
+    #   shapes[1] = (local_num_heads, head_dim), already divided by TP.
     head_dim = mamba_spec.shapes[1][1]
     local_num_heads = mamba_spec.shapes[1][0]
     intermediate_size = local_num_heads * local_tp * head_dim
 
+    # NOTE (ZhanqiuHu): global conv dim = intermediate_size + 2 * groups_ss,
+    # where groups_ss is the B (= C) dimension.  B and C are always the same
+    # size, so we recover groups_ss from the remainder after subtracting x.
     remainder = local_conv_dim * local_tp - intermediate_size
     assert remainder > 0 and remainder % 2 == 0, (
         f"Conv dim ({local_conv_dim}*tp={local_tp}) doesn't decompose into "
@@ -123,6 +129,7 @@ def derive_mamba_conv_split(
         dtype=mamba_spec.dtypes[0],  # type: ignore[misc]
     ).element_size()
 
+    # Divide by TP to get per-rank column counts.
     return MambaConvSplitInfo(
         conv_rows=conv_rows,
         x_local=intermediate_size // local_tp,

@@ -1934,6 +1934,9 @@ class NixlConnectorWorker:
                 self.device_id,
             )
 
+        # NOTE (ZhanqiuHu): mamba=True path in register_blocks is not used
+        # right now — we use _register_mamba_local instead for the 3-read
+        # approach. However, we might still need this as a fallback for homogeneous TP.
         register_blocks(blocks_data, mamba=False)
         if self._has_mamba:
             assert self.num_descs == len(blocks_data)
@@ -2166,9 +2169,10 @@ class NixlConnectorWorker:
                 self.tp_rank,
             )
 
-        # TODO (ZhanqiuHu): refactor register_blocks / register_remote_blocks
-        # so FA and Mamba paths are separated more cleanly (e.g. dedicated
-        # register_fa_descs / register_mamba_descs) instead of a `mamba` flag.
+        # NOTE (ZhanqiuHu): same as above - mamba=True path in
+        # register_remote_blocks is unused; _register_mamba_remote handles it.
+        # TODO (ZhanqiuHu): might be worth refactoring so FA and Mamba paths are handled
+        # cleanly (e.g. register_fa_descs / register_mamba_descs).
         register_remote_blocks(blocks_data, mamba=False)
         if self._has_mamba:
             logger.debug("Registering remote Mamba descriptors (4 regions/layer)")
