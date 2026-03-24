@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for NixlConnectorScheduler sw_sizes calculation with HMA."""
+"""Unit tests for NixlConnectorScheduler with HMA and Mamba N-1 prefill."""
 
 from unittest.mock import patch
 
@@ -14,24 +14,26 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 
 from .utils import (
+    create_request,
     create_vllm_config,
     make_kv_cache_config,
+    make_nixl_scheduler,
 )
 
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "hma_enabled,expected_sw_sizes",
+    "swa_enabled,expected_sw_sizes",
     [
-        # HMA enabled: FullAttentionSpec (0) + SlidingWindowSpec (2048/16=128)
+        # SWA enabled: FullAttentionSpec (0) + SlidingWindowSpec (2048/16=128)
         (True, [0, 128 + 1]),
-        # HMA disabled: only FullAttentionSpec (0)
+        # SWA disabled: only FullAttentionSpec (0)
         (False, [0]),
     ],
 )
 @patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.current_platform")
-def test_sw_sizes(mock_platform, hma_enabled, expected_sw_sizes):
-    """Test sw_sizes is correctly computed based on HMA enabled/disabled."""
+def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
+    """Test sw_sizes is correctly computed based on SWA enabled/disabled."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
         NixlConnectorScheduler,
     )
@@ -42,7 +44,7 @@ def test_sw_sizes(mock_platform, hma_enabled, expected_sw_sizes):
     vllm_config = create_vllm_config(block_size=block_size)
     # SW 2048 tokens=>128 blocks
     kv_cache_config = make_kv_cache_config(
-        block_size=block_size, hma_enabled=hma_enabled, sw_size=2048
+        block_size=block_size, swa_enabled=swa_enabled, sw_size=2048
     )
 
     scheduler = NixlConnectorScheduler(
@@ -75,7 +77,7 @@ def test_logical_to_kernel_block_ids_with_hma():
     # So each logical block maps to 2 kernel blocks eg [0]->[0,1]
     worker._physical_blocks_per_logical_kv_block = 2
     # FA + SW groups (neither is MambaSpec, so both get expanded)
-    worker.kv_cache_config = make_kv_cache_config(block_size=16, hma_enabled=True)
+    worker.kv_cache_config = make_kv_cache_config(block_size=16, swa_enabled=True)
 
     # Test conversion: FA + SW group
     logical_block_ids = [[0, 1, 2], [3, 4]]
@@ -313,3 +315,106 @@ def test_nixl_metadata_hybrid_ssm_block_ids():
     assert list(req_meta.remote.block_ids[0]) == [10, 11, 12, 13, 14, 15, 16, 17]
     assert list(req_meta.remote.block_ids[1]) == [20, 21]
     assert len(req_meta.remote.block_ids[0]) != len(req_meta.remote.block_ids[1])
+
+
+# ── Mamba N-1 prefill tests ──────────────────────────────────────────────
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "has_mamba,is_hma_required,expected_count",
+    [
+        (True, True, 9),
+        (False, False, 10),
+        (False, True, 10),
+    ],
+    ids=["mamba", "fa_only", "swa_only"],
+)
+def test_mamba_n1_d_side(has_mamba, is_hma_required, expected_count):
+    """D-side: Mamba gets N-1 matched tokens, non-Mamba gets N."""
+    sched = make_nixl_scheduler(has_mamba=has_mamba, is_hma_required=is_hma_required)
+    req = create_request(num_tokens=10, do_remote_prefill=True)
+
+    count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
+    assert count == expected_count
+    assert is_async is True
+
+
+@pytest.mark.cpu_test
+def test_mamba_n1_p_side_truncation():
+    """P-side: Mamba truncates prompt to N-1, sets max_tokens=1.
+
+    Also verifies idempotency (calling again is a no-op) which is
+    needed for preemption safety via the _p_side_truncated guard,
+    and that non-Mamba models skip truncation entirely.
+    """
+    sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
+    req = create_request(num_tokens=10, do_remote_decode=True)
+    req.max_tokens = 128
+    original_len = len(req.prompt_token_ids)
+
+    count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
+
+    assert count == 0
+    assert is_async is False
+    assert len(req.prompt_token_ids) == original_len - 1
+    assert req.num_prompt_tokens == original_len - 1
+    assert req.max_tokens == 1
+    assert req.kv_transfer_params["_p_side_truncated"] is True
+
+    # Idempotency: second call must not truncate further
+    sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
+    assert len(req.prompt_token_ids) == original_len - 1
+
+    # Non-Mamba: truncation is skipped
+    fa_sched = make_nixl_scheduler(has_mamba=False, is_hma_required=False)
+    fa_req = create_request(num_tokens=10, do_remote_decode=True)
+    fa_original = len(fa_req.prompt_token_ids)
+
+    fa_sched.get_num_new_matched_tokens(fa_req, num_computed_tokens=0)
+    assert len(fa_req.prompt_token_ids) == fa_original
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "swa_enabled,mamba_enabled,expected_has_mamba,expected_is_hma",
+    [
+        (True, True, True, True),
+        (True, False, False, True),
+        (False, False, False, False),
+    ],
+    ids=["fa_swa_mamba", "fa_swa_only", "fa_only"],
+)
+@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.current_platform")
+def test_has_mamba_init(
+    mock_platform,
+    swa_enabled,
+    mamba_enabled,
+    expected_has_mamba,
+    expected_is_hma,
+):
+    """Test _has_mamba / _is_hma_required derived from kv_cache_groups."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+        NixlConnectorScheduler,
+    )
+
+    mock_platform.device_type = "cpu"
+
+    block_size = 16
+    vllm_config = create_vllm_config(block_size=block_size)
+    # VllmConfig.__post_init__ auto-disables HMA when kv_transfer_config
+    # is set; override so we can test the scheduler's own derivation.
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    kv_cache_config = make_kv_cache_config(
+        block_size=block_size,
+        swa_enabled=swa_enabled,
+        mamba_enabled=mamba_enabled,
+    )
+
+    scheduler = NixlConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+    assert scheduler._has_mamba is expected_has_mamba
+    assert scheduler._is_hma_required is expected_is_hma
