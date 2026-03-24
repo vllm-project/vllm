@@ -18,7 +18,7 @@ class KVEventsConfig:
     Events can be published externally by zmq using the event publisher config.
     """
 
-    publisher: Literal["null", "zmq"] = Field(default=None)
+    publisher: Literal["null", "zmq"] | None = Field(default=None)
     """The publisher to use for publishing kv events. Can be "null", "zmq".
     """
 
