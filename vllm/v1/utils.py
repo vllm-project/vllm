@@ -261,30 +261,39 @@ def wait_for_completion_or_failure(
         if coordinator:
             sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
 
-        # start monitor for engine liveness
         if engine_manager:
-            monitor_thread = threading.Thread(
-                target=engine_manager.monitor_engine_liveness,
-                daemon=True,
-            )
-            monitor_thread.start()
+            core_shutdown_recv, core_shutdown_send = connection.Pipe(duplex=False)
+
+            def monitor_engines():
+                try:
+                    engine_manager.monitor_engine_liveness()
+                finally:
+                    core_shutdown_send.close()
+                    core_shutdown_recv.close()
+
+            # start monitor for engine liveness
+            threading.Thread(target=monitor_engines, daemon=True).start()
+            sentinel_to_proc[core_shutdown_recv] = None  # type: ignore[assignment]
 
         # Check if any process terminates
         while sentinel_to_proc:
-            if engine_manager is not None and engine_manager.manager_stopped.is_set():
-                raise RuntimeError("Engine core process is dead.")
-            # Wait for any process to terminate
-            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc, timeout=5)
+            # Wait for any process to terminate (or engine shutdown signal)
+            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc)
 
             # Process any terminated processes
             for sentinel in ready_sentinels:
                 proc = sentinel_to_proc.pop(sentinel)
 
                 # Check if process exited with error
-                if proc.exitcode != 0:
+                if proc is not None and proc.exitcode != 0:
                     raise RuntimeError(
                         f"Process {proc.name} (PID: {proc.pid}) "
                         f"died with exit code {proc.exitcode}"
+                    )
+                if engine_manager and engine_manager.failed_proc_name is not None:
+                    raise RuntimeError(
+                        f"Engine core process {engine_manager.failed_proc_name} "
+                        "died unexpectedly."
                     )
 
     except KeyboardInterrupt:
