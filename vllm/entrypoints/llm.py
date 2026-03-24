@@ -1233,7 +1233,7 @@ class LLM:
             if pooling_task not in self.supported_tasks:
                 raise ValueError(
                     f"Unsupported task: {pooling_task!r} "
-                    f"Supported tasks: {self.pooling_task}"
+                    f"Supported tasks: {self.supported_tasks}"
                 )
             else:
                 logger.warning_once(
