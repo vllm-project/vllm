@@ -340,9 +340,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         total_seq_lens = seq_lens_cpu[req_slice].sum()
         num_reqs = req_slice.stop - req_slice.start
         seq_idx = torch.arange(0, num_reqs, dtype=torch.int32)
-        token_to_seq = torch.repeat_interleave(
-            seq_idx, seq_lens_cpu[req_slice]
-        ).to(self.device)
+        token_to_seq = torch.repeat_interleave(seq_idx, seq_lens_cpu[req_slice]).to(
+            self.device
+        )
         assert total_seq_lens <= self.max_prefill_buffer_size
         cu_seq_lens = (
             torch.cat(
@@ -404,7 +404,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
             chunks = [
                 self.build_one_prefill_chunk(
-                    req_slice, query_slice,
+                    req_slice,
+                    query_slice,
                     query_start_loc_cpu,
                     common_attn_metadata.seq_lens_cpu,
                     common_attn_metadata.block_table_tensor,
