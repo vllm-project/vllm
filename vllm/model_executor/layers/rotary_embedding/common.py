@@ -264,7 +264,10 @@ class ApplyRotaryEmb(CustomOp):
             """
             interleaved = not self.is_neox_style
             try:
-                output = self.apply_rotary_emb_flash_attn(
+                flash_attn_func = self.apply_rotary_emb_flash_attn
+                if flash_attn_func is None:
+                    raise RuntimeError("Flash attention kernel was disabled by another thread.")
+                output = flash_attn_func(
                     x, cos, sin, interleaved=interleaved
                 ).type_as(x)
             except RuntimeError:
