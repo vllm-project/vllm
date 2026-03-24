@@ -38,6 +38,7 @@ from typing_extensions import deprecated
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal.audio import get_audio_duration
 from vllm.multimodal.image import convert_image_mode
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -54,10 +55,6 @@ try:
 except ImportError:
     pd = PlaceholderModule("pandas")
 
-try:
-    import librosa
-except ImportError:
-    librosa = PlaceholderModule("librosa")
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +179,68 @@ class BenchmarkDataset(ABC):
             lora_path=lora_path_on_disk(lora_path),
         )
         return lora_request
+
+    def get_round_robin_lora_request(
+        self,
+        index: int,
+        max_loras: int | None = None,
+        lora_path: str | None = None,
+    ) -> LoRARequest | None:
+        """
+        Optionally select a LoRA request using deterministic round-robin.
+
+        This method cycles through LoRA IDs in order based on the request
+        index, providing reproducible LoRA assignment.
+
+        Args:
+            index (int): The request index used for round-robin selection.
+            max_loras (Optional[int]): The maximum number of LoRAs available.
+                If `None`, LoRA is not used.
+            lora_path (Optional[str]): Path to the LoRA parameters on disk.
+                If `None`, LoRA is not used.
+
+        Returns:
+            A new [`LoRARequest`][vllm.lora.request.LoRARequest]
+            (or `None` if not applicable).
+        """
+        if max_loras is None or lora_path is None:
+            return None
+
+        # Deterministic round-robin: cycle through [1, max_loras]
+        lora_id = index % max_loras + 1
+        lora_request = LoRARequest(
+            lora_name=str(lora_id),
+            lora_int_id=lora_id,
+            lora_path=lora_path_on_disk(lora_path),
+        )
+        return lora_request
+
+    def get_lora_request(
+        self,
+        index: int,
+        max_loras: int | None = None,
+        lora_path: str | None = None,
+        lora_assignment: str = "random",
+    ) -> LoRARequest | None:
+        """
+        Select a LoRA request using the specified assignment strategy.
+
+        Args:
+            index (int): The request index (used for round-robin).
+            max_loras (Optional[int]): The maximum number of LoRAs available.
+            lora_path (Optional[str]): Path to the LoRA parameters on disk.
+            lora_assignment (str): Strategy for LoRA selection.
+                'random' (default) or 'round-robin'.
+
+        Returns:
+            A new [`LoRARequest`][vllm.lora.request.LoRARequest]
+            (or `None` if not applicable).
+        """
+        if lora_assignment == "round-robin":
+            return self.get_round_robin_lora_request(
+                index=index, max_loras=max_loras, lora_path=lora_path
+            )
+        return self.get_random_lora_request(max_loras=max_loras, lora_path=lora_path)
 
     @abstractmethod
     def sample(
@@ -478,6 +537,9 @@ class RandomDataset(BenchmarkDataset):
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         batchsize: int = 1,
+        max_loras: int | None = None,
+        lora_path: str | None = None,
+        lora_assignment: str = "random",
         **kwargs,
     ) -> list[SampleRequest]:
         # validate total input tokens (prefix + sampled) is at least 1.
@@ -522,11 +584,18 @@ class RandomDataset(BenchmarkDataset):
                 allowed_tokens=allowed_tokens,
             )
             token_mismatch_total += token_mismatch
+            lora_req = self.get_lora_request(
+                index=i,
+                max_loras=max_loras,
+                lora_path=lora_path,
+                lora_assignment=lora_assignment,
+            )
             requests.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=total_input_len,
                     expected_output_len=int(output_lens[i]),
+                    lora_request=lora_req,
                     request_id=request_id_prefix + str(i),
                 )
             )
@@ -1263,6 +1332,7 @@ class ShareGPTDataset(BenchmarkDataset):
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        lora_assignment: str = "random",
         **kwargs,
     ) -> list:
         samples: list = []
@@ -1275,8 +1345,11 @@ class ShareGPTDataset(BenchmarkDataset):
                 entry["conversations"][1]["value"],
             )
 
-            lora_request = self.get_random_lora_request(
-                max_loras=max_loras, lora_path=lora_path
+            lora_request = self.get_lora_request(
+                index=ind,
+                max_loras=max_loras,
+                lora_path=lora_path,
+                lora_assignment=lora_assignment,
             )
             prompt_ids = tokenizer(prompt).input_ids
             completion_ids = tokenizer(completion).input_ids
@@ -2413,6 +2486,7 @@ class BurstGPTDataset(BenchmarkDataset):
         lora_path: str | None = None,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        lora_assignment: str = "random",
         **kwargs,
     ) -> list[SampleRequest]:
         samples = []
@@ -2420,8 +2494,11 @@ class BurstGPTDataset(BenchmarkDataset):
         for i in range(num_requests):
             input_len = int(data[i][2])
             output_len = int(data[i][3])
-            lora_req = self.get_random_lora_request(
-                max_loras=max_loras, lora_path=lora_path
+            lora_req = self.get_lora_request(
+                index=i,
+                max_loras=max_loras,
+                lora_path=lora_path,
+                lora_assignment=lora_assignment,
             )
             vocab_size = tokenizer.vocab_size
             # Generate a synthetic prompt: a list of token IDs computed as (i +
@@ -3173,7 +3250,7 @@ class ASRDataset(HuggingFaceDataset):
                 break
             audio = item["audio"]
             y, sr = audio["array"], audio["sampling_rate"]
-            duration_s = librosa.get_duration(y=y, sr=sr)
+            duration_s = get_audio_duration(y=y, sr=sr)
             if duration_s < asr_min_audio_len_sec or duration_s > asr_max_audio_len_sec:
                 skipped += 1
                 continue

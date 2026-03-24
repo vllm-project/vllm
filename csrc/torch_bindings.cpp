@@ -303,9 +303,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       ") -> Tensor");
   // conditionally compiled so impl registration is in source file
 
-  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
-  ops.impl("permute_cols", torch::kCUDA, &permute_cols);
-
   // Marlin Optimized Quantized GEMM (supports GPTQ, AWQ, FP8, NVFP4, MXFP4).
   ops.def(
       "marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
@@ -525,26 +522,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool");
   ops.impl("cutlass_scaled_mm_supports_block_fp8",
            &cutlass_scaled_mm_supports_block_fp8);
-
-  // Check if cutlass sparse scaled_mm is supported for CUDA devices of the
-  // given capability
-  ops.def(
-      "cutlass_sparse_scaled_mm_supported(int cuda_device_capability) -> bool");
-  ops.impl("cutlass_sparse_scaled_mm_supported",
-           &cutlass_sparse_scaled_mm_supported);
-
-  // CUTLASS sparse GEMM, supporting symmetric per-tensor or per-row/column
-  // quantization, as well as bias
-  ops.def(
-      "cutlass_scaled_sparse_mm(Tensor! out, Tensor a,"
-      "                         Tensor bt_nzs,"
-      "                         Tensor bt_meta, Tensor a_scales,"
-      "                         Tensor b_scales, Tensor? bias) -> ()");
-  ops.impl("cutlass_scaled_sparse_mm", torch::kCUDA, &cutlass_scaled_sparse_mm);
-
-  // CUTLASS sparse matrix compressor
-  ops.def("cutlass_sparse_compress(Tensor a) -> Tensor[]");
-  ops.impl("cutlass_sparse_compress", &cutlass_sparse_compress);
 
   // SM100 CUTLASS MLA decode
   ops.def(
