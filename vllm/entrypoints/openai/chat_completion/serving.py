@@ -373,9 +373,9 @@ class OpenAIServingChat(OpenAIServing):
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
-        if request.add_generation_prompt:
+        if request.add_generation_prompt or request.is_batched:
             return self.response_role
-        return request.messages[-1]["role"]
+        return request.messages[-1]["role"]  # type: ignore[call-overload]
 
     @staticmethod
     def _bracket_level(s: str, opening="{", closing="}") -> int:
@@ -1369,10 +1369,7 @@ class OpenAIServingChat(OpenAIServing):
                 if request.echo:
                     conversation = all_conversations[prompt_idx]
                     last_msg_content: str | list[dict[str, str]] = ""
-                    if (
-                        conversation
-                        and "content" in conversation[-1]
-                    ):
+                    if conversation and "content" in conversation[-1]:
                         last_msg_content = conversation[-1]["content"] or ""
                     if isinstance(last_msg_content, list):
                         last_msg_content = "\n".join(
@@ -1384,7 +1381,9 @@ class OpenAIServingChat(OpenAIServing):
                     index=prompt_idx,
                     message=message,
                     logprobs=logprobs,
-                    finish_reason=output.finish_reason if output.finish_reason else "stop",
+                    finish_reason=output.finish_reason
+                    if output.finish_reason
+                    else "stop",
                     stop_reason=output.stop_reason,
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None

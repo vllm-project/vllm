@@ -166,7 +166,9 @@ async def test_empty_grammar(client: openai.AsyncOpenAI, model_name: str) -> Non
     "model_name",
     [MODEL_NAME],
 )
-async def test_batched_chat_completions(server: RemoteOpenAIServer, model_name: str) -> None:
+async def test_batched_chat_completions(
+    server: RemoteOpenAIServer, model_name: str
+) -> None:
     """Batched chat completions: messages accepts list[list[...]] and returns
     one choice per conversation indexed 0, 1, …, N-1."""
     conversations = [

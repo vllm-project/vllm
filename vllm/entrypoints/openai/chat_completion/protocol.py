@@ -366,7 +366,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         """Return all conversations. Wraps a single conversation in a list."""
         if self.is_batched:
             return self.messages  # type: ignore[return-value]
-        return [self.messages]  # type: ignore[return-value]
+        return [self.messages]  # type: ignore[list-item]
 
     def build_chat_params(
         self,
