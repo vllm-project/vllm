@@ -250,7 +250,7 @@ def trainer_broadcast_tensor(
     # Create and broadcast the tensor
     dtype = getattr(torch, tensor_dtype)
     tensor_to_send = torch.ones(tensor_shape, dtype=dtype, device="cuda:0")
-    comm.broadcast(tensor_to_send, src=0, stream=torch.cuda.current_stream())
+    comm.broadcast(tensor_to_send, src=0, stream=torch.accelerator.current_stream())
     torch.accelerator.synchronize()
 
     return True

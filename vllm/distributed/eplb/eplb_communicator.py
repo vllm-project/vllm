@@ -154,7 +154,7 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
         if self._cuda_stream is not None:
             self._cuda_stream.synchronize()
         else:
-            torch.cuda.current_stream().synchronize()
+            torch.accelerator.current_stream().synchronize()
 
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:

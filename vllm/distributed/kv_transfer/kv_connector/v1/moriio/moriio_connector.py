@@ -804,7 +804,7 @@ class MoRIIOConnectorWorker:
         # we can consider removing this synchronization after ibgda is enabled.
         # when mori-io supports ibgda functionality
 
-        stream = torch.cuda.current_stream()
+        stream = torch.accelerator.current_stream()
         event = torch.cuda.Event()
         event.record(stream)
 

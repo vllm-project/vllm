@@ -653,7 +653,7 @@ def copy_num_valid_draft_tokens(
     if num_reqs_to_copy <= 0:
         return
 
-    default_stream = torch.cuda.current_stream()
+    default_stream = torch.accelerator.current_stream()
     with torch.cuda.stream(num_valid_draft_tokens_copy_stream):
         num_valid_draft_tokens_copy_stream.wait_stream(default_stream)
         num_valid_draft_tokens_cpu[:num_reqs_to_copy].copy_(

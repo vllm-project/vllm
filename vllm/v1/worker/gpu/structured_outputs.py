@@ -57,7 +57,7 @@ class StructuredOutputsWorker:
             )
 
         # Ensure all async copies are complete before launching the kernel.
-        current_stream = torch.cuda.current_stream()
+        current_stream = torch.accelerator.current_stream()
         current_stream.wait_stream(self.copy_stream)
 
         num_masks = bitmask.shape[0]
