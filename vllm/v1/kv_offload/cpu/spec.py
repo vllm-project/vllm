@@ -9,9 +9,7 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
-from vllm.v1.kv_offload.arc_manager import ARCOffloadingManager
-from vllm.v1.kv_offload.backends.cpu import CPUBackend
-from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
 from vllm.v1.kv_offload.spec import OffloadingSpec
@@ -68,23 +66,13 @@ class CPUOffloadingSpec(OffloadingSpec):
             assert len(self.gpu_block_size) == 1
             gpu_block_size = self.gpu_block_size[0]
             offloaded_block_size = gpu_block_size * self.block_size_factor
-            backend = CPUBackend(
-                block_size=offloaded_block_size, num_blocks=self.num_blocks
-            )
 
-            if self.eviction_policy == "lru":
-                self._manager = LRUOffloadingManager(
-                    backend=backend, enable_events=enable_events
-                )
-            elif self.eviction_policy == "arc":
-                self._manager = ARCOffloadingManager(
-                    backend=backend, enable_events=enable_events
-                )
-            else:
-                raise ValueError(
-                    f"Unknown eviction policy: {self.eviction_policy}. "
-                    f"Supported policies: lru, arc"
-                )
+            self._manager = CPUOffloadingManager(
+                block_size=offloaded_block_size,
+                num_blocks=self.num_blocks,
+                cache_policy=self.eviction_policy,  # type: ignore[arg-type]
+                enable_events=enable_events,
+            )
 
             # store_threshold: how many times a block must appear in lookup()
             # before it is eligible for CPU offloading.  Values < 2 disable
