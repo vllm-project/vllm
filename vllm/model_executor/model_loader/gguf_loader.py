@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from collections.abc import Generator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import gguf
 import regex as re
@@ -358,8 +358,7 @@ class GGUFModelLoader(BaseModelLoader):
             "GGUF unquantized modules: %s",
             unquant_names,
         )
-        if not isinstance(quant_config := vllm_config.quant_config, GGUFConfig):
-            raise ValueError("Expected quant_config to be an instance of GGUFConfig")
+        quant_config = cast(GGUFConfig, vllm_config.quant_config)
         quant_config.unquantized_modules.extend(unquant_names)
 
         target_device = torch.device(device_config.device)
