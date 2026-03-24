@@ -450,7 +450,6 @@ class Platform:
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
         )
-        from vllm.v1.attention.backend import AttentionBackend
 
         attn_layers = get_layers_from_vllm_config(
             vllm_config,
