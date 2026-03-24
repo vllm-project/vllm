@@ -380,14 +380,19 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state(
-            [], 0, hidden_states, residual
-        )
+        use_aux_hidden_states = len(self.aux_hidden_state_layers) > 0
+        aux_hidden_states: list[torch.Tensor] = []
+        if use_aux_hidden_states:
+            aux_hidden_states = self._maybe_add_hidden_state(
+                [], 0, hidden_states, residual
+            )
         for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
             hidden_states, residual = layer(positions, hidden_states, residual)
-            self._maybe_add_hidden_state(
-                aux_hidden_states, self.start_layer + idx, hidden_states, residual
-            )
+            if use_aux_hidden_states:
+                self._maybe_add_hidden_state(
+                    aux_hidden_states, self.start_layer + idx, hidden_states,
+                    residual
+                )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -395,7 +400,7 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
             )
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        if len(aux_hidden_states) > 0:
+        if use_aux_hidden_states and len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
 
