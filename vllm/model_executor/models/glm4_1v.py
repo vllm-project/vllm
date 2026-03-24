@@ -38,7 +38,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature, Glm4vProcessor
-from transformers.models.glm4v.configuration_glm4v import Glm4vVisionConfig
+from transformers.models.glm4v.configuration_glm4v import (
+    Glm4vTextConfig,
+    Glm4vVisionConfig,
+)
 from transformers.models.glm4v.image_processing_glm4v import (
     Glm4vImageProcessor,
     smart_resize,
@@ -604,6 +607,7 @@ class Glm4vVisionEmbeddings(nn.Module):
 class Glm4vVisionTransformer(nn.Module):
     def __init__(
         self,
+        text_config: Glm4vTextConfig,
         vision_config: Glm4vVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
