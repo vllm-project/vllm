@@ -196,8 +196,9 @@ class CudaPlatformBase(Platform):
                     f"GPU {gpu_name} (compute capability "
                     f"{device_cap.major}.{device_cap.minor}, sm_{sm_version})"
                     f" requires CUDA >= 13.0, but found CUDA {cuda_version}."
-                    f" Please use a container image with CUDA 13.0 or newer"
-                    f" (e.g. a 'cu130' tagged image)."
+                    f" Please upgrade to PyTorch 2.11+ (which defaults to"
+                    f" CUDA 13.0) or use a container image with CUDA 13.0"
+                    f" or newer (e.g. a 'cu130' tagged image)."
                 )
 
         parallel_config = vllm_config.parallel_config
