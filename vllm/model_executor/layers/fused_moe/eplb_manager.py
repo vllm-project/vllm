@@ -145,7 +145,7 @@ class EplbManager:
         )
 
         return [
-            weight.view(layer.local_num_experts, -1)
+            weight.data.view(layer.local_num_experts, -1)
             for name, weight in weights
             if name not in NON_EXPERT_WEIGHTS
             and weight.shape != torch.Size([])
