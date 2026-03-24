@@ -361,6 +361,27 @@ async fn test_chat_with_engine_handle() -> (ChatLlm, tokio::task::JoinHandle<()>
     test_chat_with_engine_outputs(b"engine-openai-chat", default_stream_output_specs()).await
 }
 
+async fn server_load(app: &axum::Router) -> u64 {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/load")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    value["server_load"].as_u64().expect("server_load")
+}
+
 fn metric_value(rendered: &str, metric: &str, labels: Option<&str>) -> Option<f64> {
     rendered.lines().find_map(|line| {
         let Some(rest) = line.strip_prefix(metric) else {
@@ -686,6 +707,79 @@ async fn http_metrics_group_error_statuses() {
         ),
         1.0
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn load_endpoint_tracks_chat_stream_lifecycle() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+
+    assert_eq!(server_load(&app).await, 0);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(server_load(&app).await, 1);
+
+    let _body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+
+    assert_eq!(server_load(&app).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn load_endpoint_resets_when_stream_response_is_dropped() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(server_load(&app).await, 1);
+
+    drop(response);
+    tokio::task::yield_now().await;
+    engine_task.await.expect("mock engine task");
+
+    assert_eq!(server_load(&app).await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -12,6 +12,7 @@ anyhow.workspace = true
 axum.workspace = true
 futures.workspace = true
 futures-async-stream.workspace = true
+http-body.workspace = true
 openai-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true

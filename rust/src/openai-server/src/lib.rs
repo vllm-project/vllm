@@ -5,7 +5,7 @@
 
 mod config;
 mod error;
-mod metrics;
+mod middleware;
 mod routes;
 mod state;
 

@@ -29,6 +29,7 @@ futures = "0.3.31"
 futures-async-stream = "0.2.13"
 hex = "0.4.3"
 hf-hub = { version = "0.5.0", features = ["tokio"] }
+http-body = "1.0.1"
 libc = "0.2.177"
 openai-protocol = { version = "1.4.0", features = ["axum"] }
 parking_lot = "0.12.5"

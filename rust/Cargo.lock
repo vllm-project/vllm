@@ -4327,6 +4327,7 @@ dependencies = [
  "expect-test",
  "futures",
  "futures-async-stream",
+ "http-body",
  "openai-protocol",
  "rmp-serde",
  "serde",
