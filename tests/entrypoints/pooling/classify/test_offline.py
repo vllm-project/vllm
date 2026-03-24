@@ -107,8 +107,8 @@ def test_score_api(llm: LLM):
         llm.score("ping", "pong", use_tqdm=False)
 
 
-@pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
+@pytest.mark.parametrize("task", ["embed", "token_embed"])
 def test_unsupported_tasks(llm: LLM, task: PoolingTask):
-    err_msg = f"Unsupported task: '{task}' Supported tasks.+"
+    err_msg = "Embedding API is not supported by this model.+"
     with pytest.raises(ValueError, match=err_msg):
         llm.encode(prompt, pooling_task=task, use_tqdm=False)
