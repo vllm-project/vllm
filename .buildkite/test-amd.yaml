@@ -2526,7 +2526,7 @@ steps:
   - pytest -v -s -x lora/test_llm_with_multi_loras.py
   - pytest -v -s -x lora/test_olmoe_tp.py
   - pytest -v -s -x lora/test_gptoss_tp.py
-  - pytest -v -s -x lora/test_qwen35_densemoel_lora.py
+  - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
 
 
 - label: Weight Loading Multiple GPU # 7.5m
