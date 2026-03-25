@@ -843,6 +843,23 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     echo: bool = False
     return_token_ids: bool = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_batch_mode(cls, data: Any) -> Any:
+        if isinstance(data, BatchChatCompletionRequest):
+            data = data.model_dump(exclude_unset=True)
+        if data.get("use_beam_search"):
+            raise ValueError(
+                "Batch chat completions do not support beam search. "
+                "Please set `use_beam_search` to False."
+            )
+        n = data.get("n", 1)
+        if n is not None and n != 1:
+            raise ValueError(
+                "Batch chat completions do not support `n > 1`. Please set `n` to 1."
+            )
+        return data
+
     def to_chat_completion_request(
         self, messages: list[ChatCompletionMessageParam]
     ) -> ChatCompletionRequest:
