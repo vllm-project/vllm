@@ -155,22 +155,11 @@ class SharedExperts:
 
         return output
 
-    def _maybe_reduce_shared_output(self, output: torch.Tensor) -> torch.Tensor:
-        if (
-            self._quant_method.moe_kernel is not None
-            and self._quant_method.moe_kernel.output_is_reduced()
-            and get_tensor_model_parallel_world_size() > 1
-        ):
-            output = tensor_model_parallel_all_reduce(output)
-        return output
-
     @property
     def output(self) -> torch.Tensor:
         assert self._output is not None
         output = self._output
         self._output = None
-        if output is not None:
-            output = self._maybe_reduce_shared_output(output)
         return output
 
     def apply(
@@ -188,4 +177,4 @@ class SharedExperts:
         if order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
             self._output = self._run_in_aux_stream(shared_experts_input)
         else:
-            self._output = self._shared_experts(shared_experts_input)
+            self._output = self._layer(shared_experts_input)
