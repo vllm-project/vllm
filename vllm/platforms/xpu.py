@@ -159,7 +159,6 @@ class XPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
 
         # lazy import to avoid circular import
@@ -205,17 +204,6 @@ class XPUPlatform(Platform):
         if vllm_config.kv_transfer_config is not None:
             vllm_config.kv_transfer_config.enable_permute_local_kv = True
 
-        if model_config and model_config.use_mla:
-            logger.info(
-                "MLA is enabled on a non-GPU platform; forcing chunked "
-                "prefill and prefix caching to be disabled."
-            )
-            vllm_config.scheduler_config.enable_chunked_prefill = False
-            vllm_config.scheduler_config.max_num_batched_tokens = max(
-                vllm_config.model_config.max_model_len,
-                vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
-            )
-
         # In some cases, the internal memory type cache can misdetect GPU
         # memory as host memory, also leading to invalid memory access.
         # This cache can be disabled by setting UCX_MEMTYPE_CACHE=n.
@@ -238,6 +226,7 @@ class XPUPlatform(Platform):
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
+        torch.xpu.empty_cache()
         torch.xpu.reset_peak_memory_stats(device)
         return torch.xpu.max_memory_allocated(device)
 
