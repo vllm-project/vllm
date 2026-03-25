@@ -92,7 +92,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 replace_parameter(
                     layer,
                     "weight",
-                    torch.nn.Parameter(w_q.t().data, requires_grad=False),
+                    w_q.t(),
                 )
 
         layer.input_scale = None
