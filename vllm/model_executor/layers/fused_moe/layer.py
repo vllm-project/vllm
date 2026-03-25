@@ -1462,7 +1462,8 @@ class FusedMoE(CustomOp):
                 or name.startswith("_gate.")
                 or name.startswith("_routed_input_transform.")
                 or name.startswith("_routed_output_transform.")
-            ) and name not in NON_EXPERT_WEIGHTS
+            )
+            and name not in NON_EXPERT_WEIGHTS
         )
 
         return [
