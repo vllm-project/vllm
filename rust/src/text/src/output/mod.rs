@@ -1,10 +1,8 @@
 //! Output processing helpers shared by text and chat layers.
 
 pub use decoded::{DecodedTextEvent, TextDecodeOptions, decoded_text_event_stream};
-pub use incremental::IncrementalTextDecoder;
 
 mod decoded;
-mod incremental;
 
 use futures::{StreamExt as _, pin_mut};
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
