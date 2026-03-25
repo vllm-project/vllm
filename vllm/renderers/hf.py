@@ -628,6 +628,16 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 ),
             )
 
+        # Bridge pad_token_id from model config to tokenizer when the
+        # tokenizer's own config (tokenizer_config.json) doesn't define it
+        # but the model config (config.json) does.
+        if tokenizer is not None and tokenizer.pad_token_id is None:
+            config_pad_id = getattr(
+                model_config.hf_config, "pad_token_id", None
+            )
+            if config_pad_id is not None:
+                tokenizer.pad_token_id = config_pad_id
+
         return cls(config, tokenizer)
 
     def __init__(
