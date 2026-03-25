@@ -294,7 +294,7 @@ This supplements prefix caching since there are some situations where prefix cac
 
 - The system message is different, causing the prefix to be different even though the multi-modal inputs are the same.
 - The user places different text instructions before passing multi-modal inputs.
-- The multi-modal inputs come in a different order compared to previous requests.
+- The multi-modal inputs have different ordering or subsets.
 
 The size of the multi-modal encoder cache is expressed in terms of number of embedding tokens. In order to facilitate chunked prefill, the minimum size is the maximum number of embeddings per multi-modal item. This is also the default cache size.
 
