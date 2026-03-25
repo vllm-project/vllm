@@ -1,5 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Gradient computation API — POST /v1/gradients.
+
+Computes gradients of loss / per-token log-probs w.r.t. model embeddings,
+enabling token-level attribution and interpretability analysis.
+
+Architecture:
+  1. FastAPI router receives GradientRequest (prompt + target text).
+  2. ServingGradient tokenizes both, builds GradientParams.
+  3. AsyncLLM.compute_gradients() sends an EngineCoreRequest.
+  4. EngineCore bypasses the scheduler and dispatches via collective_rpc
+     to Worker.compute_gradients() (needs torch.enable_grad()).
+  5. GradientRunner runs forward + backward, returns gradients.
+  6. Results flow back through the output processor as GradientRequestOutput.
+"""
 
 from typing import TYPE_CHECKING
 

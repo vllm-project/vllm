@@ -1,10 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GradientRunner: computes gradients of loss and/or per-token log-probs
-with respect to input/output embeddings for a given prompt + target pair.
+"""GradientRunner — core gradient computation for attribution.
 
-This enables token-level attribution (e.g. "how much did each input token
-influence the log-probability of each output token?").
+Computes d/d(embeddings) of loss and/or per-token log-probs for a
+prompt + target pair. Enables token-level attribution ("how much did
+each input token influence each output token's log-probability?").
+
+Key design decisions:
+  - Uses @torch.enable_grad() to override the outer inference_mode
+    context that wraps normal vLLM inference.
+  - Embeddings are detached and cloned so they become leaf tensors
+    that accumulate .grad without affecting the model's own parameters.
+  - Per-token gradients require one backward pass per selected target
+    token; retain_graph is used only when more passes follow.
 """
 
 from dataclasses import dataclass, field

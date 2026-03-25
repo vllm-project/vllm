@@ -1,5 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Parameters for gradient computation requests.
+
+Gradient computation enables token-level attribution and interpretability
+by differentiating log p(y_t | x, y_{<t}) w.r.t. model embeddings.
+
+Data flow:
+  API request (GradientRequest)
+    → ServingGradient tokenizes prompt/target
+    → GradientParams created and sent through engine
+    → EngineCore dispatches via collective_rpc (bypasses scheduler)
+    → GradientRunner performs forward + backward passes
+    → Results returned as GradientOutput
+"""
 
 from copy import deepcopy
 from typing import Literal
@@ -14,37 +27,22 @@ class GradientParams(
     omit_defaults=True,  # type: ignore[call-arg]
     array_like=True,
 ):  # type: ignore[call-arg]
-    """API parameters for gradient computation.
-
-    Given a prompt and target continuation tokens, computes gradients of
-    a loss and/or per-token log-probabilities with respect to specified
-    model components (e.g. input embeddings). This enables token-level
-    attribution and interpretability analysis.
+    """Parameters controlling what and how to compute gradients.
 
     Attributes:
-        target_token_ids: The output token IDs to compute gradients for.
-            These represent the continuation after the prompt.
-        gradient_of: What quantity to differentiate:
-            - "loss": scalar cross-entropy loss (single backward pass).
-            - "token_log_probs": per-token log p(y_t | x, y_{<t})
-              (one backward pass per selected target token).
-            - "both": return both loss and per-token gradients.
-        gradient_targets: What to differentiate with respect to:
-            - "input_embeddings": gradients w.r.t. prompt token embeddings.
-            - "output_embeddings": gradients w.r.t. target token embeddings.
-        target_token_indices: If set, only compute per-token gradients for
-            these target positions (0-indexed). None = all target tokens.
-            Reduces compute when only a subset of tokens is of interest.
-        aggregation: How to reduce the hidden_dim of gradient tensors:
-            - "none": return full [num_tokens, hidden_dim] gradients.
-            - "l2_norm": ||grad||_2 per token position (most common for
-              attribution heatmaps).
-            - "abs_sum": sum(|grad|) per token position.
-        loss_function: Loss to use when gradient_of is "loss" or "both":
-            - "cross_entropy": standard cross-entropy loss over targets.
-            - "log_prob_sum": sum of log-probabilities of target tokens.
-        return_log_probs: Whether to also return the log-probability values
-            for each target token.
+        target_token_ids: Output token IDs (the continuation after the prompt).
+        gradient_of: What to differentiate:
+            "loss" — scalar cross-entropy (one backward pass),
+            "token_log_probs" — per-token log-probs (one backward per token),
+            "both" — both of the above.
+        gradient_targets: What to differentiate *with respect to*:
+            "input_embeddings" and/or "output_embeddings".
+        target_token_indices: Subset of target positions for per-token
+            gradients (0-indexed). None means all targets.
+        aggregation: Reduction over hidden_dim:
+            "none" — full gradients, "l2_norm", or "abs_sum".
+        loss_function: "cross_entropy" or "log_prob_sum".
+        return_log_probs: Also return log p(y_t | x, y_{<t}) values.
     """
 
     target_token_ids: list[int]
@@ -102,27 +100,11 @@ class GradientParams(
         if not self.gradient_targets:
             raise ValueError("gradient_targets must contain at least one target")
 
-        valid_targets = {"input_embeddings", "output_embeddings"}
-        for target in self.gradient_targets:
-            if target not in valid_targets:
-                raise ValueError(
-                    f"Unknown gradient target: {target!r}. "
-                    f"Valid targets: {valid_targets}"
-                )
-
     def __repr__(self) -> str:
         return (
             f"GradientParams("
             f"gradient_of={self.gradient_of!r}, "
-            f"gradient_targets={self.gradient_targets}, "
-            f"target_token_ids=[{len(self.target_token_ids)} tokens], "
-            f"target_token_indices={self.target_token_indices}, "
-            f"aggregation={self.aggregation!r}, "
-            f"loss_function={self.loss_function!r}, "
-            f"return_log_probs={self.return_log_probs})"
-        )
-
-    def __post_init__(self) -> None:
-        assert self.output_kind == RequestOutputKind.FINAL_ONLY, (
-            "For gradient computation output_kind has to be FINAL_ONLY"
+            f"targets={self.gradient_targets}, "
+            f"num_target_tokens={len(self.target_token_ids)}, "
+            f"aggregation={self.aggregation!r})"
         )
