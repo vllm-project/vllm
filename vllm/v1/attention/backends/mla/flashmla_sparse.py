@@ -81,7 +81,6 @@ class FlashMLASparseBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "float16",
         "bfloat16",
         "fp8_ds_mla",
         "fp8",  # alias for fp8_ds_mla
