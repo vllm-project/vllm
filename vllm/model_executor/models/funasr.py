@@ -3,9 +3,8 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, cast
+from typing import Annotated, cast
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -16,6 +15,7 @@ from transformers import (
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -877,14 +877,12 @@ class FunASRForConditionalGeneration(
     @classmethod
     def get_generation_prompt(
         cls,
-        audio: np.ndarray,
-        model_config: ModelConfig,  # not needed here
-        stt_config: SpeechToTextConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
+        stt_params: SpeechToTextParams,
     ) -> PromptType:
+        audio = stt_params.audio
+        stt_config = stt_params.stt_config
+        language = stt_params.language
+
         if language is None:
             raise ValueError(
                 "Language must be specified when creating the funasr prompt"
