@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from dataclasses import replace
 
 import torch
@@ -55,13 +56,13 @@ class DraftModelProposer(SpecDecodeBaseProposer):
     def _create_draft_vllm_config(self) -> VllmConfig:
         base = super()._create_draft_vllm_config()
         spec = self.speculative_config
+
+        draft_parallel_config = copy.copy(spec.draft_parallel_config)
+        draft_parallel_config.rank = self.vllm_config.parallel_config.rank
         return replace(
             base,
             quant_config=None,
-            parallel_config=replace(
-                spec.draft_parallel_config,
-                rank=self.vllm_config.parallel_config.rank,
-            ),
+            parallel_config=draft_parallel_config,
             model_config=spec.draft_model_config,
         )
 
