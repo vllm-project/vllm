@@ -720,35 +720,7 @@ class AttentionImplBase(ABC, Generic[T]):
 
 
 class AttentionImpl(AttentionImplBase[T], Generic[T]):
-    """Standard attention implementation with forward method.
-
-    Quantized KV Cache Contract
-    ---------------------------
-    Backends that add a quantized KV dtype (e.g. ``"int8_per_token"``) to
-    their ``AttentionBackend.supported_kv_cache_dtypes`` must handle two
-    paths:
-
-    **Write path** (``do_kv_cache_update``):
-      * Per-token quant (``kv_quant_mode == KVQuantMode.PER_TOKEN``):
-        use auxiliary scale caches bound via
-        ``bind_auxiliary_buffers()`` to write dynamic per-token
-        scales alongside quantized data.
-      * FP8: use ``layer._k_scale`` / ``layer._v_scale`` (per-tensor).
-
-    **Read path** (``forward``):
-      * If per-token scale caches are bound: pass them to the attention
-        kernel for dequantization.
-      * If FP8: pass ``layer._k_scale`` / ``layer._v_scale``.
-      * Otherwise: no scales needed.
-
-    Infrastructure:
-      * ``bind_auxiliary_buffers(buffers)`` — called by the model runner
-        after KV cache allocation to bind pre-allocated auxiliary
-        tensors (e.g. scale caches).  Override in subclasses.
-      * ``kv_quant_mode`` property — avoids string matching on dtype.
-      * Memory accounting is automatic via
-        ``KVCacheSpec.auxiliary_buffer_specs``.
-    """
+    """Standard attention implementation with forward method."""
 
     kv_cache_dtype: str
 

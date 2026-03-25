@@ -30,43 +30,21 @@ logger = init_logger(__name__)
 class KVQuantMode(IntEnum):
     """KV cache quantization mode.
 
-    Describes the *scale granularity*, not the storage dtype.  The storage
-    dtype (int8, fp8_e4m3, …) is orthogonal and carried by
-    ``AttentionSpec.dtype`` / the ``kv_cache_dtype`` string.
-
     Used by attention backends and kernels to dispatch quantization logic
     without string matching on ``kv_cache_dtype``.
     """
 
     NONE = 0
-    FP8 = 1  # per-tensor scales (current fp8 path)
-    PER_TOKEN = 2  # per-token dynamic scales (e.g. int8, fp8)
-    PER_TOKEN_GROUP = 3  # per-(token, head, group) scales (e.g. fp8 1×128)
-    NVFP4 = 4  # packed 4-bit KV + fp8 blockscales + per-token global scale
-
-
-# Default group size for PER_TOKEN_GROUP quantization (e.g. deepseek-style
-# block fp8).  Backends may override via AttentionSpec.quant_group_size.
-DEFAULT_QUANT_GROUP_SIZE = 128
-
-# Default block-scale group size for NVFP4 (1×16 groups).
-NVFP4_BLOCKSCALE_GROUP_SIZE = 16
+    FP8_PER_TENSOR = 1  # per-tensor scales (current fp8 path)
+    INT8_PER_TOKEN = 2  # per-token dynamic scales for int8
 
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
-    """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`.
-
-    Ordering matters: more specific suffixes are checked first so that
-    e.g. ``"fp8_per_token"`` maps to ``PER_TOKEN``, not ``FP8``.
-    """
-    if kv_cache_dtype == "nvfp4":
-        return KVQuantMode.NVFP4
-    if kv_cache_dtype.endswith("_per_group"):
-        return KVQuantMode.PER_TOKEN_GROUP
-    if kv_cache_dtype.endswith("_per_token"):
-        return KVQuantMode.PER_TOKEN
+    """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
+    if kv_cache_dtype == "int8_per_token":
+        return KVQuantMode.INT8_PER_TOKEN
     if kv_cache_dtype.startswith("fp8"):
-        return KVQuantMode.FP8
+        return KVQuantMode.FP8_PER_TENSOR
     return KVQuantMode.NONE
 
 
@@ -76,7 +54,7 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
 
 def kv_cache_uses_per_token_scales(kv_cache_dtype: str) -> bool:
     """Return True if *kv_cache_dtype* needs per-token scales."""
-    return get_kv_quant_mode(kv_cache_dtype) == KVQuantMode.PER_TOKEN
+    return get_kv_quant_mode(kv_cache_dtype) == KVQuantMode.INT8_PER_TOKEN
 
 
 @dataclass(frozen=True)
@@ -167,7 +145,6 @@ class AttentionSpec(KVCacheSpec):
     head_size: int
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
-    quant_group_size: int | None = None
     page_size_padded: int | None = None
 
     @property
@@ -186,40 +163,12 @@ class AttentionSpec(KVCacheSpec):
         The model runner allocates these and binds them to the attention
         implementation via ``bind_auxiliary_buffers()``.
         """
-        mode = self.kv_quant_mode
-
-        if mode == KVQuantMode.PER_TOKEN:
+        if self.kv_quant_mode == KVQuantMode.INT8_PER_TOKEN:
             # One float32 scale per token (shared across all KV heads).
-            # Works for int8_per_token, fp8_per_token, etc.
             shape = (self.block_size,)
             return [
                 AuxBufferSpec("k_scale_cache", torch.float32, shape),
                 AuxBufferSpec("v_scale_cache", torch.float32, shape),
-            ]
-
-        if mode == KVQuantMode.PER_TOKEN_GROUP:
-            # Per-(token, head, group) scales for block-quantised formats
-            # (e.g. deepseek-style fp8 with 1×128 groups).
-            gs = self.quant_group_size or DEFAULT_QUANT_GROUP_SIZE
-            num_groups = (self.head_size + gs - 1) // gs
-            group_shape = (self.block_size, self.num_kv_heads, num_groups)
-            return [
-                AuxBufferSpec("k_scale_cache", torch.float32, group_shape),
-                AuxBufferSpec("v_scale_cache", torch.float32, group_shape),
-            ]
-
-        if mode == KVQuantMode.NVFP4:
-            # NVFP4: packed KV (2 elements/byte in the main cache tensor)
-            # + fp8 blockscales (1×16 groups) + per-token global scale.
-            gs = NVFP4_BLOCKSCALE_GROUP_SIZE
-            num_groups = (self.head_size + gs - 1) // gs
-            blockscale_shape = (self.block_size, self.num_kv_heads, num_groups)
-            global_scale_shape = (self.block_size,)
-            return [
-                AuxBufferSpec("k_blockscale", torch.float8_e4m3fn, blockscale_shape),
-                AuxBufferSpec("v_blockscale", torch.float8_e4m3fn, blockscale_shape),
-                AuxBufferSpec("k_global_scale", torch.float32, global_scale_shape),
-                AuxBufferSpec("v_global_scale", torch.float32, global_scale_shape),
             ]
 
         return []
@@ -308,7 +257,6 @@ class FullAttentionSpec(AttentionSpec):
             head_size_v=specs[0].head_size_v,
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
-            quant_group_size=specs[0].quant_group_size,
             page_size_padded=specs[0].page_size_padded,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
@@ -371,7 +319,6 @@ class MLAAttentionSpec(FullAttentionSpec):
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
-            quant_group_size=specs[0].quant_group_size,
             page_size_padded=specs[0].page_size_padded,
             cache_dtype_str=cache_dtype_str_set.pop(),
         )
@@ -505,7 +452,6 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             sink_len=specs[0].sink_len,
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
-            quant_group_size=specs[0].quant_group_size,
             page_size_padded=specs[0].page_size_padded,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
