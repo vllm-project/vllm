@@ -290,8 +290,8 @@ def select_unquantized_moe_backend(
 def convert_to_unquantized_kernel_format(
     unquantized_backend: UnquantizedMoeBackend,
     layer: Module,
-    w13_weight: torch.Tensor | None = None,
-    w2_weight: torch.Tensor | None = None,
+    w13_weight: torch.Tensor,
+    w2_weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if unquantized_backend == UnquantizedMoeBackend.AITER:
         w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
@@ -310,7 +310,7 @@ def convert_to_unquantized_kernel_format(
             w2_weight,
         )
 
-    return w13_weight, w2_weight
+    return w13_weight.contiguous(), w2_weight.contiguous()
 
 
 def make_unquantized_moe_kernel(
