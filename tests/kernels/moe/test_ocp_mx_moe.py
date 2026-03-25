@@ -83,16 +83,12 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         )
 
     # `cudagraph_capture_sizes=[16]` to reduce load time.
-    compilation_config = CompilationConfig(cudagraph_capture_sizes=[16])
-    config = VllmConfig(compilation_config=compilation_config)
-    with (
-        set_current_vllm_config(config),
-        vllm_runner(
-            model_case.model_id,
-            tensor_parallel_size=model_case.tp,
-            load_format="dummy",
-        ) as llm,
-    ):
+    with vllm_runner(
+        model_case.model_id,
+        tensor_parallel_size=model_case.tp,
+        load_format="dummy",
+        compilation_config={"cudagraph_capture_sizes": [16]},
+    ) as llm:
         # Disabled as check_model is broken: https://github.com/vllm-project/vllm/pull/18465#issuecomment-3329880562
         # def check_model(model):
         #     from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501

@@ -25,6 +25,7 @@ from transformers.models.pixtral.modeling_pixtral import (
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -37,7 +38,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     NestedTensors,
 )
@@ -66,9 +66,11 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
+    supports_eagle3,
 )
 from .module_mapping import MultiModelKeys
 from .utils import StageMissingLayer, init_vllm_registered_model, maybe_prefix
@@ -262,7 +264,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
     dummy_inputs=PixtralDummyInputsBuilder,
 )
 class PixtralForConditionalGeneration(
-    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
+    nn.Module, SupportsLoRA, SupportsEagle3, SupportsMultiModal, SupportsPP
 ):
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -389,6 +391,21 @@ class PixtralForConditionalGeneration(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
+
+    def _require_language_model_eagle3(self) -> None:
+        if not supports_eagle3(self.language_model):
+            raise RuntimeError(
+                f"EAGLE-3 speculative decoding requires the language model to "
+                f"support EAGLE-3, but {type(self.language_model).__name__} does not."
+            )
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self._require_language_model_eagle3()
+        self.language_model.set_aux_hidden_state_layers(layers)
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        self._require_language_model_eagle3()
+        return self.language_model.get_eagle3_aux_hidden_state_layers()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         def is_vision_encoder_weights(weight: tuple[str, torch.Tensor]):
