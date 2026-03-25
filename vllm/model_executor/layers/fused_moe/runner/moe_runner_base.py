@@ -212,6 +212,9 @@ class MoERunnerBase(MoERunner):
             else torch.ops.vllm.moe_forward_shared
         )
 
+    def is_internal_router(self) -> bool:
+        return self.gate is not None
+
     @property
     @abstractmethod
     def reduce_results(self) -> bool:
@@ -358,7 +361,7 @@ class MoERunnerBase(MoERunner):
         # Run this before quant_method to avoid inplace issues.
         self._maybe_apply_shared_experts(
             shared_experts_input,
-            SharedExpertsOrder.BEFORE_QUANT_METHOD,
+            SharedExpertsOrder.NO_OVERLAP,
         )
 
         if self.quant_method.is_monolithic:
@@ -383,7 +386,7 @@ class MoERunnerBase(MoERunner):
 
         self._maybe_apply_shared_experts(
             shared_experts_input,
-            SharedExpertsOrder.AFTER_QUANT_METHOD,
+            SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
         )
 
         return (

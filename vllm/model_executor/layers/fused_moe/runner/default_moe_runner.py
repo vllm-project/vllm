@@ -76,9 +76,6 @@ class DefaultMoERunner(MoERunnerBase):
             enable_dbo,
         )
 
-    def is_internal_router(self) -> bool:
-        return self.gate is not None
-
     @property
     def reduce_results(self) -> bool:
         return self._reduce_results
