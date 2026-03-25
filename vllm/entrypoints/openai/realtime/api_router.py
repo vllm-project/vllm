@@ -27,21 +27,26 @@ router = APIRouter()
 
 @router.websocket("/v1/realtime")
 async def realtime_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for realtime audio transcription.
+    """WebSocket endpoint for realtime audio/video streaming.
 
-    Protocol:
+    Audio protocol:
     1. Client connects to ws://host/v1/realtime
     2. Server sends session.created event
-    3. Client optionally sends session.update with model/params
+    3. Client sends session.update with model name
     4. Client sends input_audio_buffer.commit when ready
     5. Client sends input_audio_buffer.append events with base64 PCM16 chunks
-    6. Server processes and sends transcription.delta events
-    7. Server sends transcription.done with final text + usage
-    8. Repeat from step 5 for next utterance
-    9. Optionally, client sends input_audio_buffer.commit with final=True
-       to signal audio input is finished. Useful when streaming audio files
+    6. Server streams transcription.delta / transcription.done events
+    7. Optionally, client sends input_audio_buffer.commit with final=True
+
+    Video protocol:
+    1-3. Same as audio
+    4. Client sends input_video_frame.append events with base64 JPEG/PNG
+    5. Client sends input_video_frame.commit with optional query text
+    6. Server streams video_chat.delta / video_chat.done events
+    7. Optionally, client sends input_video_frame.commit with final=True
 
     Audio format: PCM16, 16kHz, mono, base64-encoded
+    Video format: JPEG or PNG, base64-encoded, any resolution
     """
     app = websocket.app
     serving = app.state.openai_serving_realtime

@@ -1068,6 +1068,52 @@ def supports_realtime(
 
 
 @runtime_checkable
+class SupportsRealtimeVideo(Protocol):
+    """The interface required for models that support streaming video.
+
+    Models implementing this protocol accept video frames via an async
+    generator and produce prompts that include both the accumulated
+    frames and an optional text query. The first target model is
+    Qwen3-Omni, which expects video as numpy ndarrays with the prompt
+    template:
+        <|vision_start|><|video_pad|><|vision_end|>{query}
+    """
+
+    supports_realtime_video: ClassVar[Literal[True]] = True
+
+    realtime_video_max_tokens: ClassVar[int] = 2048
+    """Maximum tokens to generate per video query.
+    Override in subclasses based on the model's expected output length."""
+
+    @classmethod
+    async def buffer_realtime_video(
+        cls,
+        video_stream: AsyncGenerator[np.ndarray, None],
+        query: str | None,
+        input_stream: asyncio.Queue[list[int]],
+        model_config: ModelConfig,
+    ) -> AsyncGenerator[PromptType, None]: ...
+
+
+@overload
+def supports_realtime_video(
+    model: type[object],
+) -> TypeIs[type[SupportsRealtimeVideo]]: ...
+
+
+@overload
+def supports_realtime_video(
+    model: object,
+) -> TypeIs[SupportsRealtimeVideo]: ...
+
+
+def supports_realtime_video(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsRealtimeVideo]] | TypeIs[SupportsRealtimeVideo]:
+    return getattr(model, "supports_realtime_video", False)
+
+
+@runtime_checkable
 class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
 

@@ -18,9 +18,13 @@ from vllm.entrypoints.openai.realtime.protocol import (
     ErrorEvent,
     InputAudioBufferAppend,
     InputAudioBufferCommit,
+    InputVideoFrameAppend,
+    InputVideoFrameCommit,
     SessionCreated,
     TranscriptionDelta,
     TranscriptionDone,
+    VideoChatDelta,
+    VideoChatDone,
 )
 from vllm.entrypoints.openai.realtime.serving import OpenAIServingRealtime
 from vllm.exceptions import VLLMValidationError
@@ -45,12 +49,15 @@ class RealtimeConnection:
         self.connection_id = f"ws-{uuid4()}"
         self.serving = serving
         self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
+        self.video_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
         self.generation_task: asyncio.Task | None = None
+        self._video_query: str | None = None
 
         self._is_connected = False
         self._is_model_validated = False
 
         self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
+        self._max_video_frame_bytes = 10 * 1024 * 1024  # 10MB per frame
 
     async def handle_connection(self):
         """Main connection loop."""
@@ -98,6 +105,8 @@ class RealtimeConnection:
         - session.update: Configure model
         - input_audio_buffer.append: Add audio chunk to queue
         - input_audio_buffer.commit: Start transcription generation
+        - input_video_frame.append: Add video frame to queue
+        - input_video_frame.commit: Start video understanding generation
         """
         event_type = event.get("type")
         if event_type == "session.update":
@@ -155,8 +164,63 @@ class RealtimeConnection:
                 self.audio_queue.put_nowait(None)
             else:
                 await self.start_generation()
+
+        elif event_type == "input_video_frame.append":
+            await self._handle_video_frame_append(event)
+
+        elif event_type == "input_video_frame.commit":
+            await self._handle_video_frame_commit(event)
+
         else:
             await self.send_error(f"Unknown event type: {event_type}", "unknown_event")
+
+    async def _handle_video_frame_append(self, event: dict):
+        """Decode and queue an incoming video frame."""
+        append_event = InputVideoFrameAppend(**event)
+        try:
+            import io
+
+            from PIL import Image
+
+            frame_bytes = base64.b64decode(append_event.image)
+
+            if len(frame_bytes) > self._max_video_frame_bytes:
+                raise VLLMValidationError(
+                    "Maximum frame size exceeded",
+                    parameter="video_frame_bytes",
+                    value=len(frame_bytes),
+                )
+            if len(frame_bytes) == 0:
+                raise VLLMValidationError("Can't process empty frame.")
+
+            # Decode image bytes to numpy array (H, W, 3) RGB
+            image = Image.open(io.BytesIO(frame_bytes)).convert("RGB")
+            frame_array = np.array(image, dtype=np.uint8)
+
+            self.video_queue.put_nowait(frame_array)
+
+        except VLLMValidationError:
+            raise
+        except Exception as e:
+            logger.error("Failed to decode video frame: %s", e)
+            await self.send_error("Invalid video frame data", "invalid_video")
+
+    async def _handle_video_frame_commit(self, event: dict):
+        """Trigger video understanding generation on buffered frames."""
+        if not self._is_model_validated:
+            await self.send_error(
+                "Model not validated. Send a session.update event first.",
+                "model_not_validated",
+            )
+            return
+
+        commit_event = InputVideoFrameCommit(**event)
+        self._video_query = commit_event.query
+
+        if commit_event.final:
+            self.video_queue.put_nowait(None)
+        else:
+            await self.start_video_generation()
 
     async def audio_stream_generator(self) -> AsyncGenerator[np.ndarray, None]:
         """Generator that yields audio chunks from the queue."""
@@ -165,6 +229,95 @@ class RealtimeConnection:
             if audio_chunk is None:  # Sentinel value to stop
                 break
             yield audio_chunk
+
+    async def video_stream_generator(self) -> AsyncGenerator[np.ndarray, None]:
+        """Generator that yields video frames from the queue."""
+        while True:
+            frame = await self.video_queue.get()
+            if frame is None:  # Sentinel value to stop
+                break
+            yield frame
+
+    async def start_video_generation(self):
+        """Start the video understanding generation task."""
+        if self.generation_task is not None and not self.generation_task.done():
+            logger.warning(
+                "Generation already in progress, ignoring video commit"
+            )
+            return
+
+        video_stream = self.video_stream_generator()
+        input_stream = asyncio.Queue[list[int]]()
+
+        streaming_input_gen = self.serving.understand_video_realtime(
+            video_stream, self._video_query, input_stream
+        )
+
+        self.generation_task = asyncio.create_task(
+            self._run_video_generation(streaming_input_gen, input_stream)
+        )
+
+    async def _run_video_generation(
+        self,
+        streaming_input_gen: AsyncGenerator,
+        input_stream: asyncio.Queue[list[int]],
+    ):
+        """Run video understanding generation and stream results back.
+
+        Mirrors _run_generation but uses VideoChatDelta/Done events.
+        """
+        request_id = f"rt-vid-{self.connection_id}-{uuid4()}"
+        full_text = ""
+        prompt_token_ids_len: int = 0
+        completion_tokens_len: int = 0
+
+        try:
+            from vllm.sampling_params import RequestOutputKind, SamplingParams
+
+            sampling_params = SamplingParams.from_optional(
+                temperature=0.0,
+                max_tokens=self.serving.video_model_cls.realtime_video_max_tokens,
+                output_kind=RequestOutputKind.DELTA,
+                skip_clone=True,
+            )
+
+            result_gen = self.serving.engine_client.generate(
+                prompt=streaming_input_gen,
+                sampling_params=sampling_params,
+                request_id=request_id,
+            )
+
+            async for output in result_gen:
+                if output.outputs and len(output.outputs) > 0:
+                    if not prompt_token_ids_len and output.prompt_token_ids:
+                        prompt_token_ids_len = len(output.prompt_token_ids)
+
+                    delta = output.outputs[0].text
+                    full_text += delta
+
+                    input_stream.put_nowait(list(output.outputs[0].token_ids))
+                    await self.send(VideoChatDelta(delta=delta))
+
+                    completion_tokens_len += len(output.outputs[0].token_ids)
+
+                if not self._is_connected:
+                    break
+
+            usage = UsageInfo(
+                prompt_tokens=prompt_token_ids_len,
+                completion_tokens=completion_tokens_len,
+                total_tokens=prompt_token_ids_len + completion_tokens_len,
+            )
+
+            await self.send(VideoChatDone(text=full_text, usage=usage))
+
+            # Clear queue for next batch
+            while not self.video_queue.empty():
+                self.video_queue.get_nowait()
+
+        except Exception as e:
+            logger.exception("Error in video generation: %s", e)
+            await self.send_error(str(e), "processing_error")
 
     async def start_generation(self):
         """Start the transcription generation task."""
@@ -264,7 +417,14 @@ class RealtimeConnection:
             await self.send_error(str(e), "processing_error")
 
     async def send(
-        self, event: SessionCreated | TranscriptionDelta | TranscriptionDone
+        self,
+        event: (
+            SessionCreated
+            | TranscriptionDelta
+            | TranscriptionDone
+            | VideoChatDelta
+            | VideoChatDone
+        ),
     ):
         """Send event to client."""
         data = event.model_dump_json()
@@ -277,8 +437,9 @@ class RealtimeConnection:
 
     async def cleanup(self):
         """Cleanup resources."""
-        # Signal audio stream to stop
+        # Signal streams to stop
         self.audio_queue.put_nowait(None)
+        self.video_queue.put_nowait(None)
 
         # Cancel generation task if running
         if self.generation_task and not self.generation_task.done():

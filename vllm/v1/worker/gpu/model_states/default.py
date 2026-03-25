@@ -65,6 +65,7 @@ class DefaultModelState(ModelState):
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
         from vllm.model_executor.models.interfaces import (
             supports_realtime,
+            supports_realtime_video,
             supports_transcription,
         )
         from vllm.model_executor.models.interfaces_base import is_text_generation_model
@@ -79,7 +80,7 @@ class DefaultModelState(ModelState):
                 return ("transcription",)
             supported_tasks.append("transcription")
 
-        if supports_realtime(self.model):
+        if supports_realtime(self.model) or supports_realtime_video(self.model):
             supported_tasks.append("realtime")
 
         return tuple(supported_tasks)
