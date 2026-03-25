@@ -215,7 +215,7 @@ class InternParallelAttention(nn.Module):
             self.num_heads_per_partition,
             self.head_dim,
             self.scale,
-            prefix=prefix,
+            prefix=f"{prefix}.attn",
         )
 
     def _apply_qk_norm(self, q: torch.Tensor, k: torch.Tensor):

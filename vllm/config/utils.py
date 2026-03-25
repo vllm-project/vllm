@@ -7,21 +7,22 @@ import enum
 import hashlib
 import inspect
 import json
+import os
 import pathlib
 import textwrap
 from collections.abc import Callable, Mapping, Sequence, Set
-from dataclasses import MISSING, Field, field, fields, is_dataclass
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
-import regex as re
 import torch
 from pydantic import ConfigDict
-from pydantic.dataclasses import dataclass
+from pydantic.dataclasses import dataclass as pydantic_dataclass
 from pydantic.fields import Field as PydanticField
 from pydantic.fields import FieldInfo
 from typing_extensions import dataclass_transform, runtime_checkable
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -58,8 +59,8 @@ def config(
     if config is not None:
         merged_config.update(config)
 
-    def decorator(cls):
-        return dataclass(cls, config=merged_config, **kwargs)
+    def decorator(cls: type[ConfigT]) -> type[ConfigT]:
+        return pydantic_dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value]
 
     # Called with arguments: @config(config=...)
     if cls is None:
@@ -68,7 +69,7 @@ def config(
     return decorator(cls)
 
 
-def get_field(cls: ConfigType, name: str) -> Field:
+def get_field(cls: ConfigType, name: str) -> Any:
     """Get the default factory field of a dataclass by name. Used for getting
     default factory fields in `EngineArgs`."""
     if not is_dataclass(cls):
@@ -143,34 +144,6 @@ def getattr_iter(
                 )
             return getattr(object, name)
     return default_factory() if default_factory is not None else default
-
-
-def contains_object_print(text: str) -> bool:
-    """
-    Check if the text looks like a printed Python object, e.g.
-    contains any substring matching the pattern: "at 0xFFFFFFF>"
-    We match against 0x followed by 2-16 hex chars (there's
-    a max of 16 on a 64-bit system).
-
-    Args:
-        text (str): The text to check
-
-    Returns:
-        result (bool): `True` if a match is found, `False` otherwise.
-    """
-    pattern = r"at 0x[a-fA-F0-9]{2,16}>"
-    match = re.search(pattern, text)
-    return match is not None
-
-
-def assert_hashable(text: str) -> bool:
-    if not contains_object_print(text):
-        return True
-    raise AssertionError(
-        f"vLLM tried to hash some configs that may have Python objects ids "
-        f"in them. This is a bug, please file an issue. "
-        f"Text being hashed: {text}"
-    )
 
 
 def get_attr_docs(cls: type[Any]) -> dict[str, str]:
@@ -370,31 +343,6 @@ def hash_factors(items: dict[str, object]) -> str:
     return hashlib.sha256(json.dumps(items, sort_keys=True).encode()).hexdigest()
 
 
-def handle_deprecated(
-    config: ConfigT,
-    old_name: str,
-    new_name_or_names: str | list[str],
-    removal_version: str,
-) -> None:
-    old_val = getattr(config, old_name)
-    if old_val is None:
-        return
-
-    if isinstance(new_name_or_names, str):
-        new_names = [new_name_or_names]
-    else:
-        new_names = new_name_or_names
-
-    msg = (
-        f"{old_name} is deprecated and will be removed in {removal_version}. "
-        f"Use {', '.join(new_names)} instead."
-    )
-    logger.warning(msg)
-
-    for new_name in new_names:
-        setattr(config, new_name, old_val)
-
-
 @dataclass
 class Range:
     """
@@ -425,3 +373,91 @@ class Range:
 
     def __repr__(self) -> str:
         return self.__str__()
+
+
+def handle_deprecated(
+    config: ConfigT,
+    old_name: str,
+    new_name_or_names: str | list[str],
+    removal_version: str,
+) -> None:
+    old_val = getattr(config, old_name)
+    if old_val is None:
+        return
+
+    if isinstance(new_name_or_names, str):
+        new_names = [new_name_or_names]
+    else:
+        new_names = new_name_or_names
+
+    msg = (
+        f"{old_name} is deprecated and will be removed in {removal_version}. "
+        f"Use {', '.join(new_names)} instead."
+    )
+    logger.warning(msg)
+
+    for new_name in new_names:
+        setattr(config, new_name, old_val)
+
+
+def get_from_deprecated_env_if_set(
+    env_name: str,
+    removal_version: str,
+    field_name: str | None = None,
+) -> str | None:
+    """
+    Get value from deprecated environment variable with warning.
+
+    Args:
+        env_name: Name of the deprecated environment variable
+        removal_version: Version when it will be removed
+        field_name: Name of the field to suggest as alternative
+
+    Returns:
+        The environment variable value if set, None otherwise
+    """
+    if envs.is_set(env_name):
+        value = os.environ.get(env_name)
+        alt_msg = f" Please use {field_name} instead." if field_name else ""
+        logger.warning_once(
+            "Using %s environment variable is deprecated and will be removed in %s.%s",
+            env_name,
+            removal_version,
+            alt_msg,
+        )
+        return value
+    return None
+
+
+def set_from_deprecated_env_if_set(
+    config: ConfigT,
+    env_name: str,
+    removal_version: str,
+    field_name: str,
+    to_bool: bool = False,
+    to_int: bool = False,
+) -> None:
+    """
+    Set object field from deprecated environment variable with warning.
+
+    Args:
+        config: Config object to set the field on
+        env_name: Name of the deprecated environment variable
+        removal_version: Version when the env var will be removed
+        field_name: Name of the field to set
+        to_bool: Whether to convert the environment variable value to boolean
+        to_int: Whether to convert the environment variable value to integer
+    Returns:
+        None
+    """
+    if to_bool and to_int:
+        raise ValueError("Cannot convert to both boolean and integer.")
+
+    env_value = get_from_deprecated_env_if_set(env_name, removal_version, field_name)
+    if env_value is not None:
+        field_value: str | bool | int = env_value
+        if to_bool:
+            field_value = env_value.lower() in ("1", "true")
+        elif to_int:
+            field_value = int(env_value)
+        setattr(config, field_name, field_value)

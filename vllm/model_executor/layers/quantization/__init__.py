@@ -12,11 +12,12 @@ logger = init_logger(__name__)
 QuantizationMethods = Literal[
     "awq",
     "fp8",
-    "ptpc_fp8",
     "fbgemm_fp8",
     "fp_quant",
     "modelopt",
     "modelopt_fp4",
+    "modelopt_mxfp8",
+    "modelopt_mixed",
     "gguf",
     "gptq_marlin",
     "awq_marlin",
@@ -29,6 +30,7 @@ QuantizationMethods = Literal[
     "torchao",
     "inc",
     "mxfp4",
+    "mxfp8",
     "petit_nvfp4",
     "cpu_awq",
 ]
@@ -36,7 +38,6 @@ QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 DEPRECATED_QUANTIZATION_METHODS = [
     "tpu_int8",
-    "ptpc_fp8",
     "fbgemm_fp8",
     "fp_quant",
     "experts_int8",
@@ -119,11 +120,16 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .gptq import GPTQConfig
     from .gptq_marlin import GPTQMarlinConfig
     from .inc import INCConfig
-    from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
+    from .modelopt import (
+        ModelOptFp8Config,
+        ModelOptMixedPrecisionConfig,
+        ModelOptMxFp8Config,
+        ModelOptNvFp4Config,
+    )
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
+    from .mxfp8 import Mxfp8Config
     from .petit import PetitNvFp4Config
-    from .ptpc_fp8 import PTPCFp8Config
     from .torchao import TorchAOConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
@@ -133,13 +139,14 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "fp_quant": FPQuantConfig,
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
+        "modelopt_mxfp8": ModelOptMxFp8Config,
+        "modelopt_mixed": ModelOptMixedPrecisionConfig,
         "gguf": GGUFConfig,
         "gptq_marlin": GPTQMarlinConfig,
         "awq_marlin": AWQMarlinConfig,
         "gptq": GPTQConfig,
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
-        "ptpc_fp8": PTPCFp8Config,
         "experts_int8": ExpertsInt8Config,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
@@ -147,6 +154,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "auto-round": INCConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
+        "mxfp8": Mxfp8Config,
         "petit_nvfp4": PetitNvFp4Config,
         "cpu_awq": CPUAWQConfig,
     }

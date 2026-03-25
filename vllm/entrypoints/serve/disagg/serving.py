@@ -29,7 +29,7 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateResponse,
     GenerateResponseChoice,
 )
-from vllm.inputs.data import TokensPrompt
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -46,11 +46,11 @@ class ServingTokens(OpenAIServing):
         self,
         engine_client: EngineClient,
         models: OpenAIServingModels,
+        openai_serving_render: OpenAIServingRender,
         *,
         request_logger: RequestLogger | None,
         force_no_detokenize: bool = False,
         return_tokens_as_token_ids: bool = False,
-        log_error_stack: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_log_outputs: bool = False,
     ):
@@ -59,8 +59,8 @@ class ServingTokens(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            log_error_stack=log_error_stack,
         )
+        self.openai_serving_render = openai_serving_render
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
         self.force_no_detokenize = force_no_detokenize
@@ -99,9 +99,7 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        # TODO(NickLucche): Change to EngineCoreRequest once Renderer work is
-        # completed
-        engine_prompts = await self._preprocess_completion(
+        engine_prompts = await self.openai_serving_render.preprocess_completion(
             request,
             prompt_input=request.token_ids,
             prompt_embeds=None,
@@ -111,49 +109,38 @@ class ServingTokens(OpenAIServing):
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
-        try:
-            sampling_params = request.sampling_params
-            if self.force_no_detokenize:
-                sampling_params.detokenize = False
+        sampling_params = request.sampling_params
+        if self.force_no_detokenize:
+            sampling_params.detokenize = False
 
-            self._log_inputs(
-                request_id,
-                TokensPrompt(prompt_token_ids=request.token_ids),
-                params=sampling_params,
-                lora_request=lora_request,
-            )
+        self._log_inputs(
+            request_id,
+            engine_prompt,
+            params=sampling_params,
+            lora_request=lora_request,
+        )
 
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
+        trace_headers = (
+            None
+            if raw_request is None
+            else await self._get_trace_headers(raw_request.headers)
+        )
 
-            tok_params = request.build_tok_params(self.model_config)
-            tokenization_kwargs = tok_params.get_encode_kwargs()
-
-            result_generator = self.engine_client.generate(
-                engine_prompt,
-                sampling_params,
-                request_id,
-                lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
-                trace_headers=trace_headers,
-                priority=request.priority,
-            )
-
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        result_generator = self.engine_client.generate(
+            engine_prompt,
+            sampling_params,
+            request_id,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            priority=request.priority,
+        )
 
         # TODO(NickLucche): Implement streaming response
 
-        try:
-            assert result_generator is not None
-            return await self.serve_tokens_full_generator(
-                request, result_generator, request_id, model_name, request_metadata
-            )
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        assert result_generator is not None
+        return await self.serve_tokens_full_generator(
+            request, result_generator, request_id, model_name, request_metadata
+        )
 
     async def serve_tokens_full_generator(
         self,
@@ -172,8 +159,6 @@ class ServingTokens(OpenAIServing):
                 final_res = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(str(e))
 
         assert final_res is not None
 
@@ -184,7 +169,7 @@ class ServingTokens(OpenAIServing):
             out_logprobs = output.logprobs
 
             # This is top_logprobs in completions API
-            if sampling_params.logprobs:
+            if sampling_params.logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
                 logprobs = self._create_tokens_logprobs(
                     token_ids=token_ids,
@@ -284,7 +269,8 @@ class ServingTokens(OpenAIServing):
                                 logprob=max(p[1].logprob, -9999.0),
                             )
                             for i, p in enumerate(step_top_logprobs.items())
-                            if num_output_top_logprobs and i < num_output_top_logprobs
+                            if num_output_top_logprobs is not None
+                            and i < max(num_output_top_logprobs, 1)
                         ],
                     )
                 )

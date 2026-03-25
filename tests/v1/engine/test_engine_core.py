@@ -54,7 +54,6 @@ def make_request() -> EngineCoreRequest:
         mm_features=None,
         sampling_params=SamplingParams(),
         pooling_params=None,
-        eos_token_id=None,
         arrival_time=time.time(),
         lora_request=None,
         cache_salt=None,
@@ -507,7 +506,6 @@ def test_encoder_instance_zero_kv_cache(
     cache_config = CacheConfig(
         block_size=16,
         gpu_memory_utilization=gpu_memory_utilization,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=enable_prefix_caching,
     )

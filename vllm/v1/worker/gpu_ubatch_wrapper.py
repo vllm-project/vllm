@@ -20,9 +20,11 @@ from vllm.forward_context import (
     override_forward_context,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import has_deep_gemm
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)
@@ -71,9 +73,8 @@ class SMControlContextManager:
         assert current_platform.is_cuda(), (
             "SM control is currently only supported on CUDA"
         )
-
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        total_sms = props.multi_processor_count
+        device = torch.accelerator.current_device_index()
+        total_sms = num_compute_units(device)
 
         assert comm_sms < total_sms
         self.total_sms = total_sms
@@ -111,15 +112,26 @@ class UBatchWrapper:
         self.cudagraphs: dict[int, CUDAGraphMetaData] = {}
 
         self.cudagraph_wrapper = None
-        self.graph_pool = None
         if runtime_mode is not CUDAGraphMode.NONE:
             self.cudagraph_wrapper = CUDAGraphWrapper(
                 runnable, vllm_config, runtime_mode=runtime_mode
             )
-            self.graph_pool = current_platform.get_global_graph_pool()
 
         self.sm_control = self._create_sm_control_context(vllm_config)
         self.device = device
+        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self._runnable_str = str(runnable) if self.is_debugging_mode else None
+
+    @property
+    def graph_pool(self):
+        if self.cudagraph_wrapper is not None:
+            return self.cudagraph_wrapper.graph_pool
+        return None
+
+    def clear_graphs(self) -> None:
+        self.cudagraphs.clear()
+        if self.cudagraph_wrapper is not None:
+            self.cudagraph_wrapper.clear_graphs()
 
     @staticmethod
     def _create_sm_control_context(vllm_config: VllmConfig):
@@ -160,10 +172,12 @@ class UBatchWrapper:
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
             return getattr(self.runnable, key)
-        raise AttributeError(
-            f"Attribute {key} not exists in the runnable of "
-            f"cudagraph wrapper: {self.runnable}"
-        )
+        if self.is_debugging_mode:
+            raise AttributeError(
+                f"Attribute {key} not exists in the runnable of "
+                f"cudagraph wrapper: {self._runnable_str}"
+            )
+        raise AttributeError
 
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
@@ -194,7 +208,7 @@ class UBatchWrapper:
 
         @torch.inference_mode()
         def _capture_ubatch_thread(results, ubatch_metadata):
-            torch.cuda.set_device(self.device)
+            torch.accelerator.set_device_index(self.device)
             ubatch_context = ubatch_metadata.context
             with torch.cuda.stream(ubatch_context.compute_stream):
                 _ = torch.cuda.current_blas_handle()
@@ -239,6 +253,11 @@ class UBatchWrapper:
                 set_graph_pool_id(self.graph_pool)
             else:
                 set_graph_pool_id(current_platform.graph_pool_handle())
+
+            # Sync offloader's copy stream before capture.
+            # Ensure any pre-capture prefetches from offloader are complete.
+            get_offloader().sync_prev_onload()
+
             with torch.cuda.graph(
                 cudagraph_metadata.cudagraph,
                 stream=compute_stream,
@@ -250,6 +269,10 @@ class UBatchWrapper:
                 sorted_results = [value for position, value in sorted(results)]
                 result = torch.cat(sorted_results, dim=0)
                 cudagraph_metadata.outputs = result
+                # Join offloader's copy stream after forward to avoid unjoined
+                # stream error. The last layer's start_prefetch forks copy_stream,
+                # but wait_prefetch only happens in the next forward pass.
+                get_offloader().join_after_forward()
             self.cudagraphs[num_tokens] = cudagraph_metadata
         return cudagraph_metadata.outputs
 
@@ -366,16 +389,20 @@ class UBatchWrapper:
         inputs_embeds,
         intermediate_tensors,
     ):
-        sliced_input_ids = input_ids[tokens_slice]
+        sliced_input_ids = input_ids[tokens_slice] if input_ids is not None else None
         # if we are using mrope. Mrope adds an additional dimension to the
         # positions tensor
         if positions.ndim == 2:
             sliced_positions = positions[:, tokens_slice]
         else:
             sliced_positions = positions[tokens_slice]
-        sliced_inputs_embeds = inputs_embeds[tokens_slice] if inputs_embeds else None
+        sliced_inputs_embeds = (
+            inputs_embeds[tokens_slice] if inputs_embeds is not None else None
+        )
         sliced_intermediate_tensors = (
-            intermediate_tensors[tokens_slice] if intermediate_tensors else None
+            intermediate_tensors[tokens_slice]
+            if intermediate_tensors is not None
+            else None
         )
 
         return (
@@ -412,9 +439,7 @@ class UBatchWrapper:
 
         attn_metadata = forward_context.attn_metadata
         slot_mapping = forward_context.slot_mapping
-        num_tokens = (
-            ubatch_slices[0].token_slice.stop - ubatch_slices[0].token_slice.start
-        ) * 2
+        num_tokens = sum(ubatch_slice.num_tokens for ubatch_slice in ubatch_slices)
         input_ids = kwargs["input_ids"]
         positions = kwargs["positions"]
         intermediate_tensors = kwargs["intermediate_tensors"]
@@ -457,12 +482,15 @@ class UBatchWrapper:
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )
             with self.sm_control:
-                return self._capture_ubatches(ubatch_metadata, self.model)
+                return self._capture_ubatches(ubatch_metadata, self.runnable)
         elif (
             num_tokens in self.cudagraphs
             and cudagraph_runtime_mode is CUDAGraphMode.FULL
         ):
             cudagraph_metadata = self.cudagraphs[num_tokens]
+            # Sync offloader before replay - ensures any external dependencies
+            # from pre-capture prefetches are satisfied.
+            get_offloader().sync_prev_onload()
             cudagraph_metadata.cudagraph.replay()
             return cudagraph_metadata.outputs
         else:
@@ -480,4 +508,4 @@ class UBatchWrapper:
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )
             with self.sm_control:
-                return self._run_ubatches(ubatch_metadata, self.model)
+                return self._run_ubatches(ubatch_metadata, self.runnable)

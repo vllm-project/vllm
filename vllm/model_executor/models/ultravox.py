@@ -42,6 +42,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -133,6 +134,9 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
+
     def get_data_parser(self):
         feature_extractor = self.get_feature_extractor()
 
@@ -160,7 +164,7 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
@@ -170,11 +174,13 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo])
         )
         num_audios = mm_counts.get("audio", 0)
 
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
-                length=audio_len, num_audios=num_audios, overrides=audio_overrides
+                length=audio_len,
+                num_audios=num_audios,
+                overrides=audio_overrides,
             )
         }
 
@@ -398,12 +404,14 @@ class UltravoxTransformerProjector(nn.Module, ModuleUtilsMixin):
             kwargs["layer_head_mask"] = None
 
         for layer in self.layers:
-            layer_outputs = layer(
+            hidden_states = layer(
                 hidden_states,
                 attention_mask=extended_attention_mask,
                 **kwargs,
             )
-            hidden_states = layer_outputs[0]
+            # BC version that allows for the old tupled output
+            if isinstance(hidden_states, tuple):
+                hidden_states = hidden_states[0]
 
         hidden_states = self.ln_post(hidden_states)
         hidden_states = self.linear_out(hidden_states)
@@ -503,13 +511,14 @@ class ModifiedWhisperEncoder(WhisperEncoder):
             kwargs["layer_head_mask"] = None
 
         for encoder_layer in self.layers:
-            layer_outputs = encoder_layer(
+            hidden_states = encoder_layer(
                 hidden_states,
                 attention_mask,
                 **kwargs,
             )
-
-            hidden_states = layer_outputs[0]
+            # BC version that allows for the old tupled output
+            if isinstance(hidden_states, tuple):
+                hidden_states = hidden_states[0]
 
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
@@ -544,6 +553,11 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         self.config = config
         self.multi_modal_config = multimodal_config
         assert self.multi_modal_config
+
+        self.configure_mm_token_handling(
+            self.config.vocab_size,
+            [self.config.audio_token_index],
+        )
 
         self.secondary_weights = []
         if config.audio_model_id is not None:
@@ -701,8 +715,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        # Multi-modal token ID may exceed vocab size
-        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
@@ -712,7 +724,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(

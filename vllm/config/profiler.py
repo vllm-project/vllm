@@ -47,7 +47,9 @@ class ProfilerConfig:
     it must be an absolute path."""
 
     torch_profiler_with_stack: bool = True
-    """If `True`, enables stack tracing in the torch profiler. Enabled by default."""
+    """If `True`, enables stack tracing in the torch profiler. Enabled by default
+    as it is useful for debugging. Can be disabled via 
+    --profiler-config.torch_profiler_with_stack=false CLI flag."""
 
     torch_profiler_with_flops: bool = False
     """If `True`, enables FLOPS counting in the torch profiler. Disabled by default."""
@@ -82,6 +84,27 @@ class ProfilerConfig:
     Defaults to 0, meaning no limit.
     """
 
+    warmup_iterations: int = Field(default=0, ge=0)
+    """Number of warmup iterations for PyTorch profiler schedule.
+    During warmup, the profiler runs but data is discarded. This helps reduce
+    noise from JIT compilation and other one-time costs in the profiled trace.
+    Defaults to 0 (schedule-based profiling disabled, recording all iterations).
+    Set to a positive value (e.g., 2) to enable schedule-based profiling.
+    """
+
+    active_iterations: int = Field(default=5, ge=1)
+    """Number of active iterations for PyTorch profiler schedule.
+    This is the number of iterations where profiling data is actually collected.
+    Defaults to 5 active iterations.
+    """
+
+    wait_iterations: int = Field(default=0, ge=0)
+    """Number of wait iterations for PyTorch profiler schedule.
+    During wait, the profiler is completely off with zero overhead.
+    This allows skipping initial iterations before warmup begins.
+    Defaults to 0 (no wait period).
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -104,7 +127,7 @@ class ProfilerConfig:
         # Profiling setup does not affect the computation graph, so hash neutral.
         return {}
 
-    def _get_from_env_if_set(self, field_name: str, env_var_name: str) -> None:
+    def _get_from_env_if_set(self, field_name: str, env_var_name: str) -> str | None:
         """Get field from env var if set, with deprecation warning."""
 
         if envs.is_set(env_var_name):
@@ -129,8 +152,9 @@ class ProfilerConfig:
         to_int: bool = False,
     ) -> None:
         """Set field from env var if set, with deprecation warning."""
-        value = self._get_from_env_if_set(field_name, env_var_name)
-        if value is not None:
+        raw_value = self._get_from_env_if_set(field_name, env_var_name)
+        if raw_value is not None:
+            value: str | bool | int = raw_value
             if to_bool:
                 value = value == "1"
             if to_int:

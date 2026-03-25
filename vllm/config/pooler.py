@@ -5,6 +5,7 @@ from typing import Literal, get_args
 
 from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
+from vllm.tasks import PoolingTask
 
 logger = init_logger(__name__)
 
@@ -18,6 +19,11 @@ TOK_POOLING_TYPES: tuple[TokenPoolingType, ...] = get_args(TokenPoolingType)
 @config
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
+
+    task: PoolingTask | None = None
+    """
+    The task used for pooling.
+    """
 
     pooling_type: SequencePoolingType | TokenPoolingType | None = None
     """
@@ -53,7 +59,7 @@ class PoolerConfig:
     Reduce the dimensions of embeddings if model
     support matryoshka representation. Defaults to None.
     """
-    enable_chunked_processing: bool | None = None
+    enable_chunked_processing: bool = False
     """
     Whether to enable chunked processing for long inputs that exceed the model's
     maximum position embeddings. When enabled, long inputs will be split into
@@ -107,14 +113,14 @@ class PoolerConfig:
                     pooling_type,
                     pooling_type,
                 )
-                self.seq_pooling_type = pooling_type
+                self.seq_pooling_type = pooling_type  # type: ignore[assignment]
             elif pooling_type in TOK_POOLING_TYPES:
                 logger.debug(
                     "Resolved `pooling_type=%r` to `tok_pooling_type=%r`.",
                     pooling_type,
                     pooling_type,
                 )
-                self.tok_pooling_type = pooling_type
+                self.tok_pooling_type = pooling_type  # type: ignore[assignment]
             else:
                 raise NotImplementedError(pooling_type)
 

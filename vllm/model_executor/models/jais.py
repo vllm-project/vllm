@@ -49,7 +49,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import JAISConfig
+from vllm.transformers_utils.configs.jais import JAISConfig
 
 from .interfaces import SupportsPP
 from .utils import (
@@ -117,11 +117,14 @@ class JAISAttention(nn.Module):
             prefix=f"{prefix}.c_proj",
         )
 
-        tp_rank = get_tensor_model_parallel_rank()
-        head_start = tp_rank * self.num_heads
-        head_end = (tp_rank + 1) * self.num_heads
-        alibi_slopes = _get_alibi_slopes(total_num_heads)
-        alibi_slopes = alibi_slopes[head_start:head_end]
+        self.use_alibi = config.position_embedding_type == "alibi"
+        alibi_slopes = None
+        if self.use_alibi:
+            tp_rank = get_tensor_model_parallel_rank()
+            head_start = tp_rank * self.num_heads
+            head_end = (tp_rank + 1) * self.num_heads
+            alibi_slopes = _get_alibi_slopes(total_num_heads)
+            alibi_slopes = alibi_slopes[head_start:head_end]
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -244,7 +247,6 @@ class JAISModel(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.config = config
-        assert not config.add_cross_attention
         assert not config.scale_attn_by_inverse_layer_idx
         assert not config.reorder_and_upcast_attn
         self.embed_dim = config.hidden_size

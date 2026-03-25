@@ -9,7 +9,6 @@ and cache operations) for both cold and warm scenarios:
 """
 
 import argparse
-import dataclasses
 import json
 import multiprocessing
 import os
@@ -17,6 +16,7 @@ import shutil
 import tempfile
 import time
 from contextlib import contextmanager
+from dataclasses import fields
 from typing import Any
 
 import numpy as np
@@ -67,7 +67,7 @@ def run_startup_in_subprocess(engine_args, result_queue):
         # Measure total startup time
         start_time = time.perf_counter()
 
-        llm = LLM(**dataclasses.asdict(engine_args))
+        llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
 
         total_startup_time = time.perf_counter() - start_time
 
@@ -101,7 +101,7 @@ def save_to_pytorch_benchmark_format(
     cold_startup_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={
-            "avg_cold_startup_time": results["avg_cold_startup_time"],
+            "avg_cold_startup_time": [results["avg_cold_startup_time"]],
         },
         extra_info={
             "cold_startup_times": results["cold_startup_times"],
@@ -114,7 +114,7 @@ def save_to_pytorch_benchmark_format(
     cold_compilation_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={
-            "avg_cold_compilation_time": results["avg_cold_compilation_time"],
+            "avg_cold_compilation_time": [results["avg_cold_compilation_time"]],
         },
         extra_info={
             "cold_compilation_times": results["cold_compilation_times"],
@@ -129,7 +129,7 @@ def save_to_pytorch_benchmark_format(
     warm_startup_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={
-            "avg_warm_startup_time": results["avg_warm_startup_time"],
+            "avg_warm_startup_time": [results["avg_warm_startup_time"]],
         },
         extra_info={
             "warm_startup_times": results["warm_startup_times"],
@@ -142,7 +142,7 @@ def save_to_pytorch_benchmark_format(
     warm_compilation_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={
-            "avg_warm_compilation_time": results["avg_warm_compilation_time"],
+            "avg_warm_compilation_time": [results["avg_warm_compilation_time"]],
         },
         extra_info={
             "warm_compilation_times": results["warm_compilation_times"],
