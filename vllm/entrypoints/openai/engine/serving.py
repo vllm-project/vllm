@@ -26,6 +26,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -128,7 +129,10 @@ CompletionLikeRequest: TypeAlias = (
 )
 
 ChatLikeRequest: TypeAlias = (
-    ChatCompletionRequest | TokenizeChatRequest | PoolingChatRequest
+    ChatCompletionRequest
+    | BatchChatCompletionRequest
+    | TokenizeChatRequest
+    | PoolingChatRequest
 )
 
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest

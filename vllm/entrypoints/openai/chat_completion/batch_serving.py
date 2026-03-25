@@ -54,7 +54,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             A tuple of (all_conversations, engine_prompts) on success — one
             entry per conversation — or an ErrorResponse on failure.
         """
-        error_check_ret = await self._check_model(request)  # type: ignore[arg-type]
+        error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
@@ -138,7 +138,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)  # type: ignore[arg-type]
+        lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
         model_name = self.models.model_name(lora_request)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
         max_model_len = self.model_config.max_model_len
