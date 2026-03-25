@@ -53,6 +53,7 @@ class CompletionOutput:
     seq_id: Optional[int] = None
     is_leaf: bool = True
     tree_text: str = ""
+    tree_ids: GenericSequence[int] = ()
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -70,7 +71,8 @@ class CompletionOutput:
                 f"parent_seq_id={self.parent_seq_id}, "
                 f"seq_id={self.seq_id}, "
                 f"is_leaf={self.is_leaf}, "
-                f"tree_text={self.tree_text!r})")
+                f"tree_text={self.tree_text!r}, "
+                f"tree_ids={self.tree_ids})")
 
 
 @dataclass
@@ -265,22 +267,26 @@ class RequestOutput:
                 if include_prompt and seq.get_output_len() > num_output_tokens:
                     include_prompt = False
 
-            # Build tree_text: the "corrected" output_text for tree decoding.
+            # Build tree_text and tree_ids: the "corrected" output for tree decoding.
             #   - Child sequence (new_branch_token_id set): prepend the branch
             #     token's decoded text (stored by the detokenizer on first step).
             #   - Parent sequence (old_branch_token_id set): strip the trailing
             #     text of the last token (the branch-trigger token), which is
             #     tracked via _last_decoded_token_len.
-            #   - Normal sequences: tree_text == output_text.
+            #   - Normal sequences: tree_text == output_text, tree_ids == output_token_ids.
             tree_text = output_text
+            tree_ids = [output_token_ids] if isinstance(output_token_ids, int) else list(output_token_ids)
             new_branch_token_id = getattr(seq, 'new_branch_token_id', None)
             old_branch_token_id = getattr(seq, 'old_branch_token_id', None)
             if new_branch_token_id is not None:
                 branch_prefix = getattr(seq, '_new_branch_token_text', None) or ""
                 tree_text = branch_prefix + output_text
+                tree_ids = [new_branch_token_id] + tree_ids
             elif old_branch_token_id is not None:
                 trim = getattr(seq, '_last_decoded_token_len', 0)
                 tree_text = output_text[:-trim] if trim > 0 else output_text    
+                if len(tree_ids) > 0:
+                    tree_ids = tree_ids[:-1]
 
             if use_cache:
                 # Get cached output object
@@ -318,6 +324,7 @@ class RequestOutput:
                 output.seq_id = seq.seq_id
                 output.is_leaf = getattr(seq, 'is_leaf', True)
                 output.tree_text = tree_text
+                output.tree_ids = tree_ids
 
             else:
                 output = CompletionOutput(
@@ -333,7 +340,8 @@ class RequestOutput:
                     getattr(seq, 'parent_seq_id', None),
                     seq.seq_id,
                     getattr(seq, 'is_leaf', True),
-                    tree_text=tree_text)
+                    tree_text=tree_text,
+                    tree_ids=tree_ids)
 
             outputs.append(output)
 
