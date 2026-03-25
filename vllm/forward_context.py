@@ -382,7 +382,9 @@ def set_forward_context(
         with (
             override_forward_context(forward_context),
             vllm_config.kernel_config.ir_op_priority.set_priority(),
-            vllm.ir.direct_dispatch(vllm_config.compilation_config.ir_direct_dispatch),
+            vllm.ir.enable_torch_wrap(
+                vllm_config.compilation_config.ir_enable_torch_wrap
+            ),
         ):
             yield
     finally:

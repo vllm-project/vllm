@@ -44,7 +44,10 @@ def test_lowering_rms_norm(rms_provider, default_vllm_config):
 
     model = Model()
     x = torch.randn(8, 16, dtype=torch.bfloat16)
-    with ops.rms_norm.set_priority([rms_provider, "native"]), ir.direct_dispatch(False):
+    with (
+        ops.rms_norm.set_priority([rms_provider, "native"]),
+        ir.enable_torch_wrap(True),
+    ):
         compiled_model = torch.compile(model, backend=backend, fullgraph=True)
         compiled_unlowered_model = torch.compile(
             model, backend=backend_unlowered, fullgraph=True
@@ -59,7 +62,7 @@ def test_lowering_rms_norm(rms_provider, default_vllm_config):
     assert selected["rms_norm_2"] == "native"
 
     # Compiled function guards on global value, avoid recompilation
-    with ir.direct_dispatch(False):
+    with ir.enable_torch_wrap(True):
         output2 = compiled_model(x)
 
     torch.testing.assert_close(output_unlowered, output)

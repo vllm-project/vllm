@@ -467,12 +467,12 @@ class CompilationConfig:
     backend="inductor".
     Inductor generates (fused) Triton kernels for disabled custom ops."""
 
-    ir_direct_dispatch: bool = None  # type: ignore[assignment]
-    """If True, set vllm.ir.direct_dispatch() context during the forward pass.
-    Disables vllm_ir torch custom op wrapping, allowing Dynamo to trace the selected
-    implementation directly, or avoiding torch custom op overhead in eager mode.
-    False by default, True if not using Inductor & vllm-compile 
-    (backend!="inductor" or mode != VLLM_COMPILE)  
+    ir_enable_torch_wrap: bool = None  # type: ignore[assignment]
+    """If True, enable vllm_ir torch custom op wrapping during the forward pass.
+    When False, torch custom op wrapping is disabled, allowing Dynamo to trace the
+    selected implementation directly or avoiding torch custom op overhead in eager mode.
+    Defaults to True when using Inductor with vllm-compile
+    (backend=="inductor" and mode == VLLM_COMPILE), False otherwise.
     """
 
     splitting_ops: list[str] | None = None
@@ -839,7 +839,7 @@ class CompilationConfig:
         "cudagraph_mode",
         "max_cudagraph_capture_size",
         "use_inductor_graph_partition",
-        "ir_direct_dispatch",
+        "ir_enable_torch_wrap",
         mode="wrap",
     )
     @classmethod

@@ -20,27 +20,27 @@ logger = init_logger(__name__)
 RESERVED_PROVIDERS = ["native", "unfused"]
 """Providers that are reserved and cannot be used for custom implementations."""
 
-_DIRECT_DISPATCH: bool = False
-"""Global override flag to skip the torch op layer."""
+_ENABLE_TORCH_WRAP: bool = True
+"""Global override flag to control torch op layer wrapping."""
 
 
 @contextlib.contextmanager
-def direct_dispatch(direct: bool = True):
+def enable_torch_wrap(enable: bool = True):
     """
-    Context manager to set direct dispatch mode for vLLM IR ops.
-    When direct dispatch is enabled, the torch custom op layer is skipped
+    Context manager to enable/disable torch custom op wrapping for vLLM IR ops.
+    When torch wrapping is disabled, the torch custom op layer is skipped
     and IR ops dispatch directly to the implementation.
     Helpful for avoiding torch dispatch overhead in eager mode
     and avoiding the need for lowering for platforms not using Inductor.
     """
 
-    global _DIRECT_DISPATCH
-    old = _DIRECT_DISPATCH
+    global _ENABLE_TORCH_WRAP
+    old = _ENABLE_TORCH_WRAP
     try:
-        _DIRECT_DISPATCH = direct
+        _ENABLE_TORCH_WRAP = enable
         yield
     finally:
-        _DIRECT_DISPATCH = old
+        _ENABLE_TORCH_WRAP = old
 
 
 # 0-param decorator overload
@@ -204,8 +204,8 @@ class IrOp:
 
     def _inner_call(self, *args, **kwargs) -> Any:
         """
-        Eager call to torch op lands here. In the future, direct dispatch might
-        route straight here instead of going through torch op dispatching.
+        Eager call to torch op lands here. When torch wrapping is disabled,
+        __call__ routes straight here instead of going through torch op dispatching.
         """
         impl = self.dispatch(*args, **kwargs)
         return impl.impl_fn(*args, **kwargs)
@@ -232,7 +232,7 @@ class IrOp:
         if not self._priority_impls:
             if not torch.compiler.is_compiling():
                 # Logging not compatible with Dynamo tracing
-                # (this code is exposed when direct_dispatch is enabled)
+                # (this code is exposed when torch wrapping is disabled)
                 logger.warning_once(
                     "Priority not set for op %s, using native implementation.",
                     self.name,
@@ -264,7 +264,7 @@ class IrOp:
         )
 
     def __call__(self, *args, **kwargs) -> Any:
-        if _DIRECT_DISPATCH:
+        if not _ENABLE_TORCH_WRAP:
             return self._inner_call(*args, **kwargs)
 
         return self.torch_op(*args, **kwargs)
