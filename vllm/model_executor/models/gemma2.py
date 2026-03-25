@@ -58,6 +58,14 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _get_norm_cls(
+    quant_config: QuantizationConfig | None,
+) -> type[nn.Module]:
+    """Return RMSNorm for GGUF (weights have +1 baked in), else GemmaRMSNorm."""
+    quant_name = quant_config.get_name() if quant_config else None
+    return RMSNorm if quant_name == "gguf" else GemmaRMSNorm
+
+
 class Gemma2MLP(nn.Module):
     def __init__(
         self,
@@ -214,10 +222,7 @@ class Gemma2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        # GGUF stores RMSNorm weights with +1 baked in (llama.cpp convention).
-        # GemmaRMSNorm adds 1 in its forward pass, so use plain RMSNorm for GGUF.
-        quant_name = quant_config.get_name() if quant_config else None
-        rms_norm_cls = RMSNorm if quant_name == "gguf" else GemmaRMSNorm
+        rms_norm_cls = _get_norm_cls(quant_config)
         rms_norm_kwargs = dict(hidden_size=config.hidden_size, eps=config.rms_norm_eps)
         self.input_layernorm = rms_norm_cls(**rms_norm_kwargs)
         self.post_attention_layernorm = rms_norm_cls(**rms_norm_kwargs)
@@ -272,9 +277,9 @@ class Gemma2Model(nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
-        quant_name = quant_config.get_name() if quant_config else None
-        rms_norm_cls = RMSNorm if quant_name == "gguf" else GemmaRMSNorm
-        self.norm = rms_norm_cls(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = _get_norm_cls(quant_config)(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
         # Normalize the embedding by sqrt(hidden_size)
         # The normalizer's data type should be downcasted to the model's
