@@ -32,7 +32,10 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "DCP requires attention impls to return"
                     " the softmax lse for decode, but the impl "
                     f"{layer_impl.__class__.__name__} "
-                    "does not return the softmax lse for decode."
+                    "does not return the softmax lse for decode. "
+                    "Try using a different attention backend by "
+                    "setting the VLLM_ATTENTION_BACKEND environment "
+                    "variable (e.g., VLLM_ATTENTION_BACKEND=FLASH_ATTN)."
                 )
 
             if pcp_size > 1:
