@@ -54,7 +54,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             A tuple of (all_conversations, engine_prompts) on success — one
             entry per conversation — or an ErrorResponse on failure.
         """
-        error_check_ret = await self._check_model(request)
+        error_check_ret = await self._check_model(request)  # type: ignore[arg-type]
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
@@ -138,7 +138,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
+        lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)  # type: ignore[arg-type]
         model_name = self.models.model_name(lora_request)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
         max_model_len = self.model_config.max_model_len
@@ -256,7 +256,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         top_logprobs=output.logprobs,
                         num_output_top_logprobs=request.top_logprobs,
                         tokenizer=tokenizer,
-                        return_as_token_id=request.return_tokens_as_token_ids,
+                        return_as_token_id=request.return_token_ids,
                     )
                 else:
                     logprobs = None
@@ -266,7 +266,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         output.text,
                         request=request,  # type: ignore[arg-type]
                     )
-                    if not request.include_reasoning:
+                    if not getattr(request, "include_reasoning", True):
                         reasoning = None
                 else:
                     reasoning = None
