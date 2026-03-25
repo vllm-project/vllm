@@ -46,6 +46,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    get_tool_call_id_type,
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import ToolServer
@@ -241,15 +242,7 @@ class OpenAIServingResponses(OpenAIServing):
                 get_stop_tokens_for_assistant_actions()
             )
 
-        # Handle tool call ID type for Kimi K2 (supporting test mocking via overrides)
-        hf_overrides = getattr(self.model_config, "hf_overrides", None)
-        if self.model_config.hf_text_config.model_type == "kimi_k2" or (
-            isinstance(hf_overrides, dict)
-            and hf_overrides.get("model_type") == "kimi_k2"
-        ):
-            self.tool_call_id_type = "kimi_k2"
-        else:
-            self.tool_call_id_type = "random"
+        self.tool_call_id_type = get_tool_call_id_type(self.model_config)
 
         self.enable_auto_tools = enable_auto_tools
         # HACK(woosuk): This is a hack. We should use a better store.
@@ -609,7 +602,7 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         messages: list[ResponseInputOutputItem],
         tool_dicts: list[dict[str, Any]] | None,
-        tool_parser: Callable[[TokenizerLike], ToolParser] | None,
+        tool_parser: type[ToolParser] | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
     ):
@@ -717,9 +710,11 @@ class OpenAIServingResponses(OpenAIServing):
                 "Only 'auto' tool_choice is supported in response API with Harmony"
             )
 
+        arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
         engine_prompt = token_inputs(prompt_token_ids)
+        engine_prompt["arrival_time"] = arrival_time
 
         # Add cache_salt if provided in the request
         if request.cache_salt is not None:
@@ -880,6 +875,7 @@ class OpenAIServingResponses(OpenAIServing):
             output=output,
             status=status,
             usage=usage,
+            kv_transfer_params=context.kv_transfer_params,
         )
 
         if request.store:
