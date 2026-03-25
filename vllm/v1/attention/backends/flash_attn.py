@@ -638,27 +638,9 @@ class FlashAttentionImpl(AttentionImpl):
         )
         self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
 
-        self._dcp_context_out: torch.Tensor | None = None
-        self._dcp_query_out: torch.Tensor | None = None
+        self._dcp_dtype: torch.dtype | None = None
         if vllm_config is not None and self.dcp_world_size > 1:
-            n = vllm_config.scheduler_config.max_num_seqs
-            dt = vllm_config.model_config.dtype
-            self._dcp_context_out, self._dcp_query_out = (
-                current_workspace_manager().get_simultaneous(
-                    ((n, num_heads * self.dcp_world_size, head_size), dt),
-                    ((n, num_heads, head_size), dt),
-                )
-            )
-
-    def _dcp_fa_out(
-        self,
-        buf: torch.Tensor | None,
-        num_tokens: int,
-    ) -> torch.Tensor | None:
-        """Slice pre-allocated FA output buffer, or None for prefill."""
-        if buf is not None and num_tokens <= buf.shape[0]:
-            return buf[:num_tokens]
-        return None
+            self._dcp_dtype = vllm_config.model_config.dtype
 
     def forward(
         self,
@@ -885,11 +867,18 @@ class FlashAttentionImpl(AttentionImpl):
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
+        n = query_across_dcp.shape[0]
+        (dcp_context_out,) = current_workspace_manager().get_simultaneous(
+            (
+                (n, self.num_heads * self.dcp_world_size, self.head_size),
+                self._dcp_dtype,
+            ),
+        )
         context_attn_out, context_lse = flash_attn_varlen_func(
             q=query_across_dcp,
             k=key_cache,
             v=value_cache,
-            out=self._dcp_fa_out(self._dcp_context_out, query_across_dcp.shape[0]),
+            out=dcp_context_out,
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
             seqused_k=attn_metadata.dcp_context_kv_lens,
@@ -917,11 +906,14 @@ class FlashAttentionImpl(AttentionImpl):
         )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
+        (dcp_query_out,) = current_workspace_manager().get_simultaneous(
+            ((query.shape[0], self.num_heads, self.head_size), self._dcp_dtype),
+        )
         query_attn_out, query_lse = flash_attn_varlen_func(
             q=query,
             k=key,
             v=value,
-            out=self._dcp_fa_out(self._dcp_query_out, query.shape[0]),
+            out=dcp_query_out,
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
             cu_seqlens_k=cu_seqlens_q,
