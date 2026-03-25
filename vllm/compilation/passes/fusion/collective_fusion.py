@@ -10,6 +10,7 @@ import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
@@ -26,6 +27,7 @@ from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 FP8_DTYPE = current_platform.fp8_dtype()
+FLASHINFER_BMM_FP8_MIN_M = 64
 
 logger = init_logger(__name__)
 
@@ -72,6 +74,22 @@ def _node_shape(node: fx.Node) -> list[object] | None:
     if hasattr(val, "shape"):
         return list(val.shape)
     return None
+
+
+def _node_first_dim(node: fx.Node) -> object | None:
+    shape = _node_shape(node)
+    if shape:
+        return shape[0]
+    return None
+
+
+def _dim_is_statically_lt(dim: int | torch.SymInt, threshold: int) -> bool:
+    if isinstance(dim, int):
+        return dim < threshold
+    try:
+        return bool(statically_known_true(dim < threshold))
+    except Exception:
+        return False
 
 
 def _unwrap_bmm_fp8_arg_to_2d(arg: object) -> fx.Node | None:
@@ -748,6 +766,13 @@ class AsyncTPPass(VllmPatternMatcherPass):
         if rs_match is not None:
             rs_node, rs_input, dim, world_size, group_name = rs_match
             if dim == 0 and isinstance(world_size, int) and isinstance(group_name, str):
+                gemm_m = _node_first_dim(rs_input)
+                if (
+                    gemm_m is not None
+                    and isinstance(gemm_m, int | torch.SymInt)
+                    and _dim_is_statically_lt(gemm_m, FLASHINFER_BMM_FP8_MIN_M)
+                ):
+                    return None
                 output_shape = _node_shape(rs_input)
                 return _FlashInferCollectiveGemmMatch(
                     kind="bmm_rs",
@@ -775,6 +800,13 @@ class AsyncTPPass(VllmPatternMatcherPass):
 
         target = _find_ag_bmm_replace_target(bmm_node)
         if target is None:
+            return None
+        gemm_m = _node_first_dim(target)
+        if (
+            gemm_m is not None
+            and isinstance(gemm_m, int | torch.SymInt)
+            and _dim_is_statically_lt(gemm_m, FLASHINFER_BMM_FP8_MIN_M)
+        ):
             return None
 
         return _FlashInferCollectiveGemmMatch(
