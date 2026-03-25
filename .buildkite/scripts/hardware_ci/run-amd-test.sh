@@ -282,7 +282,7 @@ apply_rocm_test_overrides() {
 
   # --- LoRA: disable custom paged attention ---
   if [[ $cmds == *"pytest -v -s lora"* ]]; then
-    cmds=${cmds//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
+    cmds=${cmds//"pytest -v -s lora"/"pytest -v -s lora"}
   fi
 
   # --- Kernel ignores ---
