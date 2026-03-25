@@ -3,8 +3,8 @@
 
 from io import BytesIO
 from pathlib import Path
-import numpy as np
 
+import numpy as np
 import pybase64
 import torch
 from PIL import Image
@@ -14,8 +14,9 @@ from vllm.utils.serial_utils import tensor2base64
 from ..image import convert_image_mode, rgba_to_rgb
 from .base import MediaIO, MediaWithBytes
 
+MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generated/numpy.lib.format.html#format-version-1-0
 
-MAGIC_NUMPY_PREFIX = b"\x93NUMPY" # https://numpy.org/devdocs/reference/generated/numpy.lib.format.html#format-version-1-0
+
 class ImageMediaIO(MediaIO[Image.Image]):
     """Configuration values can be user-provided either by --media-io-kwargs or
     by the runtime API field "media_io_kwargs". Ensure proper validation and
@@ -106,29 +107,28 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
     def __init__(self) -> None:
         super().__init__()
 
-    
     def _load_pickled_torch(self, data: bytes) -> torch.Tensor:
         # Path for torch tensor
-        with BytesIO(data) as buffer:
-            # Enable sparse tensor integrity checks to prevent out-of-bounds
-            # writes from maliciously crafted tensors
-            with torch.sparse.check_sparse_tensor_invariants():
-                tensor = torch.load(buffer, weights_only=True)
-                return tensor.to_dense()
+        # Enable sparse tensor integrity checks to prevent out-of-bounds
+        # writes from maliciously crafted tensors.
+        with (
+            BytesIO(data) as buffer,
+            torch.sparse.check_sparse_tensor_invariants(),
+        ):
+            tensor = torch.load(buffer, weights_only=True)
+            return tensor.to_dense()
 
     def _load_numpy(self, data: bytes) -> torch.Tensor:
         # Path for numpy arrays
-        
-        with BytesIO(data) as buffer:
-            return torch.from_numpy(np.load(buffer))  
-    
-    def load_bytes(self, data: bytes) -> torch.Tensor:
 
+        with BytesIO(data) as buffer:
+            return torch.from_numpy(np.load(buffer))
+
+    def load_bytes(self, data: bytes) -> torch.Tensor:
         if data[:6] == MAGIC_NUMPY_PREFIX:
             return self._load_numpy(data)
         else:
             return self._load_pickled_torch(data)
-        
 
     def load_base64(self, media_type: str, data: str) -> torch.Tensor:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
@@ -137,7 +137,8 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
         if filepath.suffix == ".npy":
             return torch.from_numpy(np.load(filepath))
         else:
-            return torch.load(filepath, weights_only=True).to_dense()
+            with torch.sparse.check_sparse_tensor_invariants():
+                return torch.load(filepath, weights_only=True).to_dense()
 
     def encode_base64(self, media: torch.Tensor) -> str:
         return tensor2base64(media)

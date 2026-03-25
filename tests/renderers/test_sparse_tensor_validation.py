@@ -222,6 +222,24 @@ class TestImageEmbedsValidation:
         assert result.dtype == torch.int32
         assert result.shape == torch.Size([280])
         assert (result == torch.from_numpy(arr)).all()
+
+    def test_load_file_numpy_tensor_accepted(self, tmp_path):
+        """numpy .npy files should load correctly via load_file."""
+        import numpy as np
+
+        io_handler = ImageEmbeddingMediaIO()
+
+        arr = np.array([[1.5, 2.5], [3.5, 4.5]], dtype=np.float32)
+        npy_path = tmp_path / "image_embeds.npy"
+        np.save(npy_path, arr)
+
+        result = io_handler.load_file(npy_path)
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == torch.Size([2, 2])
+        assert result.dtype == torch.float32
+        assert torch.allclose(result, torch.from_numpy(arr))
+
+
 class TestAudioEmbedsValidation:
     """Test sparse tensor validation in audio embeddings (Chat API)."""
 
