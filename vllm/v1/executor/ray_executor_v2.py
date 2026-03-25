@@ -182,6 +182,36 @@ class RayExecutorV2(MultiprocExecutor):
     def __init__(self, vllm_config: VllmConfig):
         super(MultiprocExecutor, self).__init__(vllm_config)
 
+    def _build_runtime_env(self) -> dict:
+        """Build a runtime_env dict for RayWorkerProc actors.
+
+        Merges parallel_config.ray_runtime_env, driver env vars from
+        get_env_vars_to_copy, noset-device flags, and optional Nsight
+        profiling config.
+        """
+        base = self.parallel_config.ray_runtime_env
+        runtime_env: dict = copy.deepcopy(dict(base)) if base else {}
+
+        env_vars = runtime_env.setdefault("env_vars", {})
+        env_vars.update(self._worker_env_vars)
+        env_vars.update({v: "1" for v in current_platform.ray_noset_device_env_vars})
+        if self.parallel_config.ray_workers_use_nsight:
+            runtime_env["nsight"] = {
+                "t": "cuda,cudnn,cublas",
+                "o": "'worker_process_%p'",
+                "cuda-graph-trace": "node",
+            }
+        return runtime_env
+
+    @staticmethod
+    def _get_actor_resource_kwargs() -> dict[str, Any]:
+        """Return Ray actor resource kwargs for the current platform."""
+        num_devices = envs.VLLM_RAY_PER_WORKER_GPUS
+        device_key = current_platform.ray_device_key
+        if device_key == "GPU":
+            return {"num_gpus": num_devices}
+        return {"num_gpus": 0, "resources": {device_key: num_devices}}
+
     def _init_executor(self) -> None:
         """Initialize the RayExecutorV2 executor."""
         self._finalizer = weakref.finalize(self, self.shutdown)
@@ -271,23 +301,8 @@ class RayExecutorV2(MultiprocExecutor):
                 placement_group_bundle_index=bundle["bundle_id_idx"],
             )
 
-            # Build runtime_env for the worker actor:
-            # 1. Start from parallel_config.ray_runtime_env (pip, working_dir,
-            #    etc.) so that packages installed at the job level are
-            #    available inside RayWorkerProc actors.
-            # 2. Merge in driver env vars (NCCL, HF, vLLM flags) collected
-            #    by get_env_vars_to_copy.
-            # 3. Prevent Ray from setting CUDA_VISIBLE_DEVICES; we set it
-            #    ourselves in initialize_worker after discovering GPU IDs.
-            base_runtime_env = self.parallel_config.ray_runtime_env
-            runtime_env: dict = (
-                copy.deepcopy(dict(base_runtime_env)) if base_runtime_env else {}
-            )
-            env_vars = runtime_env.setdefault("env_vars", {})
-            env_vars.update(self._worker_env_vars)
-            env_vars.update(
-                {v: "1" for v in current_platform.ray_noset_device_env_vars}
-            )
+            runtime_env = self._build_runtime_env()
+            resource_kwargs = self._get_actor_resource_kwargs()
 
             actor_name = build_actor_name(
                 instance_id, bundle["rank"], tp_size, pp_size, pcp_size
@@ -298,7 +313,7 @@ class RayExecutorV2(MultiprocExecutor):
                 .options(
                     name=actor_name,
                     num_cpus=0,
-                    num_gpus=envs.VLLM_RAY_PER_WORKER_GPUS,
+                    **resource_kwargs,
                     scheduling_strategy=scheduling_strategy,
                     runtime_env=runtime_env,
                 )
