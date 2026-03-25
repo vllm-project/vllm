@@ -85,11 +85,7 @@ class InternS1ProProcessingInfo(Qwen3VLProcessingInfo):
         return self.ctx.get_hf_config()
 
     def get_hf_processor(self, **kwargs: object) -> AutoProcessor:
-        return AutoProcessor.from_pretrained(
-            self.ctx.model_config.model,
-            trust_remote_code=True,
-            **kwargs,
-        )
+        return self.ctx.get_hf_processor(**kwargs)
 
 
 class InternS1ProMoeMLP(nn.Module):
@@ -497,7 +493,7 @@ class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
         )
 
 
-class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
+class InternS1ProMoeMixtureOfExperts(MixtureOfExperts):
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -547,7 +543,7 @@ class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class InternS1ProForConditionalGeneration(
-    Qwen3VLForConditionalGeneration, Qwen3VLMoeMixtureOfExperts
+    Qwen3VLForConditionalGeneration, InternS1ProMoeMixtureOfExperts
 ):
     is_3d_moe_weight: bool = True
     packed_modules_mapping = {
@@ -580,20 +576,19 @@ class InternS1ProForConditionalGeneration(
             multimodal_config.is_multimodal_pruning_enabled()
         )
 
-        if not multimodal_config.get_limit_per_prompt(
-            "image"
-        ) and not multimodal_config.get_limit_per_prompt("video"):
-            self.visual = None
-        else:
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
-        self.language_model = InternS1ProMoeLLMForCausalLM(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = InternS1ProMoeLLMForCausalLM(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
+
         # Whether to include the gate_up_proj mapping is determined by
         # the language model.
         self.packed_modules_mapping = (

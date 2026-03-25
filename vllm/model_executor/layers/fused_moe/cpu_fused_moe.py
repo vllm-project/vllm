@@ -280,7 +280,7 @@ class CPUFusedMOE:
         if not (w13_output_size % 32 == 0 and w2_output_size % 32 == 0):
             return False, "none"
 
-        supports_amx = torch._C._cpu._is_amx_tile_supported()
+        supports_amx = torch.cpu._is_amx_tile_supported()
 
         if (
             supports_amx
@@ -402,7 +402,7 @@ class CPUFusedMOE:
             input,
             topk_weights,
             topk_ids,
-            activation,
+            activation.value,
             global_num_experts,
             skip_weighted,
         )

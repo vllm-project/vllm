@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -195,11 +196,12 @@ def _mxfp8_e4m3_quantize(
     A_scale: torch.Tensor | None,
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
+    is_sf_swizzled_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert A_scale is None
     assert not per_act_token_quant
-    assert block_shape is None
-    return mxfp8_e4m3_quantize(A)
+    assert block_shape is None or block_shape == [1, 32]
+    return mxfp8_e4m3_quantize(A, is_sf_swizzled_layout)
 
 
 def _mxfp6_e3m2_quantize(
@@ -264,7 +266,7 @@ def moe_kernel_quantize_input(
         # weights are already dequantized, and we proceed with normal
         # activation quantization below.
 
-    if quant_dtype == torch.float8_e4m3fn:
+    if quant_dtype == current_platform.fp8_dtype():
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
@@ -275,23 +277,19 @@ def moe_kernel_quantize_input(
     elif quant_dtype == "mxfp8":
         # TODO: `quant_dtype == "mxfp8"` is ambiguous,
         # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
-        return _mxfp8_e4m3_quantize(A, A_scale, per_act_token_quant, block_shape)
+        return _mxfp8_e4m3_quantize(
+            A,
+            A_scale,
+            per_act_token_quant,
+            block_shape,
+            is_sf_swizzled_layout=is_fp4_scale_swizzled,
+        )
     elif quant_dtype == "mxfp6_e3m2":
         return _mxfp6_e3m2_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp6_e2m3":
         return _mxfp6_e2m3_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
         return A, A_scale
-
-
-def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
-    """
-    A permutation routine that works on fp8 types.
-    """
-    if torch.is_floating_point(m) and m.dtype.itemsize == 1:
-        return m.view(dtype=torch.uint8)[idx, ...].view(dtype=m.dtype)
-    else:
-        return m[idx, ...]
 
 
 def normalize_scales_shape(scales: torch.Tensor | None) -> torch.Tensor | None:
@@ -317,27 +315,6 @@ def normalize_batched_scales_shape(
             scales = scales.view(num_experts, -1, scales.size(-1))
 
     return scales
-
-
-def _validate_scale_shape(
-    a: torch.Tensor,
-    a_scale: torch.Tensor | None,
-    per_act_token_quant: bool,
-    block_shape: list[int] | None,
-) -> None:
-    if a_scale is None:
-        return
-
-    if not per_act_token_quant and block_shape is None:
-        assert a_scale.numel() == 1, f"{a_scale.shape}"
-    elif per_act_token_quant:
-        assert a_scale.shape[0] == a.shape[0] and a_scale.shape[1] == 1, (
-            f"{a_scale.shape[0]} == {a.shape[0]} and {a_scale.shape[1]} == 1"
-        )
-    else:
-        assert block_shape is not None
-        expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
-        assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"
 
 
 # Torch custom ops can't deal with outputs aliasing inputs so we need to

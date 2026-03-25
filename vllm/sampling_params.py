@@ -3,11 +3,11 @@
 """Sampling parameters for text generation."""
 
 import copy
-import json
+import json as json_mod
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import Any
 
 import msgspec
 from pydantic.dataclasses import dataclass
@@ -16,6 +16,7 @@ from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
+from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
@@ -40,7 +41,6 @@ class StructuredOutputsParams:
     grammar: str | None = None
     json_object: bool | None = None
     # These are other options that can be set.
-    disable_fallback: bool = False
     disable_any_whitespace: bool = False
     disable_additional_properties: bool = False
     whitespace_pattern: str | None = None
@@ -104,6 +104,43 @@ class StructuredOutputsParams:
                 "json_object",
             )
         )
+
+
+@dataclass
+class RepetitionDetectionParams:
+    """Parameters for detecting repetitive N-gram patterns in output tokens."""
+
+    max_pattern_size: int = 0
+    """Maximum size of N-gram pattern to detect for sequence repetition.
+    Set to 0 to disable. Must be used together with min_count."""
+
+    min_pattern_size: int = 0
+    """Minimum N-gram pattern size to check for sequence repetition.
+    If set to 0, it defaults to 1.
+    Must be <= max_pattern_size."""
+
+    min_count: int = 0
+    """Minimum number of times an N-gram pattern must repeat to trigger
+    detection. Must be >= 2. Example: 3 for detecting a phrase repeated
+    3 times. Must be used together with max_pattern_size."""
+
+    def __post_init__(self):
+        if (
+            self.max_pattern_size < 0
+            or self.min_pattern_size < 0
+            or self.min_pattern_size > self.max_pattern_size
+        ):
+            raise ValueError(
+                "max_pattern_size, min_pattern_size must be >=0, "
+                "with min_pattern_size <= max_pattern_size. "
+                "Set both to 0 to disable repetitive pattern detection."
+            )
+        if self.max_pattern_size > 0 and self.min_count < 2:
+            raise ValueError(
+                "min_count must be >= 2 to detect repetitive patterns "
+                "in engine output. If you do not wish to detect repetitive "
+                "patterns, set max_pattern_size to 0."
+            )
 
 
 class RequestOutputKind(Enum):
@@ -208,10 +245,6 @@ class SamplingParams(
     """Whether to add spaces between special tokens in the output."""
     include_stop_str_in_output: bool = False
     """Whether to include the stop strings in output text."""
-    truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None
-    """If set to -1, will use the truncation size supported by the model. If
-    set to an integer k, will use only the last k tokens from the prompt
-    (i.e., left truncation). If set to `None`, truncation is disabled."""
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
     skip_clone: bool = False
     """Internal flag indicating that this SamplingParams instance is safe to
@@ -248,6 +281,16 @@ class SamplingParams(
     _bad_words_token_ids: list[list[int]] | None = None
 
     skip_reading_prefix_cache: bool | None = None
+    thinking_token_budget: int | None = None
+    """Maximum number of tokens allowed for thinking operations."""
+
+    repetition_detection: RepetitionDetectionParams | None = None
+    """Parameters for detecting repetitive N-gram patterns in output tokens.
+    If such repetition is detected, generation will be ended early. LLMs can
+    sometimes generate repetitive, unhelpful token patterns, stopping only
+    when they hit the maximum output length (e.g. 'abcdabcdabcd...' or
+    '\\emoji \\emoji \\emoji ...'). This feature can detect such behavior
+    and terminate early, saving time and tokens."""
 
     @staticmethod
     def from_optional(
@@ -263,6 +306,7 @@ class SamplingParams(
         stop: str | list[str] | None = None,
         stop_token_ids: list[int] | None = None,
         bad_words: list[str] | None = None,
+        thinking_token_budget: int | None = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: int | None = 16,
@@ -272,13 +316,13 @@ class SamplingParams(
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
-        truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
         structured_outputs: StructuredOutputsParams | None = None,
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
+        repetition_detection: RepetitionDetectionParams | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -303,6 +347,7 @@ class SamplingParams(
             stop=stop,
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
+            thinking_token_budget=thinking_token_budget,
             include_stop_str_in_output=include_stop_str_in_output,
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
@@ -312,13 +357,13 @@ class SamplingParams(
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
-            truncate_prompt_tokens=truncate_prompt_tokens,
             output_kind=output_kind,
             structured_outputs=structured_outputs,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
             skip_clone=skip_clone,
+            repetition_detection=repetition_detection,
         )
 
     def __post_init__(self) -> None:
@@ -448,15 +493,6 @@ class SamplingParams(
                 parameter="prompt_logprobs",
                 value=self.prompt_logprobs,
             )
-        if self.truncate_prompt_tokens is not None and (
-            self.truncate_prompt_tokens == 0 or self.truncate_prompt_tokens < -1
-        ):
-            raise VLLMValidationError(
-                f"truncate_prompt_tokens must be an integer >= 1 or -1, "
-                f"got {self.truncate_prompt_tokens}",
-                parameter="truncate_prompt_tokens",
-                value=self.truncate_prompt_tokens,
-            )
         assert isinstance(self.stop_token_ids, list)
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
             raise ValueError(
@@ -501,6 +537,7 @@ class SamplingParams(
             if eos_ids:
                 self._all_stop_token_ids.update(eos_ids)
                 if not self.ignore_eos:
+                    assert self.stop_token_ids is not None
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 
@@ -677,9 +714,9 @@ class SamplingParams(
             return
 
         # Some sampling parameters are not yet compatible with spec decoding.
-        if self.min_tokens > 1 or self.min_p > _SAMPLING_EPS or self.logit_bias:
+        if self.min_p > _SAMPLING_EPS or self.logit_bias:
             raise ValueError(
-                "The min_tokens, min_p, and logit_bias sampling parameters "
+                "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
             )
 
@@ -731,7 +768,6 @@ class SamplingParams(
         ):
             raise ValueError("structured_outputs.grammar cannot be an empty string")
 
-        from vllm.tokenizers.mistral import MistralTokenizer
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
             validate_guidance_grammar,
@@ -752,7 +788,7 @@ class SamplingParams(
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
-            if isinstance(tokenizer, MistralTokenizer):
+            if is_mistral_tokenizer(tokenizer):
                 raise ValueError(
                     "Mistral tokenizer is not supported for the 'guidance' "
                     "structured output backend. Please use ['xgrammar', 'outlines'] "
@@ -764,7 +800,7 @@ class SamplingParams(
             validate_structured_output_request_outlines(self)
         elif backend == "lm-format-enforcer":
             # lm format enforcer backend
-            if isinstance(tokenizer, MistralTokenizer):
+            if is_mistral_tokenizer(tokenizer):
                 raise ValueError(
                     "Mistral tokenizer is not supported for the 'lm-format-enforcer' "
                     "structured output backend. Please use ['xgrammar', 'outlines'] "
@@ -791,12 +827,12 @@ class SamplingParams(
                 skip_guidance = False
                 if so_params.json:
                     if isinstance(so_params.json, str):
-                        schema = json.loads(so_params.json)
+                        schema = json_mod.loads(so_params.json)
                     else:
                         schema = so_params.json
                     skip_guidance = has_guidance_unsupported_json_features(schema)
 
-                if isinstance(tokenizer, MistralTokenizer) or skip_guidance:
+                if is_mistral_tokenizer(tokenizer) or skip_guidance:
                     # Fall back to outlines if the tokenizer is Mistral
                     # or if schema contains features unsupported by guidance
                     validate_structured_output_request_outlines(self)
@@ -826,6 +862,7 @@ class SamplingParams(
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "
             f"bad_words={self.bad_words}, "
+            f"thinking_token_budget={self.thinking_token_budget}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "
@@ -835,9 +872,26 @@ class SamplingParams(
             f"skip_special_tokens={self.skip_special_tokens}, "
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
-            f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"structured_outputs={self.structured_outputs}, "
             f"extra_args={self.extra_args})"
+        )
+
+    @staticmethod
+    def for_sampler_warmup() -> "SamplingParams":
+        """Set parameters to exercise all sampler logic."""
+        return SamplingParams(
+            temperature=0.9,
+            top_p=0.9,
+            top_k=50,
+            min_p=0.1,
+            frequency_penalty=0.5,
+            presence_penalty=0.5,
+            repetition_penalty=1.2,
+            min_tokens=2,
+            logit_bias={0: -1.0, 1: 0.5},
+            _bad_words_token_ids=[[0], [1, 2]],
+            logprobs=5,
+            prompt_logprobs=1,
         )
 
 

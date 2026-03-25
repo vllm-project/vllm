@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     disable_inplace,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype,
     marlin_make_workspace_new,
     marlin_moe_intermediate_size,
     marlin_quant_input,
@@ -39,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kMxfp4Static,
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
@@ -408,7 +410,7 @@ def batched_fused_marlin_moe(
     Note that the moe_align_block_size function indicates,
         - What rows of the A matrix (hidden_states) to access during the
         matmul, via sorted_ids output.
-        - What expert_id to use for each block matmul, via expert_ids ouptut.
+        - What expert_id to use for each block matmul, via expert_ids output.
 
     In the batched version, the tokens are already grouped/batched by experts
     they subscribe to. Due to this, we can represent the batched hidden_states
@@ -525,7 +527,7 @@ def batched_fused_marlin_moe(
     return output
 
 
-class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
+class MarlinExpertsBase(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -550,6 +552,8 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
         self.w2_g_idx_sort_indices = w2_g_idx_sort_indices
         self.is_k_full = is_k_full
+        self.input_dtype = get_marlin_input_dtype()
+
         super().__init__(
             moe_config=moe_config,
             quant_config=quant_config,
@@ -571,22 +575,26 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # TODO(rob): add int4, mxfp4, int8 as integrations
+        # TODO(rob): add int4, int8 as integrations
         # are migrated to use the oracle one-by-one.
         SUPPORTED_W = [
             kFp8Static128BlockSym,
             kFp8StaticChannelSym,
             kFp8StaticTensorSym,
+            kMxfp4Static,
             kNvfp4Static,
         ]
         return weight_key in SUPPORTED_W
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
+        # Marlin uses apply_moe_activation() callback for activation,
+        # so any activation supported there can be used here.
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUSTEP,
             MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU_NO_MUL,
             MoEActivation.RELU2_NO_MUL,
@@ -594,7 +602,10 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not moe_parallel_config.use_fi_all2allv_kernels
+        return not (
+            moe_parallel_config.use_fi_nvl_two_sided_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
+        )
 
     @property
     def quant_type_id(self) -> int:
@@ -651,9 +662,6 @@ class MarlinExperts(MarlinExpertsBase):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
-
-    def supports_chunking(self) -> bool:
-        return True
 
     def workspace_shapes(
         self,
@@ -736,6 +744,7 @@ class MarlinExperts(MarlinExpertsBase):
             sort_indices1=self.w13_g_idx_sort_indices,
             sort_indices2=self.w2_g_idx_sort_indices,
             is_k_full=self.is_k_full,
+            input_dtype=self.input_dtype,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
@@ -778,9 +787,6 @@ class BatchedMarlinExperts(MarlinExpertsBase):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
-
-    def supports_chunking(self) -> bool:
-        return False
 
     def workspace_shapes(
         self,

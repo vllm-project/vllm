@@ -4,7 +4,6 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
-from functools import cached_property
 from typing import Annotated, Literal
 
 import torch
@@ -13,10 +12,7 @@ import torch.nn.functional as F
 from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
-from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
-from PIL import Image
-from transformers import BatchFeature, PixtralVisionConfig, TensorType
-from transformers.image_utils import ImageInput
+from transformers import PixtralVisionConfig
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens,
 )
@@ -25,11 +21,11 @@ from transformers.models.pixtral.modeling_pixtral import (
     apply_rotary_pos_emb,
     position_ids_in_meshgrid,
 )
-from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -42,32 +38,39 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalUUIDDict,
     NestedTensors,
 )
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
-from vllm.multimodal.processing import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+)
+from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     MultiModalProcessingInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    TimingContext,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.transformers_utils.processors.pixtral import MistralCommonPixtralProcessor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
+    supports_eagle3,
 )
 from .module_mapping import MultiModelKeys
 from .utils import StageMissingLayer, init_vllm_registered_model, maybe_prefix
@@ -116,93 +119,6 @@ class PixtralImagePixelInputs(TensorSchema):
     ]
 
 
-class PixtralProcessorAdapter:
-    """
-    Provide a HF-compatible interface for
-    `mistral_common.tokens.tokenizers.multimodal.ImageEncoder`.
-    """
-
-    def __init__(self, tokenizer: MistralTokenizer) -> None:
-        super().__init__()
-
-        self.tokenizer = tokenizer
-
-    @property
-    def image_processor(self) -> ImageEncoder:
-        image_encoder = self.tokenizer.instruct.mm_encoder
-        assert isinstance(image_encoder, ImageEncoder)
-        return image_encoder
-
-    @cached_property
-    def image_break_id(self) -> int:
-        return self.image_processor.special_ids.img_break
-
-    @cached_property
-    def image_token_id(self) -> int:
-        return self.image_processor.special_ids.img
-
-    @cached_property
-    def image_end_id(self) -> int:
-        return self.image_processor.special_ids.img_end
-
-    @cached_property
-    def image_size(self) -> int:
-        return self.image_processor.mm_config.max_image_size
-
-    @cached_property
-    def patch_size(self) -> int:
-        return self.image_processor.mm_config.image_patch_size
-
-    def __call__(
-        self,
-        text: TextInput | list[TextInput] | None = None,
-        images: ImageInput | list[ImageInput] | None = None,
-        return_tensors: str | TensorType | None = None,
-        **kwargs,
-    ) -> Mapping[str, NestedTensors]:
-        if text is None:
-            text = []
-        if not isinstance(text, list):
-            text = [text]
-        if images is None:
-            images = []
-        if not isinstance(images, list):
-            images = [images]
-
-        if not images:
-            input_ids = self.tokenizer(text).input_ids
-
-            return {"input_ids": torch.tensor(input_ids)}
-
-        # Allow dummy text, which is used for profiling as well as token inputs
-        if any(len(t) > 0 for t in text):
-            raise ValueError(
-                "You've passed text inputs instead of token inputs. "
-                "Make sure to process your input via `mistral_common`'s "
-                "tokenizer or pass a chat completion request. "
-                "For more info, see: "
-                "https://github.com/vllm-project/vllm/issues/8411."
-            )
-
-        images_processed = list[torch.Tensor]()
-        images_tokens = list[torch.Tensor]()
-
-        for image in images:
-            image_inputs = self.image_processor(ImageChunk(image=image))
-            image_processed = torch.tensor(image_inputs.image)
-            image_tokens = torch.tensor(image_inputs.tokens)
-
-            images_processed.append(image_processed)
-            images_tokens.append(image_tokens)
-
-        return BatchFeature(
-            {
-                "input_ids": torch.cat(images_tokens)[None].expand(len(text), -1),
-                "images": images_processed,
-            }
-        )
-
-
 class PixtralProcessingInfo(BaseProcessingInfo):
     def get_tokenizer(self) -> MistralTokenizer:
         tokenizer = cached_tokenizer_from_config(self.ctx.model_config)
@@ -211,28 +127,19 @@ class PixtralProcessingInfo(BaseProcessingInfo):
 
         return tokenizer
 
-    def get_hf_processor(self) -> PixtralProcessorAdapter:
-        return PixtralProcessorAdapter(self.get_tokenizer())
+    def get_hf_processor(self, **kwargs) -> MistralCommonPixtralProcessor:
+        return self.ctx.init_processor(
+            MistralCommonPixtralProcessor,
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        processor: PixtralProcessorAdapter,
-    ) -> int:
-        ncols, nrows = processor.image_processor._image_to_num_tokens(
-            Image.new("RGB", (image_width, image_height))
-        )
-
-        return ncols * nrows
-
     def get_image_size_with_most_features(self) -> ImageSize:
         image_processor = self.get_hf_processor().image_processor
-        max_image_size = image_processor.mm_config.max_image_size
+        max_image_size = image_processor.mm_encoder.mm_config.max_image_size
 
         return ImageSize(width=max_image_size, height=max_image_size)
 
@@ -245,14 +152,13 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -267,15 +173,21 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
+        mm_data: MultiModalDataDict | None = None,
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 
         dummy_text = self.get_dummy_text(mm_counts)
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-        dummy_images = dummy_mm_data.get("image", [])
-        tokenization_kwargs = {"truncation": False}
+        dummy_mm_data = (
+            self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+            if mm_data is None
+            else mm_data
+        )
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+        dummy_images = (
+            [] if "image" not in dummy_mm_data else dummy_mm_items["image"].get_all()
+        )
 
         request = ChatCompletionRequest(
             messages=[
@@ -290,13 +202,7 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         res = tokenizer.mistral.encode_chat_completion(request)
         dummy_tokens = res.tokens
 
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
-
-        return ProcessorInputs(
-            prompt=dummy_tokens,
-            mm_items=dummy_mm_items,
-            tokenization_kwargs=tokenization_kwargs,
-        )
+        return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
 
 
 class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]):
@@ -323,8 +229,9 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
-            ncols, nrows = processor.image_processor._image_to_num_tokens(
-                Image.new("RGB", (image_size.width, image_size.height))
+            _, nrows, ncols = processor.image_processor.get_number_of_image_patches(
+                image_size.height,
+                image_size.width,
             )
 
             tokens = ([image_token_id] * ncols + [image_break_id]) * nrows
@@ -342,19 +249,10 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
 
     def _cached_apply_hf_processor(
         self,
-        prompt: str | list[int],
-        mm_data_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-        mm_uuids: MultiModalUUIDDict | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
-        prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
-            prompt=prompt,
-            mm_data_items=mm_data_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(inputs, timing_ctx)
 
         # NOTE: The tokens are already inserted by the chat template
         return prompt_ids, mm_info, True
@@ -366,7 +264,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
     dummy_inputs=PixtralDummyInputsBuilder,
 )
 class PixtralForConditionalGeneration(
-    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
+    nn.Module, SupportsLoRA, SupportsEagle3, SupportsMultiModal, SupportsPP
 ):
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -493,6 +391,21 @@ class PixtralForConditionalGeneration(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
+
+    def _require_language_model_eagle3(self) -> None:
+        if not supports_eagle3(self.language_model):
+            raise RuntimeError(
+                f"EAGLE-3 speculative decoding requires the language model to "
+                f"support EAGLE-3, but {type(self.language_model).__name__} does not."
+            )
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self._require_language_model_eagle3()
+        self.language_model.set_aux_hidden_state_layers(layers)
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        self._require_language_model_eagle3()
+        return self.language_model.get_eagle3_aux_hidden_state_layers()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         def is_vision_encoder_weights(weight: tuple[str, torch.Tensor]):

@@ -16,7 +16,7 @@
 # limitations under the License.
 """Qwen3.5 model configuration"""
 
-from transformers.configuration_utils import PretrainedConfig, layer_type_validation
+from transformers.configuration_utils import PretrainedConfig
 
 
 class Qwen3_5TextConfig(PretrainedConfig):
@@ -68,14 +68,6 @@ class Qwen3_5TextConfig(PretrainedConfig):
         eos_token_id=None,
         **kwargs,
     ):
-        kwargs["ignore_keys_at_rope_validation"] = [
-            "mrope_section",
-            "mrope_interleaved",
-        ]
-        self.pad_token_id = pad_token_id
-        self.bos_token_id = bos_token_id
-        self.eos_token_id = eos_token_id
-        self.tie_word_embeddings = tie_word_embeddings
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size
@@ -102,7 +94,18 @@ class Qwen3_5TextConfig(PretrainedConfig):
                 else "full_attention"
                 for i in range(self.num_hidden_layers)
             ]
-        layer_type_validation(self.layer_types, self.num_hidden_layers)
+        if hasattr(self, "validate_layer_type"):
+            # Transformers v5
+            kwargs["ignore_keys_at_rope_validation"] = {
+                "mrope_section",
+                "mrope_interleaved",
+            }
+            self.validate_layer_type()
+        else:
+            # Transformers v4
+            from transformers.configuration_utils import layer_type_validation
+
+            layer_type_validation(self.layer_types, self.num_hidden_layers)
 
         # linear attention part
         self.linear_conv_kernel_dim = linear_conv_kernel_dim
@@ -111,6 +114,13 @@ class Qwen3_5TextConfig(PretrainedConfig):
         self.linear_num_key_heads = linear_num_key_heads
         self.linear_num_value_heads = linear_num_value_heads
         super().__init__(**kwargs)
+        # Set these AFTER super().__init__() because transformers v4's
+        # PretrainedConfig.__init__ has these as explicit params with different
+        # defaults (e.g. tie_word_embeddings=True) that would overwrite our values.
+        self.pad_token_id = pad_token_id
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.tie_word_embeddings = tie_word_embeddings
 
 
 class Qwen3_5VisionConfig(PretrainedConfig):
@@ -182,8 +192,9 @@ class Qwen3_5Config(PretrainedConfig):
         self.video_token_id = video_token_id
         self.vision_start_token_id = vision_start_token_id
         self.vision_end_token_id = vision_end_token_id
-        self.tie_word_embeddings = tie_word_embeddings
         super().__init__(**kwargs)
+        # Set after super().__init__() to avoid v4 PretrainedConfig overwrite
+        self.tie_word_embeddings = tie_word_embeddings
 
 
 __all__ = ["Qwen3_5Config", "Qwen3_5TextConfig"]
