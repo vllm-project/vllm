@@ -236,13 +236,15 @@ def log_non_default_args(args: Namespace | EngineArgs):
 def should_include_usage(
     stream_options: "StreamOptions | None", enable_force_include_usage: bool
 ) -> tuple[bool, bool]:
+    if enable_force_include_usage:
+        return True, True
     if stream_options:
-        include_usage = stream_options.include_usage or enable_force_include_usage
+        include_usage = bool(stream_options.include_usage)
         include_continuous_usage = include_usage and bool(
             stream_options.continuous_usage_stats
         )
     else:
-        include_usage, include_continuous_usage = enable_force_include_usage, False
+        include_usage, include_continuous_usage = False, False
     return include_usage, include_continuous_usage
 
 
