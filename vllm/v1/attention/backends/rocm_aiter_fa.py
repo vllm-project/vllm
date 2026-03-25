@@ -1283,8 +1283,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                             :num_decodes
                         ].stride(0),
                         scale=self.scale,
-                        K_QScale_hip=layer._k_scale,
-                        V_QScale_hip=layer._v_scale,
+                        K_QScale_hip=attn_metadata.k_scale if attn_metadata.k_scale is not None else layer._k_scale,
+                        V_QScale_hip=attn_metadata.v_scale if attn_metadata.v_scale is not None else layer._v_scale,
                         K_QScale_asm=k_qscale_asm,
                         V_QScale_asm=v_qscale_asm,
                         out_=output[:num_decode_tokens],
