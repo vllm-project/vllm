@@ -96,6 +96,15 @@ async def init_generate_state(
         if "generate" in supported_tasks
         else None
     )
+
+    # Share tool_server with OpenAIServingRender so that
+    # render_responses() can build Harmony system messages.
+    # Stores (response_store, msg_store) are already created in
+    # OpenAIServingRender.__init__ and shared via references in
+    # OpenAIServingResponses.__init__.
+    if state.openai_serving_responses is not None:
+        state.openai_serving_render.tool_server = tool_server
+
     state.openai_serving_chat = (
         OpenAIServingChat(
             engine_client,

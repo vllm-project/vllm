@@ -7,7 +7,6 @@ import uuid
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
-from copy import copy
 from http import HTTPStatus
 from typing import Any, Final
 
@@ -36,15 +35,12 @@ from openai.types.responses.response_output_text import Logprob, LogprobTopLogpr
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
-from openai.types.responses.tool import Mcp, Tool
-from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.config.utils import replace
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     get_tool_call_id_type,
 )
@@ -61,12 +57,7 @@ from vllm.entrypoints.openai.engine.serving import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
-    get_developer_message,
     get_stop_tokens_for_assistant_actions,
-    get_system_message,
-    get_user_message,
-    has_custom_tools,
-    render_for_completion,
 )
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
@@ -76,10 +67,8 @@ from vllm.entrypoints.openai.responses.context import (
     StreamingHarmonyContext,
 )
 from vllm.entrypoints.openai.responses.harmony import (
-    construct_harmony_previous_input_messages,
     harmony_to_response_output,
     parser_state_to_response_output,
-    response_input_to_harmony,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     InputTokensDetails,
@@ -104,7 +93,6 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 )
 from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
-    construct_tool_dicts,
     extract_tool_types,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
@@ -124,45 +112,6 @@ from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
-
-
-def _extract_allowed_tools_from_mcp_requests(
-    tools: list[Tool],
-) -> dict[str, list[str] | None]:
-    """
-    Extract allowed_tools mapping from MCP tool requests.
-
-    Returns a dictionary mapping server_label to allowed_tools list.
-    Handles both list format and McpAllowedToolsMcpToolFilter object format.
-
-    Special handling:
-    - If allowed_tools is None, returns None (allows all tools)
-    - If allowed_tools contains "*", returns None (allows all tools)
-    - Otherwise, returns the list of specific tool names
-
-    This function can be reused for both harmony and non-harmony MCP calls.
-    """
-    allowed_tools_map: dict[str, list[str] | None] = {}
-    for tool in tools:
-        if not isinstance(tool, Mcp):
-            continue
-
-        # allowed_tools can be a list or an object with tool_names
-        # Extract the actual list of tool names
-        allowed_tools_val = None
-        if tool.allowed_tools is not None:
-            if isinstance(tool.allowed_tools, list):
-                allowed_tools_val = tool.allowed_tools
-            elif hasattr(tool.allowed_tools, "tool_names"):
-                # It's an McpAllowedToolsMcpToolFilter object
-                allowed_tools_val = tool.allowed_tools.tool_names
-
-        # Normalize "*" to None (both mean "allow all tools")
-        if allowed_tools_val is not None and "*" in allowed_tools_val:
-            allowed_tools_val = None
-
-        allowed_tools_map[tool.server_label] = allowed_tools_val
-    return allowed_tools_map
 
 
 class OpenAIServingResponses(OpenAIServing):
@@ -245,16 +194,11 @@ class OpenAIServingResponses(OpenAIServing):
         self.tool_call_id_type = get_tool_call_id_type(self.model_config)
 
         self.enable_auto_tools = enable_auto_tools
-        # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove responses from the store.
-        self.response_store: dict[str, ResponsesResponse] = {}
-        self.response_store_lock = asyncio.Lock()
-
-        # HACK(woosuk): This is a hack. We should use a better store.
-        # FIXME: If enable_store=True, this may cause a memory leak since we
-        # never remove messages from the store.
-        self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
+        # Stores are managed by OpenAIServingRender so that
+        # render_responses() can access them directly.
+        self.response_store = self.openai_serving_render.response_store
+        self.response_store_lock = self.openai_serving_render.response_store_lock
+        self.msg_store = self.openai_serving_render.msg_store
 
         # HACK(wuhang): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
@@ -266,6 +210,33 @@ class OpenAIServingResponses(OpenAIServing):
         self.background_tasks: dict[str, asyncio.Task] = {}
 
         self.tool_server = tool_server
+
+    async def render_responses_request(
+        self,
+        request: ResponsesRequest,
+    ) -> tuple[list, list[ProcessorInputs]] | ErrorResponse:
+        """
+        Validate the model and preprocess a responses request.
+
+        Delegates preprocessing logic to OpenAIServingRender, adding the
+        engine-aware checks (LoRA model validation, engine health).
+
+        Returns:
+            A tuple of (messages, engine_prompts) on success,
+            or an ErrorResponse on failure.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            logger.error("Error with model %s", error_check_ret)
+            return error_check_ret
+
+        # If the engine is dead, raise the engine's DEAD_ERROR.
+        # This is required for the streaming case, where we return a
+        # success status before we actually start generating text :).
+        if self.engine_client.errored:
+            raise self.engine_client.dead_error
+
+        return await self.openai_serving_render.render_responses(request)
 
     def _validate_generator_input(
         self,
@@ -332,19 +303,9 @@ class OpenAIServingResponses(OpenAIServing):
         | ResponsesResponse
         | ErrorResponse
     ):
-        error_check_ret = await self._check_model(request)
-        if error_check_ret is not None:
-            logger.error("Error with model %s", error_check_ret)
-            return error_check_ret
         maybe_validation_error = self._validate_create_responses_input(request)
         if maybe_validation_error is not None:
             return maybe_validation_error
-
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
 
         if request.store and not self.enable_store:
             # Disable the store option.
@@ -355,25 +316,14 @@ class OpenAIServingResponses(OpenAIServing):
             # value).
             request.store = False
 
-        # Handle the previous response ID.
-        prev_response_id = request.previous_response_id
-        if prev_response_id is not None:
-            async with self.response_store_lock:
-                prev_response = self.response_store.get(prev_response_id)
-            if prev_response is None:
-                return self._make_not_found_error(prev_response_id)
-        else:
-            prev_response = None
+        result = await self.render_responses_request(request)
+        if isinstance(result, ErrorResponse):
+            return result
+
+        messages, engine_prompts = result
 
         lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)
-
-        if self.use_harmony:
-            messages, engine_prompts = self._make_request_with_harmony(
-                request, prev_response
-            )
-        else:
-            messages, engine_prompts = await self._make_request(request, prev_response)
 
         request_metadata = RequestResponseMetadata(request_id=request.request_id)
         if raw_request:
@@ -572,31 +522,6 @@ class OpenAIServingResponses(OpenAIServing):
             request_metadata,
         )
 
-    async def _make_request(
-        self,
-        request: ResponsesRequest,
-        prev_response: ResponsesResponse | None,
-    ):
-        tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
-        # Construct the input messages.
-        messages = construct_input_messages(
-            request_instructions=request.instructions,
-            request_input=request.input,
-            prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
-            prev_response_output=prev_response.output if prev_response else None,
-        )
-
-        _, engine_prompts = await self.openai_serving_render.preprocess_chat(
-            request,
-            messages,
-            default_template=self.chat_template,
-            default_template_content_format=self.chat_template_content_format,
-            default_template_kwargs=None,
-            tool_dicts=tool_dicts,
-            tool_parser=self.parser.tool_parser_cls if self.parser else None,
-        )
-        return messages, engine_prompts
-
     async def _render_next_turn(
         self,
         request: ResponsesRequest,
@@ -699,28 +624,6 @@ class OpenAIServingResponses(OpenAIServing):
             # OPTIMIZATION
             priority = orig_priority - 1
             sub_request += 1
-
-    def _make_request_with_harmony(
-        self,
-        request: ResponsesRequest,
-        prev_response: ResponsesResponse | None,
-    ):
-        if request.tool_choice != "auto":
-            raise NotImplementedError(
-                "Only 'auto' tool_choice is supported in response API with Harmony"
-            )
-
-        arrival_time = time.time()
-        messages = self._construct_input_messages_with_harmony(request, prev_response)
-        prompt_token_ids = render_for_completion(messages)
-        engine_prompt = token_inputs(prompt_token_ids)
-        engine_prompt["arrival_time"] = arrival_time
-
-        # Add cache_salt if provided in the request
-        if request.cache_salt is not None:
-            engine_prompt["cache_salt"] = request.cache_salt
-
-        return messages, [engine_prompt]
 
     async def _initialize_tool_sessions(
         self,
@@ -1048,160 +951,6 @@ class OpenAIServingResponses(OpenAIServing):
         if last_items:
             output_items.extend(last_items)
         return output_items
-
-    def _extract_system_message_from_request(
-        self, request: ResponsesRequest
-    ) -> str | None:
-        system_msg = None
-        if not isinstance(request.input, str):
-            for response_msg in request.input:
-                if (
-                    isinstance(response_msg, dict)
-                    and response_msg.get("role") == "system"
-                ):
-                    content = response_msg.get("content")
-                    if isinstance(content, str):
-                        system_msg = content
-                    elif isinstance(content, list):
-                        for param in content:
-                            if (
-                                isinstance(param, dict)
-                                and param.get("type") == "input_text"
-                            ):
-                                system_msg = param.get("text")
-                                break
-                    break
-        return system_msg
-
-    def _construct_harmony_system_input_message(
-        self, request: ResponsesRequest, with_custom_tools: bool, tool_types: set[str]
-    ) -> OpenAIHarmonyMessage:
-        model_identity = self._extract_system_message_from_request(request)
-
-        reasoning_effort = request.reasoning.effort if request.reasoning else None
-
-        # Extract allowed_tools from MCP tool requests
-        allowed_tools_map = _extract_allowed_tools_from_mcp_requests(request.tools)
-
-        # Get filtered tool descriptions first.
-        # If get_tool_description returns None (due to filtering), the tool is disabled.
-        browser_description = (
-            self.tool_server.get_tool_description(
-                "browser", allowed_tools_map.get("web_search_preview")
-            )
-            if "web_search_preview" in tool_types
-            and self.tool_server is not None
-            and self.tool_server.has_tool("browser")
-            else None
-        )
-        python_description = (
-            self.tool_server.get_tool_description(
-                "python", allowed_tools_map.get("code_interpreter")
-            )
-            if "code_interpreter" in tool_types
-            and self.tool_server is not None
-            and self.tool_server.has_tool("python")
-            else None
-        )
-        container_description = (
-            self.tool_server.get_tool_description(
-                "container", allowed_tools_map.get("container")
-            )
-            if "container" in tool_types
-            and self.tool_server is not None
-            and self.tool_server.has_tool("container")
-            else None
-        )
-
-        sys_msg = get_system_message(
-            model_identity=model_identity,
-            reasoning_effort=reasoning_effort,
-            browser_description=browser_description,
-            python_description=python_description,
-            container_description=container_description,
-            instructions=request.instructions,
-            with_custom_tools=with_custom_tools,
-        )
-        return sys_msg
-
-    def _construct_input_messages_with_harmony(
-        self,
-        request: ResponsesRequest,
-        prev_response: ResponsesResponse | None,
-    ) -> list[OpenAIHarmonyMessage]:
-        messages: list[OpenAIHarmonyMessage] = []
-        if prev_response is None:
-            # New conversation.
-            tool_types = extract_tool_types(request.tools)
-            with_custom_tools = has_custom_tools(tool_types)
-
-            sys_msg = self._construct_harmony_system_input_message(
-                request, with_custom_tools, tool_types
-            )
-            messages.append(sys_msg)
-            if with_custom_tools:
-                dev_msg = get_developer_message(
-                    instructions=request.instructions, tools=request.tools
-                )
-                messages.append(dev_msg)
-            messages += construct_harmony_previous_input_messages(request)
-
-        else:
-            # Continue the previous conversation.
-            # FIXME(woosuk): Currently, request params like reasoning and
-            # instructions are ignored.
-            prev_msgs = self.msg_store[prev_response.id]
-
-            # FIXME(woosuk): The slice-delete-reappend cycle below is
-            # currently a no-op --- it removes messages then puts them all
-            # back unfiltered. It may be intentionally deferred (see FIXME
-            # above) or redundant if the Harmony encoder already strips
-            # analysis messages at render time. If analysis messages need
-            # to be dropped here, add a channel != "analysis" filter when
-            # re-appending, similar to auto_drop_analysis_messages in
-            # harmony_utils.py.
-            if len(prev_msgs) > 0:
-                last_msg = prev_msgs[-1]
-                assert isinstance(last_msg, OpenAIHarmonyMessage)
-                if last_msg.channel == "final":
-                    prev_final_msg_idx = -1
-                    for i in range(len(prev_msgs) - 2, -1, -1):
-                        prev_msg_i = prev_msgs[i]
-                        assert isinstance(prev_msg_i, OpenAIHarmonyMessage)
-                        if prev_msg_i.channel == "final":
-                            prev_final_msg_idx = i
-                            break
-                    recent_turn_msgs = prev_msgs[prev_final_msg_idx + 1 :]
-                    del prev_msgs[prev_final_msg_idx + 1 :]
-                    for msg in recent_turn_msgs:
-                        assert isinstance(msg, OpenAIHarmonyMessage)
-                        prev_msgs.append(msg)
-            messages.extend(prev_msgs)
-        # Append the new input.
-        # Responses API supports simple text inputs without chat format.
-        if isinstance(request.input, str):
-            # Skip empty string input when previous_input_messages supplies
-            # the full conversation history --- an empty trailing user message
-            # confuses the model into thinking nothing was sent.
-            if request.input or not request.previous_input_messages:
-                messages.append(get_user_message(request.input))
-        else:
-            if prev_response is not None:
-                prev_outputs = copy(prev_response.output)
-            else:
-                prev_outputs = []
-            for response_msg in request.input:
-                new_msg = response_input_to_harmony(response_msg, prev_outputs)
-                if new_msg is not None and new_msg.author.role != "system":
-                    messages.append(new_msg)
-
-                # User passes in a tool call request and its output. We need
-                # to add the tool call request to prev_outputs so that
-                # response_input_to_harmony can find the tool call request when
-                # parsing the tool call output.
-                if isinstance(response_msg, ResponseFunctionToolCall):
-                    prev_outputs.append(response_msg)
-        return messages
 
     async def _run_background_request_stream(
         self,

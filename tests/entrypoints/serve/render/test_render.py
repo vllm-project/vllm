@@ -263,3 +263,88 @@ async def test_chat_completion_render_with_sampling_params(client):
 
     # Check that internal fields are not present
     assert "_all_stop_token_ids" not in sampling_params
+
+
+@pytest.mark.asyncio
+async def test_responses_render_basic(client):
+    """Test basic responses render endpoint."""
+    response = await client.post(
+        "/v1/responses/render",
+        json={
+            "model": MODEL_NAME,
+            "input": "What is the meaning of life?",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+
+    # Verify response structure - should be a GenerateRequest
+    assert isinstance(data, dict)
+    assert "token_ids" in data
+    assert "sampling_params" in data
+    assert "model" in data
+    assert "request_id" in data
+    assert isinstance(data["token_ids"], list)
+    assert len(data["token_ids"]) > 0
+    assert data["model"] == MODEL_NAME
+    assert data["request_id"].startswith("resp-")
+
+
+@pytest.mark.asyncio
+async def test_responses_render_error_invalid_model(client):
+    """Test responses render with invalid model returns error."""
+    response = await client.post(
+        "/v1/responses/render",
+        json={
+            "model": "invalid-model-name",
+            "input": "Hello",
+        },
+    )
+
+    assert response.status_code == 404
+    data = response.json()
+    assert "error" in data
+
+
+@pytest.mark.asyncio
+async def test_responses_render_no_generation(client):
+    """Verify responses render endpoint does not generate text."""
+    import time
+
+    start = time.perf_counter()
+    response = await client.post(
+        "/v1/responses/render",
+        json={
+            "model": MODEL_NAME,
+            "input": "Tell me a very long story about " * 10,
+        },
+    )
+    elapsed = time.perf_counter() - start
+
+    assert response.status_code == 200
+    # Render should be fast (< 1 second) since no generation
+    assert elapsed < 1.0
+
+
+@pytest.mark.asyncio
+async def test_responses_render_with_sampling_params(client):
+    """Verify sampling params are correctly returned by responses /render."""
+    response = await client.post(
+        "/v1/responses/render",
+        json={
+            "model": MODEL_NAME,
+            "input": "Test sampling params",
+            "temperature": 0.123,
+            "top_p": 0.456,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert "sampling_params" in data
+    sampling_params = data["sampling_params"]
+
+    assert sampling_params.get("temperature") == 0.123
+    assert sampling_params.get("top_p") == 0.456
