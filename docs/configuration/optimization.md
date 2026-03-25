@@ -301,7 +301,7 @@ The size of the multi-modal encoder cache is expressed in terms of number of emb
 
 If your workload involves many repeating multi-modal inputs that cannot be optimized via prefix caching, you can further increase the cache size by setting `encoder_cache_size`, at the cost of reserving more GPU memory which in turn reduces the size of the KV cache.
 
-For [encoder disaggregation](../examples/online_serving/disaggregated_encoder.md), you can allocate more memory to increasing the encoder cache size since the memory taken up by the modality encoders is typically much smaller than the language backbone.
+For [encoder disaggregation](../examples/online_serving/disaggregated_encoder.md), you can allocate more memory to the encoder cache since you do not have to worry about reducing the memory available to KV cache, which are allocated separately.
 
 ## CPU Resources for GPU Deployments
 
