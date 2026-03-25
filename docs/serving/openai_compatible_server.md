@@ -268,6 +268,34 @@ The following extra parameters in the response object are supported:
     --8<-- "vllm/entrypoints/openai/responses/protocol.py:responses-response-extra-params"
     ```
 
+#### Response Storage
+
+By default, vLLM does not store responses (unlike OpenAI, where `store=True` is the default). To enable response storage, you can choose from three backends via environment variables:
+
+**In-memory** (default) — responses are kept in memory and lost on restart:
+
+```bash
+export VLLM_ENABLE_RESPONSES_API_STORE=1
+```
+
+**File-based** — each response is persisted as a JSON file in a directory. Survives restarts, and multiple instances sharing the same directory can read each other's stored responses:
+
+```bash
+export VLLM_RESPONSES_STORE_BACKEND=file
+export VLLM_RESPONSES_STORE_PATH=/path/to/store
+```
+
+**Redis** — stores responses in Redis for full multi-instance support with immediate visibility. Requires the `redis` Python package (`pip install redis`):
+
+```bash
+export VLLM_RESPONSES_STORE_BACKEND=redis
+export VLLM_RESPONSES_STORE_REDIS_URL=redis://localhost:6379/0
+```
+
+When `VLLM_RESPONSES_STORE_BACKEND` is set to `file` or `redis`, response storage is automatically enabled — there is no need to also set `VLLM_ENABLE_RESPONSES_API_STORE=1`.
+
+Response storage is required for the `previous_response_id` parameter (multi-turn conversations) and for background requests.
+
 ### Transcriptions API
 
 Our Transcriptions API is compatible with [OpenAI's Transcriptions API](https://platform.openai.com/docs/api-reference/audio/createTranscription);

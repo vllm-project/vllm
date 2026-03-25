@@ -200,6 +200,9 @@ if TYPE_CHECKING:
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
+    VLLM_RESPONSES_STORE_BACKEND: str = "memory"
+    VLLM_RESPONSES_STORE_PATH: str | None = None
+    VLLM_RESPONSES_STORE_REDIS_URL: str | None = None
     VLLM_NVFP4_GEMM_BACKEND: str | None = None
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
@@ -1453,13 +1456,33 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # When set to 1, vLLM's OpenAI server will retain the input and output
     # messages for those requests in memory. By default, this is disabled (0),
     # and the "store" option is ignored.
-    # NOTE/WARNING:
-    # 1. Messages are kept in memory only (not persisted to disk) and will be
-    #    lost when the vLLM server shuts down.
-    # 2. Enabling this option will cause a memory leak, as stored messages are
-    #    never removed from memory until the server terminates.
+    # NOTE: This is automatically enabled when VLLM_RESPONSES_STORE_BACKEND
+    # is set to anything other than "memory".
     "VLLM_ENABLE_RESPONSES_API_STORE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))
+    ),
+    # Selects the storage backend for the Responses API store.
+    # "memory" (default): in-memory dicts, lost on restart, may leak memory.
+    # "file": one JSON file per entry in a directory (set
+    #   VLLM_RESPONSES_STORE_PATH). Survives restarts. Multiple instances
+    #   sharing the directory see each other's writes.
+    # "redis": stores in Redis (set VLLM_RESPONSES_STORE_REDIS_URL).
+    #   Requires the `redis` Python package. Full multi-instance support.
+    "VLLM_RESPONSES_STORE_BACKEND": env_with_choices(
+        "VLLM_RESPONSES_STORE_BACKEND",
+        "memory",
+        ["memory", "file", "redis"],
+        case_sensitive=False,
+    ),
+    # Directory path for the "file" responses store backend.
+    # Required when VLLM_RESPONSES_STORE_BACKEND=file.
+    # The directory is created automatically if it does not exist.
+    "VLLM_RESPONSES_STORE_PATH": lambda: os.getenv("VLLM_RESPONSES_STORE_PATH"),
+    # Redis connection URL for the "redis" responses store backend.
+    # Required when VLLM_RESPONSES_STORE_BACKEND=redis.
+    # Example: redis://localhost:6379/0 or redis://:password@host:6379/0
+    "VLLM_RESPONSES_STORE_REDIS_URL": lambda: os.getenv(
+        "VLLM_RESPONSES_STORE_REDIS_URL"
     ),
     # If set, use the fp8 mfma in rocm paged attention.
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": lambda: bool(
