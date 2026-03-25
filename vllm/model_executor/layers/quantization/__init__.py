@@ -12,8 +12,6 @@ logger = init_logger(__name__)
 QuantizationMethods = Literal[
     "awq",
     "fp8",
-    "mxfp8",
-    "ptpc_fp8",
     "fbgemm_fp8",
     "fp_quant",
     "modelopt",
@@ -32,6 +30,7 @@ QuantizationMethods = Literal[
     "torchao",
     "inc",
     "mxfp4",
+    "mxfp8",
     "petit_nvfp4",
     "cpu_awq",
 ]
@@ -129,14 +128,13 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     )
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
+    from .mxfp8 import Mxfp8Config
     from .petit import PetitNvFp4Config
     from .torchao import TorchAOConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AWQConfig,
         "fp8": Fp8Config,
-        "ptpc_fp8": Fp8Config,
-        "mxfp8": ModelOptMxFp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
         "fp_quant": FPQuantConfig,
         "modelopt": ModelOptFp8Config,
@@ -156,6 +154,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "auto-round": INCConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
+        "mxfp8": Mxfp8Config,
         "petit_nvfp4": PetitNvFp4Config,
         "cpu_awq": CPUAWQConfig,
     }
