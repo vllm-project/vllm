@@ -133,8 +133,6 @@ async def serve_http(
         watchdog_task.cancel()
         if ssl_cert_refresher:
             ssl_cert_refresher.stop()
-        if health_proc is not None:
-            stop_health_process(health_proc)
 
     shutdown_task = loop.create_task(handle_shutdown())
 
