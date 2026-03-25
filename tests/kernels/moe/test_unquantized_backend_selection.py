@@ -103,19 +103,14 @@ def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
         mock_platform.is_out_of_tree.return_value = False
 
         moe_config = make_dummy_moe_config()
-        selected_backend = select_unquantized_moe_backend(
+        selected_backend, expert_cls = select_unquantized_moe_backend(
             moe_config=moe_config,
-            use_ep=False,
-            use_dp=False,
         )
 
         assert selected_backend == UnquantizedMoeBackend.AITER
+        assert expert_cls is not None
 
 
-@patch(
-    "vllm.model_executor.layers.fused_moe.oracle.unquantized.has_flashinfer",
-    return_value=True,
-)
 @patch(
     "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16Experts.is_supported_config",
     return_value=(True, None),
@@ -123,9 +118,7 @@ def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms."
 )
-def test_select_cuda_flashinfer_trtllm_backend(
-    mock_has_flashinfer, mock_is_supported_trtllm, monkeypatch
-):
+def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm, monkeypatch):
     """Test CUDA backend selection when FlashInfer TRTLLM is available and enabled."""
     with (
         patch.object(current_platform, "is_cuda", return_value=True),
