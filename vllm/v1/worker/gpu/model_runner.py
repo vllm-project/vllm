@@ -62,10 +62,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     get_uniform_token_count,
 )
 from vllm.v1.worker.gpu.dp_utils import sync_cudagraph_and_dp_padding
-from vllm.v1.worker.gpu.eplb_utils import (
-    EPLBController,
-    step_eplb_after,
-)
+from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
