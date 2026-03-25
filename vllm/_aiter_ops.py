@@ -50,9 +50,9 @@ def is_aiter_found_and_supported() -> bool:
     VLLM_ROCM_USE_AITER=0, while preventing unwanted JIT warnings for auto-discovery.
     """
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        from vllm.platforms.rocm import on_gfx9
+        from vllm.platforms.rocm import on_mi3xx
 
-        return on_gfx9()
+        return on_mi3xx()
     return False
 
 
