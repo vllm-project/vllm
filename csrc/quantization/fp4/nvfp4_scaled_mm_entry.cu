@@ -24,6 +24,13 @@ void cutlass_scaled_fp4_mm_sm100a(torch::Tensor& D, torch::Tensor const& A,
                                   torch::Tensor const& A_sf,
                                   torch::Tensor const& B_sf,
                                   torch::Tensor const& alpha);
+// SM103 (B300) uses FP4 Ultra MMA -- separate entry point compiled from
+// the same source file, guarded by CUTLASS_ARCH_MMA_SM103_SUPPORTED.
+void cutlass_scaled_fp4_mm_sm103a(torch::Tensor& D, torch::Tensor const& A,
+                                  torch::Tensor const& B,
+                                  torch::Tensor const& A_sf,
+                                  torch::Tensor const& B_sf,
+                                  torch::Tensor const& alpha);
 #endif
 
 #if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
@@ -43,6 +50,14 @@ void cutlass_scaled_fp4_mm(torch::Tensor& D, const torch::Tensor& A,
   const int32_t sm = get_sm_version_num();
 
 #if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
+  // SM103 (B300): Use FP4 Ultra kernels with K=768 tiles for higher
+  // throughput. Falls through to SM100 path if SM103 kernels weren’t compiled
+  // (e.g., CUDA < 12.9).
+  if (sm == 103) {
+    cutlass_scaled_fp4_mm_sm103a(D, A, B, A_sf, B_sf, alpha);
+    return;
+  }
+
   if (sm >= 100 && sm < 120) {
     cutlass_scaled_fp4_mm_sm100a(D, A, B, A_sf, B_sf, alpha);
     return;

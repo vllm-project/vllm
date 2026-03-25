@@ -199,6 +199,55 @@ __device__ __forceinline__ uint8_t* cvt_quant_to_fp4_get_sf_out_offset(
   return reinterpret_cast<uint8_t*>(SFout) + SFOffset;
 }
 
+// ============================================================================
+// SM103 (Blackwell Ultra / B300) swizzled SF offset.
+//
+// SM103 uses Sm103BlockScaledConfig with a 3-level M decomposition:
+//   M -> (m8, m4a, m4b)  where mIdx = m4b + m4a*4 + m8*16
+//   K -> (sfv16_broadcast, k4)
+//
+// Atom layout:
+//   Shape:  <Shape<_8, _4, _4>, Shape<SFVecSize=16, _4>>
+//   Stride: <Stride<_16, _128, _4>, Stride<_0, _1>>
+//
+// Physical offset = m8*16 + m4a*128 + m4b*4 + k4
+// Each 128-row x 4-col tile occupies 512 bytes (same as SM100).
+// ============================================================================
+template <class SFType, int CVT_FP4_NUM_THREADS_PER_SF>
+__device__ __forceinline__ uint8_t* cvt_quant_to_fp4_get_sf_out_offset_sm103(
+    int rowIdx, int colIdx, int32_t numKTiles, SFType* SFout) {
+  static_assert(CVT_FP4_NUM_THREADS_PER_SF == 1 ||
+                CVT_FP4_NUM_THREADS_PER_SF == 2);
+
+  if (threadIdx.x % CVT_FP4_NUM_THREADS_PER_SF != 0) {
+    return nullptr;
+  }
+
+  int32_t kIdx = colIdx / CVT_FP4_NUM_THREADS_PER_SF;
+  int32_t mIdx = rowIdx;
+
+  // SM103 tile decomposition (128 rows per M-tile, 4 K-positions per K-tile).
+  int32_t mTileIdx = mIdx >> 7;         // mIdx / 128
+  int32_t mLocal = mIdx & 127;          // mIdx % 128
+
+  // SM103 3-level M decomposition: mLocal = m4b + m4a*4 + m8*16
+  int32_t m4b = mLocal & 3;             // mLocal % 4
+  int32_t m4a = (mLocal >> 2) & 3;      // (mLocal / 4) % 4
+  int32_t m8  = (mLocal >> 4) & 7;      // (mLocal / 16) % 8
+
+  int32_t kTileIdx = kIdx >> 2;         // kIdx / 4
+  int32_t innerKIdx = kIdx & 3;         // kIdx % 4
+
+  // Physical offset within the 512-byte tile:
+  //   m8 * 16 + m4a * 128 + m4b * 4 + innerKIdx
+  // Tile base: (mTileIdx * numKTiles + kTileIdx) * 512
+  int64_t SFOffset = (static_cast<int64_t>(mTileIdx) * numKTiles + kTileIdx)
+                         << 9 |
+                     (m8 << 4) | (m4a << 7) | (m4b << 2) | innerKIdx;
+
+  return reinterpret_cast<uint8_t*>(SFout) + SFOffset;
+}
+
 template <class SFType>
 __device__ __forceinline__ uint8_t* sf_out_rowmajor_u8(int row, int pack,
                                                        int packs_per_row_sf,

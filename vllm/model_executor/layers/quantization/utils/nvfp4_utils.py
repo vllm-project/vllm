@@ -107,12 +107,23 @@ def prepare_weights_for_nvfp4_flashinfer_trtllm(
 def prepare_weights_for_nvfp4_cutlass(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
+    use_sm103_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     """
     Prepare weights and scales for CUTLASS/FlashInfer-CUTLASS FP4 GEMM.
     This involves padding weights for alignment (K and N divisible by 32)
+    and swizzling scales to the layout expected by the target GPU.
+
+    Parameters
+    ----------
+    use_sm103_layout : bool
+        If True, use the SM103 (B300) scale factor layout instead of SM100.
+        SM103 uses Sm103BlockScaledConfig with a 3-level M decomposition.
     """
-    swizzled_weight_scale = swizzle_blockscale(weight_scale)
+    if use_sm103_layout:
+        swizzled_weight_scale = swizzle_blockscale_sm103(weight_scale)
+    else:
+        swizzled_weight_scale = swizzle_blockscale(weight_scale)
     padded_weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(weight)
     return padded_weight, swizzled_weight_scale, weights_padding_cols
 
@@ -166,7 +177,8 @@ def convert_to_nvfp4_linear_kernel_format(
         NvFp4LinearBackend.FLASHINFER_CUDNN,
     ):
         weight, weight_scale, weights_padding_cols = prepare_weights_for_nvfp4_cutlass(
-            layer.weight.data, layer.weight_scale.data
+            layer.weight.data, layer.weight_scale.data,
+            use_sm103_layout=is_sm103(),
         )
         layer.weight = torch.nn.Parameter(weight, requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
@@ -310,6 +322,95 @@ def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:
     if scale_ndim == 2:
         return swizzled.reshape(M_padded, K_padded)
     return swizzled.reshape(B, M_padded, K_padded)
+
+
+def swizzle_blockscale_sm103(scale: torch.Tensor) -> torch.Tensor:
+    """
+    Pad and block-interleave the FP4 block-scales for SM103 (B300).
+
+    SM103 uses Sm103BlockScaledConfig with a different swizzle pattern:
+      M decomposition: m4b + m4a*4 + m8*16  (3-level, 4×4×8 = 128)
+    vs SM100:
+      M decomposition: outerM + innerM*32   (2-level, 32×4 = 128)
+
+    The K decomposition (4 per tile) is the same for both.
+
+    Parameters
+    ----------
+    scale : torch.Tensor
+        FP8-E4M3FN block scales, shape [M, K/16] or [B, M, K/16].
+
+    Returns
+    -------
+    torch.Tensor
+        The SM103-swizzled tensor, same outer shape as *scale*.
+    """
+    assert scale.dtype == torch.float8_e4m3fn, (
+        "swizzle_blockscale_sm103 expects the input tensor to be in "
+        "torch.float8_e4m3fn format."
+    )
+
+    scale_ndim = scale.ndim
+    if scale_ndim == 2:
+        scale = scale.unsqueeze(0)
+    assert scale.ndim == 3, "Expected a 2-D or 3-D tensor for block scales."
+
+    B, M, K = scale.shape
+
+    M_padded = round_up(M, 128)
+    K_padded = round_up(K, 4)
+
+    padded = torch.zeros(
+        (B, M_padded, K_padded), dtype=scale.dtype, device=scale.device
+    )
+    padded[:B, :M, :K] = scale
+
+    # SM103 3-level M decomposition: mLocal = m4b + m4a*4 + m8*16
+    # Reshape: [B, numMTiles, 8(m8), 4(m4a), 4(m4b), numKTiles, 4(innerK)]
+    padded = padded.reshape(
+        B, M_padded // 128, 8, 4, 4, K_padded // 4, 4
+    )
+    # Permute to: [B, mTile, kTile, m8, m4a, m4b, innerK]
+    # which matches stride layout: m8*16 + m4a*128 + m4b*4 + innerK
+    # In contiguous memory: last dims are innermost.
+    # Target byte offset = m8*16 + m4a*128 + m4b*4 + innerK
+    # We need the permutation that, when contiguous, produces these strides.
+    #
+    # Contiguous strides for shape [mTile, kTile, d0, d1, d2, d3]:
+    #   d3 stride = 1 (innerK)
+    #   d2 stride = 4 (m4b -> 4)
+    #   d1 stride = 16 (m4a -> but we need 128!)
+    #
+    # Since contiguous layout assigns stride 1 to the last dim and
+    # increasing strides to earlier dims, we need to ORDER the dims
+    # so that the dim with stride 1 is last, stride 4 is second-to-last, etc.
+    #
+    # Target strides within 512-byte tile:
+    #   innerK: stride 1
+    #   m4b:    stride 4
+    #   m8:     stride 16
+    #   m4a:    stride 128
+    #
+    # So ordering from outermost to innermost by decreasing stride:
+    #   m4a (128) > m8 (16) > m4b (4) > innerK (1)
+    #
+    # Current dims: [B, mTile, m8, m4a, m4b, kTile, innerK]
+    #                0    1     2    3    4     5      6
+    # Target:       [B, mTile, kTile, m4a, m8, m4b, innerK]
+    #                0    1      5      3    2   4     6
+    swizzled = padded.permute(0, 1, 5, 3, 2, 4, 6).contiguous().cuda()
+
+    if scale_ndim == 2:
+        return swizzled.reshape(M_padded, K_padded)
+    return swizzled.reshape(B, M_padded, K_padded)
+
+
+def is_sm103() -> bool:
+    """Check if the current device is SM103 (B300/Blackwell Ultra)."""
+    if not current_platform.is_cuda():
+        return False
+    cap = current_platform.get_device_capability()
+    return cap is not None and cap.to_int() == 103
 
 
 def cutlass_fp4_supported() -> bool:

@@ -36,6 +36,10 @@ using namespace cute;
 
 #if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
 
+// ============================================================================
+// SM100 (B200) Tile Configurations
+// ============================================================================
+
 // Configuration for M in (256, inf)
 struct sm100_fp4_config_default {
   using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
@@ -62,6 +66,51 @@ struct sm100_fp4_config_M16 {
   using ClusterShape = Shape<_1, _1, _1>;
   using PerSmTileShape_MNK = Shape<_128, _128, _256>;
 };
+
+// ============================================================================
+// SM103 (B300 / Blackwell Ultra) Tile Configurations
+//
+// Key differences from SM100:
+//   - Tile K = 768 is MANDATORY (CUTLASS static_assert)
+//   - Uses FP4 Ultra MMA instructions (UltraVs16) for higher throughput
+//   - Uses NoSmem epilogue (saves shared memory for mainloop)
+//   - 1SM for small M, 2SM for large M (cooperative SM pairs)
+// ============================================================================
+#if defined(CUTLASS_ARCH_MMA_SM103_SUPPORTED)
+
+// SM103 configuration for M in (256, inf) -- 2SM cooperative execution
+struct sm103_fp4_config_default {
+  // 2SM schedule: two SMs cooperate on one tile for higher throughput
+  using KernelSchedule = cutlass::gemm::collective::
+      KernelTmaWarpSpecialized2SmBlockScaledMxNvf4UltraVs16Sm103;
+  using EpilogueSchedule = cutlass::epilogue::NoSmemWarpSpecialized2Sm;
+  using TileShape = Shape<_128, _256, Int<768>>;
+  using ClusterShape = Shape<_2, _2, _1>;
+  using PerSmTileShape_MNK = Shape<_128, _256, Int<768>>;
+};
+
+// SM103 configuration for M in (16, 256] -- 2SM with smaller N tile
+struct sm103_fp4_config_M256 {
+  using KernelSchedule = cutlass::gemm::collective::
+      KernelTmaWarpSpecialized2SmBlockScaledMxNvf4UltraVs16Sm103;
+  using EpilogueSchedule = cutlass::epilogue::NoSmemWarpSpecialized2Sm;
+  using TileShape = Shape<_128, _128, Int<768>>;
+  using ClusterShape = Shape<_1, _2, _1>;
+  using PerSmTileShape_MNK = Shape<_128, _128, Int<768>>;
+};
+
+// SM103 configuration for M in [1, 16] -- 1SM (decode / small batch)
+struct sm103_fp4_config_M16 {
+  // 1SM schedule: single SM per tile, lower latency for small problems
+  using KernelSchedule = cutlass::gemm::collective::
+      KernelTmaWarpSpecialized1SmBlockScaledMxNvf4UltraVs16Sm103;
+  using EpilogueSchedule = cutlass::epilogue::NoSmemWarpSpecialized1Sm;
+  using TileShape = Shape<_128, _128, Int<768>>;
+  using ClusterShape = Shape<_1, _1, _1>;
+  using PerSmTileShape_MNK = Shape<_128, _128, Int<768>>;
+};
+
+#endif  // CUTLASS_ARCH_MMA_SM103_SUPPORTED
 
 template <typename Config, typename OutType>
 struct Fp4GemmSm100 {
@@ -124,6 +173,99 @@ struct Fp4GemmSm100 {
   using StrideD = typename Gemm::GemmKernel::StrideD;
   using LayoutD = decltype(cute::make_layout(make_shape(0, 0, 0), StrideD{}));
 };
+
+// ============================================================================
+// SM103 GEMM Definition (FP4 Ultra)
+//
+// SM103 differs from SM100 in several fundamental ways:
+//   1. Uses cutlass::arch::Sm103 (separate CollectiveBuilder specialization)
+//   2. Element types passed as cute::tuple<DataType, ScaleFactorType>
+//      (SM100 uses nv_float4_t<float_e2m1_t> wrapper instead)
+//   3. Tile K = 768 (SM100 uses K = 256)
+//   4. Epilogue uses NoSmemWarpSpecialized (SM100 uses TmaWarpSpecialized)
+//   5. Scale factor memory layout uses Sm103BlockScaledConfig
+//      (different swizzle pattern from SM100's Sm1xxBlockScaledConfig)
+//
+// IMPORTANT: Scale factor layout compatibility
+//   SM103 and SM100 use DIFFERENT physical scale factor layouts in memory.
+//   The activation quantization kernel (scaled_fp4_quant) and the weight
+//   scale factors in NVFP4 checkpoints must produce/store data in the
+//   SM103-expected layout when using these kernels. Passing SM100-format
+//   scale factors to SM103 kernels will produce incorrect results.
+//   See Sm103BlockScaledConfig::tile_atom_to_shape_SFA for the expected
+//   layout.
+// ============================================================================
+#if defined(CUTLASS_ARCH_MMA_SM103_SUPPORTED)
+
+template <typename Config, typename OutType>
+struct Fp4GemmSm103 {
+  // A matrix configuration -- bare float_e2m1_t (not nv_float4_t wrapper)
+  using ElementA = cutlass::float_e2m1_t;
+  using ElementSFA = cutlass::float_ue4m3_t;
+  using LayoutATag = cutlass::layout::RowMajor;
+  static constexpr int AlignmentA = 32;
+
+  // B matrix configuration
+  using ElementB = cutlass::float_e2m1_t;
+  using ElementSFB = cutlass::float_ue4m3_t;
+  using LayoutBTag = cutlass::layout::ColumnMajor;
+  static constexpr int AlignmentB = 32;
+
+  // C/D matrix configuration
+  using ElementD = OutType;
+  using ElementC = OutType;
+  using LayoutCTag = cutlass::layout::RowMajor;
+  using LayoutDTag = cutlass::layout::RowMajor;
+  static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
+  static constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementC>::value;
+
+  // Kernel functional config
+  using ElementAccumulator = float;
+  using ArchTag = cutlass::arch::Sm103;
+  using OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
+
+  // Use config's tile shapes (K=768 mandatory for SM103)
+  using MmaTileShape = typename Config::TileShape;
+  using ClusterShape = typename Config::ClusterShape;
+  using PerSmTileShape_MNK = typename Config::PerSmTileShape_MNK;
+
+  // Epilogue: SM103 uses NoSmem variant with OpClassTensorOp
+  // Note: epilogue builder uses Sm100 arch tag (shared epilogue HW)
+  using CollectiveEpilogue =
+      typename cutlass::epilogue::collective::CollectiveBuilder<
+          cutlass::arch::Sm100, cutlass::arch::OpClassTensorOp,
+          PerSmTileShape_MNK, ClusterShape,
+          cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
+          ElementAccumulator, ElementC, LayoutCTag, AlignmentC, ElementD,
+          LayoutDTag, AlignmentD,
+          typename Config::EpilogueSchedule>::CollectiveOp;
+
+  // Mainloop: SM103 passes element+SF types as tuples to the builder
+  using CollectiveMainloop =
+      typename cutlass::gemm::collective::CollectiveBuilder<
+          ArchTag, OperatorClass, cute::tuple<ElementA, ElementSFA>, LayoutATag,
+          AlignmentA, cute::tuple<ElementB, ElementSFB>, LayoutBTag, AlignmentB,
+          ElementAccumulator, MmaTileShape, ClusterShape,
+          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
+              sizeof(typename CollectiveEpilogue::SharedStorage))>,
+          typename Config::KernelSchedule>::CollectiveOp;
+
+  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
+      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>;
+  using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+  using StrideA = typename Gemm::GemmKernel::StrideA;
+  using LayoutA = decltype(cute::make_layout(make_shape(0, 0, 0), StrideA{}));
+  using LayoutSFA = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFA;
+  using StrideB = typename Gemm::GemmKernel::StrideB;
+  using LayoutB = decltype(cute::make_layout(make_shape(0, 0, 0), StrideB{}));
+  using LayoutSFB = typename Gemm::GemmKernel::CollectiveMainloop::LayoutSFB;
+  using StrideC = typename Gemm::GemmKernel::StrideC;
+  using LayoutC = decltype(cute::make_layout(make_shape(0, 0, 0), StrideC{}));
+  using StrideD = typename Gemm::GemmKernel::StrideD;
+  using LayoutD = decltype(cute::make_layout(make_shape(0, 0, 0), StrideD{}));
+};
+
+#endif  // CUTLASS_ARCH_MMA_SM103_SUPPORTED
 
 template <typename Config>
 typename Config::Gemm::Arguments args_from_options(
@@ -220,6 +362,38 @@ void cutlass_fp4_gemm_dispatch(torch::Tensor& D, torch::Tensor const& A,
   }
 }
 
+// ============================================================================
+// SM103 Dispatch
+// ============================================================================
+#if defined(CUTLASS_ARCH_MMA_SM103_SUPPORTED)
+
+template <typename OutType>
+void cutlass_fp4_gemm_sm103_dispatch(torch::Tensor& D, torch::Tensor const& A,
+                                     torch::Tensor const& B,
+                                     torch::Tensor const& A_sf,
+                                     torch::Tensor const& B_sf,
+                                     torch::Tensor const& alpha, int64_t m,
+                                     int64_t n, int64_t k,
+                                     cudaStream_t stream) {
+  uint32_t const mp2 = std::max(static_cast<uint32_t>(16), next_pow_2(m));
+
+  if (mp2 <= 16) {
+    // m in [1, 16] -- 1SM, low-latency decode
+    runGemm<Fp4GemmSm103<sm103_fp4_config_M16, OutType>>(
+        D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
+  } else if (mp2 <= 256) {
+    // m in (16, 256] -- 2SM with moderate cluster
+    runGemm<Fp4GemmSm103<sm103_fp4_config_M256, OutType>>(
+        D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
+  } else {
+    // m in (256, inf) -- 2SM with full cluster
+    runGemm<Fp4GemmSm103<sm103_fp4_config_default, OutType>>(
+        D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
+  }
+}
+
+#endif  // CUTLASS_ARCH_MMA_SM103_SUPPORTED
+
 #else
 template <typename OutType>
 void cutlass_fp4_gemm_dispatch(torch::Tensor& D, torch::Tensor const& A,
@@ -315,3 +489,82 @@ void cutlass_scaled_fp4_mm_sm100a(torch::Tensor& D, torch::Tensor const& A,
                 ")");
   }
 }
+
+// ============================================================================
+// SM103 Entry Point (B300 / Blackwell Ultra)
+//
+// Uses FP4 Ultra MMA instructions with K=768 tiles for higher throughput.
+// Scale factors must be in Sm103BlockScaledConfig layout (different from SM100).
+// ============================================================================
+#if defined(CUTLASS_ARCH_MMA_SM103_SUPPORTED)
+
+void cutlass_scaled_fp4_mm_sm103a(torch::Tensor& D, torch::Tensor const& A,
+                                  torch::Tensor const& B,
+                                  torch::Tensor const& A_sf,
+                                  torch::Tensor const& B_sf,
+                                  torch::Tensor const& alpha) {
+  CHECK_INPUT(A, FLOAT4_E2M1X2, "a");
+  CHECK_INPUT(B, FLOAT4_E2M1X2, "b");
+
+  CHECK_INPUT(A_sf, SF_DTYPE, "scale_a");
+  CHECK_INPUT(B_sf, SF_DTYPE, "scale_b");
+
+  CHECK_INPUT(alpha, at::ScalarType::Float, "alpha");
+
+  TORCH_CHECK(A.dim() == 2, "a must be a matrix");
+  TORCH_CHECK(B.dim() == 2, "b must be a matrix");
+  TORCH_CHECK(A.sizes()[1] == B.sizes()[1],
+              "a and b shapes cannot be multiplied (", A.sizes()[0], "x",
+              A.sizes()[1], " and ", B.sizes()[0], "x", B.sizes()[1], ")");
+
+  auto const m = A.sizes()[0];
+  auto const n = B.sizes()[0];
+  auto const k = A.sizes()[1] * 2;
+
+  constexpr int alignment = 32;
+  TORCH_CHECK(k % alignment == 0, "Expected k to be divisible by ", alignment,
+              ", but got a shape: (", A.sizes()[0], "x", A.sizes()[1],
+              "), k: ", k, ".");
+  TORCH_CHECK(n % alignment == 0, "Expected n to be divisible by ", alignment,
+              ", but got b shape: (", B.sizes()[0], "x", B.sizes()[1], ").");
+
+  // SM103 scale factor shape validation.
+  // Physical dimensions are the same as SM100 (padded to 128 x ceil(k/16,4)),
+  // but the internal swizzle pattern (Sm103BlockScaledConfig) differs.
+  auto round_up = [](int x, int y) { return (x + y - 1) / y * y; };
+  int rounded_m = round_up(m, 128);
+  int rounded_n = round_up(n, 128);
+  int rounded_k = round_up(k / 16, 4);
+
+  TORCH_CHECK(A_sf.dim() == 2, "scale_a must be a matrix");
+  TORCH_CHECK(B_sf.dim() == 2, "scale_b must be a matrix");
+  TORCH_CHECK(A_sf.sizes()[1] == B_sf.sizes()[1],
+              "scale_a and scale_b shapes cannot be multiplied (",
+              A_sf.sizes()[0], "x", A_sf.sizes()[1], " and ", B_sf.sizes()[0],
+              "x", B_sf.sizes()[1], ")");
+  TORCH_CHECK(A_sf.sizes()[0] == rounded_m && A_sf.sizes()[1] == rounded_k,
+              "scale_a must be padded and swizzled to a shape (", rounded_m,
+              "x", rounded_k, "), but got a shape (", A_sf.sizes()[0], "x",
+              A_sf.sizes()[1], ")");
+  TORCH_CHECK(B_sf.sizes()[0] == rounded_n && B_sf.sizes()[1] == rounded_k,
+              "scale_b must be padded and swizzled to a shape (", rounded_n,
+              "x", rounded_k, "), but got a shape (", B_sf.sizes()[0], "x",
+              B_sf.sizes()[1], ")");
+
+  auto out_dtype = D.dtype();
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(A.get_device());
+
+  if (out_dtype == at::ScalarType::Half) {
+    cutlass_fp4_gemm_sm103_dispatch<cutlass::half_t>(D, A, B, A_sf, B_sf,
+                                                     alpha, m, n, k, stream);
+  } else if (out_dtype == at::ScalarType::BFloat16) {
+    cutlass_fp4_gemm_sm103_dispatch<cutlass::bfloat16_t>(
+        D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
+  } else {
+    TORCH_CHECK(false, "Unsupported output data type of nvfp4 mm (", out_dtype,
+                ")");
+  }
+}
+
+#endif  // CUTLASS_ARCH_MMA_SM103_SUPPORTED
