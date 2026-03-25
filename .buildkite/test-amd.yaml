@@ -3751,7 +3751,7 @@ steps:
   - python3 benchmarks/attention_benchmarks/benchmark.py --backends ROCM_ATTN ROCM_AITER_FA ROCM_AITER_UNIFIED_ATTN --batch-specs "8q1s1k" --repeats 1 --warmup-iters 1
 
 
-- label: "LM Eval Qwen3.5 Models (B200-MI355)" # TBD
+- label: LM Eval Qwen3-5 Models (B200-MI355) # TBD
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
