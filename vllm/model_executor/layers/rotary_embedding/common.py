@@ -135,9 +135,17 @@ class ApplyRotaryEmb(CustomOp):
 
         self.apply_rotary_emb_flash_attn = None
         if find_spec("flash_attn") is not None:
-            from flash_attn.ops.triton.rotary import apply_rotary
+            try:
+                from flash_attn.ops.triton.rotary import apply_rotary
 
-            self.apply_rotary_emb_flash_attn = apply_rotary
+                self.apply_rotary_emb_flash_attn = apply_rotary
+            except (ImportError, ModuleNotFoundError):
+                # flash_attn exists but flash_attn.ops.triton may not be available
+                logger.debug(
+                    "flash_attn.ops.triton.rotary not available when version is less than v2.1.2, "
+                    "falling back to native implementation"
+                )
+                self.apply_rotary_emb_flash_attn = None
 
     @staticmethod
     def forward_static(
