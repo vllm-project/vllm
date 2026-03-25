@@ -137,7 +137,7 @@ def test_routed_input_transform_inside_vs_outside(
     Method A (inside): SharedFusedMoE with routed_input_transform
     Method B (outside): Manually transform, then SharedFusedMoE without transform
     """
-    if current_platform.is_rocm():
+    if current_platform.is_rocm() and use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1" if use_rocm_aiter else "0")
         from vllm._aiter_ops import rocm_aiter_ops
@@ -213,9 +213,14 @@ def test_routed_input_transform_inside_vs_outside(
         hidden_states = torch.randn(num_tokens, hidden_size, device="cuda", dtype=dtype)
         router_logits = torch.randn(num_tokens, num_experts, device="cuda", dtype=dtype)
 
+        # Clone inputs so any in-place modification by Method A
+        # cannot affect Method B's computation.
+        hidden_states_A = hidden_states.clone()
+        router_logits_A = router_logits.clone()
+
         with set_forward_context(None, vllm_config, num_tokens=num_tokens):
             shared_out_A, routed_out_A = moe_with_transform(
-                hidden_states, router_logits
+                hidden_states_A, router_logits_A
             )
 
             transformed_hidden = routed_transform(hidden_states)
