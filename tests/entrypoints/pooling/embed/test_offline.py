@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import logging
 import weakref
 
 import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm import LLM, PoolingParams
+from vllm import LLM, EmbeddingRequestOutput, PoolingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
+from vllm.tasks import PoolingTask
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 
-prompts = ["The chef prepared a delicious meal."]
+prompt = "The chef prepared a delicious meal."
+prompt_token_ids = [0, 581, 21861, 133888, 10, 8, 150, 60744, 109911, 5, 2]
+embedding_size = 384
 
 
 @pytest.fixture(scope="module")
@@ -44,16 +47,48 @@ def llm():
 
 
 @pytest.mark.skip_global_cleanup
-def test_token_embed(llm: LLM):
-    outputs = llm.encode(prompts, pooling_task="token_embed", use_tqdm=False)
+def test_str_prompts(llm: LLM):
+    outputs = llm.embed(prompt, use_tqdm=False)
+    assert len(outputs) == 1
+    assert isinstance(outputs[0], EmbeddingRequestOutput)
+    assert outputs[0].prompt_token_ids == prompt_token_ids
+    assert len(outputs[0].outputs.embedding) == embedding_size
+
+
+@pytest.mark.skip_global_cleanup
+def test_token_ids_prompts(llm: LLM):
+    outputs = llm.embed([prompt_token_ids], use_tqdm=False)
+    assert len(outputs) == 1
+    assert isinstance(outputs[0], EmbeddingRequestOutput)
+    assert outputs[0].prompt_token_ids == prompt_token_ids
+    assert len(outputs[0].outputs.embedding) == embedding_size
+
+
+@pytest.mark.skip_global_cleanup
+def test_list_prompts(llm: LLM):
+    outputs = llm.embed([prompt, prompt_token_ids], use_tqdm=False)
+    assert len(outputs) == 2
+    for i in range(len(outputs)):
+        assert isinstance(outputs[i], EmbeddingRequestOutput)
+        assert outputs[i].prompt_token_ids == prompt_token_ids
+        assert len(outputs[i].outputs.embedding) == embedding_size
+
+
+@pytest.mark.skip_global_cleanup
+def test_token_embed(llm: LLM, caplog_vllm):
+    with caplog_vllm.at_level(level=logging.WARNING, logger="vllm"):
+        outputs = llm.encode(prompt, pooling_task="token_embed", use_tqdm=False)
+        assert "deprecated" in caplog_vllm.text
+
     multi_vector = outputs[0].outputs.data
     assert multi_vector.shape == (11, 384)
 
 
+@pytest.mark.skip_global_cleanup
 def test_pooling_params(llm: LLM):
     def get_outputs(normalize):
         outputs = llm.embed(
-            prompts,
+            [prompt],
             pooling_params=PoolingParams(use_activation=normalize),
             use_tqdm=False,
         )
@@ -70,3 +105,10 @@ def test_pooling_params(llm: LLM):
     assert torch.allclose(w_normal, F.normalize(wo_normal, p=2, dim=-1), atol=1e-2), (
         "w_normal should be close to normal(wo_normal)."
     )
+
+
+@pytest.mark.parametrize("task", ["token_classify", "classify"])
+def test_unsupported_tasks(llm: LLM, task: PoolingTask):
+    err_msg = "Classification API is not supported by this model.+"
+    with pytest.raises(ValueError, match=err_msg):
+        llm.encode(prompt, pooling_task=task, use_tqdm=False)
