@@ -225,8 +225,6 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
     API server scale-out disables most forms of [multi-modal input caching](#multi-modal-input-caching)
     because it requires a one-to-one correspondence between API and engine core processes.
 
-    This does not impact [multi-modal processor caching](#processor-caching).
-
 ## Multi-Modal Input Caching
 
 Multi-modal input caching avoids repeated processing or transfer of multi-modal inputs, which commonly occurs in multi-turn conversations.
