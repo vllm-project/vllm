@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.config import VllmConfig, replace
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
@@ -256,30 +255,6 @@ def compute_new_slot_mapping(
     # Mask out rejected tokens to prevent saves to the KV cache.
     new_slot_mapping.masked_fill_(is_rejected_token_mask, PADDING_SLOT_ID)
     return new_slot_mapping
-
-
-def create_vllm_config_for_draft_model(
-    target_model_vllm_config: VllmConfig,
-) -> VllmConfig:
-    """The vllm_config is configured for the target model, e.g.
-    its quant_config and parallel_config. But the draft model is potentially
-    quantized differently, and has potentially different tensor_parallel_size.
-    This function creates a new vllm_config configured for the drafter.
-    The vllm_config is useful when loading the draft model with get_model().
-    """
-    old = target_model_vllm_config
-    assert old.speculative_config is not None, "speculative_config is not set"
-    old_spec_config = old.speculative_config
-    new_parallel_config = replace(
-        old_spec_config.draft_parallel_config, rank=old.parallel_config.rank
-    )
-    new: VllmConfig = replace(
-        old,
-        quant_config=None,
-        parallel_config=new_parallel_config,
-        model_config=old_spec_config.draft_model_config,
-    )
-    return new
 
 
 def extend_all_queries_by_N(
