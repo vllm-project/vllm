@@ -8,6 +8,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
+from functools import partial
 from http import HTTPStatus
 from typing import Final
 
@@ -93,6 +94,9 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponsesResponse,
     ResponseUsage,
     StreamingResponsesResponse,
+)
+from vllm.entrypoints.openai.responses.simple_streaming_events import (
+    process_simple_stream,
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
@@ -1220,7 +1224,7 @@ class OpenAIServingResponses(OpenAIServing):
             param="response_id",
         )
 
-    async def _process_simple_streaming_events(
+    async def _process_simple_streaming_events_old(
         self,
         request: ResponsesRequest,
         sampling_params: SamplingParams,
@@ -1243,6 +1247,7 @@ class OpenAIServingResponses(OpenAIServing):
         tool_parser = None
         if self.parser and self.parser.tool_parser_cls:
             tool_parser = self.parser.tool_parser_cls(tokenizer)
+        # True once we have observed the first delta that is not pure reasoning.
         reasoning_ended = False
         tool_call_text_started = False
         previous_text = ""
@@ -1250,13 +1255,17 @@ class OpenAIServingResponses(OpenAIServing):
         prompt_is_reasoning_end = None
         first_delta_sent = False
         previous_delta_messages: list[DeltaMessage] = []
+        any_text_delta_emitted = False
+        pending_tool_call: DeltaMessage | None = None
+        _reasoning_and_content_same_delta = False
         async for ctx in result_generator:
             assert isinstance(ctx, SimpleContext)
             if ctx.last_output is None:
                 continue
             if reasoning_parser and prompt_is_reasoning_end is None:
-                prompt_is_reasoning_end = reasoning_parser.is_reasoning_end(
-                    ctx.last_output.prompt_token_ids
+                prompt_is_reasoning_end = (
+                    reasoning_parser.is_reasoning_end(ctx.last_output.prompt_token_ids)
+                    is True
                 )
             if ctx.last_output.outputs:
                 output = ctx.last_output.outputs[0]
@@ -1267,30 +1276,61 @@ class OpenAIServingResponses(OpenAIServing):
                 current_text = previous_text + delta_text
                 current_token_ids = previous_token_ids + delta_token_ids
 
-                if reasoning_parser and tool_parser:
-                    if prompt_is_reasoning_end:
-                        reasoning_ended = True
-                    if not reasoning_ended:
-                        delta_message = reasoning_parser.extract_reasoning_streaming(
-                            previous_text=previous_text,
-                            current_text=current_text,
-                            delta_text=delta_text,
-                            previous_token_ids=previous_token_ids,
-                            current_token_ids=current_token_ids,
-                            delta_token_ids=delta_token_ids,
-                        )
-                        if reasoning_parser.is_reasoning_end(delta_token_ids):
-                            reasoning_ended = True
-                            current_token_ids = reasoning_parser.extract_content_ids(
-                                delta_token_ids
-                            )
-                            if delta_message and delta_message.content:
-                                current_text = delta_message.content
-                                delta_message.content = None
-                            else:
-                                current_text = ""
+                if reasoning_parser and tool_parser and prompt_is_reasoning_end:
+                    reasoning_ended = True
 
-                    if reasoning_ended:
+                # Extract reasoning deltas only when a reasoning parser is present
+                # and we have not yet marked reasoning as ended.
+                delta_message: DeltaMessage | None = None
+                if not reasoning_ended and reasoning_parser:
+                    delta_message = reasoning_parser.extract_reasoning_streaming(
+                        previous_text=previous_text,
+                        current_text=current_text,
+                        delta_text=delta_text,
+                        previous_token_ids=previous_token_ids,
+                        current_token_ids=current_token_ids,
+                        delta_token_ids=delta_token_ids,
+                    )
+
+                if (
+                    reasoning_parser
+                    and reasoning_parser.is_reasoning_end(delta_token_ids) is True
+                ):
+                    reasoning_ended = True
+                    current_token_ids = reasoning_parser.extract_content_ids(
+                        delta_token_ids
+                    )
+                    if delta_message:
+                        current_text = delta_message.content
+
+                    # Emit text delta when content extracted at reasoning end;
+                    # This ensures content before tool calls is properly emitted
+                    if current_text:
+                        yield _increment_sequence_number_and_return(
+                            ResponseTextDeltaEvent(
+                                type="response.output_text.delta",
+                                sequence_number=-1,
+                                content_index=current_content_index,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                delta=current_text,
+                                logprobs=(
+                                    self._create_stream_response_logprobs(
+                                        token_ids=delta_token_ids,
+                                        logprobs=output.logprobs,
+                                        tokenizer=tokenizer,
+                                        top_logprobs=request.top_logprobs,
+                                    )
+                                    if request.is_include_output_logprobs()
+                                    else []
+                                ),
+                            )
+                        )
+                        any_text_delta_emitted = True
+                    else:
+                        current_text = ""
+
+                    if tool_parser:
                         if not tool_call_text_started:
                             tool_call_text_started = True
                             previous_text = ""
@@ -1307,7 +1347,7 @@ class OpenAIServingResponses(OpenAIServing):
                             delta_token_ids=delta_token_ids,
                             request=request,  # type: ignore[arg-type]
                         )
-                elif reasoning_parser:
+                elif delta_message is None and reasoning_ended and reasoning_parser:
                     delta_message = reasoning_parser.extract_reasoning_streaming(
                         previous_text=previous_text,
                         current_text=current_text,
@@ -1316,7 +1356,7 @@ class OpenAIServingResponses(OpenAIServing):
                         current_token_ids=current_token_ids,
                         delta_token_ids=delta_token_ids,
                     )
-                elif tool_parser:
+                elif delta_message is None and tool_parser and reasoning_ended:
                     delta_message = tool_parser.extract_tool_calls_streaming(
                         previous_text=previous_text,
                         current_text=current_text,
@@ -1326,7 +1366,7 @@ class OpenAIServingResponses(OpenAIServing):
                         delta_token_ids=delta_token_ids,
                         request=request,  # type: ignore[arg-type]
                     )
-                else:
+                elif delta_message is None:
                     delta_message = DeltaMessage(
                         content=output.text,
                     )
@@ -1395,7 +1435,55 @@ class OpenAIServingResponses(OpenAIServing):
                                 ),
                             )
                         )
-                    elif not delta_message.tool_calls:
+                    if (
+                        delta_message.content is not None
+                        and delta_message.reasoning is not None
+                    ):
+                        # When reasoning and content are in the same delta,
+                        # create a separate message item for the content.
+                        current_output_index += 1
+                        current_item_id = random_uuid()
+                        current_content_index = 0
+                        yield _increment_sequence_number_and_return(
+                            ResponseOutputItemAddedEvent(
+                                type="response.output_item.added",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item=ResponseOutputMessage(
+                                    id=current_item_id,
+                                    type="message",
+                                    role="assistant",
+                                    content=[],
+                                    status="in_progress",
+                                ),
+                            )
+                        )
+                        yield _increment_sequence_number_and_return(
+                            ResponseContentPartAddedEvent(
+                                type="response.content_part.added",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                content_index=current_content_index,
+                                part=ResponseOutputText(
+                                    type="output_text",
+                                    text="",
+                                    annotations=[],
+                                    logprobs=[],
+                                ),
+                            )
+                        )
+                    # If there are no tool calls and we haven't yet emitted a
+                    # message item for this output, create a placeholder message.
+                    # Previously this branch unconditionally created a message
+                    # even when the delta contained no content (e.g., after a
+                    # tool call), leading to an extra ``ResponseOutputItemAdded``
+                    # event. Guard with ``delta_message.content is not None`` to
+                    # ensure we only emit a message when there is actual content.
+                    elif (
+                        not delta_message.tool_calls
+                        and delta_message.content is not None
+                    ):
                         yield _increment_sequence_number_and_return(
                             ResponseOutputItemAddedEvent(
                                 type="response.output_item.added",
@@ -1427,26 +1515,17 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                     first_delta_sent = True
 
-                # check delta message and previous delta message are
-                # same as content or reasoning content
                 if (
                     previous_delta_messages
                     and previous_delta_messages[-1].reasoning is not None
                     and delta_message.content is not None
                 ):
-                    # from reasoning to normal content, send done
-                    # event for reasoning
                     reason_content = "".join(
                         pm.reasoning
                         for pm in previous_delta_messages
                         if pm.reasoning is not None
                     )
 
-                    # delta message could have both reasoning and
-                    # content. Include current delta's reasoning in the
-                    # finalization since it may carry the tail end of
-                    # reasoning text (e.g. when reasoning end and
-                    # content start arrive in the same delta).
                     if delta_message.reasoning is not None:
                         yield _increment_sequence_number_and_return(
                             ResponseReasoningTextDeltaEvent(
@@ -1460,7 +1539,6 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                         reason_content += delta_message.reasoning
                         delta_message = DeltaMessage(content=delta_message.content)
-
                     yield _increment_sequence_number_and_return(
                         ResponseReasoningTextDoneEvent(
                             type="response.reasoning_text.done",
@@ -1471,6 +1549,8 @@ class OpenAIServingResponses(OpenAIServing):
                             text=reason_content,
                         )
                     )
+                    reasoning_ended = True
+                    tool_parser = None
                     yield _increment_sequence_number_and_return(
                         ResponseReasoningPartDoneEvent(
                             type="response.reasoning_part.done",
@@ -1536,8 +1616,8 @@ class OpenAIServingResponses(OpenAIServing):
                             ),
                         )
                     )
-                    # reset previous delta messages
                     previous_delta_messages = []
+                    any_text_delta_emitted = False
                 if delta_message.tool_calls and delta_message.tool_calls[0].function:
                     if delta_message.tool_calls[0].function.arguments:
                         yield _increment_sequence_number_and_return(
@@ -1551,57 +1631,112 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                     # tool call initiated with no arguments
                     elif delta_message.tool_calls[0].function.name:
-                        # send done with current content part
-                        # and add new function call item
-                        # Collect accumulated content from previous delta messages
+                        # Finalize any accumulated content and reasoning before emitting
+                        # the tool call.
                         final_content = "".join(
                             pm.content for pm in previous_delta_messages if pm.content
                         )
+                        final_reasoning = "".join(
+                            pm.reasoning
+                            for pm in previous_delta_messages
+                            if pm.reasoning
+                        )
                         previous_delta_messages = []
-                        yield _increment_sequence_number_and_return(
-                            ResponseTextDoneEvent(
-                                type="response.output_text.done",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                content_index=current_content_index,
+
+                        if final_reasoning:
+                            yield _increment_sequence_number_and_return(
+                                ResponseReasoningTextDoneEvent(
+                                    type="response.reasoning_text.done",
+                                    item_id=current_item_id,
+                                    sequence_number=-1,
+                                    output_index=current_output_index,
+                                    content_index=current_content_index,
+                                    text=final_reasoning,
+                                )
+                            )
+                            yield _increment_sequence_number_and_return(
+                                ResponseReasoningPartDoneEvent(
+                                    type="response.reasoning_part.done",
+                                    sequence_number=-1,
+                                    item_id=current_item_id,
+                                    output_index=current_output_index,
+                                    content_index=current_content_index,
+                                    part=ResponseReasoningTextContent(
+                                        text=final_reasoning,
+                                        type="reasoning_text",
+                                    ),
+                                )
+                            )
+                            reasoning_item = ResponseReasoningItem(
+                                type="reasoning",
+                                content=[
+                                    ResponseReasoningTextContent(
+                                        text=final_reasoning,
+                                        type="reasoning_text",
+                                    )
+                                ],
+                                status="completed",
+                                id=current_item_id,
+                                summary=[],
+                            )
+                            yield _increment_sequence_number_and_return(
+                                ResponseOutputItemDoneEvent(
+                                    type="response.output_item.done",
+                                    sequence_number=-1,
+                                    output_index=current_output_index,
+                                    item=reasoning_item,
+                                )
+                            )
+                            current_output_index += 1
+                            current_content_index = 0
+                            current_item_id = random_uuid()
+
+                        if final_content:
+                            yield _increment_sequence_number_and_return(
+                                ResponseTextDoneEvent(
+                                    type="response.output_text.done",
+                                    sequence_number=-1,
+                                    output_index=current_output_index,
+                                    content_index=current_content_index,
+                                    text=final_content,
+                                    logprobs=[],
+                                    item_id=current_item_id,
+                                )
+                            )
+                            text_part = ResponseOutputText(
+                                type="output_text",
                                 text=final_content,
+                                annotations=[],
                                 logprobs=[],
-                                item_id=current_item_id,
                             )
-                        )
-                        text_part = ResponseOutputText(
-                            type="output_text",
-                            text=final_content,
-                            annotations=[],
-                            logprobs=[],
-                        )
-                        yield _increment_sequence_number_and_return(
-                            ResponseContentPartDoneEvent(
-                                type="response.content_part.done",
-                                sequence_number=-1,
-                                item_id=current_item_id,
-                                output_index=current_output_index,
-                                content_index=current_content_index,
-                                part=text_part,
+                            yield _increment_sequence_number_and_return(
+                                ResponseContentPartDoneEvent(
+                                    type="response.content_part.done",
+                                    sequence_number=-1,
+                                    item_id=current_item_id,
+                                    output_index=current_output_index,
+                                    content_index=current_content_index,
+                                    part=text_part,
+                                )
                             )
-                        )
-                        content_list = [text_part] if final_content else []
-                        yield _increment_sequence_number_and_return(
-                            ResponseOutputItemDoneEvent(
-                                type="response.output_item.done",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item=ResponseOutputMessage(
-                                    id=current_item_id,
-                                    type="message",
-                                    role="assistant",
-                                    content=content_list,
-                                    status="completed",
-                                ),
+                            content_list = [text_part] if final_content else []
+                            yield _increment_sequence_number_and_return(
+                                ResponseOutputItemDoneEvent(
+                                    type="response.output_item.done",
+                                    sequence_number=-1,
+                                    output_index=current_output_index,
+                                    item=ResponseOutputMessage(
+                                        id=current_item_id,
+                                        type="message",
+                                        role="assistant",
+                                        content=content_list,
+                                        status="completed",
+                                    ),
+                                )
                             )
-                        )
-                        current_output_index += 1
-                        current_item_id = random_uuid()
+                            current_output_index += 1
+                            current_item_id = random_uuid()
+
                         assert delta_message.tool_calls[0].function is not None
                         current_tool_call_name = delta_message.tool_calls[
                             0
@@ -1624,6 +1759,7 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                         # skip content part for tool call
                         current_content_index = 1
+                        pending_tool_call = delta_message
                         continue
                 elif delta_message.reasoning is not None:
                     yield _increment_sequence_number_and_return(
@@ -1636,7 +1772,31 @@ class OpenAIServingResponses(OpenAIServing):
                             delta=delta_message.reasoning,
                         )
                     )
+                    if delta_message.content is not None:
+                        _reasoning_and_content_same_delta = True
+                        any_text_delta_emitted = True
+                        yield _increment_sequence_number_and_return(
+                            ResponseTextDeltaEvent(
+                                type="response.output_text.delta",
+                                sequence_number=-1,
+                                content_index=current_content_index,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                delta=delta_message.content,
+                                logprobs=(
+                                    self._create_stream_response_logprobs(
+                                        token_ids=output.token_ids,
+                                        logprobs=output.logprobs,
+                                        tokenizer=tokenizer,
+                                        top_logprobs=request.top_logprobs,
+                                    )
+                                    if request.is_include_output_logprobs()
+                                    else []
+                                ),
+                            )
+                        )
                 elif delta_message.content:
+                    any_text_delta_emitted = True
                     yield _increment_sequence_number_and_return(
                         ResponseTextDeltaEvent(
                             type="response.output_text.delta",
@@ -1658,7 +1818,14 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                     )
 
-                previous_delta_messages.append(delta_message)
+                if pending_tool_call is not None:
+                    previous_delta_messages.append(pending_tool_call)
+                    pending_tool_call = None
+                else:
+                    previous_delta_messages.append(delta_message)
+
+        if pending_tool_call is not None:
+            previous_delta_messages.append(pending_tool_call)
 
         if previous_delta_messages:
             parts = []
@@ -1673,17 +1840,18 @@ class OpenAIServingResponses(OpenAIServing):
                     parts.append(pm.tool_calls[0].function.arguments or "")
 
             tool_call_arguments = "".join(parts)
-            if tool_call_arguments:
-                yield _increment_sequence_number_and_return(
-                    ResponseFunctionCallArgumentsDoneEvent(
-                        type="response.function_call_arguments.done",
-                        sequence_number=-1,
-                        output_index=current_output_index,
-                        item_id=current_item_id,
-                        arguments=tool_call_arguments,
-                        name=current_tool_call_name,
+            if parts:
+                if tool_call_arguments:
+                    yield _increment_sequence_number_and_return(
+                        ResponseFunctionCallArgumentsDoneEvent(
+                            type="response.function_call_arguments.done",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item_id=current_item_id,
+                            arguments=tool_call_arguments,
+                            name=current_tool_call_name,
+                        )
                     )
-                )
                 current_content_index = 0
                 function_call_item = ResponseFunctionToolCall(
                     type="function_call",
@@ -1701,8 +1869,10 @@ class OpenAIServingResponses(OpenAIServing):
                         item=function_call_item,
                     )
                 )
-
-            elif previous_delta_messages[-1].reasoning is not None:
+            elif (
+                not reasoning_ended
+                and previous_delta_messages[-1].reasoning is not None
+            ):
                 reason_content = "".join(
                     pm.reasoning
                     for pm in previous_delta_messages
@@ -1755,50 +1925,120 @@ class OpenAIServingResponses(OpenAIServing):
                 final_content = "".join(
                     pm.content for pm in previous_delta_messages if pm.content
                 )
-                yield _increment_sequence_number_and_return(
-                    ResponseTextDoneEvent(
-                        type="response.output_text.done",
-                        sequence_number=-1,
-                        output_index=current_output_index,
-                        content_index=current_content_index,
+                if not any_text_delta_emitted:
+                    empty_item = ResponseOutputMessage(
+                        type="message",
+                        role="assistant",
+                        content=[],
+                        status="completed",
+                        id=current_item_id,
+                        summary=[],
+                    )
+                    yield _increment_sequence_number_and_return(
+                        ResponseOutputItemDoneEvent(
+                            type="response.output_item.done",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item=empty_item,
+                        )
+                    )
+                else:
+                    yield _increment_sequence_number_and_return(
+                        ResponseTextDoneEvent(
+                            type="response.output_text.done",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            content_index=current_content_index,
+                            text=final_content,
+                            logprobs=[],
+                            item_id=current_item_id,
+                        )
+                    )
+                    part = ResponseOutputText(
                         text=final_content,
-                        logprobs=[],
-                        item_id=current_item_id,
+                        type="output_text",
+                        annotations=[],
                     )
-                )
-                part = ResponseOutputText(
-                    text=final_content,
-                    type="output_text",
-                    annotations=[],
-                )
-                yield _increment_sequence_number_and_return(
-                    ResponseContentPartDoneEvent(
-                        type="response.content_part.done",
-                        sequence_number=-1,
-                        item_id=current_item_id,
-                        output_index=current_output_index,
-                        content_index=current_content_index,
-                        part=part,
+                    yield _increment_sequence_number_and_return(
+                        ResponseContentPartDoneEvent(
+                            type="response.content_part.done",
+                            sequence_number=-1,
+                            item_id=current_item_id,
+                            output_index=current_output_index,
+                            content_index=current_content_index,
+                            part=part,
+                        )
                     )
-                )
-                item = ResponseOutputMessage(
-                    type="message",
-                    role="assistant",
-                    content=[
-                        part,
-                    ],
-                    status="completed",
-                    id=current_item_id,
-                    summary=[],
-                )
-                yield _increment_sequence_number_and_return(
-                    ResponseOutputItemDoneEvent(
-                        type="response.output_item.done",
-                        sequence_number=-1,
-                        output_index=current_output_index,
-                        item=item,
+                    item = ResponseOutputMessage(
+                        type="message",
+                        role="assistant",
+                        content=[
+                            part,
+                        ],
+                        status="completed",
+                        id=current_item_id,
+                        summary=[],
                     )
-                )
+                    yield _increment_sequence_number_and_return(
+                        ResponseOutputItemDoneEvent(
+                            type="response.output_item.done",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item=item,
+                        )
+                    )
+
+    async def _process_simple_streaming_events(
+        self,
+        request: ResponsesRequest,
+        sampling_params: SamplingParams,
+        result_generator: AsyncIterator[ConversationContext | None],
+        context: ConversationContext,
+        model_name: str,
+        tokenizer: TokenizerLike,
+        request_metadata: RequestResponseMetadata,
+        created_time: int,
+        _increment_sequence_number_and_return: Callable[
+            [StreamingResponsesResponse], StreamingResponsesResponse
+        ],
+    ) -> AsyncGenerator[StreamingResponsesResponse, None]:
+        """Delegate to the refactored simple streaming implementation.
+
+        Parsers are instantiated if configured, and log‑prob handling respects
+        the request flag. The wrapper forwards events through the sequence‑
+        number helper.
+        """
+        reasoning_parser = (
+            self.parser.reasoning_parser_cls(tokenizer)
+            if self.parser and self.parser.reasoning_parser_cls
+            else None
+        )
+        tool_parser = (
+            self.parser.tool_parser_cls(tokenizer)
+            if self.parser and self.parser.tool_parser_cls
+            else None
+        )
+
+        # Prepare optional logprob callback
+        get_logprobs = (
+            partial(
+                self._create_stream_response_logprobs, top_logprobs=request.top_logprobs
+            )
+            if request.is_include_output_logprobs()
+            else None
+        )
+
+        async for event in process_simple_stream(
+            result_generator,
+            reasoning_parser,
+            tool_parser,
+            request,
+            tokenizer,
+            _increment_sequence_number_and_return,
+            get_logprobs,
+            self._raise_if_error,
+        ):
+            yield event
 
     async def _process_harmony_streaming_events(
         self,
