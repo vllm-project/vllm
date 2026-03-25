@@ -335,7 +335,19 @@ def get_streamable_parser_for_assistant() -> StreamableParser:
 def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
     parser = get_streamable_parser_for_assistant()
     for token_id in token_ids:
-        parser.process(token_id)
+        try:
+            parser.process(token_id)
+        except (ValueError, RuntimeError):
+            # Grammar-constrained output (e.g. tool_choice=required EBNF)
+            # may produce token sequences that the Harmony parser cannot
+            # fully handle (e.g. <|call|> after <|end|>).  Return the
+            # partial parse so callers can still extract messages parsed
+            # before the error.
+            logger.warning(
+                "HarmonyError while parsing token %d, returning partial parse results.",
+                token_id,
+            )
+            break
     return parser
 
 

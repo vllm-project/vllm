@@ -248,6 +248,15 @@ class OpenAIServingRender:
                 request, should_include_tools
             )
 
+            # Apply tool parser adjust_request (e.g. EBNF grammar for
+            # tool_choice="required") — _make_request_with_harmony does
+            # not go through _preprocess_chat where this normally happens.
+            if tool_parser is not None:
+                tool_choice = getattr(request, "tool_choice", "none")
+                if tool_choice != "none":
+                    assert tokenizer is not None
+                    request = tool_parser(tokenizer).adjust_request(request=request)
+
         return conversation, engine_prompts
 
     async def render_completion_request(

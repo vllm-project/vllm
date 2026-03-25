@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.parser.harmony_utils import parse_output_into_messages
 from vllm.logger import init_logger
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
@@ -28,8 +29,57 @@ logger = init_logger(__name__)
 
 
 class OpenAIToolParser(ToolParser):
+    """
+    Tool parser for GPT-OSS Harmony models.
+
+    Supports tool_choice="required" via EBNF grammar that constrains
+    generation to analysis/commentary channels, blocking the final channel.
+    """
+
     def __init__(self, tokenizer: "TokenizerLike"):
         super().__init__(tokenizer)
+
+    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        if not request.tools or request.tool_choice != "required":
+            return super().adjust_request(request)
+
+        tool_names = [t.function.name for t in request.tools]
+        grammar = self._build_tool_required_grammar(tool_names)
+        request.structured_outputs = StructuredOutputsParams(grammar=grammar)  # type: ignore[call-arg]
+        request.response_format = None
+        return request
+
+    @staticmethod
+    def _build_tool_required_grammar(tool_names: list[str]) -> str:
+        """Build EBNF grammar that enforces tool calls for Harmony format.
+
+        The grammar:
+        - Allows analysis blocks (multi-round reasoning)
+        - Allows commentary preambles
+        - Requires at least one tool call (commentary to=functions.X)
+        - Blocks the final channel entirely (not defined in grammar)
+
+        Content rule uses ([^<] | "<" [^|])* to allow '<' in text
+        while blocking Harmony special tokens (<|...|>).
+        """
+        for n in tool_names:
+            if '"' in n or "\n" in n:
+                raise ValueError(
+                    f"Tool name {n!r} contains characters invalid for EBNF grammar"
+                )
+        func_alts = " | ".join(f'"functions.{n}"' for n in tool_names)
+        return (
+            "root ::= non_tool_block* tool_block more_tool*\n"
+            'non_tool_block ::= ("analysis" | "commentary")'
+            ' "<|message|>" content "<|end|>"'
+            ' "<|start|>" "assistant" "<|channel|>"\n'
+            'tool_block ::= "commentary to=" func_name'
+            ' "<|message|>" content "<|end|>" "<|call|>"\n'
+            'more_tool ::= "<|start|>" "assistant" "<|channel|>"'
+            " non_tool_block* tool_block\n"
+            f"func_name ::= {func_alts}\n"
+            'content ::= ([^<] | "<" [^|])*'
+        )
 
     def extract_tool_calls(
         self,
@@ -57,10 +107,13 @@ class OpenAIToolParser(ToolParser):
                     # most common case with gpt-oss models.
                     if not msg.content_type or "json" in msg.content_type:
                         # load and dump the JSON text to check validity and
-                        # remove any extra newlines or other odd formatting
+                        # remove any extra newlines or other odd formatting.
+                        # Use raw_decode to handle trailing garbage from
+                        # partial Harmony parsing (e.g. structural tokens).
                         try:
-                            tool_args = json.dumps(json.loads(msg_text))
-                        except json.JSONDecodeError:
+                            obj, _ = json.JSONDecoder().raw_decode(msg_text)
+                            tool_args = json.dumps(obj)
+                        except (json.JSONDecodeError, ValueError):
                             logger.exception(
                                 "Error decoding JSON tool call from response."
                             )
