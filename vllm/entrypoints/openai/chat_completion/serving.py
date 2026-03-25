@@ -176,6 +176,33 @@ class OpenAIServingChat(OpenAIServing):
             )
         )
 
+    async def render_chat_request(
+        self,
+        request: ChatCompletionRequest,
+    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
+        """
+        Validate the model and preprocess a chat completion request.
+
+        Delegates preprocessing logic to OpenAIServingRender, adding the
+        engine-aware checks (LoRA model validation, engine health).
+
+        Returns:
+            A tuple of (conversation, engine_prompts) on success,
+            or an ErrorResponse on failure.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            logger.error("Error with model %s", error_check_ret)
+            return error_check_ret
+
+        # If the engine is dead, raise the engine's DEAD_ERROR.
+        # This is required for the streaming case, where we return a
+        # success status before we actually start generating text :).
+        if self.engine_client.errored:
+            raise self.engine_client.dead_error
+
+        return await self.openai_serving_render.render_chat(request)
+
     async def render_batch_chat_request(
         self,
         request: BatchChatCompletionRequest,
@@ -236,33 +263,6 @@ class OpenAIServingChat(OpenAIServing):
             all_engine_prompts.append(engine_prompts[0])
 
         return all_conversations, all_engine_prompts
-
-    async def render_chat_request(
-        self,
-        request: ChatCompletionRequest,
-    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
-        """
-        Validate the model and preprocess a chat completion request.
-
-        Delegates preprocessing logic to OpenAIServingRender, adding the
-        engine-aware checks (LoRA model validation, engine health).
-
-        Returns:
-            A tuple of (conversation, engine_prompts) on success,
-            or an ErrorResponse on failure.
-        """
-        error_check_ret = await self._check_model(request)
-        if error_check_ret is not None:
-            logger.error("Error with model %s", error_check_ret)
-            return error_check_ret
-
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
-
-        return await self.openai_serving_render.render_chat(request)
 
     async def create_chat_completion(
         self,
