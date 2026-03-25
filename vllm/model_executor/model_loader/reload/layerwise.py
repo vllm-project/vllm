@@ -12,10 +12,7 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    initialize_single_dummy_weight,
-)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .meta import (
     capture_layer_to_meta,
@@ -32,7 +29,7 @@ __all__ = [
     "get_layerwise_info",
     "record_metadata_for_reloading",
     "initialize_layerwise_reload",
-    "finalize_layerwise_process",
+    "finalize_layerwise_processing",
     "finalize_layerwise_reload",
 ]
 
@@ -174,19 +171,25 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
     return online_process_loader
 
 
-def finalize_layerwise_process(model: torch.nn.Module, model_config: ModelConfig):
+def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelConfig):
     """
-    Remove the outermost layer of weight loading wrappers.
+    Apply processing to any layers which were not layerwise processed during loading.
+    This includes attention layers and layers which have weight elements which are not
+    loaded (due to padding).
 
     This function should be applied after `initialize_layerwise_reload` is applied
     unwrap the layerwise weight loaders.
 
-    Also processes Attention/MLA layers, which must be processed after all other layers
+    :param model: model to finalize processing for
+    :param model_config: config needed for applying processing to attention layers
     """
     model._do_torchao_reload = getattr(model, "_original_do_torchao_reload", False)
 
     for layer in model.modules():
         info = get_layerwise_info(layer)
+        if not info.can_load():
+            info.reset()
+            continue
 
         # Attention/MLA layers are processed after all other layers
         if isinstance(layer, (Attention, MLAAttention)):
@@ -195,13 +198,25 @@ def finalize_layerwise_process(model: torch.nn.Module, model_config: ModelConfig
                     "Layerwise reloading of Q/K/V scale weights is not implemented yet"
                 )
 
+            elif info.kernel_tensors is None:
+                raise NotImplementedError(
+                    "Layerwise loading of Q/K/V scale weights is not implemented yet"
+                )
+
             else:
-                _place_or_materialize(layer, info)
+                _place_kernel_tensors(layer, info)
                 layer.process_weights_after_loading(model_config.dtype)
 
         # No weights were loaded
-        elif info.can_load() and info.load_numel <= 0:
-            _place_or_materialize(layer, info)
+        elif info.load_numel <= 0:
+            # first load but received no weights. This happens on dummy load
+            if info.kernel_tensors is None:
+                materialize_layer(layer)
+
+            # reloading: place kernel tensors back as a fallback
+            else:
+                logger.warning("%s: Failed to load weights", layer.__class__.__name__)
+                _place_kernel_tensors(layer, info)
 
         # Process non-attention layers which did not load all elements. This can happen
         # if the created weight has extra padding elements which are not loaded
@@ -214,9 +229,9 @@ def finalize_layerwise_process(model: torch.nn.Module, model_config: ModelConfig
         info.reset()
 
 
-@deprecated("finalize_layerwise_process")
+@deprecated("finalize_layerwise_processing")
 def finalize_layerwise_reload(*args, **kwargs):
-    finalize_layerwise_process(*args, **kwargs)
+    finalize_layerwise_processing(*args, **kwargs)
 
 
 def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
@@ -266,18 +281,6 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
 
     info.reset()
     logger.debug("%s: Processed", layer.__class__.__name__)
-
-
-def _place_or_materialize(layer: torch.nn.Module, info: LayerReloadingInfo):
-    # reloading: place kernel tensors back
-    if info.kernel_tensors is not None:
-        _place_kernel_tensors(layer, info)
-
-    # first load but received no weights: assume `--load_format dummy` option
-    elif info.can_load():
-        materialize_layer(layer)
-        for tensor in get_layer_tensors(layer).values():
-            initialize_single_dummy_weight(tensor)
 
 
 def _get_original_loader(tensor: torch.Tensor) -> Callable:

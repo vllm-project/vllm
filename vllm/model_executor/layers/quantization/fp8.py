@@ -520,7 +520,7 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
             data=torch.empty(
                 output_size_per_partition,
                 input_size_per_partition,
-                device="meta",
+                device="meta",  # materialized and processed during loading
                 dtype=params_dtype,
             ),
             input_dim=1,
@@ -968,7 +968,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
-                device="meta",
+                device="meta",  # materialized and processed during loading
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -982,7 +982,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
                 torch.zeros(
                     num_experts,
                     2 * intermediate_size_per_partition,
-                    device="meta",
+                    device="meta",  # materialized and processed during loading
                     dtype=layer.orig_dtype,
                 ),
                 requires_grad=False,
@@ -992,7 +992,10 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
             w2_bias = torch.nn.Parameter(
                 torch.zeros(
-                    num_experts, hidden_size, device="meta", dtype=layer.orig_dtype
+                    num_experts,
+                    hidden_size,
+                    device="meta",  # materialized and processed during loading
+                    dtype=layer.orig_dtype,
                 ),
                 requires_grad=False,
             )

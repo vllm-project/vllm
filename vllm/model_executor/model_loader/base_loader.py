@@ -9,7 +9,7 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.reload import finalize_layerwise_process
+from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -72,7 +72,7 @@ class BaseModelLoader(ABC):
             # Process weights into kernel format. Note that when using online
             # quantization, weights are (typically) quantized as they are loaded.
             if _has_online_quant(model):
-                finalize_layerwise_process(model, model_config)
+                finalize_layerwise_processing(model, model_config)
 
             process_weights_after_loading(model, model_config, target_device)
 
