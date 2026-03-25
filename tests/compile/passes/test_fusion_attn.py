@@ -128,7 +128,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         raw_tensor = raw_tensor.view(kv_cache_shape)
         kv_cache = raw_tensor.permute(*inv_order)
 
-        self.attn.kv_cache = [kv_cache]
+        self.attn.kv_cache = kv_cache
 
         # Build attn metadata
         self.attn_metadata = self.builder.build(
