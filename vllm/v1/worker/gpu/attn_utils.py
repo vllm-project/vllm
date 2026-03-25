@@ -173,7 +173,7 @@ def _reshape_kv_cache(
                     )
                     state_tensors.append(tensor)
                     storage_offset_bytes += stride[0] * dtype_size
-                kv_caches[layer_name] = state_tensors
+                kv_caches[layer_name] = state_tensors  # type: ignore[assignment]
 
             else:
                 raise NotImplementedError(
