@@ -467,7 +467,7 @@ class OpenAIServingResponses(OpenAIServing):
                     tokenizer
                 ).adjust_structured_outputs_for_reasoning(
                     sampling_params,
-                    mode="responses",
+                    request=request,
                     tool_server=self.tool_server,
                 )
             generator = self._generate_with_builtin_tools(

@@ -286,7 +286,6 @@ class OpenAIServingChat(OpenAIServing):
                         tokenizer
                     ).adjust_structured_outputs_for_reasoning(
                         sampling_params,
-                        mode="chat",
                         request=request,
                         model_architecture=self._model_architecture(),
                     )

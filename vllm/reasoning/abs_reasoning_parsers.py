@@ -7,9 +7,11 @@ from abc import abstractmethod
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from functools import cached_property
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.collection_utils import is_list_of
@@ -17,11 +19,9 @@ from vllm.utils.import_utils import import_from_path
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
         ChatCompletionToolsParam,
     )
     from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
@@ -121,7 +121,7 @@ class ReasoningParser:
     def extract_reasoning(
         self,
         model_output: str,
-        request: "ChatCompletionRequest | ResponsesRequest",
+        request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from a complete model-generated string.
@@ -177,7 +177,7 @@ class ReasoningParser:
         return None
 
     @staticmethod
-    def _merge_reasoning_structural_tag_into_sampling_params(
+    def _adjust_sampling_params_reasoning_structural_tag(
         sampling_params: SamplingParams,
         struct_out_before: StructuredOutputsParams | None,
         prepared: str | None,
@@ -203,24 +203,21 @@ class ReasoningParser:
         self,
         sampling_params: SamplingParams,
         *,
-        mode: Literal["chat", "responses"],
-        request: "ChatCompletionRequest | None" = None,
+        request: ChatCompletionRequest | ResponsesRequest,
         tool_server: ToolServer | None = None,
         model_architecture: str | None = None,
     ) -> None:
         """Merge reasoning structural tags into ``sampling_params.structured_outputs``.
 
-        ``mode="chat"``: runs when structured outputs are set or tools are present;
-        clears non-tag constraints when applying a prepared tag.
+        For ``ChatCompletionRequest``: runs when structured outputs are set or tools
+        are present; clears non-tag constraints when applying a prepared tag.
 
-        ``mode="responses"``: runs only when constraints are structural-tag-only;
+        For ``ResponsesRequest``: runs only when constraints are structural-tag-only;
         always sets ``structural_tag`` from ``prepare_structured_tag`` (may be None).
         """
         struct_out = sampling_params.structured_outputs
 
-        if mode == "chat":
-            if request is None:
-                raise ValueError("request is required when mode='chat'")
+        if isinstance(request, ChatCompletionRequest):
             has_tools = len(request.tools or []) > 0
             if not (isinstance(struct_out, StructuredOutputsParams) or has_tools):
                 return
@@ -235,30 +232,36 @@ class ReasoningParser:
                 tools=request.tools if request.tools else None,
                 model_architecture=model_architecture,
             )
-            self._merge_reasoning_structural_tag_into_sampling_params(
+            self._adjust_sampling_params_reasoning_structural_tag(
                 sampling_params,
                 struct_out if isinstance(struct_out, StructuredOutputsParams) else None,
                 prepared,
             )
             return
 
-        # mode == "responses"
-        if not (
-            isinstance(struct_out, StructuredOutputsParams)
-            and struct_out.all_non_structural_tag_constraints_none()
-        ):
+        if isinstance(request, ResponsesRequest):
+            if not (
+                isinstance(struct_out, StructuredOutputsParams)
+                and struct_out.all_non_structural_tag_constraints_none()
+            ):
+                return
+
+            prepared = self.prepare_structured_tag(
+                struct_out.structural_tag,
+                tool_server,
+                sampling_params=sampling_params,
+                tools=None,
+                model_architecture=None,
+            )
+            sampling_params.structured_outputs = replace(
+                struct_out,
+                structural_tag=prepared,
+            )
             return
 
-        prepared = self.prepare_structured_tag(
-            struct_out.structural_tag,
-            tool_server,
-            sampling_params=sampling_params,
-            tools=None,
-            model_architecture=None,
-        )
-        sampling_params.structured_outputs = replace(
-            struct_out,
-            structural_tag=prepared,
+        raise TypeError(
+            "request must be ChatCompletionRequest or ResponsesRequest, "
+            f"got {type(request).__name__}"
         )
 
 
