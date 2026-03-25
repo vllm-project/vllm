@@ -150,7 +150,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 self.base_layer.quant_method.select_gemm_impl(
                     prepare_finalize, self.base_layer
                 ),
-                self.base_layer.shared_experts,
             )
 
         # TODO: could be incorrect due to monolithic kernel? or add assert it
