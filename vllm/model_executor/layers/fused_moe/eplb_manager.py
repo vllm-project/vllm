@@ -136,10 +136,10 @@ class EplbManager:
             weight.is_contiguous()
             for name, weight in weights
             if not (
-                "_shared_experts." in name
-                or "_gate." in name
-                or "_routed_input_transform." in name
-                or "_routed_output_transform." in name
+                name.startswith("_shared_experts.")
+                or name.startswith("_gate.")
+                or name.startswith("_routed_input_transform.")
+                or name.startswith("_routed_output_transform.")
             )
             and name not in NON_EXPERT_WEIGHTS
         )
@@ -149,12 +149,12 @@ class EplbManager:
             for name, weight in weights
             if name not in NON_EXPERT_WEIGHTS
             and weight.shape != torch.Size([])
-            and "_shared_experts." not in name
+            and not name.startswith("_shared_experts.")
             # exclude parameters from non-expert submodules,
             # e.g. gate/shared/transforms.
-            and "_gate." not in name
-            and "_routed_input_transform." not in name
-            and "_routed_output_transform." not in name
+            and not name.startswith("_gate.")
+            and not name.startswith("_routed_input_transform.")
+            and not name.startswith("_routed_output_transform.")
         ]
 
     @staticmethod
