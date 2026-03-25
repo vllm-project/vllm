@@ -115,6 +115,7 @@ export VLLM_USE_PRECOMPILED=1
 uv pip install --editable .
 
 # fallback: use latest already-built main commit
+export VLLM_USE_PRECOMPILED=1
 export VLLM_PRECOMPILED_WHEEL_COMMIT=nightly
 uv pip install --editable .
 ```
