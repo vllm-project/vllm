@@ -107,8 +107,6 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # We use global_num_experts due to how moe_align_block_size handles
-        # expert_maps.
         """
         Compute the shapes for the temporary and final outputs of the two gemms
         and activation in the fused expert function.  Since the gemms are
@@ -125,6 +123,9 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
         """
+
+        # We use global_num_experts due to how moe_align_block_size handles
+        # expert_maps.
         K_dim = K * 2 if envs.VLLM_DEEPEPLL_NVFP4_DISPATCH else K
         output_shape = (local_num_experts, M, K_dim)
         workspace2 = (local_num_experts, M, N)

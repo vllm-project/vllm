@@ -78,7 +78,7 @@ def interleave_linear_and_gate(
     return x
 
 
-def prepare_nvfp4_moe_layer_for_cutedsl_wrapper(
+def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     layer: "FusedMoE",
     w13: torch.Tensor,
     w13_scale: torch.Tensor,

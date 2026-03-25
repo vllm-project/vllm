@@ -18,8 +18,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     nvfp4_w4a16_moe_quant_config,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-    prepare_nvfp4_moe_layer_for_cutedsl_wrapper,
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
+    prepare_nvfp4_moe_layer_for_flashinfer_cutedsl,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -312,7 +312,7 @@ def convert_to_nvfp4_moe_kernel_format(
             w2_scale,
             w2_scale_2,
             a2_scale,
-        ) = prepare_nvfp4_moe_layer_for_cutedsl_wrapper(
+        ) = prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
             layer=layer,
             w13=w13,
             w13_scale=w13_scale,
