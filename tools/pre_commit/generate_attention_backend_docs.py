@@ -45,6 +45,7 @@ FLASHINFER_UTILS_FILE = REPO_ROOT / "vllm" / "utils" / "flashinfer.py"
 MLA_ATTENTION_FILE = (
     REPO_ROOT / "vllm" / "model_executor" / "layers" / "attention" / "mla_attention.py"
 )
+BACKEND_BASE_FILE = REPO_ROOT / "vllm" / "v1" / "attention" / "backend.py"
 
 # Backends to skip during doc generation
 SKIP_BACKENDS = {"CUSTOM", "TORCH_SDPA"}
@@ -307,6 +308,20 @@ def parse_supported_dtypes(node: ast.ClassDef) -> str:
     return ", ".join(dtype_map.get(d, d) for d in dtypes)
 
 
+def _get_base_kv_cache_dtypes() -> str:
+    """Parse supported_kv_cache_dtypes from the AttentionBackend base class."""
+    try:
+        tree = ast.parse(BACKEND_BASE_FILE.read_text())
+        base = find_class_in_ast(tree, "AttentionBackend")
+        if base:
+            dtypes = _parse_list_class_var(base, "supported_kv_cache_dtypes")
+            if dtypes:
+                return ", ".join(dtypes)
+    except Exception:
+        pass
+    return "float16, bfloat16"
+
+
 def parse_kv_cache_dtypes(node: ast.ClassDef) -> str:
     """Parse supported_kv_cache_dtypes class var or supports_kv_cache_dtype method."""
     # First try the class variable
@@ -315,7 +330,7 @@ def parse_kv_cache_dtypes(node: ast.ClassDef) -> str:
         return ", ".join(dtypes)
 
     # Fall back to parsing the supports_kv_cache_dtype method
-    # Look for `kv_cache_dtype in ["auto", "bfloat16"]` pattern
+    # Look for `kv_cache_dtype in [...]` pattern
     method = find_method(node, "supports_kv_cache_dtype")
     if method:
         for n in ast.walk(method):
@@ -334,7 +349,8 @@ def parse_kv_cache_dtypes(node: ast.ClassDef) -> str:
                 if dtypes:
                     return ", ".join(dtypes)
 
-    return "auto"
+    # Inherit from AttentionBackend base class
+    return _get_base_kv_cache_dtypes()
 
 
 def parse_block_sizes(node: ast.ClassDef) -> str:
@@ -1098,7 +1114,7 @@ _COL_VERSION: TableColumn = ("Version", lambda b: b.get("version", ""))
 _COL_DTYPES: TableColumn = ("Dtypes", lambda b: b["dtypes"])
 _COL_KV_DTYPES: TableColumn = (
     "KV Dtypes",
-    lambda b: add_literal_quotes(b["kv_cache_dtypes"]),
+    lambda b: add_literal_quotes(_prepend_auto(b["kv_cache_dtypes"])),
 )
 _COL_BLOCK_SIZES: TableColumn = ("Block Sizes", lambda b: b["block_sizes"])
 _COL_HEAD_SIZES: TableColumn = ("Head Sizes", lambda b: b["head_sizes"])
@@ -1111,6 +1127,18 @@ _COL_MM_PREFIX: TableColumn = (
 _COL_DCP: TableColumn = ("DCP", lambda b: bool_to_emoji(b["supports_dcp"]))
 _COL_ATTN_TYPES: TableColumn = ("Attention Types", lambda b: b["attn_types"])
 _COL_COMPUTE_CAP: TableColumn = ("Compute Cap.", lambda b: b["compute_capability"])
+
+
+def _prepend_auto(kv_dtypes: str) -> str:
+    """Prepend 'auto' to the KV dtypes list.
+
+    All backends accept ``--kv-cache-dtype auto`` (resolved to the model
+    dtype before reaching the backend), so we always show it in the docs.
+    """
+    items = [item.strip() for item in kv_dtypes.split(",")]
+    if "auto" not in items:
+        items.insert(0, "auto")
+    return ", ".join(items)
 
 
 def add_literal_quotes(value: str) -> str:
@@ -1342,7 +1370,7 @@ def generate_legend() -> str:
 | Column | Description |
 | ------ | ----------- |
 | **Dtypes** | Supported model data types (fp16, bf16, fp32) |
-| **KV Dtypes** | Supported KV cache data types (`auto`, `fp8`, `fp8_e4m3`, etc.) |
+| **KV Dtypes** | KV cache dtypes (`auto` = inferred). |
 | **Block Sizes** | Supported KV cache block sizes (%N means multiples of N) |
 | **Head Sizes** | Supported attention head sizes |
 | **Sink** | Attention sink support (for StreamingLLM) |
