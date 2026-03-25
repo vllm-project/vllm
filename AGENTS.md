@@ -63,7 +63,7 @@ pre-commit install
 VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto
 
 # If you are also making C/C++ changes:
-uv pip install -e .
+uv pip install -e . --torch-backend=auto
 ```
 
 ### Running tests
