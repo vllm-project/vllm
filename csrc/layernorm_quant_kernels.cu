@@ -10,7 +10,7 @@
 #include "dispatch_utils.h"
 #include "cub_helpers.h"
 #include "core/batch_invariant.hpp"
-#include "quantization/vectorization_utils.cuh"
+#include "libtorch_stable/quantization/vectorization_utils.cuh"
 
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
