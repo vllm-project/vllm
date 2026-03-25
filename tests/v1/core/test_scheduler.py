@@ -1549,6 +1549,12 @@ def test_kv_connector_handles_preemption(is_async, use_ec_connector, ec_role):
 
     # All can be scheduled - 1st token.
     output = scheduler.schedule()
+
+    # verify request-level cache hit stats are set
+    for request in requests:
+        assert request.num_cached_tokens == NUM_MATCHED_NEW_TOKENS
+        assert request.num_external_computed_tokens == NUM_MATCHED_NEW_TOKENS
+
     if is_async:
         assert _num_waiting_requests(scheduler) == 2
         assert scheduler.running == []
@@ -1607,6 +1613,12 @@ def test_kv_connector_handles_preemption(is_async, use_ec_connector, ec_role):
     # Restarts the preempted request - generate 3rd token.
     # This will have a local and remote cache hit.
     output = scheduler.schedule()
+
+    # verify request level hit stats are NOT re-set
+    for request in requests:
+        assert request.num_cached_tokens == NUM_MATCHED_NEW_TOKENS
+        assert request.num_external_computed_tokens == NUM_MATCHED_NEW_TOKENS
+
     if is_async:
         waiting_req_ids = [
             req.request_id
@@ -1648,6 +1660,11 @@ def test_kv_connector_handles_preemption(is_async, use_ec_connector, ec_role):
     assert len(scheduler.running) == 0
     # All memory should be freed since nothing is running.
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == NUM_BLOCKS - 1
+
+    # final verification request-level cache hit stats are NOT re-set
+    for request in requests:
+        assert request.num_cached_tokens == NUM_MATCHED_NEW_TOKENS
+        assert request.num_external_computed_tokens == NUM_MATCHED_NEW_TOKENS
 
 
 def make_output(scheduler: Scheduler):
