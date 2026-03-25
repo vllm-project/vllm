@@ -74,7 +74,6 @@ FP4_DTYPE = torch.uint8
 
 logger = init_logger(__name__)
 
-
 trtllm_gen_workspace_buffer = None
 
 
