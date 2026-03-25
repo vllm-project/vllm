@@ -27,38 +27,31 @@ class AttentionConfig(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         attention_config = vllm_config.attention_config
         assert cache_config is not None
+        from vllm.config import set_current_vllm_config
         from vllm.v1.attention.selector import (
-            AttentionSelectorConfig,
             _cached_get_attn_backend,
+            get_attn_backend,
         )
 
-        # NOTE: To avoid getting vllm_config, which will raise error outside
-        # the `set_current_vllm_config`, we use _cached_get_attn_backend
-        # instead of get_attn_backend to get the current attention backend.
-        # Notice that this backend may not be exactly same with that of
+        # NOTE: Notice that this backend may not be exactly same with that of
         # runtime, cause we doesn't get the exact information of sinks,
-        # sparse attention, multi-modality prefix, and so on. Thus a clear
+        # multi-modality prefix, and so on. Thus a clear
         # of cache is required after this.
-        attn_selector_config = AttentionSelectorConfig(
-            head_size=model_config.get_head_size(),
-            dtype=model_config.dtype,
-            kv_cache_dtype=cache_config.cache_dtype,
-            block_size=cache_config.block_size
-            if cache_config.block_size is not None
-            else 16,
-            use_mla=model_config.use_mla,
-            use_sparse=hasattr(model_config.hf_config, "index_topk"),
-        )
-        backend_cls = _cached_get_attn_backend(
-            backend=attention_config.backend,
-            attn_selector_config=attn_selector_config,
-        )
-        ori_supported_kernel_block_sizes = (
-            backend_cls.get_supported_kernel_block_sizes()
-        )
-        # clear the cache of attention backend to avoid influcing the
-        # attention backend selection during inference runtime
-        _cached_get_attn_backend.cache_clear()
+        with set_current_vllm_config(vllm_config):
+            backend_cls = get_attn_backend(
+                head_size=model_config.get_head_size(),
+                dtype=model_config.dtype,
+                kv_cache_dtype=cache_config.cache_dtype,
+                use_mla=model_config.use_mla,
+                use_sparse=hasattr(model_config.hf_config, "index_topk"),
+                num_heads=model_config.hf_config.num_attention_heads
+                // vllm_config.parallel_config.tensor_parallel_size,
+            )
+            ori_supported_kernel_block_sizes = (
+                backend_cls.get_supported_kernel_block_sizes()
+            )
+            _cached_get_attn_backend.cache_clear()
+
         supported_kernel_block_sizes = [
             kernel_block_size.base
             if isinstance(kernel_block_size, MultipleOf)
