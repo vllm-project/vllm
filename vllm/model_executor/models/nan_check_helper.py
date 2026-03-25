@@ -143,6 +143,67 @@ def mark_fp8_nan(tensor: torch.Tensor, stage_col: int, layer_idx: int) -> None:
     _attn_detail[layer_idx, stage_col] = nan_count
 
 
+def mark_kv_stale_fp8_nan(
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+    layer_idx: int,
+) -> None:
+    """Check stale (unused) slots in each sequence's last KV cache block
+    for FP8 NaN bit patterns.
+
+    Only scans the padding region of the last block per real sequence.
+    All ops stay on GPU — no .item(), no sync, no graph break.
+
+    kv_cache: [num_blocks, block_size, head_size] (fp8)
+    block_table: [B, max_num_blocks_per_seq] (int32)
+    seq_lens: [B] (int32)
+    """
+    if _attn_detail is None:
+        return
+    if not _is_fp8(kv_cache.dtype):
+        return
+
+    # Only check real sequences (seq_lens > 0)
+    real_mask = seq_lens > 0
+    real_seq_lens = seq_lens[real_mask]
+    real_block_table = block_table[real_mask]
+
+    if real_seq_lens.numel() == 0:
+        _attn_detail[layer_idx, 18] = 0
+        return
+
+    # Last logical block index per sequence
+    last_logical = (real_seq_lens - 1) // block_size
+    # Physical block index
+    last_physical = real_block_table.gather(
+        1, last_logical.unsqueeze(1).to(torch.int64)
+    ).squeeze(1)
+    # Number of used slots in last block
+    used = real_seq_lens % block_size
+    # Handle exact multiples: used=0 means full block, no stale slots
+    full_block_mask = used == 0
+
+    # Gather last blocks: [num_real_seqs, block_size, head_size]
+    last_blocks = kv_cache[last_physical.long()]
+
+    # Build a mask for stale slots: [num_real_seqs, block_size]
+    slot_idx = torch.arange(block_size, device=kv_cache.device).unsqueeze(0)
+    # stale = slot >= used (but not for full blocks)
+    stale_mask = (slot_idx >= used.unsqueeze(1)) & ~full_block_mask.unsqueeze(1)
+
+    # Check FP8 NaN in stale slots only
+    raw = last_blocks.view(last_blocks.shape[0], block_size, -1)
+    raw_u8 = raw.view(torch.uint8)
+    is_nan = (raw_u8 == 0x7F) | (raw_u8 == 0xFF)
+    # Mask to stale slots: [num_real_seqs, block_size, head_size_bytes]
+    stale_3d = stale_mask.unsqueeze(2).expand_as(is_nan)
+    nan_count = (is_nan & stale_3d).sum()
+
+    _attn_detail[layer_idx, 18] = nan_count
+
+
 def mark_fwd_mqa_real(
     attn_out: torch.Tensor, layer_idx: int, seq_lens: torch.Tensor
 ) -> None:
@@ -344,7 +405,13 @@ def _emit_report(
 _stash_bufs: dict[int, list[torch.Tensor]] = {}  # keyed by batch_size
 _stash_captured: dict[int, torch.Tensor] = {}  # keyed by batch_size
 _stash_layer_idx: dict[int, torch.Tensor] = {}  # keyed by batch_size
-_stashed_metadata: dict = {}  # persistent refs (kv_cache, block_table, etc.)
+_stashed_metadata: dict = {}  # persistent refs (block_table, seq_lens, etc.)
+_stashed_kv_per_layer: dict[int, dict[int, torch.Tensor]] = {}  # [bkey][layer_idx]
+
+# ---------------------------------------------------------------------------
+# Prefill (MHA) stash — no CUDA graphs, so just store refs directly.
+# ---------------------------------------------------------------------------
+_prefill_stash: dict | None = None  # set once at first NaN layer
 
 
 def stash_if_nan(
@@ -357,6 +424,11 @@ def stash_if_nan(
     block_table,
     seq_lens,
     num_actual_toks: int,
+    max_seq_len: int = 0,
+    qk_nope_head_dim: int = 0,
+    kv_lora_rank: int = 0,
+    qk_rope_head_dim: int = 0,
+    block_size: int = 0,
 ) -> None:
     """Called AFTER mark_attn and mark_fwd_mqa_real for fwd_mqa.
     Writes to one shared buffer only at the first layer where fwd_mqa
@@ -423,14 +495,44 @@ def stash_if_nan(
         torch.where(has_real_nan, torch.ones_like(captured), captured)
     )
 
+    # Store per-layer kv_cache ref (just a pointer, no copy).
+    if bkey not in _stashed_kv_per_layer:
+        _stashed_kv_per_layer[bkey] = {}
+    _stashed_kv_per_layer[bkey][layer_idx] = kv_cache
+
     # Store persistent refs (overwritten each layer — cheap, just pointers).
     _stashed_metadata[bkey] = {
-        "kv_cache": kv_cache,
         "block_table": block_table,
         "seq_lens": seq_lens,
         "num_actual_toks": num_actual_toks,
         "mqa_q_is_tuple": isinstance(mqa_q, tuple),
         "mqa_q_count": len(mqa_q) if isinstance(mqa_q, tuple) else 1,
+        "max_seq_len": max_seq_len,
+        "qk_nope_head_dim": qk_nope_head_dim,
+        "kv_lora_rank": kv_lora_rank,
+        "qk_rope_head_dim": qk_rope_head_dim,
+        "block_size": block_size,
+    }
+
+
+def stash_if_nan_prefill(
+    layer_idx: int,
+    mha_output: torch.Tensor,
+    kv_cache: torch.Tensor,
+    num_actual_toks: int,
+) -> None:
+    """Prefill-path stash. No CUDA graphs, so just store refs at first NaN layer.
+    Only stores kv_cache ref + layer_idx. Cheap — no copies, no GPU ops.
+    """
+    global _prefill_stash
+    if _nan_reported or _prefill_stash is not None:
+        return
+    if not mha_output[:num_actual_toks].isnan().any():
+        return
+    _prefill_stash = {
+        "layer_idx": layer_idx,
+        "kv_cache": kv_cache,
+        "num_actual_toks": num_actual_toks,
     }
 
 
@@ -490,14 +592,44 @@ def _dump_repro(
     else:
         save_dict["mqa_q"] = bufs[3].cpu()
 
+    # Save kv_cache from the actual NaN layer (not the last layer)
+    kv_per_layer = _stashed_kv_per_layer.get(B, {})
+    kv_at_nan_layer = kv_per_layer.get(stash_layer)
+    if kv_at_nan_layer is not None:
+        save_dict["kv_cache"] = kv_at_nan_layer.cpu()
+    else:
+        msg = (
+            f"[NAN_REPRO] WARNING: no kv_cache for layer {stash_layer} "
+            f"(available: {list(kv_per_layer.keys())})\n"
+        )
+        f.write(msg)
+        f.flush()
+        print(msg, file=sys.stderr, end="", flush=True)
+
     # Persistent tensor refs from metadata
-    for k in ("kv_cache", "block_table", "seq_lens"):
+    for k in ("block_table", "seq_lens"):
         v = meta.get(k)
         if v is not None and isinstance(v, torch.Tensor):
             save_dict[k] = v.cpu()
-    for k in ("num_actual_toks", "mqa_q_is_tuple", "mqa_q_count"):
+    for k in (
+        "num_actual_toks",
+        "mqa_q_is_tuple",
+        "mqa_q_count",
+        "max_seq_len",
+        "qk_nope_head_dim",
+        "kv_lora_rank",
+        "qk_rope_head_dim",
+        "block_size",
+    ):
         if k in meta:
             save_dict[k] = meta[k]
+
+    # Include prefill stash if available
+    if _prefill_stash is not None:
+        ps = _prefill_stash
+        save_dict["prefill_stash_layer"] = ps["layer_idx"]
+        save_dict["prefill_kv_cache"] = ps["kv_cache"].cpu()
+        save_dict["prefill_num_actual_toks"] = ps["num_actual_toks"]
 
     try:
         torch.save(save_dict, save_path)

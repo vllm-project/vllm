@@ -241,6 +241,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.models.nan_check_helper import mark_attn as _nan_mark_mla
 from vllm.model_executor.models.nan_check_helper import (
+    mark_fp8_nan as _nan_mark_fp8,
+)
+from vllm.model_executor.models.nan_check_helper import (
     mark_fwd_mqa_real as _nan_mark_fwd_mqa_real,
 )
 from vllm.model_executor.models.nan_check_helper import (
@@ -251,6 +254,9 @@ from vllm.model_executor.models.nan_check_helper import (
 )
 from vllm.model_executor.models.nan_check_helper import (
     stash_if_nan as _nan_stash_if_nan,
+)
+from vllm.model_executor.models.nan_check_helper import (
+    stash_if_nan_prefill as _nan_stash_if_nan_prefill,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -581,6 +587,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
+            _nan_mark_fp8(
+                self_kv_cache, 18, self._nan_layer_idx
+            )  # KV cache FP8 NaN BEFORE any writes this step
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
                 kv_c_normed,
                 k_pe,
@@ -736,6 +745,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             _nan_mark_mla(
                 output[num_mqa_tokens:], 10, self._nan_layer_idx
             )  # after fwd_mha
+            _nan_stash_if_nan_prefill(
+                self._nan_layer_idx,
+                output[num_mqa_tokens:],
+                kv_cache,
+                num_actual_toks,
+            )
 
         if num_mqa_tokens > 0:
             mqa_q = q[:num_mqa_tokens]
@@ -877,6 +892,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 block_table=attn_metadata.decode.block_table,
                 seq_lens=attn_metadata.decode.seq_lens,
                 num_actual_toks=num_actual_toks,
+                max_seq_len=attn_metadata.max_seq_len,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                kv_lora_rank=self.impl.kv_lora_rank,
+                qk_rope_head_dim=self.impl.qk_rope_head_dim,
+                block_size=self.impl.block_size,
             )
 
             # correct dcp attn_out with lse.
