@@ -26,8 +26,12 @@ def test_steering_changes_output(vllm_runner, monkeypatch, model: str) -> None:
             enable_prefix_caching=True,
         ) as llm:
             # 1. Baseline (zero steering buffers)
-            baseline = llm.generate([prompt], sampling)
-            baseline_tokens = baseline[0][0][0]
+            # Use llm.llm.generate() to get RequestOutput objects so we
+            # can compare only the generated completion tokens, not the
+            # prompt+completion concatenation that VllmRunner.generate()
+            # returns.
+            baseline = llm.llm.generate([prompt], sampling)
+            baseline_tokens = list(baseline[0].outputs[0].token_ids)
 
             # Clear the clean prompt from APC so the steered run has to
             # prefill and write its own KV entries before the unsteered
@@ -54,8 +58,8 @@ def test_steering_changes_output(vllm_runner, monkeypatch, model: str) -> None:
                 args=({target_layer: vec}, False),
             )
 
-            steered = llm.generate([prompt], sampling)
-            steered_tokens = steered[0][0][0]
+            steered = llm.llm.generate([prompt], sampling)
+            steered_tokens = list(steered[0].outputs[0].token_ids)
 
             assert steered_tokens != baseline_tokens, (
                 "Non-zero steering should change model output"
@@ -64,8 +68,8 @@ def test_steering_changes_output(vllm_runner, monkeypatch, model: str) -> None:
             # 4. Clear steering and verify output matches baseline
             llm.llm.collective_rpc("clear_steering_vectors")
 
-            restored = llm.generate([prompt], sampling)
-            restored_tokens = restored[0][0][0]
+            restored = llm.llm.generate([prompt], sampling)
+            restored_tokens = list(restored[0].outputs[0].token_ids)
 
             assert restored_tokens == baseline_tokens, (
                 "Clearing steering should restore original output"
