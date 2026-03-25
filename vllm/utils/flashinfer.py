@@ -128,7 +128,9 @@ scaled_fp4_grouped_quantize = _lazy_import_wrapper(
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer.fp4_quantization", "block_scale_interleave"
 )
-flashinfer_CuteDslMoEWrapper = _lazy_import_wrapper("flashinfer", "CuteDslMoEWrapper")
+flashinfer_cute_dsl_fused_moe_nvfp4 = _lazy_import_wrapper(
+    "flashinfer", "cute_dsl_fused_moe_nvfp4"
+)
 flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
     "flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"
 )
@@ -256,12 +258,12 @@ def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
 
 
 @functools.cache
-def has_flashinfer_cutedsl_moe_wrapper() -> bool:
-    """Return ``True`` if FlashInfer CuteDslMoEWrapper is available."""
+def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
+    """Return ``True`` if FlashInfer cute_dsl_fused_moe_nvfp4 is available."""
     if not has_flashinfer_cutedsl():
         return False
     mod = _get_submodule("flashinfer")
-    return mod is not None and hasattr(mod, "CuteDslMoEWrapper")
+    return mod is not None and hasattr(mod, "cute_dsl_fused_moe_nvfp4")
 
 
 @functools.cache
@@ -780,7 +782,7 @@ __all__ = [
     "silu_and_mul_scaled_nvfp4_experts_quantize",
     "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
-    "flashinfer_CuteDslMoEWrapper",
+    "flashinfer_cute_dsl_fused_moe_nvfp4",
     "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
     "autotune",
@@ -790,7 +792,7 @@ __all__ = [
     "has_flashinfer_nvlink_one_sided",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
-    "has_flashinfer_cutedsl_moe_wrapper",
+    "has_flashinfer_cutedsl_moe_nvfp4",
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",

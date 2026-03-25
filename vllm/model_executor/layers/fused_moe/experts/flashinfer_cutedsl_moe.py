@@ -19,6 +19,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import (
+    flashinfer_cute_dsl_fused_moe_nvfp4,
+    has_flashinfer_cutedsl_moe_nvfp4,
+)
+
 
 class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
     """
@@ -66,7 +71,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         return (
             p.is_cuda()
             and p.is_device_capability_family(100)
-            and has_flashinfer_cutedsl_grouped_gemm_nt_masked()
+            and has_flashinfer_cutedsl_moe_nvfp4()
         )
 
     @staticmethod
@@ -144,14 +149,10 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         # The functional API expects x_sf with trailing dim: (M, K//16, 1).
         x_sf = a1q_scale.unsqueeze(-1)
 
-        from flashinfer.fused_moe.cute_dsl.fused_moe import (
-            cute_dsl_fused_moe_nvfp4,
-        )
-
         from vllm.utils.flashinfer import _is_fi_autotuning, autotune
 
         with autotune(_is_fi_autotuning):
-            cute_dsl_fused_moe_nvfp4(
+            flashinfer_cute_dsl_fused_moe_nvfp4(
                 x=hidden_states,
                 x_sf=x_sf,
                 token_selected_experts=topk_ids.to(torch.int32),
