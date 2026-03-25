@@ -99,6 +99,10 @@ class MarlinLinearKernel(MPLinearKernel):
                 # int-quantized format: [N, K] int8 (signed int4 in [-8, 7])
                 # pack 8 int4 values into one int32, then transpose to [K//8, N]
                 w = x.data
+                assert w.shape[1] % 8 == 0, (
+                    f"The input dimension ({w.shape[1]}) must be a multiple of 8 "
+                    "for int4 Marlin packing."
+                )
                 w_u4 = (w.to(torch.int32) + 8) & 0xF
                 w_u4 = w_u4.reshape(w.shape[0], w.shape[1] // 8, 8)
                 shifts = torch.arange(0, 32, 4, dtype=torch.int32, device=w.device)

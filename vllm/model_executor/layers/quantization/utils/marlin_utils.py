@@ -537,7 +537,7 @@ def apply_gptq_marlin_linear(
         # weight processing, so this path normally sees `wtype=uint4b8`.
         # Keep `int4` for defensive compatibility with alternate call paths.
         assert wtype in (scalar_types.uint4b8, scalar_types.int4), (
-            "W8A8-INT8 is not supported by marlin kernel."
+            "W4A8-INT8 with marlin kernel only supports uint4b8 or int4 weights."
         )
         reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
         if input_global_scale is not None:
