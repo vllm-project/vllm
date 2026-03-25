@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -156,7 +154,7 @@ class GptOssReasoningParser(ReasoningParser):
     def extract_reasoning(
         self,
         model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
+        request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
         raise NotImplementedError(
             "gpt-oss has a special branch for parsing reasoning in non-streaming mode. This method shouldn't be used."  # noqa: E501
@@ -168,7 +166,7 @@ class GptOssReasoningParser(ReasoningParser):
         original_tag: str | StructuredOutputsParams | None,
         tool_server: ToolServer | None,
         sampling_params: SamplingParams | None = None,
-        tools: list[ChatCompletionToolsParam] | None = None,
+        tools: list["ChatCompletionToolsParam"] | None = None,
         model_architecture: str | None = None,
     ) -> str | None:
         if original_tag is None:

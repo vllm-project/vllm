@@ -160,7 +160,7 @@ class ReasoningParser:
         original_tag: str | StructuredOutputsParams | None,
         tool_server: ToolServer | None,
         sampling_params: SamplingParams | None = None,
-        tools: list[ChatCompletionToolsParam] | None = None,
+        tools: list["ChatCompletionToolsParam"] | None = None,
         model_architecture: str | None = None,
     ) -> str | None:
         """
