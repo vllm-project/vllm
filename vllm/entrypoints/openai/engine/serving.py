@@ -593,6 +593,16 @@ class OpenAIServing:
             status_code=e.status_code,
         )
 
+    def _convert_generation_error_to_response(
+        self, e: GenerationError
+    ) -> ErrorResponse:
+        """Convert GenerationError to error response."""
+        return self.create_error_response(
+            str(e),
+            err_type="InternalServerError",
+            status_code=e.status_code,
+        )
+
     async def _check_model(
         self,
         request: AnyRequest,

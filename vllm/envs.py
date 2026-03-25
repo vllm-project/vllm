@@ -200,6 +200,8 @@ if TYPE_CHECKING:
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
+    VLLM_RESPONSES_STORE_BACKEND: str = ""
+    VLLM_RESPONSES_STATE_SIGNING_KEY: str = ""
     VLLM_NVFP4_GEMM_BACKEND: str | None = None
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
@@ -1460,6 +1462,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #    never removed from memory until the server terminates.
     "VLLM_ENABLE_RESPONSES_API_STORE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))
+    ),
+    # Fully-qualified class name of a custom ResponseStore backend.
+    # When set, vLLM loads this class instead of InMemoryResponseStore.
+    # Example: "mypackage.redis_store.RedisResponseStore"
+    "VLLM_RESPONSES_STORE_BACKEND": lambda: os.environ.get(
+        "VLLM_RESPONSES_STORE_BACKEND", ""
+    ),
+    # Hex-encoded 32-byte (64-char) signing key for stateless multi-turn
+    # state carriers (RFC #26934). If not set, a random key is generated at
+    # startup (incompatible across restarts / multi-node deployments).
+    "VLLM_RESPONSES_STATE_SIGNING_KEY": lambda: os.environ.get(
+        "VLLM_RESPONSES_STATE_SIGNING_KEY", ""
     ),
     # If set, use the fp8 mfma in rocm paged attention.
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": lambda: bool(
