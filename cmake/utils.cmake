@@ -355,8 +355,10 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   list(REMOVE_DUPLICATES _PTX_ARCHS)
   list(REMOVE_DUPLICATES _SRC_CUDA_ARCHS)
 
-  # If x.0a or x.0f is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
-  # remove x.0a or x.0f from SRC_CUDA_ARCHS and add x.0a or x.0f to _CUDA_ARCHS
+  # Handle architecture-specific suffixes (a/f) for SRC entries.
+  # If SRC has x.ya/f, check TGT for x.y, x.ya, or x.yf.
+  # When TGT has a different suffix, prefer TGT's suffix for compilation
+  # (e.g. SRC="12.1f" + TGT="12.1a" -> output "12.1a").
   set(_CUDA_ARCHS)
   foreach(_arch ${_SRC_CUDA_ARCHS})
     if(_arch MATCHES "[af]$")
@@ -364,6 +366,26 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
       string(REGEX REPLACE "[af]$" "" _base "${_arch}")
       if ("${_base}" IN_LIST TGT_CUDA_ARCHS)
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
+        list(APPEND _CUDA_ARCHS "${_arch}")
+      elseif("${_base}a" IN_LIST _TGT_CUDA_ARCHS)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}a")
+        list(APPEND _CUDA_ARCHS "${_base}a")
+      elseif("${_base}f" IN_LIST _TGT_CUDA_ARCHS)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}f")
+        list(APPEND _CUDA_ARCHS "${_base}f")
+      endif()
+    endif()
+  endforeach()
+
+  # Symmetric handling: if TGT has x.ya/f and SRC has x.y (without suffix),
+  # preserve TGT's suffix in the output.
+  set(_tgt_copy ${_TGT_CUDA_ARCHS})
+  foreach(_arch ${_tgt_copy})
+    if(_arch MATCHES "[af]$")
+      string(REGEX REPLACE "[af]$" "" _base "${_arch}")
+      if ("${_base}" IN_LIST _SRC_CUDA_ARCHS)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_arch}")
+        list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_base}")
         list(APPEND _CUDA_ARCHS "${_arch}")
       endif()
     endif()
