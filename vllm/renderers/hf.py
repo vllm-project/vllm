@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
 import itertools
+import threading
 from collections import defaultdict, deque
 from collections.abc import Set
 from functools import lru_cache
@@ -35,9 +36,10 @@ from vllm.utils.func_utils import supports_kw
 from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
-from .params import ChatParams
+from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
+    from vllm.inputs import TextPrompt, TokensPrompt
     from vllm.multimodal.inputs import MultiModalDataDict, MultiModalUUIDDict
 else:
     MultiModalDataDict = dict[str, Any]
@@ -641,6 +643,112 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             config.model_config.hf_config, "use_unified_vision_chunk", False
         )
 
+        # Cache: system_content_text -> (rendered_prefix_text, prefix_token_ids)
+        self._sys_prompt_cache: dict[str, tuple[str, list[int]]] = {}
+        self._sys_prompt_cache_lock = threading.Lock()
+
+    def _get_or_cache_system_prefix(
+        self,
+        conversation: list[ConversationMessage],
+        chat_template_kwargs: dict[str, Any],
+    ) -> tuple[str, list[int]] | None:
+        """Return cached (rendered_prefix, token_ids) for the system message,
+        or None if caching is not applicable."""
+        if len(conversation) < 2:
+            return None
+        first = conversation[0]
+        if first.get("role") != "system":
+            return None
+        sys_content = first.get("content")
+        if not isinstance(sys_content, str):
+            return None
+
+        with self._sys_prompt_cache_lock:
+            cached = self._sys_prompt_cache.get(sys_content)
+            if cached is not None:
+                return cached
+
+        # Render system-only template to get prefix text
+        kwargs = dict(chat_template_kwargs)
+        kwargs.pop("tokenize", None)
+        kwargs["add_generation_prompt"] = False
+        try:
+            prefix_text = safe_apply_chat_template(
+                self.model_config,
+                self.get_tokenizer(),
+                [first],
+                tokenize=False,
+                **kwargs,
+            )
+        except Exception:
+            return None
+
+        if not isinstance(prefix_text, str):
+            return None
+
+        tokenizer = self.get_tokenizer()
+        prefix_ids = tokenizer.encode(prefix_text)
+
+        with self._sys_prompt_cache_lock:
+            if len(self._sys_prompt_cache) < 64:
+                self._sys_prompt_cache[sys_content] = (prefix_text, prefix_ids)
+
+        return prefix_text, prefix_ids
+
+    def _tokenize_prompt(
+        self,
+        prompt: "TextPrompt",
+        params: TokenizeParams,
+    ) -> "TokensPrompt":
+        from vllm.inputs import TokensPrompt as _TokensPrompt
+
+        cache_id = prompt.pop("_sys_prefix_key", None)  # type: ignore[typeddict-item, misc]
+        if cache_id is not None:
+            # Find cached entry by id
+            with self._sys_prompt_cache_lock:
+                for cached in self._sys_prompt_cache.values():
+                    if id(cached) == cache_id:
+                        prefix_text, prefix_ids = cached
+                        break
+                else:
+                    cached = None  # type: ignore[assignment]
+
+            if cached is not None:
+                full_text = prompt["prompt"]
+                suffix = full_text[len(prefix_text) :]
+                tokenizer = self.get_tokenizer()
+                suffix_ids = tokenizer.encode(suffix, add_special_tokens=False)
+                return _TokensPrompt(prompt_token_ids=prefix_ids + suffix_ids, **prompt)
+
+        # Fallback to base implementation
+        return super()._tokenize_prompt(prompt, params)
+
+    async def _tokenize_prompt_async(
+        self,
+        prompt: "TextPrompt",
+        params: TokenizeParams,
+    ) -> "TokensPrompt":
+        from vllm.inputs import TokensPrompt as _TokensPrompt
+
+        cache_id = prompt.pop("_sys_prefix_key", None)  # type: ignore[typeddict-item, misc]
+        if cache_id is not None:
+            with self._sys_prompt_cache_lock:
+                for cached in self._sys_prompt_cache.values():
+                    if id(cached) == cache_id:
+                        prefix_text, prefix_ids = cached
+                        break
+                else:
+                    cached = None  # type: ignore[assignment]
+
+            if cached is not None:
+                full_text = prompt["prompt"]
+                suffix = full_text[len(prefix_text) :]
+                tokenizer = self.get_async_tokenizer()
+                suffix_ids = await tokenizer.encode(suffix, add_special_tokens=False)
+                return _TokensPrompt(prompt_token_ids=prefix_ids + suffix_ids, **prompt)
+
+        return await super()._tokenize_prompt_async(prompt, params)
+
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
@@ -690,6 +798,16 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             )
 
         prompt = parse_dec_only_prompt(prompt_raw)
+
+        # Cache system prefix for tokenization optimization
+        cached = self._get_or_cache_system_prefix(
+            conversation, params.get_apply_chat_template_kwargs()
+        )
+        if cached is not None:
+            prefix_text, _ = cached
+            if isinstance(prompt_raw, str) and prompt_raw.startswith(prefix_text):
+                prompt["_sys_prefix_key"] = id(cached)  # type: ignore[typeddict-unknown-key]
+
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
@@ -744,6 +862,15 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             )
 
         prompt = parse_dec_only_prompt(prompt_raw)
+
+        cached = self._get_or_cache_system_prefix(
+            conversation, params.get_apply_chat_template_kwargs()
+        )
+        if cached is not None:
+            prefix_text, _ = cached
+            if isinstance(prompt_raw, str) and prompt_raw.startswith(prefix_text):
+                prompt["_sys_prefix_key"] = id(cached)  # type: ignore[typeddict-unknown-key]
+
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
