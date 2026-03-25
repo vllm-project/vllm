@@ -582,6 +582,12 @@ class OpenAIServing:
                 request_id,
             )
             raise GenerationError("Internal server error")
+        elif finish_reason == "validation":
+            logger.error(
+                "Request %s failed with a validation error",
+                request_id,
+            )
+            raise ValueError(f"Validation error, check your response format in case of a structured output error")
 
     def _convert_generation_error_to_streaming_response(
         self, e: GenerationError

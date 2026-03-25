@@ -51,7 +51,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -168,6 +173,12 @@ class Scheduler(SchedulerInterface):
         self.skipped_waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
 
+        # Buffer for error outputs from grammar compilation failures,
+        # merged into update_from_output() results.
+        self._pending_grammar_error_outputs: list[
+            tuple[int, EngineCoreOutput]
+        ] = []
+        
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
@@ -568,17 +579,21 @@ class Scheduler(SchedulerInterface):
                 request_id = request.request_id
 
                 # try to promote blocked statuses while traversing skipped queue.
-                if self._is_blocked_waiting_status(
-                    request.status
-                ) and not self._try_promote_blocked_waiting_request(request):
-                    if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request_id,
-                        )
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
-                    continue
+                if self._is_blocked_waiting_status(request.status):
+                    promoted, skip_to_next = self._try_promote_blocked_waiting_request(
+                        request, request_queue
+                    )
+                    if skip_to_next:
+                        continue
+                    if not promoted:
+                        if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                            logger.debug(
+                                "%s is still in WAITING_FOR_REMOTE_KVS state.",
+                                request_id,
+                            )
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
@@ -1512,6 +1527,12 @@ class Scheduler(SchedulerInterface):
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
+        # Merge pending grammar compilation error outputs.
+        if self._pending_grammar_error_outputs:
+            for client_index, error_output in self._pending_grammar_error_outputs:
+                outputs[client_index].append(error_output)
+            self._pending_grammar_error_outputs.clear()
+
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
@@ -2067,33 +2088,64 @@ class Scheduler(SchedulerInterface):
 
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
-    def _try_promote_blocked_waiting_request(self, request: Request) -> bool:
+    def _try_promote_blocked_waiting_request(
+        self, request: Request, request_queue: RequestQueue
+    ) -> tuple[bool, bool]:
         """
         Try to promote a blocked waiting request back to schedulable states.
+
+        Returns:
+            (promoted, skip_to_next): promoted=True means request is now
+            schedulable; skip_to_next=True means we handled the request
+            (e.g. grammar error) and caller should continue to next iteration.
         """
         if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
             # finished_recving_kv_req_ids is populated during
             # update_from_output(), based on worker-side connector signals
             # in KVConnectorOutput.finished_recving
             if request.request_id not in self.finished_recving_kv_req_ids:
-                return False
+                return (False, False)
             self._update_waiting_for_remote_kv(request)
             if request.num_preemptions:
                 request.status = RequestStatus.PREEMPTED
             else:
                 request.status = RequestStatus.WAITING
-            return True
+            return (True, False)
 
         if request.status == RequestStatus.WAITING_FOR_FSM:
-            structured_output_req = request.structured_output_request
-            if not (structured_output_req and structured_output_req.grammar):
-                return False
-            request.status = RequestStatus.WAITING
-            return True
+            try:
+                structured_output_req = request.structured_output_request
+                if not (structured_output_req and structured_output_req.grammar):
+                    return (False, False)
+                request.status = RequestStatus.WAITING
+                return (True, False)
+            except ValueError as e:
+                logger.error(
+                    "Structured output grammar compilation "
+                    "failed for request %s: %s",
+                    request.request_id,
+                    e,
+                )
+                request_queue.pop_request()
+
+                self._pending_grammar_error_outputs.append(
+                    (
+                        request.client_index,
+                        EngineCoreOutput(
+                            request_id=request.request_id,
+                            new_token_ids=[],
+                            finish_reason=FinishReason.VALIDATION,
+                        ),
+                    )
+                )
+                request.status = RequestStatus.FINISHED_ERROR
+                self._free_request(request)
+                # Handled: caller should continue to next iteration.
+                return (False, True)
 
         if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             assert not request.streaming_queue
-            return False
+            return (False, False)
 
         raise AssertionError(
             "Unexpected blocked waiting status in promotion: "
