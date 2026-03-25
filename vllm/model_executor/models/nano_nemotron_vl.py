@@ -15,6 +15,7 @@ from functools import cached_property
 from io import BytesIO
 from typing import Annotated, Literal, TypeAlias
 
+import einops
 import torch
 import torch.nn as nn
 from transformers import BatchFeature
@@ -786,7 +787,6 @@ class NanoNemotronVLDummyInputsBuilder(
 class NemotronH_Nano_VL_V2(
     nn.Module, HasInnerState, IsHybrid, SupportsMultiModal, SupportsMultiModalPruning
 ):
-
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
@@ -1139,13 +1139,16 @@ class NemotronH_Nano_VL_V2(
         pixel_values = video_input["pixel_values_flat"]
         num_frames_per_video = video_input["num_patches"].tolist()
         hidden_size = self.config.text_config.hidden_size
+        is_list = not torch.is_tensor(pixel_values)
 
         T = self.video_temporal_patch_size
         patch_size = self.patch_size
 
-        varying_res = is_list and len(pixel_values) > 1 and len(
-            {(pv.shape[-2], pv.shape[-1]) for pv in pixel_values}
-        ) > 1
+        varying_res = (
+            is_list
+            and len(pixel_values) > 1
+            and len({(pv.shape[-2], pv.shape[-1]) for pv in pixel_values}) > 1
+        )
 
         if varying_res:
             return self._extract_video_embeddings_temporal_dynamic(
@@ -1177,10 +1180,7 @@ class NemotronH_Nano_VL_V2(
         """Same-resolution fast path with micro-batch windows."""
         micro_batch_size = 128 - (128 % T)
 
-        all_frames = (
-            torch.cat(pixel_values, dim=0) if is_list
-            else pixel_values
-        )
+        all_frames = torch.cat(pixel_values, dim=0) if is_list else pixel_values
         _N, _C, H, W = all_frames.shape
         H_patches = H // patch_size
         W_patches = W // patch_size
@@ -1207,9 +1207,7 @@ class NemotronH_Nano_VL_V2(
             frame_chunks = []
             window_num_frames = []
             for frame_start, nf in window:
-                frame_chunks.append(
-                    all_frames[frame_start : frame_start + nf]
-                )
+                frame_chunks.append(all_frames[frame_start : frame_start + nf])
                 window_num_frames.append(nf)
 
             window_frames = torch.cat(frame_chunks, dim=0)
@@ -1231,9 +1229,7 @@ class NemotronH_Nano_VL_V2(
             tubelet_offset = 0
             for _, nf in window:
                 nt = math.ceil(nf / T)
-                vid_embeds = vit_embeds[
-                    tubelet_offset : tubelet_offset + nt
-                ]
+                vid_embeds = vit_embeds[tubelet_offset : tubelet_offset + nt]
                 results.append(vid_embeds.reshape(-1, hidden_size))
                 tubelet_offset += nt
 
@@ -1267,9 +1263,9 @@ class NemotronH_Nano_VL_V2(
             all_patch_chunks.append(patches)
             imgs_sizes.extend([(H_i, W_i)] * nf)
 
-        all_patches = torch.cat(
-            all_patch_chunks, dim=0
-        ).unsqueeze(0)  # [1, total_patches, 3*P*P]
+        all_patches = torch.cat(all_patch_chunks, dim=0).unsqueeze(
+            0
+        )  # [1, total_patches, 3*P*P]
 
         _, vit_embeds = self.vision_model(
             all_patches,
@@ -1302,9 +1298,7 @@ class NemotronH_Nano_VL_V2(
                 (H_i * ds // patch_size) * (W_i * ds // patch_size)
             )
             total_tokens = nt * tokens_per_tubelet
-            vid_embeds = vit_embeds[
-                :, token_offset : token_offset + total_tokens, :
-            ]
+            vid_embeds = vit_embeds[:, token_offset : token_offset + total_tokens, :]
             results.append(vid_embeds.reshape(-1, hidden_size))
             token_offset += total_tokens
 
@@ -1443,9 +1437,7 @@ class NemotronH_Nano_VL_V2(
                     t.shape[-2:] == pixel_values_flat_video[0].shape[-2:]
                     for t in pixel_values_flat_video
                 ):
-                    pixel_values_flat_video = torch.cat(
-                        pixel_values_flat_video, dim=0
-                    )
+                    pixel_values_flat_video = torch.cat(pixel_values_flat_video, dim=0)
                 else:
                     return NanoNemotronVLVideoPixelInputs(
                         type="pixel_values_videos",

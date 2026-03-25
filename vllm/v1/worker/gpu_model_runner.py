@@ -2797,11 +2797,12 @@ class GPUModelRunner(
         # Example: [video_req1, audio_req1, video_req2, audio_req2]
         #       -> [audio_req1, audio_req2, video_req1, video_req2]
         # This resolves the FIXME above; mm_hashes is kept in sync so that
-        # the cache-by-hash logic below (zip(mm_hashes, encoder_outputs)) remains correct.
+        # the cache-by-hash logic below (zip(mm_hashes, encoder_outputs))
+        # remains correct.
         _perm = sorted(range(len(mm_kwargs)), key=lambda i: mm_kwargs[i][0])
         if _perm != list(range(len(_perm))):
-            mm_kwargs    = [mm_kwargs[i]    for i in _perm]
-            mm_hashes    = [mm_hashes[i]    for i in _perm]
+            mm_kwargs = [mm_kwargs[i] for i in _perm]
+            mm_hashes = [mm_hashes[i] for i in _perm]
             mm_lora_refs = [mm_lora_refs[i] for i in _perm]
 
         encoder_outputs: list[torch.Tensor] = []
@@ -4779,7 +4780,6 @@ class GPUModelRunner(
             and mm_config is not None
             and mm_config.is_multimodal_pruning_enabled()
         )
-
 
         if (
             is_mixture_of_experts(self.model)

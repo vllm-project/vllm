@@ -311,9 +311,7 @@ class ViTPatchGenerator(nn.Module):
         patches, _pos_enc = self.apply_pos_enc_dynamic(
             patches, imgs_sizes=tubelet_imgs_sizes
         )
-        patches = self.cls_token_dynamic(
-            patches, imgs_sizes=tubelet_imgs_sizes
-        )
+        patches = self.cls_token_dynamic(patches, imgs_sizes=tubelet_imgs_sizes)
         patches = self.patch_normalizer(patches)
         return patches, tubelet_imgs_sizes, num_tubelets_per_video
 
@@ -794,9 +792,7 @@ class RadioInternVisionModel(nn.Module):
             if isinstance(num_frames, int):
                 num_frames = [num_frames]
             hidden_states, tubelet_imgs_sizes, _ = (
-                self.patch_generator.forward_video_dynamic(
-                    x, imgs_sizes, num_frames
-                )
+                self.patch_generator.forward_video_dynamic(x, imgs_sizes, num_frames)
             )
             self._tubelet_imgs_sizes = tubelet_imgs_sizes
             mask_meta = self.inter_image_mask_metadata(
@@ -808,33 +804,23 @@ class RadioInternVisionModel(nn.Module):
             # packed into [1, total, hidden].
             if isinstance(num_frames, int):
                 num_frames = [num_frames]
-            hidden_states, _ntp = (
-                self.patch_generator.forward_video(x, num_frames)
-            )
-            packed_batch_size, seq_per_tubelet, hidden_dim = (
-                hidden_states.shape
-            )
+            hidden_states, _ntp = self.patch_generator.forward_video(x, num_frames)
+            packed_batch_size, seq_per_tubelet, hidden_dim = hidden_states.shape
             hidden_states = hidden_states.reshape(1, -1, hidden_dim)
-            mask_meta = (
-                self._inter_image_mask_metadata_from_seq_lens(
-                    [seq_per_tubelet] * packed_batch_size,
-                    device=hidden_states.device,
-                )
+            mask_meta = self._inter_image_mask_metadata_from_seq_lens(
+                [seq_per_tubelet] * packed_batch_size,
+                device=hidden_states.device,
             )
 
         else:
             # Images (fixed or dynamic resolution)
-            hidden_states = self.patch_generator(
-                x, imgs_sizes=imgs_sizes
-            )
+            hidden_states = self.patch_generator(x, imgs_sizes=imgs_sizes)
             if imgs_sizes is not None and len(imgs_sizes) > 1:
                 mask_meta = self.inter_image_mask_metadata(
                     imgs_sizes, device=hidden_states.device
                 )
 
-        encoder_outputs = self.encoder(
-            inputs_embeds=hidden_states, mask_meta=mask_meta
-        )
+        encoder_outputs = self.encoder(inputs_embeds=hidden_states, mask_meta=mask_meta)
 
         if packed_batch_size is not None:
             encoder_outputs = encoder_outputs.reshape(
