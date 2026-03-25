@@ -192,6 +192,7 @@ class TestImageEmbedsValidation:
             io_handler.load_bytes(buffer.read())
 
     def test_valid_numpy_tensor_accepted(self):
+        """numpy .npy format should load and return correct tensor."""
         io_handler = ImageEmbeddingMediaIO()
 
         arr = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
