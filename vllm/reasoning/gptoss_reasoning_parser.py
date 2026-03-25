@@ -163,9 +163,9 @@ class GptOssReasoningParser(ReasoningParser):
     # This function prepares the structural tag to format reasoning output
     def prepare_structured_tag(
         self,
-        original_tag: str | StructuredOutputsParams | None,
+        original_tag: str | "StructuredOutputsParams" | None,
         tool_server: ToolServer | None,
-        sampling_params: SamplingParams | None = None,
+        sampling_params: "SamplingParams" | None = None,
         tools: list["ChatCompletionToolsParam"] | None = None,
         model_architecture: str | None = None,
     ) -> str | None:
