@@ -532,6 +532,9 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         initialize_online_processing(layer)
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
         # TODO(future): support block_quant in online quant path
         assert not self.block_quant
 
@@ -551,6 +554,9 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         else:
             weight = qweight.t()
             replace_parameter(layer, "weight", weight.data)
+
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
@@ -996,6 +1002,9 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         initialize_online_processing(layer)
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
         w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
@@ -1022,6 +1031,9 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             w13_input_scale=layer.w13_input_scale,
             w2_input_scale=layer.w2_input_scale,
         )
+
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):

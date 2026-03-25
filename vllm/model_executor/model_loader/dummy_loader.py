@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch.nn as nn
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import initialize_dummy_weights
@@ -23,6 +23,12 @@ class DummyModelLoader(BaseModelLoader):
         pass  # Nothing to download
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
-        # NOTE(woosuk): For accurate performance evaluation, we assign
-        # random values to the weights.
-        initialize_dummy_weights(model, model_config)
+        pass  # Nothing to load
+
+    def load_model(
+        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
+    ) -> nn.Module:
+        model = super().load_model(vllm_config, model_config, prefix=prefix)
+        initialize_dummy_weights(model, model_config)  # avoid nans during inference
+
+        return model
