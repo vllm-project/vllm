@@ -598,14 +598,18 @@ class WorkerProc:
         self.worker = wrapper
 
         self.setup_proc_title_and_log_prefix(
-            enable_ep=vllm_config.parallel_config.enable_expert_parallel
+            enable_ep=vllm_config.parallel_config.enable_expert_parallel,
+            enable_log_prefix=vllm_config.observability_config
+            .enable_log_prefix,
         )
 
         # Load model
         self.worker.init_device()
         # Update process title now that parallel groups are initialized
         self.setup_proc_title_and_log_prefix(
-            enable_ep=vllm_config.parallel_config.enable_expert_parallel
+            enable_ep=vllm_config.parallel_config.enable_expert_parallel,
+            enable_log_prefix=vllm_config.observability_config
+            .enable_log_prefix,
         )
         if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self.worker.elastic_ep_execute("load_model")
@@ -957,12 +961,15 @@ class WorkerProc:
                 self.handle_output(output)
 
     @staticmethod
-    def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
+    def setup_proc_title_and_log_prefix(
+        enable_ep: bool, enable_log_prefix: bool = True
+    ) -> None:
         # Check if parallel groups are initialized first
         if not model_parallel_is_initialized():
             # Parallel groups not yet initialized, use default process name
             set_process_title(name="Worker")
-            decorate_logs("Worker")
+            if enable_log_prefix:
+                decorate_logs("Worker")
             return
 
         dp_size = get_dp_group().world_size
@@ -990,7 +997,8 @@ class WorkerProc:
             ep_rank = get_ep_group().rank_in_group
             process_name += f"_EP{ep_rank}"
         set_process_title(name=process_name)
-        decorate_logs(process_name)
+        if enable_log_prefix:
+            decorate_logs(process_name)
 
 
 def set_multiprocessing_worker_envs():
