@@ -28,7 +28,7 @@ vLLM is supported on WSL2 but there are several known issues to be aware of:
 
 ### OOM during source builds
 
-WSL2 only [assigns 50% of the total memory by default](https://learn.microsoft.com/en-us/windows/wsl/wsl-config#main-wsl-settings). This is often insufficient for compiling vLLM from source. Create or edit `C:\Users\<your_username>\.wslconfig` to increase the memory limit:
+WSL2 only [assigns 50% of the total memory by default](https://learn.microsoft.com/en-us/windows/wsl/wsl-config#main-wsl-settings). This is often insufficient for compiling vLLM from source. Create or edit `C:\Users\<your_username>\.wslconfig` to increase the memory limit (adjust the values based on your system's available RAM):
 ```ini
 [wsl2]
 memory=12GB
@@ -39,7 +39,7 @@ Then restart WSL with `wsl --shutdown` from PowerShell. You can also limit compi
 
 ### OOM at runtime on small GPUs
 
-On WSL, the Windows desktop compositor reserves a portion of GPU memory, so the actual available VRAM is less than what `nvidia-smi` reports. The default `gpu_memory_utilization` of `0.9` may cause OOM on GPUs with 8GB or less. Try lowering it:
+On WSL, the Windows desktop compositor reserves a portion of GPU memory, so the actual available VRAM is less than what `nvidia-smi` reports. The default `gpu_memory_utilization` of `0.9` may cause OOM on GPUs with 8GB or less. This parameter is a float between `0.0` and `1.0` representing the fraction of GPU memory to use for the KV cache. Try lowering it:
 ```python
 llm = LLM(model="...", gpu_memory_utilization=0.7)
 ```
@@ -60,6 +60,7 @@ On WSL, vLLM overrides the multiprocessing start method to `spawn` because NVML 
 ```python
 from vllm import LLM, SamplingParams
 
+# Wrap vLLM code in main() to avoid multiprocessing issues with spawn
 def main():
     llm = LLM(model="...")
     outputs = llm.generate(["Hello!"], SamplingParams(max_tokens=50))
