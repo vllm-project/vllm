@@ -418,9 +418,7 @@ class DFlashQwen3Model(nn.Module):
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
         for i in range(L):
             attn = self._attn_layers[i]
-            # TODO(ben): generalize to PP compatibility if needed
-            # assumes virtual_engine=0 for now
-            kv_cache = attn.kv_cache[0]
+            kv_cache = attn.kv_cache
             attn.impl.do_kv_cache_update(
                 attn,
                 all_k_final[i],

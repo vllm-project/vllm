@@ -7,7 +7,6 @@ from typing import Any
 
 import pytest
 import torch
-from datasets import load_dataset
 from tqdm import tqdm
 
 from tests.evals.gsm8k.gsm8k_eval import _build_gsm8k_prompts, evaluate_gsm8k_offline
@@ -1057,6 +1056,8 @@ def compute_acceptance_len(
 
 # Datasets in the format used in DFlash validations
 def load_and_process_dataset(data_name: str):
+    from datasets import load_dataset
+
     if data_name == "gsm8k":
         dataset = load_dataset("openai/gsm8k", "main", split="test")
         prompt_fmt = (
