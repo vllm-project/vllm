@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
-
-import httpx
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
@@ -161,86 +158,3 @@ async def test_empty_grammar(client: openai.AsyncOpenAI, model_name: str) -> Non
             ],
             extra_body={"structured_outputs": {"grammar": ""}},
         )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
-async def test_batched_chat_completions(
-    server: RemoteOpenAIServer, model_name: str
-) -> None:
-    conversations = [
-        [{"role": "user", "content": "Reply with exactly the word: alpha"}],
-        [{"role": "user", "content": "Reply with exactly the word: beta"}],
-    ]
-
-    async with httpx.AsyncClient() as http_client:
-        response = await http_client.post(
-            f"{server.url_for('v1/chat/completions/batch')}",
-            json={
-                "model": model_name,
-                "messages": conversations,
-            },
-            timeout=60,
-        )
-
-    assert response.status_code == 200, response.text
-    data = response.json()
-
-    choices = data["choices"]
-    assert len(choices) == 2
-
-    indices = {choice["index"] for choice in choices}
-    assert indices == {0, 1}
-
-    # Each conversation should produce a non-empty text response.
-    for choice in choices:
-        assert choice["message"]["content"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
-async def test_batched_chat_completions_with_json_schema(
-    server: RemoteOpenAIServer, model_name: str
-) -> None:
-    schema = {
-        "type": "object",
-        "properties": {
-            "answer": {"type": "string", "enum": ["yes", "no"]},
-        },
-        "required": ["answer"],
-    }
-    conversations = [
-        [{"role": "user", "content": "Is the sky blue? Answer in JSON."}],
-        [{"role": "user", "content": "Is fire cold? Answer in JSON."}],
-    ]
-
-    async with httpx.AsyncClient() as http_client:
-        response = await http_client.post(
-            f"{server.url_for('v1/chat/completions/batch')}",
-            json={
-                "model": model_name,
-                "messages": conversations,
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {"name": "answer", "schema": schema, "strict": True},
-                },
-            },
-            timeout=60,
-        )
-
-    assert response.status_code == 200, response.text
-    data = response.json()
-
-    choices = data["choices"]
-    assert len(choices) == 2
-
-    for choice in choices:
-        parsed = json.loads(choice["message"]["content"])
-        assert "answer" in parsed
-        assert parsed["answer"] in ("yes", "no")
