@@ -80,20 +80,18 @@ if current_platform.is_cuda_alike():
 
         # `expert_load_view`: (num_physical_experts,)
 
-        topk_ids = physical_ids
-
-        topk_ids_for_count = topk_ids
+        ids_for_count = physical_ids
         if num_unpadded_tokens >= 0:
-            topk_ids_for_count = topk_ids[:num_unpadded_tokens, :]
+            ids_for_count = physical_ids[:num_unpadded_tokens, :]
 
         # `torch.bincount` is not compilable, so use `scatter_add_` instead.
-        topk_ids_flatten = topk_ids_for_count.flatten()
+        ids_flatten = ids_for_count.flatten()
         expert_load_view.scatter_add_(
             dim=0,
-            index=topk_ids_flatten.long(),
-            src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
+            index=ids_flatten.long(),
+            src=torch.ones_like(ids_flatten).to(expert_load_view),
         )
-        return topk_ids
+        return physical_ids
 else:
 
     def eplb_map_to_physical_and_record(
