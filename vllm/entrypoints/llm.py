@@ -409,6 +409,11 @@ class LLM:
         # Cache for __repr__ to avoid repeated collective_rpc calls
         self._cached_repr: str | None = None
 
+    @classmethod
+    def from_engine_args(cls, engine_args: EngineArgs) -> "LLM":
+        """Create an LLM instance from EngineArgs."""
+        return cls(**vars(engine_args))
+
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
 
