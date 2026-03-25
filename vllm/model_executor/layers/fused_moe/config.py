@@ -229,6 +229,9 @@ class FusedMoEQuantConfig:
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
     is_nvfp4_scale_swizzled: bool = True
+    # CK MXFP4 (gfx950) padding info for rocm_aiter_ops.fused_moe()
+    hidden_pad: int = 0
+    intermediate_pad: int = 0
 
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (

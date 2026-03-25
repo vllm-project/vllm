@@ -5,6 +5,7 @@ import pytest
 
 import vllm
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 
 from ..utils import multi_gpu_test
 
@@ -69,6 +70,16 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason=(
+        "Mxfp4 LoRA on ROCm is blocked by a spawn compatibility issue. "
+        "The fused_moe_lora Triton kernel crashes in spawned subprocesses, "
+        "and vLLM forces spawn mode when HIP is initialized before "
+        "multiprocessing. Fixing this requires either making the LoRA "
+        "Triton kernel spawn-safe or pre-warming the kernel cache."
+    ),
+)
 @pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
 @pytest.mark.parametrize("specialize_active_lora", [True, False])
 def test_gpt_oss_lora(
