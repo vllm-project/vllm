@@ -4221,8 +4221,9 @@ def test_priority_scheduling_preemption_avoids_waste():
 
     # One of the running requests should be preempted
     # The one with fewer computed_tokens should be preempted
-    preempted_reqs = [req for req in scheduler.waiting
-                      if req.request_id in ["req_a", "req_b"]]
+    preempted_reqs = [
+        req for req in scheduler.waiting if req.request_id in ["req_a", "req_b"]
+    ]
 
     assert len(preempted_reqs) == 1, (
         f"Expected exactly 1 request to be preempted, "
