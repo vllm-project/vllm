@@ -2381,7 +2381,7 @@ class NixlConnectorWorker:
                 # Handle heartbeat messages from D (consumer) to hold KV Cache blocks.
                 if decoded.startswith("HB:"):
                     req_ids_str = decoded[3:]  # Skip "HB:" prefix
-                    heartbeat_req_ids = req_ids_str.split(",")
+                    heartbeat_req_ids = [r for r in req_ids_str.split(",") if r]
                     extended_count = 0
                     for req_id in heartbeat_req_ids:
                         if req_id in self._reqs_to_send:
