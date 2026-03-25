@@ -12,7 +12,7 @@ class NemotronV3ReasoningParser(DeepSeekR1ReasoningParser):
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        self._enable_thinking = chat_kwargs.get("enable_thinking", None)
+        self._enable_thinking = chat_kwargs.get("enable_thinking", True)
         self._force_nonempty_content = chat_kwargs.get("force_nonempty_content", False)
 
     def extract_reasoning(self, model_output: str) -> tuple[str | None, str | None]:
