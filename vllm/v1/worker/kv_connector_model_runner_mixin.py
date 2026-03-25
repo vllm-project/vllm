@@ -351,6 +351,12 @@ class KVConnectorModelRunnerMixin:
         if len(page_sizes) != 1:
             return False
 
+        # all kv cache tensors must have the same size so that
+        # they can share a single contiguous buffer
+        tensor_sizes = set(t.size for t in kv_cache_config.kv_cache_tensors)
+        if len(tensor_sizes) != 1:
+            return False
+
         # all backends must agree on the same stride order
         common_stride_order: tuple[int, ...] | None = None
         for groups in attn_groups:
@@ -415,7 +421,7 @@ class KVConnectorModelRunnerMixin:
                 canonical_kv_caches is the CanonicalKVCaches wrapping
                     for the connector.
         """
-        # all tensors have the same size (validated by use_canonical_kv_caches)
+        # Validated by use_canonical_kv_caches.
         tensor_sizes = set(t.size for t in kv_cache_config.kv_cache_tensors)
         assert len(tensor_sizes) == 1
         tensor_size = tensor_sizes.pop()
