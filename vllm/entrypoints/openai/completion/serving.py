@@ -59,12 +59,14 @@ class OpenAIServingCompletion(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        max_waiting_queue_time: float | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
+            max_waiting_queue_time=max_waiting_queue_time,
         )
 
         self.openai_serving_render = openai_serving_render

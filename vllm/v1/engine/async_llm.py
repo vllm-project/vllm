@@ -867,6 +867,9 @@ class AsyncLLM(EngineClient):
     async def is_tracing_enabled(self) -> bool:
         return self.observability_config.otlp_traces_endpoint is not None
 
+    def get_estimated_queue_time(self) -> float:
+        return self.output_processor.queue_time_tracker.avg_queue_time
+
     async def do_log_stats(self) -> None:
         if self.logger_manager:
             self.logger_manager.log()

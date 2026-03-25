@@ -113,6 +113,15 @@ class EngineClient(ABC):
     async def is_tracing_enabled(self) -> bool: ...
 
     @abstractmethod
+    def get_estimated_queue_time(self) -> float:
+        """Get the estimated queue time in seconds based on historical average.
+
+        This is the predicted wait time for a new request before it gets
+        scheduled. Returns 0.0 if no historical data is available.
+        """
+        ...
+
+    @abstractmethod
     async def do_log_stats(self) -> None: ...
 
     @abstractmethod

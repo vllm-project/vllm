@@ -106,12 +106,14 @@ class OpenAIServingChat(OpenAIServing):
         enable_log_outputs: bool = False,
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        max_waiting_queue_time: float | None = None,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
+            max_waiting_queue_time=max_waiting_queue_time,
         )
 
         self.openai_serving_render = openai_serving_render

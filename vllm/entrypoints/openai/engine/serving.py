@@ -185,6 +185,7 @@ class OpenAIServing:
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
+        max_waiting_queue_time: float | None = None,
     ):
         super().__init__()
 
@@ -194,6 +195,7 @@ class OpenAIServing:
 
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
+        self.max_waiting_queue_time = max_waiting_queue_time
 
         self.model_config = engine_client.model_config
         self.renderer = engine_client.renderer
@@ -465,6 +467,18 @@ class OpenAIServing:
             )
         return None
 
+    def _validate_max_waiting_queue_time(self) -> ErrorResponse | None:
+        if self.max_waiting_queue_time is not None:
+            queue_time = self.engine_client.get_estimated_queue_time()
+            if queue_time > self.max_waiting_queue_time:
+                return self.create_error_response(
+                    "The server is currently experiencing high load.\n"
+                    "Please try again later.",
+                    err_type="ServiceUnavailableError",
+                    status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+        return None
+
     def _create_pooling_params(
         self,
         ctx: ServeContext,
@@ -598,7 +612,8 @@ class OpenAIServing:
         request: AnyRequest,
     ) -> ErrorResponse | None:
         error_response = None
-
+        if error_response := self._validate_max_waiting_queue_time():
+            return error_response
         if self._is_model_supported(request.model):
             return None
         if request.model in self.models.lora_requests:

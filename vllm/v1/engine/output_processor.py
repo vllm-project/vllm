@@ -34,6 +34,7 @@ from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
     IterationStats,
     LoRARequestStates,
+    QueueTimeTracker,
     RequestStateStats,
     SchedulerStats,
 )
@@ -429,6 +430,7 @@ class OutputProcessor:
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
+        self.queue_time_tracker = QueueTimeTracker()
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -793,6 +795,13 @@ class OutputProcessor:
 
         assert finish_reason is not None
         assert req_state.stats is not None
+
+        # Update historical queue time tracker before computing
+        # finished request stats.
+        if req_state.stats.scheduled_ts > 0.0 and req_state.stats.queued_ts > 0.0:
+            queued_time = req_state.stats.scheduled_ts - req_state.stats.queued_ts
+            self.queue_time_tracker.observe(queued_time)
+
         iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
             num_prompt_tokens=req_state.prompt_len,
