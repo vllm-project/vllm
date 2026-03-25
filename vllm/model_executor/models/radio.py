@@ -214,16 +214,126 @@ class ViTPatchGenerator(nn.Module):
             return patches, pos_enc
         return patches
 
-    def forward_video(self, x: torch.Tensor) -> torch.Tensor:
+    def _apply_temporal_grouping(
+        self,
+        x: torch.Tensor,
+        imgs_sizes: list[tuple[int, int]],
+        num_frames: list[int],
+    ) -> tuple[torch.Tensor, list[tuple[int, int]], list[int]]:
+        """Group consecutive video frames into tubelets for temporal
+        compression on pre-patched dynamic-resolution input.
+
+        All items are assumed to be videos (nf >= 1).  Frames within each
+        video must share the same (H, W); different videos may differ.
+
+        Args:
+            x: ``[1, total_patches, C*P*P]`` packed patches.
+            imgs_sizes: One ``(H, W)`` per frame,
+                ``len == sum(num_frames)``.
+            num_frames: Per-video frame counts.
+
+        Returns:
+            x_grouped: ``[1, reduced_patches, C*T*P*P]``.
+            tubelet_imgs_sizes: One ``(H, W)`` per tubelet.
+            num_tubelets_per_video: Tubelet count per video.
+        """
+        T = self.temporal_patch_size
+        patch_size = self.patch_size
+
+        assert len(imgs_sizes) == sum(num_frames), (
+            f"imgs_sizes has {len(imgs_sizes)} entries but "
+            f"sum(num_frames)={sum(num_frames)}"
+        )
+
+        seq_lens = calc_seq_lens(imgs_sizes, patch_size)
+        chunks = torch.split(x, seq_lens, dim=1)
+
+        grouped_chunks: list[torch.Tensor] = []
+        tubelet_imgs_sizes: list[tuple[int, int]] = []
+        num_tubelets_per_video: list[int] = []
+        tile_idx = 0
+
+        for nf in num_frames:
+            padded_nf = nf if nf % T == 0 else nf + (T - nf % T)
+
+            for group_start in range(0, padded_nf, T):
+                group_frames = []
+                for t in range(T):
+                    fi = group_start + t
+                    if fi < nf:
+                        group_frames.append(chunks[tile_idx + fi])
+                    else:
+                        group_frames.append(chunks[tile_idx + nf - 1])
+                grouped = torch.cat(group_frames, dim=-1)
+                grouped_chunks.append(grouped)
+                tubelet_imgs_sizes.append(imgs_sizes[tile_idx])
+
+            num_tubelets_per_video.append(padded_nf // T)
+            tile_idx += nf
+
+        x_grouped = torch.cat(grouped_chunks, dim=1)
+        return x_grouped, tubelet_imgs_sizes, num_tubelets_per_video
+
+    def forward_video_dynamic(
+        self,
+        x: torch.Tensor,
+        imgs_sizes: list[tuple[int, int]],
+        num_frames: list[int],
+    ) -> tuple[torch.Tensor, list[tuple[int, int]], list[int]]:
+        """Process pre-patched video frames with temporal compression
+        and per-tubelet dynamic-resolution positional encoding.
+
+        Args:
+            x: ``[1, total_patches, C*P*P]`` packed patches from
+                all videos.
+            imgs_sizes: One ``(H, W)`` per frame (pixel sizes).
+            num_frames: Per-video frame counts.
+
+        Returns:
+            patches: ``[1, total_seq_with_cls, hidden]`` embedded
+                tubelets with positional encoding and cls tokens.
+            tubelet_imgs_sizes: One ``(H, W)`` per tubelet.
+            num_tubelets_per_video: Tubelet count per video.
+        """
+        if not self._video_embedder_loaded:
+            raise ValueError(
+                "Temporal compression (video_temporal_patch_size > 1) "
+                "requires video_embedder weights, but they were never "
+                "loaded. Ensure the checkpoint was trained with "
+                "temporal compression."
+            )
+
+        x_grouped, tubelet_imgs_sizes, num_tubelets_per_video = (
+            self._apply_temporal_grouping(x, imgs_sizes, num_frames)
+        )
+
+        patches = self.video_embedder(x_grouped)
+        patches, _pos_enc = self.apply_pos_enc_dynamic(
+            patches, imgs_sizes=tubelet_imgs_sizes
+        )
+        patches = self.cls_token_dynamic(
+            patches, imgs_sizes=tubelet_imgs_sizes
+        )
+        patches = self.patch_normalizer(patches)
+        return patches, tubelet_imgs_sizes, num_tubelets_per_video
+
+    def forward_video(
+        self, x: torch.Tensor, num_frames: list[int]
+    ) -> tuple[torch.Tensor, list[int]]:
         """Process video frames with temporal compression.
 
         Groups T consecutive frames into tubelets before embedding.
+        Supports batched processing of multiple videos with different frame
+        counts but identical spatial dimensions (H, W).
 
         Args:
-            x: [num_frames, 3, H, W] tensor of video frames
+            x: [total_frames, 3, H, W] tensor of all video frames concatenated.
+            num_frames: Per-video frame counts, e.g. [31, 63, 128].
 
         Returns:
-            Embedded patches with temporal compression applied.
+            patches: [total_tubelets, seq_per_tubelet, hidden] embedded tubelets
+                with positional encoding and cls tokens applied.
+            num_tubelets_per_video: Number of tubelets produced per video.
         """
         if not self._video_embedder_loaded:
             raise ValueError(
@@ -234,39 +344,46 @@ class ViTPatchGenerator(nn.Module):
         T = self.temporal_patch_size
         input_size = x.shape[2:]
 
-        patches = self.im_to_patches(x)  # [N, num_patches, 3*P*P]
-        num_frames, num_spatial, feat_dim = patches.shape
+        all_patches = self.im_to_patches(x)  # [total_frames, num_spatial, 3*P*P]
+        _, num_spatial, feat_dim = all_patches.shape
 
-        # Pad to a multiple of T by repeating the last frame so that
-        # all tubelets have exactly T frames.
-        num_pad_frames = (-num_frames) % T
-        if num_pad_frames > 0:
-            last_frame_dup = patches[-1:].expand(num_pad_frames, -1, -1)
-            patches = torch.cat([patches, last_frame_dup], dim=0)
+        frame_offset = 0
+        tubelet_groups: list[torch.Tensor] = []
+        num_tubelets_per_video: list[int] = []
 
-        # Group T frames per tubelet: for each spatial position, concatenate
-        #   features across T consecutive frames; order follows Megatron training
-        num_frames_padded = patches.shape[0]
-        num_tublets = num_frames_padded // T
-        patches = rearrange(
-            patches,
-            "(tubelets frames) spatial feat -> tubelets spatial (frames feat)",
-            tubelets=num_tublets,
-            frames=T,
-            spatial=num_spatial,
-            feat=feat_dim,
-        )
+        for nf in num_frames:
+            video_patches = all_patches[frame_offset : frame_offset + nf]
+            frame_offset += nf
 
-        patches = self.video_embedder(patches)
+            num_pad = (-nf) % T
+            if num_pad > 0:
+                video_patches = torch.cat(
+                    [video_patches, video_patches[-1:].expand(num_pad, -1, -1)],
+                    dim=0,
+                )
+
+            nt = video_patches.shape[0] // T
+            video_patches = rearrange(
+                video_patches,
+                "(tubelets frames) spatial feat -> tubelets spatial (frames feat)",
+                tubelets=nt,
+                frames=T,
+                spatial=num_spatial,
+                feat=feat_dim,
+            )
+            tubelet_groups.append(video_patches)
+            num_tubelets_per_video.append(nt)
+
+        all_tubelets = torch.cat(tubelet_groups, dim=0)
+        patches = self.video_embedder(all_tubelets)
 
         patches, pos_enc = self.apply_pos_enc(patches, input_size=input_size)
-
         patches = self.cls_token(patches)
-
         patches = self.patch_normalizer(patches)
+
         if self.return_pos_enc:
-            return patches, pos_enc
-        return patches
+            return (patches, pos_enc), num_tubelets_per_video
+        return patches, num_tubelets_per_video
 
     def apply_pos_enc_dynamic(
         self, patches: torch.Tensor, imgs_sizes: list[tuple[int, int]]
@@ -661,35 +778,64 @@ class RadioInternVisionModel(nn.Module):
         self,
         x: torch.Tensor,
         imgs_sizes: list[tuple[int, int]] | None = None,
-        num_frames: int | None = None,
+        num_frames: int | list[int] | None = None,
     ) -> torch.FloatTensor:
         T = self.temporal_patch_size
 
-        # Build packed-sequence metadata for MMEncoderAttention when needed.
-        mask_meta = None
-        packed_batch_size = None  # Original batch size before packing
+        # Reset per-call state used by RadioModel._extract_final
+        self._tubelet_imgs_sizes: list[tuple[int, int]] | None = None
 
-        if num_frames is not None and T > 1:
-            # Conv3d video: all tubelets have the same sequence length.
-            # Pack [num_tubelets, seq_per_tubelet, hidden] → [1, total, hidden]
-            hidden_states = self.patch_generator.forward_video(x)
-            packed_batch_size, seq_per_tubelet, hidden_dim = hidden_states.shape
-            hidden_states = hidden_states.reshape(1, -1, hidden_dim)
-            mask_meta = self._inter_image_mask_metadata_from_seq_lens(
-                [seq_per_tubelet] * packed_batch_size, device=hidden_states.device
+        mask_meta = None
+        packed_batch_size = None
+
+        if num_frames is not None and T > 1 and imgs_sizes is not None:
+            # Dynamic-resolution video: variable-size tubelets packed
+            # into [1, total_seq, hidden] with per-tubelet attention.
+            if isinstance(num_frames, int):
+                num_frames = [num_frames]
+            hidden_states, tubelet_imgs_sizes, _ = (
+                self.patch_generator.forward_video_dynamic(
+                    x, imgs_sizes, num_frames
+                )
             )
+            self._tubelet_imgs_sizes = tubelet_imgs_sizes
+            mask_meta = self.inter_image_mask_metadata(
+                tubelet_imgs_sizes, device=hidden_states.device
+            )
+
+        elif num_frames is not None and T > 1:
+            # Same-resolution video (fast path): uniform tubelets
+            # packed into [1, total, hidden].
+            if isinstance(num_frames, int):
+                num_frames = [num_frames]
+            hidden_states, _ntp = (
+                self.patch_generator.forward_video(x, num_frames)
+            )
+            packed_batch_size, seq_per_tubelet, hidden_dim = (
+                hidden_states.shape
+            )
+            hidden_states = hidden_states.reshape(1, -1, hidden_dim)
+            mask_meta = (
+                self._inter_image_mask_metadata_from_seq_lens(
+                    [seq_per_tubelet] * packed_batch_size,
+                    device=hidden_states.device,
+                )
+            )
+
         else:
-            # Images for any model, or video for non-conv3d model
-            hidden_states = self.patch_generator(x, imgs_sizes=imgs_sizes)
+            # Images (fixed or dynamic resolution)
+            hidden_states = self.patch_generator(
+                x, imgs_sizes=imgs_sizes
+            )
             if imgs_sizes is not None and len(imgs_sizes) > 1:
-                # Dynamic resolution w/ > 1 image, create attn mask
                 mask_meta = self.inter_image_mask_metadata(
                     imgs_sizes, device=hidden_states.device
                 )
 
-        encoder_outputs = self.encoder(inputs_embeds=hidden_states, mask_meta=mask_meta)
+        encoder_outputs = self.encoder(
+            inputs_embeds=hidden_states, mask_meta=mask_meta
+        )
 
-        # Unpack back to original batch shape if we packed for video
         if packed_batch_size is not None:
             encoder_outputs = encoder_outputs.reshape(
                 packed_batch_size, seq_per_tubelet, -1
@@ -738,14 +884,15 @@ class RadioModel(nn.Module):
         pixel_embeds: torch.Tensor | None = None,
         *,
         imgs_sizes: list[tuple[int, int]] | None = None,
-        num_frames: int | None = None,
+        num_frames: int | list[int] | None = None,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
         y = self.model(
             pixel_values,
             imgs_sizes=imgs_sizes,
             num_frames=num_frames,
         )
-        return self._extract_final(y, imgs_sizes=imgs_sizes)
+        extract_sizes = self.model._tubelet_imgs_sizes or imgs_sizes
+        return self._extract_final(y, imgs_sizes=extract_sizes)
 
     def load_weights(self, weights) -> set[str]:
         loaded_params: set[str] = set()

@@ -786,8 +786,6 @@ class NanoNemotronVLDummyInputsBuilder(
 class NemotronH_Nano_VL_V2(
     nn.Module, HasInnerState, IsHybrid, SupportsMultiModal, SupportsMultiModalPruning
 ):
-    requires_sequential_video_encoding = True
-    """Temporarily needed for dynamic res video w/ conv3d, doesn't support bs>1 yet"""
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -1066,7 +1064,6 @@ class NemotronH_Nano_VL_V2(
         """Process video input and create final embeddings with video content
         and indicator tokens."""
         T = self.video_temporal_patch_size
-
         if T > 1:
             video_embeddings = self._extract_video_embeddings_temporal(video_input)
         else:
@@ -1132,22 +1129,184 @@ class NemotronH_Nano_VL_V2(
     ) -> tuple[torch.Tensor, ...]:
         """Extract per-video embeddings with temporal compression.
 
-        Each video is processed separately through extract_feature with
-        num_frames, which uses the fixed-resolution temporal path in RADIO
-        (no attention mask, flash attention).
+        Two paths:
+        * **Same-resolution** (all videos share H, W): raw-pixel fast
+          path with micro-batch windows of ~128 frames.
+        * **Varying-resolution** (different H, W across videos):
+          pre-patch to dynamic format and use the dynamic-resolution
+          ViT path with per-tubelet positional encoding.
         """
         pixel_values = video_input["pixel_values_flat"]
         num_frames_per_video = video_input["num_patches"].tolist()
         hidden_size = self.config.text_config.hidden_size
 
-        results: list[torch.Tensor] = []
-        frame_offset = 0
-        for nf in num_frames_per_video:
-            video_frames = pixel_values[frame_offset : frame_offset + nf]
-            frame_offset += nf
+        T = self.video_temporal_patch_size
+        patch_size = self.patch_size
 
-            vit_embeds = self.extract_feature(video_frames, num_frames=nf)
-            results.append(vit_embeds.view(-1, hidden_size))
+        varying_res = is_list and len(pixel_values) > 1 and len(
+            {(pv.shape[-2], pv.shape[-1]) for pv in pixel_values}
+        ) > 1
+
+        if varying_res:
+            return self._extract_video_embeddings_temporal_dynamic(
+                pixel_values,
+                num_frames_per_video,
+                hidden_size,
+                T,
+                patch_size,
+            )
+
+        return self._extract_video_embeddings_temporal_fast(
+            pixel_values,
+            num_frames_per_video,
+            hidden_size,
+            is_list,
+            T,
+            patch_size,
+        )
+
+    def _extract_video_embeddings_temporal_fast(
+        self,
+        pixel_values,
+        num_frames_per_video: list[int],
+        hidden_size: int,
+        is_list: bool,
+        T: int,
+        patch_size: int,
+    ) -> tuple[torch.Tensor, ...]:
+        """Same-resolution fast path with micro-batch windows."""
+        micro_batch_size = 128 - (128 % T)
+
+        all_frames = (
+            torch.cat(pixel_values, dim=0) if is_list
+            else pixel_values
+        )
+        _N, _C, H, W = all_frames.shape
+        H_patches = H // patch_size
+        W_patches = W // patch_size
+
+        windows: list[list[tuple[int, int]]] = []
+        cur_segs: list[tuple[int, int]] = []
+        cur_size = 0
+        global_offset = 0
+
+        for nf in num_frames_per_video:
+            if cur_segs and cur_size + nf > micro_batch_size:
+                windows.append(cur_segs)
+                cur_segs = []
+                cur_size = 0
+            cur_segs.append((global_offset, nf))
+            cur_size += nf
+            global_offset += nf
+
+        if cur_segs:
+            windows.append(cur_segs)
+
+        results: list[torch.Tensor] = []
+        for window in windows:
+            frame_chunks = []
+            window_num_frames = []
+            for frame_start, nf in window:
+                frame_chunks.append(
+                    all_frames[frame_start : frame_start + nf]
+                )
+                window_num_frames.append(nf)
+
+            window_frames = torch.cat(frame_chunks, dim=0)
+            _, vit_embeds = self.vision_model(
+                window_frames, num_frames=window_num_frames
+            )
+            vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+            vit_embeds = vit_embeds.reshape(
+                vit_embeds.shape[0], H_patches, W_patches, -1
+            )
+            vit_embeds = self.pixel_shuffle(
+                vit_embeds, scale_factor=self.downsample_ratio
+            )
+            vit_embeds = vit_embeds.reshape(
+                vit_embeds.shape[0], -1, vit_embeds.shape[-1]
+            )
+            vit_embeds = self.mlp1(vit_embeds)
+
+            tubelet_offset = 0
+            for _, nf in window:
+                nt = math.ceil(nf / T)
+                vid_embeds = vit_embeds[
+                    tubelet_offset : tubelet_offset + nt
+                ]
+                results.append(vid_embeds.reshape(-1, hidden_size))
+                tubelet_offset += nt
+
+        return tuple(results)
+
+    def _extract_video_embeddings_temporal_dynamic(
+        self,
+        pixel_values: list[torch.Tensor],
+        num_frames_per_video: list[int],
+        hidden_size: int,
+        T: int,
+        patch_size: int,
+    ) -> tuple[torch.Tensor, ...]:
+        """Varying-resolution path: pre-patch frames to dynamic
+        format and process with per-tubelet positional encoding."""
+
+        # Pre-patch: [nf_i, 3, H_i, W_i] → patches [nf_i*(H_i/P)*(W_i/P), 3*P*P]
+        all_patch_chunks: list[torch.Tensor] = []
+        imgs_sizes: list[tuple[int, int]] = []
+
+        for i, nf in enumerate(num_frames_per_video):
+            video = pixel_values[i]  # [nf, 3, H_i, W_i]
+            H_i, W_i = video.shape[-2], video.shape[-1]
+            patches = einops.rearrange(
+                video,
+                "n c (py yy) (px xx) -> n (py px) (c yy xx)",
+                yy=patch_size,
+                xx=patch_size,
+            )
+            patches = patches.reshape(-1, patches.shape[-1])
+            all_patch_chunks.append(patches)
+            imgs_sizes.extend([(H_i, W_i)] * nf)
+
+        all_patches = torch.cat(
+            all_patch_chunks, dim=0
+        ).unsqueeze(0)  # [1, total_patches, 3*P*P]
+
+        _, vit_embeds = self.vision_model(
+            all_patches,
+            imgs_sizes=imgs_sizes,
+            num_frames=num_frames_per_video,
+        )
+        # vit_embeds: [1, total_tubelet_patches, vit_hidden]
+        vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+
+        # Build per-tubelet imgs_sizes for pixel_shuffle_dynamic_res
+        tubelet_imgs_sizes: list[tuple[int, int]] = []
+        for i, nf in enumerate(num_frames_per_video):
+            nt = math.ceil(nf / T)
+            H_i, W_i = pixel_values[i].shape[-2], pixel_values[i].shape[-1]
+            tubelet_imgs_sizes.extend([(H_i, W_i)] * nt)
+
+        vit_embeds = self.pixel_shuffle_dynamic_res(
+            vit_embeds, imgs_sizes=tubelet_imgs_sizes
+        )
+        vit_embeds = self.mlp1(vit_embeds)
+
+        # Split per video
+        ds = self.downsample_ratio
+        results: list[torch.Tensor] = []
+        token_offset = 0
+        for i, nf in enumerate(num_frames_per_video):
+            nt = math.ceil(nf / T)
+            H_i, W_i = pixel_values[i].shape[-2], pixel_values[i].shape[-1]
+            tokens_per_tubelet = int(
+                (H_i * ds // patch_size) * (W_i * ds // patch_size)
+            )
+            total_tokens = nt * tokens_per_tubelet
+            vid_embeds = vit_embeds[
+                :, token_offset : token_offset + total_tokens, :
+            ]
+            results.append(vid_embeds.reshape(-1, hidden_size))
+            token_offset += total_tokens
 
         return tuple(results)
 
@@ -1280,7 +1439,22 @@ class NemotronH_Nano_VL_V2(
                 pixel_values_flat_video = list(pixel_values_flat_video)
 
             if not torch.is_tensor(pixel_values_flat_video):
-                pixel_values_flat_video = torch.cat(pixel_values_flat_video, dim=0)
+                if all(
+                    t.shape[-2:] == pixel_values_flat_video[0].shape[-2:]
+                    for t in pixel_values_flat_video
+                ):
+                    pixel_values_flat_video = torch.cat(
+                        pixel_values_flat_video, dim=0
+                    )
+                else:
+                    return NanoNemotronVLVideoPixelInputs(
+                        type="pixel_values_videos",
+                        pixel_values_flat=pixel_values_flat_video,
+                        num_patches=video_num_patches,
+                        frames_indices=frames_indices,
+                        frame_duration_ms=frame_duration_ms,
+                        validate=False,
+                    )
 
             expected_h = pixel_values_flat_video.shape[-2]
             expected_w = pixel_values_flat_video.shape[-1]

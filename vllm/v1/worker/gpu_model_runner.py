@@ -424,7 +424,6 @@ class GPUModelRunner(
         )
         # These will be overridden in load_model()
         self.is_multimodal_pruning_enabled = False
-        self.requires_sequential_video_encoding = False
         # Set to True after init_routed_experts_capturer() completes.
         # Prevents routed experts code from running during profiling/dummy run.
         self.routed_experts_initialized = False
@@ -2793,6 +2792,18 @@ class GPUModelRunner(
                     connector_mapping,
                 )
 
+        # Sort by modality so that group_and_batch_mm_kwargs sees consecutive
+        # same-modality items and can batch them across requests.
+        # Example: [video_req1, audio_req1, video_req2, audio_req2]
+        #       -> [audio_req1, audio_req2, video_req1, video_req2]
+        # This resolves the FIXME above; mm_hashes is kept in sync so that
+        # the cache-by-hash logic below (zip(mm_hashes, encoder_outputs)) remains correct.
+        _perm = sorted(range(len(mm_kwargs)), key=lambda i: mm_kwargs[i][0])
+        if _perm != list(range(len(_perm))):
+            mm_kwargs    = [mm_kwargs[i]    for i in _perm]
+            mm_hashes    = [mm_hashes[i]    for i in _perm]
+            mm_lora_refs = [mm_lora_refs[i] for i in _perm]
+
         encoder_outputs: list[torch.Tensor] = []
         # Track the current index in mm_kwargs/mm_lora_refs to map groups to request IDs
         current_item_idx = 0
@@ -2803,72 +2814,17 @@ class GPUModelRunner(
         ):
             batch_outputs: MultiModalEmbeddings
 
-            # EVS and dynamic res video related change.
-            # (ekhvedchenia): Temporary hack to limit peak memory usage when
-            # processing multimodal data. This solves the issue with scheduler
-            # putting too many video samples into a single batch. Scheduler
-            # uses pruned vision tokens count to compare it versus compute
-            # budget which is incorrect (Either input media size or non-pruned
-            # output vision tokens count should be considered)
-            # dynamic res video for nemotron temporarily uses this hack via
-            # requires_sequential_video_encoding
-            # because it doesn't yet support video batching.
-            # TODO(ywang96): Fix memory profiling to take EVS into account and
-            # remove this hack.
-            if (
-                (
-                    self.is_multimodal_pruning_enabled
-                    or self.requires_sequential_video_encoding
-                )
-                and modality == "video"
-                and num_items > 1
+            # Run the encoder.
+            # `batch_outputs` is either of the following:
+            # 1. A tensor of shape (num_items, feature_size, hidden_size)
+            # in case feature_size is fixed across all multimodal items.
+            # 2. A list or tuple (length: num_items) of tensors,
+            # each of shape (feature_size, hidden_size) in case the feature
+            # size is dynamic depending on the input multimodal items.
+            with self.timed_encoder_operation(
+                should_time, mm_lora_refs, current_item_idx, num_items
             ):
-                batch_outputs_lst = list[torch.Tensor]()
-                for video_idx in range(num_items):
-                    video_mm_kwargs_item = mm_kwargs[current_item_idx + video_idx]
-                    with self.timed_encoder_operation(
-                        should_time, mm_lora_refs, current_item_idx + video_idx, 1
-                    ):
-                        _, _, micro_batch_mm_inputs = next(
-                            group_and_batch_mm_kwargs(
-                                [video_mm_kwargs_item],
-                                device=self.device,
-                                pin_memory=self.pin_memory,
-                            )
-                        )
-
-                        micro_batch_outputs = model.embed_multimodal(
-                            **micro_batch_mm_inputs
-                        )
-
-                        batch_outputs_lst.extend(micro_batch_outputs)
-
-                batch_outputs = batch_outputs_lst
-            else:
-                # Run the encoder.
-                # `batch_outputs` is either of the following:
-                # 1. A tensor of shape (num_items, feature_size, hidden_size)
-                # in case feature_size is fixed across all multimodal items.
-                # 2. A list or tuple (length: num_items) of tensors,
-                # each of shape (feature_size, hidden_size) in case the feature
-                # size is dynamic depending on the input multimodal items.
-
-                with self.timed_encoder_operation(
-                    should_time, mm_lora_refs, current_item_idx, num_items
-                ):
-                    cudagraph_output = None
-                    if (
-                        self.encoder_cudagraph_manager is not None
-                        and self.encoder_cudagraph_manager.supports_modality(modality)
-                    ):
-                        cudagraph_output = self.encoder_cudagraph_manager.execute(
-                            mm_kwargs_batch,
-                        )
-
-                    if cudagraph_output is not None:
-                        batch_outputs = cudagraph_output
-                    else:
-                        batch_outputs = model.embed_multimodal(**mm_kwargs_batch)
+                batch_outputs = model.embed_multimodal(**mm_kwargs_batch)
 
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
@@ -4823,9 +4779,7 @@ class GPUModelRunner(
             and mm_config is not None
             and mm_config.is_multimodal_pruning_enabled()
         )
-        self.requires_sequential_video_encoding = hasattr(
-            self.get_model(), "requires_sequential_video_encoding"
-        )  # Temporary hack for dynamic res video w/o support for bs>1 yet
+
 
         if (
             is_mixture_of_experts(self.model)
