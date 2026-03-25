@@ -782,8 +782,8 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         require a specialized implementation, like MarlinExperts, they are free
         to override this function.
         """
-        assert w1.dim() == 3 and w2.dim() == 3
-        E, N, _ = w1.size()
+        assert len(w1.shape) == 3 and len(w2.shape) == 3
+        E, N, _ = w1.shape
         K = a1.size(-1)
 
         if a1.dim() == 2:
@@ -1363,7 +1363,7 @@ class FusedMoEKernelModularImpl:
         else:
             output = torch.empty_like(hidden_states)
 
-        local_num_experts = w1.size(0)
+        local_num_experts = w1.shape[0]
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 

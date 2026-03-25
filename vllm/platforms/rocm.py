@@ -265,7 +265,6 @@ def use_rocm_custom_paged_attention(
             and (block_size == 16 or block_size == 32)
             and (gqa_ratio >= 1 and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
-            and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
             and sinks is None
         )
 
@@ -280,7 +279,6 @@ def use_rocm_custom_paged_attention(
             and max_seq_len <= 128 * 1024
             and alibi_slopes is None
             and kv_cache_dtype == "auto"
-            and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN
             and sinks is None
         )
 
@@ -311,7 +309,7 @@ def _get_backend_priorities(
     use_mla: bool,
     use_sparse: bool,
 ) -> list[AttentionBackendEnum]:
-    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 
     if use_sparse:
         return [AttentionBackendEnum.ROCM_AITER_MLA_SPARSE]
@@ -328,28 +326,15 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_MLA,
             ]
 
-    backends = []
-
-    # Priority 1: Check for AITER Unified Attention (must check before MHA)
-    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION:
-        backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
-
-    # Priority 2: Check for AITER MHA (Flash Attention)
-    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA:
+    backends = [
+        AttentionBackendEnum.ROCM_ATTN,
+    ]
+    if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
-
-    # Priority 3: Check for ROCM_ATTN (prefill-decode split)
-    from vllm.config import get_current_vllm_config_or_none
-
-    vllm_config = get_current_vllm_config_or_none()
-    if (
-        vllm_config is not None
-        and vllm_config.attention_config.use_prefill_decode_attention
-    ):
-        backends.append(AttentionBackendEnum.ROCM_ATTN)
-
-    # Default: Triton Unified Attention
+    if is_aiter_found_and_supported():
+        backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
+
     return backends
 
 
@@ -378,7 +363,6 @@ class RocmPlatform(Platform):
         "fbgemm_fp8",
         "gguf",
         "quark",
-        "ptpc_fp8",
         "mxfp4",
         "petit_nvfp4",
         "torchao",
