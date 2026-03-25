@@ -90,7 +90,7 @@ def test_get_numel_loaded():
     assert ret == "value"
 
 
-@pytest.mark.parametrize("tp_size", [1])
+@pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize(
     "base_model,mul_model,add_model",
     [
@@ -150,7 +150,7 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         assert add_perp < mul_perp
 
 
-@pytest.mark.parametrize("tp_size", [1])
+@pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize(
     "base_model,mul_model,add_model,quantization",
     [
