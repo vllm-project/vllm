@@ -434,8 +434,7 @@ class Platform:
 
         cache_config = vllm_config.cache_config
         if cache_config.user_specified_block_size:
-            # User specified --block-size; keep it.
-            return
+            assert cache_config.block_size, "block_size must be positive."
 
         model_config = vllm_config.model_config
         # model_config may be None during testing.
