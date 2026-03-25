@@ -91,7 +91,7 @@ class WorkerConnectorInitializationData:
     the extra data.
     """
 
-    model: "torch.nn.Module | None" = field(default=None)
+    model: torch.nn.Module | None = field(default=None)
 
 
 @dataclass
