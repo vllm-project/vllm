@@ -847,6 +847,6 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
         self, messages: list[ChatCompletionMessageParam]
     ) -> ChatCompletionRequest:
         """Build a single-conversation ChatCompletionRequest from one conversation."""
-        data = self.model_dump(exclude={"messages"})
+        data = self.model_dump(exclude={"messages"}, exclude_none=True)
         data["messages"] = messages
         return ChatCompletionRequest.model_validate(data)
