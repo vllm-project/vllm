@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import json
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from transformers import PreTrainedTokenizerBase
 
@@ -158,30 +159,46 @@ class GptOssReasoningParser(ReasoningParser):
 
     # This function prepares the structural tag to format reasoning output
     def prepare_structured_tag(
-        self, original_tag: str | None, tool_server: ToolServer | None
+        self,
+        original_tag: str | None,
+        tool_server: ToolServer | None,
+        final_content_format: dict | None = None,
     ) -> str | None:
-        if original_tag is None:
-            if tool_server is None:
-                return json.dumps(no_func_reasoning_tag)
-            else:
-                builtin_tool_list: list[str] = []
-                if tool_server.has_tool("browser"):
-                    builtin_tool_list.append("browser")
-                if tool_server.has_tool("python"):
-                    builtin_tool_list.append("python")
-                if tool_server.has_tool("container"):
-                    builtin_tool_list.append("container")
-
-                if len(builtin_tool_list) > 0:
-                    logger.info("Builtin_tool_list: %s", builtin_tool_list)
-                    func_tag = json.dumps(
-                        tag_with_builtin_funcs(no_func_reasoning_tag, builtin_tool_list)
-                    )
-                else:
-                    logger.info("Builtin_tool_list is empty")
-                    func_tag = json.dumps(no_func_reasoning_tag)
-
-                return func_tag
-        else:
+        if original_tag is not None:
             # There is potential risk for appending the tag to the original tag
             return original_tag
+
+        tag: dict[str, Any]
+        if tool_server is None:
+            tag = copy.deepcopy(no_func_reasoning_tag)
+        else:
+            builtin_tool_list: list[str] = []
+            if tool_server.has_tool("browser"):
+                builtin_tool_list.append("browser")
+            if tool_server.has_tool("python"):
+                builtin_tool_list.append("python")
+            if tool_server.has_tool("container"):
+                builtin_tool_list.append("container")
+
+            if len(builtin_tool_list) > 0:
+                logger.info("Builtin_tool_list: %s", builtin_tool_list)
+                tag = tag_with_builtin_funcs(no_func_reasoning_tag, builtin_tool_list)
+            else:
+                logger.info("Builtin_tool_list is empty")
+                tag = copy.deepcopy(no_func_reasoning_tag)
+
+        # If a content constraint is requested for the final channel,
+        # add a triggered tag for <|channel|>final with that constraint.
+        # This ensures grammar enforcement only applies within the final
+        # output region, not during reasoning.
+        if final_content_format is not None:
+            tag["format"]["triggers"].append("<|channel|>final")
+            tag["format"]["tags"].append(
+                {
+                    "begin": "<|channel|>final<|message|>",
+                    "content": final_content_format,
+                    "end": "<|end|>",
+                }
+            )
+
+        return json.dumps(tag)

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import json as json_mod
 import time
 import uuid
 from collections import deque
@@ -66,6 +67,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_system_message,
     get_user_message,
     has_custom_tools,
+    inject_response_formats,
     render_for_completion,
 )
 from vllm.entrypoints.openai.responses.context import (
@@ -126,6 +128,26 @@ from vllm.utils.collection_utils import as_list
 logger = init_logger(__name__)
 
 
+def _extract_response_format_schema(request: ResponsesRequest) -> dict | None:
+    """Extract JSON schema from the request's structured output config."""
+    if (
+        request.text is not None
+        and request.text.format is not None
+        and request.text.format.type == "json_schema"
+        and request.text.format.schema_ is not None
+    ):
+        return request.text.format.schema_
+    if (
+        request.structured_outputs is not None
+        and request.structured_outputs.json is not None
+    ):
+        val = request.structured_outputs.json
+        if isinstance(val, str):
+            return json_mod.loads(val)
+        return val
+    return None
+
+
 def _extract_allowed_tools_from_mcp_requests(
     tools: list[Tool],
 ) -> dict[str, list[str] | None]:
@@ -163,6 +185,32 @@ def _extract_allowed_tools_from_mcp_requests(
 
         allowed_tools_map[tool.server_label] = allowed_tools_val
     return allowed_tools_map
+
+
+def _constraint_to_content_format(
+    params: StructuredOutputsParams,
+) -> dict | None:
+    """Convert a StructuredOutputsParams constraint into an xgrammar
+    content format dict suitable for embedding in a structural tag."""
+    if params.json is not None:
+        schema = (
+            params.json
+            if isinstance(params.json, dict)
+            else json_mod.loads(params.json)
+        )
+        return {"type": "json_schema", "json_schema": schema}
+    if params.json_object:
+        return {"type": "json_schema", "json_schema": {"type": "object"}}
+    if params.regex is not None:
+        return {"type": "regex", "pattern": params.regex}
+    if params.grammar is not None:
+        return {"type": "grammar", "grammar": params.grammar}
+    if params.choice is not None:
+        return {
+            "type": "or",
+            "elements": [{"type": "const_string", "value": c} for c in params.choice],
+        }
+    return None
 
 
 class OpenAIServingResponses(OpenAIServing):
@@ -411,83 +459,126 @@ class OpenAIServingResponses(OpenAIServing):
         else:
             assert len(builtin_tool_list) == 0
             available_tools = []
-        tokenizer = self.renderer.get_tokenizer()
+        try:
+            tokenizer = self.renderer.get_tokenizer()
 
-        for engine_prompt in engine_prompts:
-            maybe_error = self._validate_generator_input(engine_prompt)
-            if maybe_error is not None:
-                return maybe_error
+            for engine_prompt in engine_prompts:
+                maybe_error = self._validate_generator_input(engine_prompt)
+                if maybe_error is not None:
+                    return maybe_error
 
-            default_max_tokens = get_max_tokens(
-                max_model_len,
-                request.max_output_tokens,
-                self._extract_prompt_len(engine_prompt),
-                self.default_sampling_params,
-                self.override_max_tokens,
-            )
+                default_max_tokens = get_max_tokens(
+                    max_model_len,
+                    request.max_output_tokens,
+                    self._extract_prompt_len(engine_prompt),
+                    self.default_sampling_params,
+                    self.override_max_tokens,
+                )
 
-            sampling_params = request.to_sampling_params(
-                default_max_tokens, self.default_sampling_params
-            )
+                sampling_params = request.to_sampling_params(
+                    default_max_tokens, self.default_sampling_params
+                )
 
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
+                trace_headers = (
+                    None
+                    if raw_request is None
+                    else await self._get_trace_headers(raw_request.headers)
+                )
 
-            context: ConversationContext
-            if self.use_harmony:
-                if request.stream:
-                    context = StreamingHarmonyContext(messages, available_tools)
+                context: ConversationContext
+                if self.use_harmony:
+                    if request.stream:
+                        context = StreamingHarmonyContext(messages, available_tools)
+                    else:
+                        context = HarmonyContext(messages, available_tools)
                 else:
-                    context = HarmonyContext(messages, available_tools)
-            else:
-                if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
-                    # This is a feature in development for parsing
-                    # tokens during generation instead of at the end
-                    context = ParsableContext(
-                        response_messages=messages,
-                        tokenizer=tokenizer,
-                        reasoning_parser_cls=self.parser.reasoning_parser_cls
-                        if self.parser
-                        else None,
-                        request=request,
-                        tool_parser_cls=self.parser.tool_parser_cls
-                        if self.parser
-                        else None,
-                        available_tools=available_tools,
-                        chat_template=self.chat_template,
-                        chat_template_content_format=self.chat_template_content_format,
-                    )
-                else:
-                    context = SimpleContext()
+                    if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
+                        # This is a feature in development for parsing
+                        # tokens during generation instead of at the end
+                        context = ParsableContext(
+                            response_messages=messages,
+                            tokenizer=tokenizer,
+                            reasoning_parser_cls=self.parser.reasoning_parser_cls
+                            if self.parser
+                            else None,
+                            request=request,
+                            tool_parser_cls=self.parser.tool_parser_cls
+                            if self.parser
+                            else None,
+                            available_tools=available_tools,
+                            chat_template=self.chat_template,
+                            chat_template_content_format=self.chat_template_content_format,
+                        )
+                    else:
+                        context = SimpleContext()
 
-            if self.parser and self.parser.reasoning_parser_cls is not None:
-                reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
-                if (
-                    isinstance(
-                        struct_out := sampling_params.structured_outputs,
-                        StructuredOutputsParams,
-                    )
-                    and struct_out.all_non_structural_tag_constraints_none()
-                ):
-                    sampling_params.structured_outputs = replace(
-                        struct_out,
-                        structural_tag=reasoning_parser.prepare_structured_tag(
-                            struct_out.structural_tag, self.tool_server
-                        ),
-                    )
-            generator = self._generate_with_builtin_tools(
-                request_id=request.request_id,
-                engine_prompt=engine_prompt,
-                sampling_params=sampling_params,
-                context=context,
-                lora_request=lora_request,
-                priority=request.priority,
-                trace_headers=trace_headers,
-            )
-            generators.append(generator)
+                if self.parser and self.parser.reasoning_parser_cls is not None:
+                    reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
+                    struct_out = sampling_params.structured_outputs
+
+                    if isinstance(struct_out, StructuredOutputsParams):
+                        if struct_out.all_non_structural_tag_constraints_none():
+                            # No content constraint — just apply reasoning
+                            # channel tags
+                            sampling_params.structured_outputs = replace(
+                                struct_out,
+                                structural_tag=(
+                                    reasoning_parser.prepare_structured_tag(
+                                        struct_out.structural_tag,
+                                        self.tool_server,
+                                    )
+                                ),
+                            )
+                        else:
+                            # Content constraint present (json, regex,
+                            # grammar, choice, json_object). Embed it in the
+                            # final channel tag within the structural tag.
+                            content_fmt = _constraint_to_content_format(struct_out)
+                            if content_fmt is not None:
+                                structural_tag = (
+                                    reasoning_parser.prepare_structured_tag(
+                                        None,
+                                        self.tool_server,
+                                        final_content_format=content_fmt,
+                                    )
+                                )
+                                if structural_tag is not None:
+                                    # Clear content constraints, set
+                                    # structural_tag, but preserve options
+                                    # like disable_any_whitespace.
+                                    sampling_params.structured_outputs = replace(
+                                        struct_out,
+                                        json=None,
+                                        regex=None,
+                                        choice=None,
+                                        grammar=None,
+                                        json_object=None,
+                                        structural_tag=structural_tag,
+                                    )
+                    elif struct_out is None:
+                        # No structured output requested, but still need
+                        # reasoning channel tags
+                        tag = reasoning_parser.prepare_structured_tag(
+                            None, self.tool_server
+                        )
+                        if tag is not None:
+                            sampling_params.structured_outputs = (
+                                StructuredOutputsParams(
+                                    structural_tag=tag  # type: ignore[call-arg]
+                                )
+                            )
+                generator = self._generate_with_builtin_tools(
+                    request_id=request.request_id,
+                    engine_prompt=engine_prompt,
+                    sampling_params=sampling_params,
+                    context=context,
+                    lora_request=lora_request,
+                    priority=request.priority,
+                    trace_headers=trace_headers,
+                )
+                generators.append(generator)
+        except ValueError as e:
+            return self.create_error_response(e)
 
         assert len(generators) == 1
         (result_generator,) = generators
@@ -1139,9 +1230,23 @@ class OpenAIServingResponses(OpenAIServing):
                 request, with_custom_tools, tool_types
             )
             messages.append(sys_msg)
-            if with_custom_tools:
+
+            # Determine if we need a developer message.
+            # Per Harmony cookbook: developer message holds instructions,
+            # function tools, AND response format schemas.
+            response_format_schema = _extract_response_format_schema(request)
+            needs_dev_msg = with_custom_tools or response_format_schema is not None
+
+            if needs_dev_msg:
+                response_format_text = None
+                if response_format_schema is not None:
+                    response_format_text = inject_response_formats(
+                        None, response_format_schema
+                    )
                 dev_msg = get_developer_message(
-                    instructions=request.instructions, tools=request.tools
+                    instructions=request.instructions,
+                    tools=request.tools if with_custom_tools else None,
+                    response_format_section=response_format_text,
                 )
                 messages.append(dev_msg)
             messages += construct_harmony_previous_input_messages(request)
@@ -1981,7 +2086,7 @@ class OpenAIServingResponses(OpenAIServing):
                 output=[],
                 status="in_progress",
                 usage=None,
-            ).model_dump()
+            )
             yield _increment_sequence_number_and_return(
                 ResponseCreatedEvent(
                     type="response.created",
