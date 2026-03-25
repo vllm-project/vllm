@@ -196,9 +196,7 @@ def finalize_layerwise_process(model: torch.nn.Module, model_config: ModelConfig
                 )
 
             else:
-                # reloading: place kernel tensors back
-                if info.kernel_tensors is not None:
-                    _place_kernel_tensors(layer, info)
+                _place_or_materialize(layer, info)
                 layer.process_weights_after_loading(model_config.dtype)
 
         # No weights were loaded
@@ -275,8 +273,8 @@ def _place_or_materialize(layer: torch.nn.Module, info: LayerReloadingInfo):
     if info.kernel_tensors is not None:
         _place_kernel_tensors(layer, info)
 
-    # first load: initialize with `--load_format dummy` option
-    else:
+    # first load but received no weights: assume `--load_format dummy` option
+    elif info.can_load():
         materialize_layer(layer)
         for tensor in get_layer_tensors(layer).values():
             initialize_single_dummy_weight(tensor)
