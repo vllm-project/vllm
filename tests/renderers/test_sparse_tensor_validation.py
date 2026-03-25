@@ -190,7 +190,38 @@ class TestImageEmbedsValidation:
         with pytest.raises((RuntimeError, ValueError)):
             io_handler.load_bytes(buffer.read())
 
+    def test_valid_numpy_tensor_accepted(self):
+        """numpy .npy format should load and return correct tensor."""
+        import numpy as np
 
+        io_handler = ImageEmbeddingMediaIO()
+
+        arr = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+        buf = io.BytesIO()
+        np.save(buf, arr)
+        encoded = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+        result = io_handler.load_base64("", encoded)
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == torch.Size([2, 3])
+        assert result.dtype == torch.float32
+        assert torch.allclose(result, torch.from_numpy(arr))
+
+    def test_numpy_int32_tensor_accepted(self):
+        """numpy int32 arrays should round-trip correctly."""
+        import numpy as np
+
+        io_handler = ImageEmbeddingMediaIO()
+
+        arr = np.arange(280, dtype=np.int32)
+        buf = io.BytesIO()
+        np.save(buf, arr)
+        encoded = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+        result = io_handler.load_base64("", encoded)
+        assert result.dtype == torch.int32
+        assert result.shape == torch.Size([280])
+        assert (result == torch.from_numpy(arr)).all()
 class TestAudioEmbedsValidation:
     """Test sparse tensor validation in audio embeddings (Chat API)."""
 
