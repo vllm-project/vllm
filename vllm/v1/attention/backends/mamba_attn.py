@@ -358,7 +358,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=decode_threshold
+                common_attn_metadata,
+                decode_threshold=decode_threshold,
+                treat_short_extends_as_decodes=False,
             )
         )
 
