@@ -51,8 +51,10 @@ def test_commit_eplb_maps_shape_change():
     )
     _commit_eplb_maps(model_state, new_phy2log_larger)
 
-    # Check that the number of physical experts has been updated
+    # Check that the number of physical experts has been updated and that the values
+    # match
     assert model_state.physical_to_logical_map.shape[1] == num_physical + 2
+    assert torch.equal(model_state.physical_to_logical_map, new_phy2log_larger)
 
 
 def test_commit_eplb_maps_for_layer_logical_padding():
