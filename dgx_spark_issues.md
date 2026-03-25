@@ -134,15 +134,30 @@ PyTorch only supports compute capabilities 8.0-9.0.
 
 ---
 
+## 2026-03-26 更新：NVIDIA 官方 DGX Spark 修复
+
+**PR #38126** — "[NVIDIA] Fix DGX Spark logic" by johnnynunez (NVIDIA maintainer)
+- **状态：** Open，5 条评论，活跃讨论中
+- **内容：** NVIDIA 官方维护者在修复 DGX Spark 相关问题
+- **影响：** 如果这个 PR merge，可能解决部分 DGX Spark 问题
+- **我的策略：** 观察这个 PR 的内容，如果它解决了 Marlin 自动检测问题，我可以转向其他 DGX Spark 方向；如果没有，继续推进 #37141
+
+**教训：**
+- NVIDIA 维护者也在关注 DGX Spark，这是好事
+- 社区协作：我可以测试他们的修复，提供反馈
+- 避免重复工作：先看看 #38126 解决了什么
+
+---
+
 ## 总结
 
 **DGX Spark 独特优势：**
 1. 我们有真实的 GB10 硬件可以测试
 2. 社区里 DGX Spark 用户相对少，贡献更容易被注意到
-3. 维护者 (ProExpertProg) 明确表示需要 DGX Spark 相关的改进
+3. 维护者 (ProExpertProg, johnnynunez) 明确表示需要 DGX Spark 相关的改进
 
 **最佳 PR 方向：**
-- #37141: 自动检测 GB10/SM121 并默认启用 Marlin backend
+- #37141: 自动检测 GB10/SM121 并默认启用 Marlin backend（如果 #38126 没覆盖）
 - 改动小，逻辑清晰
 - 有 maintainer 认可
 - 可以直接在本地测试
