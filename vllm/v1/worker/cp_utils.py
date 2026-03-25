@@ -35,7 +35,8 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "does not return the softmax lse for decode. "
                     "Try using a different attention backend by "
                     "setting the VLLM_ATTENTION_BACKEND environment "
-                    "variable (e.g., VLLM_ATTENTION_BACKEND=FLASH_ATTN)."
+                    "variable (e.g., VLLM_ATTENTION_BACKEND=FLASH_ATTN) "
+                    "or using the --attention-backend CLI argument."
                 )
 
             if pcp_size > 1:
