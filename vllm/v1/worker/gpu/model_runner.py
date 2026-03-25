@@ -62,7 +62,10 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     get_uniform_token_count,
 )
 from vllm.v1.worker.gpu.dp_utils import sync_cudagraph_and_dp_padding
-from vllm.v1.worker.gpu.eplb_utils import EPLBController
+from vllm.v1.worker.gpu.eplb_utils import (
+    EPLBController,
+    step_eplb_after,
+)
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -249,34 +252,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
         )
 
-    @property
-    def eplb_state(self):
-        return self.eplb.state
-
-    @eplb_state.setter
-    def eplb_state(self, state) -> None:
-        self.eplb.state = state
-
-    @property
-    def eep_eplb_suppressed(self) -> bool:
-        return self.eplb.suppressed
-
-    @eep_eplb_suppressed.setter
-    def eep_eplb_suppressed(self, suppressed: bool) -> None:
-        self.eplb.suppressed = suppressed
-
-    def setup_eplb_from_mapping(
-        self,
-        expanded_physical_to_logical: torch.Tensor,
-        old_num_physical_experts: int,
-    ) -> None:
-        self.eplb.setup_from_mapping(
-            self.get_model(),
-            self.model_config,
-            expanded_physical_to_logical,
-            old_num_physical_experts,
-        )
-
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
@@ -419,6 +394,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
     @torch.inference_mode()
+    @step_eplb_after(is_dummy=True)
     def _dummy_run(
         self,
         num_tokens: int,
@@ -470,8 +446,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Non-last PP ranks don't produce output for sampling.
         if not self.is_last_pp_rank:
-            if not skip_eplb:
-                self.eplb.step(is_dummy=True, is_profile=is_profile)
             return None, None
 
         assert self.execute_model_state is not None
@@ -517,9 +491,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_attn_for_dummy_run=skip_attn,
                 mm_inputs=mm_inputs,
             )
-
-        if not skip_eplb:
-            self.eplb.step(is_dummy=True, is_profile=is_profile)
 
         assert hidden_states is not None  # Last PP rank always has hidden_states
         sample_hidden_states = hidden_states[input_batch.logits_indices]
@@ -1144,6 +1115,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return None
 
     @torch.inference_mode()
+    @step_eplb_after()
     def sample_tokens(
         self, grammar_output: GrammarOutput | None
     ) -> AsyncOutput | ModelRunnerOutput | None:
@@ -1168,7 +1140,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch.num_reqs, max_sample_len=self.num_speculative_steps + 1
             )
             self.postprocess(input_batch, sampled, num_sampled, num_rejected)
-            self.eplb.step()
             return None
 
         # Last rank: sample tokens
@@ -1258,7 +1229,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
 
-        self.eplb.step()
         if self.use_async_scheduling:
             return async_output
         return async_output.get_output()
@@ -1267,6 +1237,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return self.draft_tokens_handler.get_draft_tokens()
 
     @torch.inference_mode()
+    @step_eplb_after()
     def pool(self) -> AsyncPoolingOutput | ModelRunnerOutput | None:
         if self.execute_model_state is None:
             # The prior execute_model call must have failed.
@@ -1279,15 +1250,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not self.is_last_pp_rank:
             self.postprocess_pool(input_batch)
-            self.eplb.step()
             return None
 
         assert self.pooling_runner is not None
         pooler_output, is_valid = self.pooling_runner.pool(
             hidden_states, input_batch, self.req_states
         )
-        self.postprocess_pool(input_batch)
-        self.eplb.step()
 
         # Build the model runner output.
         model_runner_output = ModelRunnerOutput(
@@ -1303,6 +1271,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             copy_event=self.output_copy_event,
         )
+
+        self.postprocess_pool(input_batch)
         if self.use_async_scheduling:
             return async_output
         return async_output.get_output()
@@ -1322,6 +1292,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         np.minimum(
             computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
         )
+
+    ########### EPLB methods start ###########
+    @property
+    def eplb_state(self):
+        return self.eplb.state
+
+    @eplb_state.setter
+    def eplb_state(self, state) -> None:
+        self.eplb.state = state
+
+    @property
+    def eep_eplb_suppressed(self) -> bool:
+        return self.eplb.suppressed
+
+    @eep_eplb_suppressed.setter
+    def eep_eplb_suppressed(self, suppressed: bool) -> None:
+        self.eplb.suppressed = suppressed
+
+    def setup_eplb_from_mapping(
+        self,
+        expanded_physical_to_logical: torch.Tensor,
+        old_num_physical_experts: int,
+    ) -> None:
+        self.eplb.setup_from_mapping(
+            self.get_model(),
+            self.model_config,
+            expanded_physical_to_logical,
+            old_num_physical_experts,
+        )
+
+    ########### EPLB methods end ###########
 
 
 class ExecuteModelState(NamedTuple):

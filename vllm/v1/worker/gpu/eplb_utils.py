@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from collections.abc import Callable
+from functools import wraps
+from typing import Any, Concatenate, ParamSpec, TypeVar
 
 import torch
 import torch.nn as nn
@@ -11,6 +13,36 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
 
 logger = init_logger(__name__)
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def step_eplb_after(
+    *,
+    is_dummy: bool = False,
+) -> Callable[
+    [Callable[Concatenate[Any, P], R]],
+    Callable[Concatenate[Any, P], R],
+]:
+    """Step EPLB after a model runner method completes successfully."""
+
+    def decorator(
+        fn: Callable[Concatenate[Any, P], R],
+    ) -> Callable[Concatenate[Any, P], R]:
+        @wraps(fn)
+        def wrapper(self: Any, *args: P.args, **kwargs: P.kwargs) -> R:
+            result = fn(self, *args, **kwargs)
+            if kwargs.get("skip_eplb", False):
+                return result
+
+            is_profile = kwargs.get("is_profile", False) if is_dummy else False
+            self.eplb.step(is_dummy=is_dummy, is_profile=is_profile)
+            return result
+
+        return wrapper
+
+    return decorator
 
 
 class EPLBController:
