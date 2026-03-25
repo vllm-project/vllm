@@ -342,23 +342,24 @@ def get_pkg_version(run_lambda, pkg):
         cmd = ""
         if mgr_name in ["dnf", "yum"]:
             index = 1
-            cmd = f"{mgr_name} list | grep {pkg_name}"
+            cmd = f"{mgr_name} list | grep -w {pkg_name}"
         elif mgr_name == "zypper":
             index = 2
             cmd = f"{mgr_name} info {pkg_name} | grep Version"
         elif mgr_name == "dpkg":
             index = 2
-            cmd = f"{mgr_name} -l | grep {pkg_name}"
+            cmd = f"{mgr_name} -l | grep -w {pkg_name}"
 
         if cmd:
-            ret = run_and_read_all(run_lambda, cmd)
-            if ret:
+            out = run_and_read_all(run_lambda, cmd)
+            if out:
+                ret = out.splitlines()[0]
                 break
 
     if not ret or index == -1:
         return "N/A"
 
-    lst = re.sub(" +", " ", ret).split(" ")
+    lst = re.sub(" +", " ", ret).strip().split(" ")
     if len(lst) > index:
         return lst[index]
 
@@ -953,7 +954,7 @@ def pretty_str(envinfo):
     all_dynamic_xpu_fields_missing = all(
         mutable_dict[field] is None for field in dynamic_xpu_fields
     )
-    xpu_available = get_xpu_available()
+    xpu_available = mutable_dict.get("xpu_available") == "True"
     if not xpu_available and all_dynamic_xpu_fields_missing:
         for field in all_xpu_fields:
             mutable_dict[field] = "No XPU"
