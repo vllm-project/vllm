@@ -4,6 +4,7 @@ from copy import deepcopy
 from math import lcm
 from typing import TYPE_CHECKING
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.utils.math_utils import cdiv, round_up
@@ -130,9 +131,12 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             cache_config.calculate_kv_scales = False
 
         # Save the user input before it gets modified by MambaModelConfig
-        mamba_block_size = cache_config.mamba_block_size
+        mamba_block_size = vllm_config.cache_config.mamba_block_size
         # Enable FULL_AND_PIECEWISE by default
-        MambaModelConfig.verify_and_update_config(vllm_config)
+        MambaModelConfig.verify_and_update_config(
+            vllm_config,
+            ensure_batch_invariant_chunk_alignment=False,
+        )
 
         attention_config = vllm_config.attention_config
         cache_config = vllm_config.cache_config
@@ -237,6 +241,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         # basic granularity for prefix caching.
         if cache_config.mamba_cache_mode == "align":
             cache_config.mamba_block_size = cache_config.block_size
+
+        MambaModelConfig._ensure_batch_invariant_chunk_alignment(vllm_config)
 
         # compute new attention page size
         attn_page_size = cache_config.block_size * attn_page_size_1_token
@@ -369,7 +375,39 @@ class LlamaNemotronVLConfig(VerifyAndUpdateConfig):
 
 class MambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
-    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+    def _ensure_batch_invariant_chunk_alignment(cls, vllm_config: "VllmConfig") -> None:
+        cache_config = vllm_config.cache_config
+        if not (envs.VLLM_BATCH_INVARIANT and cache_config.enable_prefix_caching):
+            return
+
+        effective_mamba_block_size = cache_config.mamba_block_size
+        assert effective_mamba_block_size is not None
+
+        chunk_size = vllm_config.model_config.get_mamba_chunk_size()
+        assert chunk_size is not None
+
+        if effective_mamba_block_size % chunk_size == 0:
+            return
+
+        aligned = round_up(effective_mamba_block_size, chunk_size)
+        logger.info(
+            "Batch-invariant mode: rounding mamba_block_size from %d "
+            "to %d to align with mamba_chunk_size=%d.",
+            effective_mamba_block_size,
+            aligned,
+            chunk_size,
+        )
+        cache_config.mamba_block_size = aligned
+        if cache_config.mamba_cache_mode == "align":
+            cache_config.block_size = aligned
+
+    @classmethod
+    def verify_and_update_config(
+        cls,
+        vllm_config: "VllmConfig",
+        *,
+        ensure_batch_invariant_chunk_alignment: bool = True,
+    ) -> None:
         """
         Enable FULL_AND_PIECEWISE cuda graph mode by default (required
         to get good performance for mamba layers in V1).
@@ -425,6 +463,9 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 )
             if cache_config.mamba_block_size is None:
                 cache_config.mamba_block_size = model_config.max_model_len
+
+        if ensure_batch_invariant_chunk_alignment:
+            cls._ensure_batch_invariant_chunk_alignment(vllm_config)
 
 
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):

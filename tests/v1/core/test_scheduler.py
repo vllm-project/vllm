@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
 import torch
 
+import vllm.v1.core.sched.scheduler as scheduler_mod
 from vllm.config import (
     CacheConfig,
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
+    ParallelConfig,
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
@@ -30,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -681,6 +685,194 @@ def test_schedule_order(enable_chunked_prefill: bool):
         # and scheduling subsequent short requests in advance,
         # even though there is still token budgets remaining.
         assert len(scheduler_output1.scheduled_new_reqs) == 1
+
+
+def _mamba_chunk_invariant_build_configs(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    invariant_enabled: bool,
+    chunk_size: int = 256,
+    max_num_batched_tokens: int = 8192,
+    max_num_seqs: int = 8,
+    max_model_len: int = 8192,
+    long_prefill_token_threshold: int = 0,
+    block_size: int = 16,
+    num_blocks: int = 10000,
+) -> tuple[VllmConfig, KVCacheConfig, int]:
+    monkeypatch.setattr(scheduler_mod.envs, "VLLM_BATCH_INVARIANT", invariant_enabled)
+    model_config = ModelConfig(
+        model="facebook/opt-125m",
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+        skip_tokenizer_init=True,
+    )
+    monkeypatch.setattr(
+        model_config,
+        "get_mamba_chunk_size",
+        lambda: chunk_size,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_model_len=max_model_len,
+        long_prefill_token_threshold=long_prefill_token_threshold,
+        disable_chunked_mm_input=False,
+        enable_chunked_prefill=True,
+        async_scheduling=False,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+    )
+    cache_config = CacheConfig(
+        block_size=block_size,
+        gpu_memory_utilization=0.9,
+        cache_dtype="auto",
+        enable_prefix_caching=False,
+    )
+    vllm_config = VllmConfig(
+        scheduler_config=scheduler_config,
+        model_config=model_config,
+        cache_config=cache_config,
+        parallel_config=ParallelConfig(),
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((1,),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="none",
+                ),
+            )
+        ],
+    )
+    cache_config.num_gpu_blocks = num_blocks
+    return vllm_config, kv_cache_config, block_size
+
+
+def _create_mamba_chunk_invariant_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+    **kwargs: Any,
+) -> Scheduler:
+    vllm_config, kv_cache_config, block_size = _mamba_chunk_invariant_build_configs(
+        monkeypatch,
+        **kwargs,
+    )
+    return Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        block_size=block_size,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+        log_stats=False,
+    )
+
+
+def test_mamba_chunk_invariant_clamps_prefill_to_chunk(monkeypatch: pytest.MonkeyPatch):
+    scheduler = _create_mamba_chunk_invariant_scheduler(
+        monkeypatch,
+        invariant_enabled=True,
+        chunk_size=256,
+        max_num_batched_tokens=300,
+        max_num_seqs=8,
+        max_model_len=8192,
+    )
+    (req,) = create_requests(num_requests=1, num_tokens=500, req_ids=["long"])
+    scheduler.add_request(req)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens["long"] == 256
+
+
+def test_mamba_chunk_invariant_no_clamp_without_batch_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    scheduler = _create_mamba_chunk_invariant_scheduler(
+        monkeypatch,
+        invariant_enabled=False,
+        chunk_size=256,
+        max_num_batched_tokens=300,
+        max_num_seqs=8,
+        max_model_len=8192,
+    )
+    (req,) = create_requests(num_requests=1, num_tokens=500, req_ids=["long"])
+    scheduler.add_request(req)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens["long"] == 300
+
+
+def test_mamba_chunk_invariant_rejects_small_max_num_batched_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    vllm_config, kv_cache_config, block_size = _mamba_chunk_invariant_build_configs(
+        monkeypatch,
+        invariant_enabled=True,
+        chunk_size=256,
+        max_num_batched_tokens=128,
+        max_num_seqs=8,
+        max_model_len=8192,
+    )
+    with pytest.raises(ValueError, match="max_num_batched_tokens.*mamba_chunk_size"):
+        Scheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            block_size=block_size,
+            structured_output_manager=StructuredOutputManager(vllm_config),
+            log_stats=False,
+        )
+
+
+def test_mamba_chunk_invariant_rejects_small_long_prefill_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    vllm_config, kv_cache_config, block_size = _mamba_chunk_invariant_build_configs(
+        monkeypatch,
+        invariant_enabled=True,
+        chunk_size=256,
+        max_num_batched_tokens=512,
+        max_num_seqs=8,
+        max_model_len=8192,
+        long_prefill_token_threshold=100,
+    )
+    with pytest.raises(
+        ValueError, match="long_prefill_token_threshold.*mamba_chunk_size"
+    ):
+        Scheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            block_size=block_size,
+            structured_output_manager=StructuredOutputManager(vllm_config),
+            log_stats=False,
+        )
+
+
+def test_mamba_chunk_invariant_defers_long_schedules_short_same_step(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Batch-invariant ctor requires max_num_batched_tokens >= mamba_chunk_size, so we
+    # cannot set budget=100 with chunk=256. Instead, a prior request consumes the
+    # budget until the remainder is < chunk_size; then a long prefill defers while a
+    # later short request still fits in the same step.
+    scheduler = _create_mamba_chunk_invariant_scheduler(
+        monkeypatch,
+        invariant_enabled=True,
+        chunk_size=256,
+        max_num_batched_tokens=300,
+        max_num_seqs=8,
+        max_model_len=8192,
+    )
+    (medium_req,) = create_requests(num_requests=1, num_tokens=200, req_ids=["medium"])
+    (long_req,) = create_requests(num_requests=1, num_tokens=500, req_ids=["long"])
+    (short_req,) = create_requests(num_requests=1, num_tokens=10, req_ids=["short"])
+    scheduler.add_request(medium_req)
+    scheduler.add_request(long_req)
+    scheduler.add_request(short_req)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens["medium"] == 200
+    assert output.num_scheduled_tokens["short"] == 10
+    assert "long" not in output.num_scheduled_tokens
+    assert {r.req_id for r in output.scheduled_new_reqs} == {"medium", "short"}
 
 
 def test_preempt_during_execution():

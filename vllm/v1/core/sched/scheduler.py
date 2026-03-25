@@ -50,7 +50,11 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
-from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.sched.utils import (
+    check_stop,
+    remove_all,
+    validate_mamba_chunk_invariant_batch_settings,
+)
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
@@ -245,6 +249,17 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
+        self.need_mamba_chunk_invariant_split = (
+            self.has_mamba_layers and envs.VLLM_BATCH_INVARIANT
+        )
+        if self.need_mamba_chunk_invariant_split:
+            self.mamba_chunk_size = vllm_config.model_config.get_mamba_chunk_size()
+            assert self.mamba_chunk_size is not None
+            validate_mamba_chunk_invariant_batch_settings(
+                self.max_num_scheduled_tokens,
+                self.mamba_chunk_size,
+                self.scheduler_config.long_prefill_token_threshold,
+            )
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
@@ -287,6 +302,34 @@ class Scheduler(SchedulerInterface):
             )
 
         self._pause_state: PauseState = PauseState.UNPAUSED
+
+    def _mamba_chunk_invariant_split(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_computed_tokens: int,
+    ) -> int:
+        """Align chunked-prefill boundaries to mamba chunk_size for batch
+        invariance.  Only active during prefill (num_new_tokens > 1); decode
+        steps pass through unchanged.
+
+        Returns the (possibly reduced) num_new_tokens, or 0 when the
+        remaining token budget is too small to reach the next chunk boundary
+        (the caller should defer this request to the next scheduling step).
+        """
+        if num_new_tokens <= 1:
+            return num_new_tokens
+
+        remaining = request.num_tokens - num_computed_tokens
+        if num_new_tokens >= remaining:
+            return num_new_tokens
+
+        chunk_size = self.mamba_chunk_size
+        end_position = num_computed_tokens + num_new_tokens
+        aligned_end = (end_position // chunk_size) * chunk_size
+        if aligned_end <= num_computed_tokens:
+            return 0
+        return aligned_end - num_computed_tokens
 
     def _mamba_block_aligned_split(
         self,
@@ -427,6 +470,13 @@ class Scheduler(SchedulerInterface):
                     shift_computed_tokens=1 if self.use_eagle else 0,
                 )
 
+            if self.need_mamba_chunk_invariant_split:
+                num_new_tokens = self._mamba_chunk_invariant_split(
+                    request,
+                    num_new_tokens,
+                    request.num_computed_tokens,
+                )
+
             if self.need_mamba_block_aligned_split:
                 num_new_tokens = self._mamba_block_aligned_split(
                     request, num_new_tokens
@@ -444,6 +494,8 @@ class Scheduler(SchedulerInterface):
                 # 3. The encoder cache is exhausted.
                 # 4. Insufficient budget for a block-aligned chunk in hybrid
                 #    models with mamba cache mode \"align\".
+                # 5. Insufficient budget for a chunk-aligned prefill in
+                #    batch-invariant mode with mamba models.
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
@@ -690,6 +742,23 @@ class Scheduler(SchedulerInterface):
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
+
+                if self.need_mamba_chunk_invariant_split:
+                    num_new_tokens = self._mamba_chunk_invariant_split(
+                        request,
+                        num_new_tokens,
+                        num_computed_tokens,
+                    )
+                    if num_new_tokens == 0:
+                        # Budget too small for chunk-aligned prefill.
+                        # Unlike _mamba_block_aligned_split which breaks
+                        # (all subsequent requests would also fail), here
+                        # we continue because a later request may still
+                        # be schedulable with the same budget if its
+                        # remaining prompt is short enough to finish.
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
 
                 if self.need_mamba_block_aligned_split:
                     num_new_tokens = self._mamba_block_aligned_split(
