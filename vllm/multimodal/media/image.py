@@ -109,7 +109,7 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
     def _load_pickled_torch(self, data: bytes) -> torch.Tensor:
         # Enable sparse tensor integrity checks to prevent out-of-bounds
-        # writes from maliciously crafted tensors.
+        # writes from maliciously crafted tensors
         with torch.sparse.check_sparse_tensor_invariants():
             buffer = BytesIO(data)
             tensor = torch.load(buffer, weights_only=True)
