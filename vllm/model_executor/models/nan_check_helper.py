@@ -25,7 +25,7 @@ _log_fh = None
 _nan_counts: torch.Tensor | None = None
 _inf_counts: torch.Tensor | None = None
 
-# Attention detail tensors: shape (num_layers, 19)
+# Attention detail tensors: shape (num_layers, 21)
 # Outer MLA wrapper (mla.py):
 #   0=qkv_proj, 1=q_norm, 2=kv_norm, 3=rope, 4=mla_attn, 5=o_proj
 # Inner MLAAttention (mla_attention.py):
@@ -34,6 +34,7 @@ _inf_counts: torch.Tensor | None = None
 #   14=mha_q, 15=mha_kv_c_normed, 16=mha_k_pe
 #   17=kv_c_normed_decode_real (bf16, seq_lens-filtered)
 #   18=kv_cache_fp8_nan (FP8 NaN via uint8 bit pattern check)
+#   19=after_kv_b_proj_prefill (new tokens), 20=after_kv_b_proj_context_chunk
 _attn_detail: torch.Tensor | None = None
 _inf_attn_detail: torch.Tensor | None = None
 
@@ -54,9 +55,9 @@ def ensure_flags(num_layers: int, device: torch.device) -> None:
     if _inf_counts is None or _inf_counts.shape[0] < num_layers:
         _inf_counts = torch.zeros(num_layers, 4, dtype=torch.int64, device=device)
     if _attn_detail is None or _attn_detail.shape[0] < num_layers:
-        _attn_detail = torch.zeros(num_layers, 19, dtype=torch.int64, device=device)
+        _attn_detail = torch.zeros(num_layers, 21, dtype=torch.int64, device=device)
     if _inf_attn_detail is None or _inf_attn_detail.shape[0] < num_layers:
-        _inf_attn_detail = torch.zeros(num_layers, 19, dtype=torch.int64, device=device)
+        _inf_attn_detail = torch.zeros(num_layers, 21, dtype=torch.int64, device=device)
     if _fwd_mqa_real_nan is None or _fwd_mqa_real_nan.shape[0] < num_layers:
         _fwd_mqa_real_nan = torch.zeros(num_layers, dtype=torch.int64, device=device)
     if _layer_idx_gpu is None or _layer_idx_gpu.shape[0] < num_layers:
@@ -388,7 +389,9 @@ def _emit_report(
                 f"mha_q={ad[14].item()} mha_kv_c={ad[15].item()} "
                 f"mha_k_pe={ad[16].item()} "
                 f"kv_c_normed_real={ad[17].item()} "
-                f"kv_cache_fp8_nan={ad[18].item()}\n"
+                f"kv_cache_fp8_nan={ad[18].item()} "
+                f"kv_b_proj_prefill={ad[19].item()} "
+                f"kv_b_proj_ctx_chunk={ad[20].item()}\n"
             )
             f.write(msg)
             f.flush()
