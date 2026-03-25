@@ -254,7 +254,7 @@ class GLUPointWiseConv(nn.Module):
 
 
 class DepthWiseSeperableConv1d(nn.Module):
-    """DepthWiseSeperableConv1d module used in Convnet module
+class DepthWiseSeparableConv1d(nn.Module):
     for the conformer, for more details see:
     https://arxiv.org/pdf/2005.08100v1.pdf
 
@@ -426,7 +426,7 @@ class ConvModule(nn.Module):
         else:
             padding = (kernel_size - 1) // 2
 
-        self.dw_sep_conv_1d = DepthWiseSeperableConv1d(
+        self.dw_sep_conv_1d = DepthWiseSeparableConv1d(
             input_dim,
             depthwise_seperable_out_channel,
             kernel_size,

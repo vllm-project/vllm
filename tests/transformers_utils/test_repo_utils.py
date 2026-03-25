@@ -31,9 +31,9 @@ def test_list_filtered_repo_files(
         (path_tmp_dir / "json_file.json").touch()
         (path_tmp_dir / "correct_2.txt").touch()
         (path_tmp_dir / "uncorrect.txt").touch()
-        (path_tmp_dir / "uncorrect.jpeg").touch()
+        (path_tmp_dir / "incorrect.txt").touch()
         (subfolder / "correct.txt").touch()
-        (subfolder / "uncorrect_sub.txt").touch()
+        (subfolder / "incorrect_sub.txt").touch()
 
         def _glob_path() -> list[str]:
             return [

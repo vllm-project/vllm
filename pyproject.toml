@@ -126,7 +126,7 @@ ignore-files = true
 ignore-dot = true
 ignore-vcs = true
 ignore-global = true
-ignore-parent = true
+extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizers_/*",
 
 [tool.typos.default]
 binary = false
@@ -140,7 +140,7 @@ extend-ignore-identifiers-re = ["NVML_*", ".*Unc.*", ".*_thw",
     ".*UE8M0.*", ".*[UE4M3|ue4m3].*", ".*eles.*",
      ".*[Tt]h[rR].*"]
 extend-ignore-words-re = []
-extend-ignore-re = []
+extend-ignore-identifiers-re = [".*[Uu][Ee][0-9][Mm][0-9].*"]
 
 [tool.typos.default.extend-identifiers]
 bbc5b7ede = "bbc5b7ede"
@@ -154,10 +154,10 @@ UperNetDecoder = "UperNetDecoder"
 subtile = "subtile"
 cudaDevAttrMaxSharedMemoryPerBlockOptin = "cudaDevAttrMaxSharedMemoryPerBlockOptin"
 SFOuput = "SFOuput"
-# huggingface transformers repo uses these words
+
 depthwise_seperable_out_channel = "depthwise_seperable_out_channel"
 DepthWiseSeperableConv1d = "DepthWiseSeperableConv1d"
-depthwise_seperable_CNN = "depthwise_seperable_CNN"
+pard_token = "pard_token"
 
 [tool.typos.default.extend-words]
 iy = "iy"
@@ -252,7 +252,7 @@ extend-ignore-identifiers-re = []
 extend-ignore-words-re = []
 extend-ignore-re = []
 
-[tool.typos.type.css.extend-identifiers]
+fo = "fo"
 nd = "nd"
 
 [tool.typos.type.css.extend-words]
@@ -299,7 +299,7 @@ extend-ignore-re = []
 [tool.typos.type.vimscript.extend-identifiers]
 windo = "windo"
 
-[tool.typos.type.vimscript.extend-words]
+eles = "eles"
 
 [tool.uv]
 no-build-isolation-package = ["torch"]

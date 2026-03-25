@@ -252,12 +252,12 @@ class LongcatRouter(nn.Module):
             config.hidden_size,
             self.n_routed_experts,
             bias=config.router_bias,
-            params_dtype=rounter_params_dtype,
+            params_dtype=router_params_dtype,
             quant_config=None,
             prefix=f"{prefix}.classifier",
         )
         self.e_score_correction_bias = nn.Parameter(
-            torch.zeros((self.n_routed_experts), dtype=rounter_params_dtype)
+            torch.zeros((self.n_routed_experts), dtype=router_params_dtype)
         )
 
     def forward(self, hidden_states):
@@ -285,14 +285,14 @@ class LongcatMoe(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
         self.enable_eplb = enable_eplb
         # Gate always runs at half / full precision for now.
-        self.rounter_params_dtype = params_dtype
+        self.router_params_dtype = params_dtype
         if config.router_dtype == "float32":
-            self.rounter_params_dtype = torch.float32
+            self.router_params_dtype = torch.float32
 
         self.router = LongcatRouter(
             config=config,
             zero_expert_num=self.zero_expert_num,
-            rounter_params_dtype=self.rounter_params_dtype,
+            router_params_dtype=self.router_params_dtype,
             prefix=f"{prefix}.gate",
         )
 

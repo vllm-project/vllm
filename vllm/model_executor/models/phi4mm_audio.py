@@ -692,19 +692,19 @@ class ConformerEncoder(TransformerEncoderBase):
             default False.
         ext_pw_out_channel: int, optional
             the number of channel for CNN
-            before depthwise_seperable_CNN.
+            before depthwise_separable_CNN.
             If 0 then use linear. default 0.
         ext_pw_kernel_size: int, optional
-            kernel size of N before depthwise_seperable_CNN.
+            kernel size of N before depthwise_separable_CNN.
             only work for ext_pw_out_channel > 0.
             default 1
         depthwise_seperable_out_channel: int, optional
             the number of channel for
-            depthwise_seperable_CNN.
+            depthwise_separable_CNN.
             default 256.
         depthwise_multiplier: int, optional
             the number of multiplier for
-            depthwise_seperable_CNN.
+            depthwise_separable_CNN.
             default 1.
         chunk_se: int, optional
             0 for offline SE.
@@ -714,7 +714,7 @@ class ConformerEncoder(TransformerEncoderBase):
              by only the current chunk.
             default 0.
         kernel_size: int, optional
-            the number of kernels for depthwise_seperable_CNN.
+            the number of kernels for depthwise_separable_CNN.
             default 3.
         activation: str, optional
             FeedForward block activation.
@@ -724,7 +724,7 @@ class ConformerEncoder(TransformerEncoderBase):
             activation function used in ConvModule part
             of the conformer, default "relu".
         conv_glu_type: str, optional
-            activation used use glu in depthwise_seperable_CNN,
+            activation used use glu in depthwise_separable_CNN,
             default "sigmoid"
         bias_in_glu: bool, optional
             if set to True, use additive bias in the weight module

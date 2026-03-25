@@ -395,7 +395,7 @@ class ReqMeta:
         )
 
 
-def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
+def need_gpu_interim_buffer(lmcache_config: LMCacheEngineConfig):
     return not lmcache_config.enable_pd
 
 
@@ -494,7 +494,7 @@ def _init_lmcache_engine(
         use_mla,
     )
 
-    use_gpu = need_gpu_interm_buffer(lmcache_config)
+    use_gpu = need_gpu_interim_buffer(lmcache_config)
     vllm_gpu_connector: (
         VLLMBufferLayerwiseGPUConnector
         | VLLMPagedMemGPUConnectorV2

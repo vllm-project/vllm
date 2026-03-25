@@ -1414,7 +1414,7 @@ def test_aborted_request_removed_from_worker_in_batch(dist_init):
     req = create_request(request_id=1, do_remote_decode=True, max_tokens=1)
     scheduler.add_request(req)
 
-    # First scheduling pass - examinate build_connector_meta output
+    # First scheduling pass - examine build_connector_meta output
     sched_out = scheduler.schedule()
     kv_meta = sched_out.kv_connector_metadata
     assert kv_meta is not None
