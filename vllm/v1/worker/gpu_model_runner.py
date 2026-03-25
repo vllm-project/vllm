@@ -6687,6 +6687,7 @@ class GPUModelRunner(
             Mapping of layer_name -> {buffer_name -> tensor}.
         """
         result: dict[str, dict[str, torch.Tensor]] = {}
+        num_blocks = self.kv_cache_config.num_blocks
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
             if not isinstance(kv_cache_spec, AttentionSpec):
@@ -6697,15 +6698,6 @@ class GPUModelRunner(
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
-                kv_cache = kv_caches[layer_name]
-                # KV cache shape is backend-specific, but the first
-                # dimension after unbinding K/V is always num_blocks
-                # for flash-style layouts.  For shape (2, num_blocks, ...)
-                # use shape[1]; for (num_blocks, 2, ...) use shape[0].
-                if kv_cache.shape[0] == 2:
-                    num_blocks = kv_cache.shape[1]
-                else:
-                    num_blocks = kv_cache.shape[0]
                 buffers: dict[str, torch.Tensor] = {}
                 for aux in aux_specs:
                     buffers[aux.name] = torch.zeros(
