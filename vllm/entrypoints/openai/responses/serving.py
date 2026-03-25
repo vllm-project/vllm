@@ -713,6 +713,17 @@ class OpenAIServingResponses(OpenAIServing):
         arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
+
+        # Apply truncation when truncation="auto" and the prompt exceeds
+        # the model's context window. Per the OpenAI spec, we drop tokens
+        # from the beginning of the conversation to fit.
+        if request.truncation == "auto":
+            max_model_len = self.model_config.max_model_len
+            max_output = max(request.max_output_tokens or 0, 1)
+            max_input = max_model_len - max_output
+            if len(prompt_token_ids) > max_input and max_input > 0:
+                prompt_token_ids = prompt_token_ids[-max_input:]
+
         engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
         engine_input["arrival_time"] = arrival_time
 

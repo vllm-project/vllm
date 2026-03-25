@@ -154,3 +154,53 @@ class TestResponsesRequestSamplingParams:
         assert "Cannot specify both structured_outputs and text.format" in str(
             exc_info.value
         )
+
+
+class _FakeModelConfig:
+    """Minimal stand-in for ModelConfig used by build_tok_params."""
+
+    def __init__(self, max_model_len: int):
+        self.max_model_len = max_model_len
+
+
+class TestResponsesRequestTruncation:
+    """Test that truncation='auto' produces the right TokenizeParams."""
+
+    def test_truncation_auto_sets_truncate_prompt_tokens(self):
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            truncation="auto",
+        )
+        tok_params = request.build_tok_params(_FakeModelConfig(max_model_len=4096))
+        assert tok_params.truncate_prompt_tokens == -1
+
+    def test_truncation_disabled_sets_none(self):
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            truncation="disabled",
+        )
+        tok_params = request.build_tok_params(_FakeModelConfig(max_model_len=4096))
+        assert tok_params.truncate_prompt_tokens is None
+
+    def test_truncation_default_is_disabled(self):
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+        )
+        assert request.truncation == "disabled"
+        tok_params = request.build_tok_params(_FakeModelConfig(max_model_len=4096))
+        assert tok_params.truncate_prompt_tokens is None
+
+    def test_truncation_auto_max_input_tokens_with_output(self):
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            truncation="auto",
+            max_output_tokens=1024,
+        )
+        tok_params = request.build_tok_params(_FakeModelConfig(max_model_len=4096))
+        # -1 maps to max_input_tokens at truncation time
+        assert tok_params.truncate_prompt_tokens == -1
+        assert tok_params.max_input_tokens == 4096 - 1024
