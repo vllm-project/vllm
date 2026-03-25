@@ -183,7 +183,8 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     :param model: model to finalize processing for
     :param model_config: config needed for applying processing to attention layers
     """
-    model._do_torchao_reload = getattr(model, "_original_do_torchao_reload", False)
+    if hasattr(model, "_original_do_torchao_reload"):
+        model._do_torchao_reload = model._original_do_torchao_reload
 
     for layer in model.modules():
         info = get_layerwise_info(layer)
