@@ -25,6 +25,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
     OffloadPromMetrics,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.policy import (
+    OffloadingPolicy,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
 )
@@ -56,11 +59,12 @@ class OffloadingConnector(KVConnectorBase_V1):
 
         assert kv_cache_config is not None
         spec = OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)
+        self.policy: OffloadingPolicy = spec.get_policy()
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = OffloadingConnectorScheduler(spec)
+            self.connector_scheduler = OffloadingConnectorScheduler(spec, self.policy)
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = OffloadingConnectorWorker(spec)
 
@@ -99,6 +103,8 @@ class OffloadingConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
+        if not self.policy.should_store_in_wait_for_save():
+            return
         self.connector_worker.prepare_store_kv(self._connector_metadata)
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:

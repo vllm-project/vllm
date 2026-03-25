@@ -13,6 +13,9 @@ from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.policy import (
+        OffloadingPolicy,
+    )
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
@@ -61,6 +64,22 @@ class OffloadingSpec(ABC):
 
             assert offloaded_block_size_int % gpu_block_size == 0
             self.block_size_factor = offloaded_block_size_int // gpu_block_size
+
+    def get_policy(self) -> "OffloadingPolicy":
+        """
+        Get the offloading policy for this spec.
+
+        Returns an OffloadingPolicy that controls which requests are offloaded
+        and when.
+
+        Default: OffloadAllPolicy
+        """
+        # avoid circular dependencies.
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.policy import (  # noqa: E501
+            OffloadAllPolicy,
+        )
+
+        return OffloadAllPolicy()
 
     @abstractmethod
     def get_manager(self) -> OffloadingManager:
