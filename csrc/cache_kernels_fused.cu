@@ -1,3 +1,5 @@
+#include <type_traits>
+
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -22,7 +24,7 @@ namespace vllm {
 // NOTE Be EXTRA careful with raw_kv_scalar_t, for __half and __nv_bfloat16 it's
 // using u16 as the backing type.
 template <typename qk_t, bool IS_NEOX, typename raw_kv_scalar_t,
-          typename cache_t, Fp8KVCacheDataType kv_dt>
+          typename cache_t, at::ScalarType kv_dt>
 __global__ void concat_and_cache_mla_rope_fused_kernel(
     const int64_t* __restrict__ positions,  // [num_tokens]
     qk_t* __restrict__ q_pe,        // [num_tokens, num_q_heads, rot_dim]
@@ -132,7 +134,7 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
                             entry_idx * entry_stride + kv_lora_rank;
 
     // MLA Cache Store
-    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+    if constexpr (std::is_same_v<cache_t, raw_kv_scalar_t>) {
       kv_cache_ptr[pair_idx_x] = raw_x_value;
       kv_cache_ptr[pair_idx_y] = raw_y_value;
     } else {
@@ -154,7 +156,7 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
     cache_t* kv_cache_ptr =
         kv_cache + block_idx * block_stride + entry_idx * entry_stride;
 
-    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+    if constexpr (std::is_same_v<cache_t, raw_kv_scalar_t>) {
       kv_cache_ptr[i] = src_value;
     } else {
       kv_cache_ptr[i] = fp8::scaled_convert<cache_t, raw_kv_scalar_t, kv_dt>(

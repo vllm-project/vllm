@@ -40,9 +40,8 @@
           out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, seq_lens_ptr,    \
           max_num_partitions);
 
-template <typename T, typename CACHE_T, int BLOCK_SIZE,
-          vllm::Fp8KVCacheDataType KV_DTYPE, bool IS_BLOCK_SPARSE,
-          int NUM_THREADS = 128, int PARTITION_SIZE = 512>
+template <typename T, typename CACHE_T, int BLOCK_SIZE, at::ScalarType KV_DTYPE,
+          bool IS_BLOCK_SPARSE, int NUM_THREADS = 128, int PARTITION_SIZE = 512>
 void paged_attention_v2_launcher(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,

@@ -2,6 +2,7 @@
 
 #include "../../../../attention/attention_dtypes.h"
 #include <assert.h>
+#include <c10/core/ScalarType.h>
 #include <float.h>
 #include <stdint.h>
 #include <type_traits>
@@ -512,12 +513,12 @@ __inline__ __device__ float4 scaled_vec_conversion<float4, uint32_t>(
 }
   #endif  // ENABLE_FP8
 
-template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
+template <typename Tout, typename Tin, at::ScalarType kv_dt>
 __inline__ __device__ Tout convert(const Tin& x) {
   #if 0  // Disable the following code to reduce the binary size.
-  if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
+  if constexpr (kv_dt == at::ScalarType::Float8_e4m3fn) {
     return vec_conversion<Tout, Tin>(x, __NV_E4M3);
-  } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
+  } else if constexpr (kv_dt == at::ScalarType::Float8_e5m2) {
     return vec_conversion<Tout, Tin>(x, __NV_E5M2);
   }
   #endif
@@ -525,12 +526,12 @@ __inline__ __device__ Tout convert(const Tin& x) {
   __builtin_unreachable();  // Suppress missing return statement warning
 }
 
-template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
+template <typename Tout, typename Tin, at::ScalarType kv_dt>
 __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
   #ifdef ENABLE_FP8
-  if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
+  if constexpr (kv_dt == at::ScalarType::Float8_e4m3fn) {
     return scaled_vec_conversion<Tout, Tin>(x, scale, __NV_E4M3);
-  } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
+  } else if constexpr (kv_dt == at::ScalarType::Float8_e5m2) {
     return scaled_vec_conversion<Tout, Tin>(x, scale, __NV_E5M2);
   }
   #endif
@@ -541,47 +542,47 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
   // The following macro is used to dispatch the conversion function based on
   // the data type of the key and value cache. The FN is a macro that calls a
   // function with template<typename scalar_t, typename cache_t,
-  // Fp8KVCacheDataType kv_dt>.
+  // at::ScalarType kv_dt>.
   #define DISPATCH_BY_KV_CACHE_DTYPE(SRC_DTYPE, KV_DTYPE, FN)                  \
     if (KV_DTYPE == "float32") {                                               \
       TORCH_CHECK(SRC_DTYPE == at::ScalarType::Float, "KV cache dtype ",       \
                   KV_DTYPE, " does not match model dtype ", SRC_DTYPE);        \
-      FN(float, float, vllm::Fp8KVCacheDataType::kAuto);                       \
+      FN(float, float, at::ScalarType::Float);                                 \
     } else if (KV_DTYPE == "float16") {                                        \
       TORCH_CHECK(SRC_DTYPE == at::ScalarType::Half, "KV cache dtype ",        \
                   KV_DTYPE, " does not match model dtype ", SRC_DTYPE);        \
-      FN(uint16_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto);                 \
+      FN(uint16_t, uint16_t, at::ScalarType::Half);                            \
     } else if (KV_DTYPE == "bfloat16") {                                       \
       TORCH_CHECK(SRC_DTYPE == at::ScalarType::BFloat16, "KV cache dtype ",    \
                   KV_DTYPE, " does not match model dtype ", SRC_DTYPE);        \
-      FN(__nv_bfloat16, __nv_bfloat16, vllm::Fp8KVCacheDataType::kAuto);       \
+      FN(__nv_bfloat16, __nv_bfloat16, at::ScalarType::BFloat16);              \
     } else if (KV_DTYPE == "fp8" || KV_DTYPE == "fp8_e4m3") {                  \
       if (SRC_DTYPE == at::ScalarType::Float) {                                \
-        FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);                \
+        FN(float, uint8_t, at::ScalarType::Float8_e4m3fn);                     \
       } else if (SRC_DTYPE == at::ScalarType::Half) {                          \
-        FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);             \
+        FN(uint16_t, uint8_t, at::ScalarType::Float8_e4m3fn);                  \
       } else if (SRC_DTYPE == at::ScalarType::BFloat16) {                      \
-        FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);        \
+        FN(__nv_bfloat16, uint8_t, at::ScalarType::Float8_e4m3fn);             \
       } else {                                                                 \
         TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE); \
       }                                                                        \
     } else if (KV_DTYPE == "fp8_e5m2") {                                       \
       if (SRC_DTYPE == at::ScalarType::Float) {                                \
-        FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);                \
+        FN(float, uint8_t, at::ScalarType::Float8_e5m2);                       \
       } else if (SRC_DTYPE == at::ScalarType::Half) {                          \
-        FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);             \
+        FN(uint16_t, uint8_t, at::ScalarType::Float8_e5m2);                    \
       } else if (SRC_DTYPE == at::ScalarType::BFloat16) {                      \
-        FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);        \
+        FN(__nv_bfloat16, uint8_t, at::ScalarType::Float8_e5m2);               \
       } else {                                                                 \
         TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE); \
       }                                                                        \
     } else if (KV_DTYPE == "fp8_ds_mla") {                                     \
       if (SRC_DTYPE == at::ScalarType::Float) {                                \
-        FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);                \
+        FN(float, uint8_t, at::ScalarType::Float8_e4m3fn);                     \
       } else if (SRC_DTYPE == at::ScalarType::Half) {                          \
-        FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);             \
+        FN(uint16_t, uint8_t, at::ScalarType::Float8_e4m3fn);                  \
       } else if (SRC_DTYPE == at::ScalarType::BFloat16) {                      \
-        FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);        \
+        FN(__nv_bfloat16, uint8_t, at::ScalarType::Float8_e4m3fn);             \
       } else {                                                                 \
         TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE); \
       }                                                                        \

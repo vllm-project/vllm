@@ -40,9 +40,8 @@
           blocksparse_head_sliding_step);
 
 // TODO(woosuk): Tune NUM_THREADS.
-template <typename T, typename CACHE_T, int BLOCK_SIZE,
-          vllm::Fp8KVCacheDataType KV_DTYPE, bool IS_BLOCK_SPARSE,
-          int NUM_THREADS = 128>
+template <typename T, typename CACHE_T, int BLOCK_SIZE, at::ScalarType KV_DTYPE,
+          bool IS_BLOCK_SPARSE, int NUM_THREADS = 128>
 void paged_attention_v1_launcher(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int num_kv_heads, float scale,

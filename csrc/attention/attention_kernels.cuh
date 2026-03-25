@@ -21,6 +21,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
+#include <type_traits>
 
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
@@ -79,8 +80,7 @@ inline __device__ float block_sum(float* red_smem, float sum) {
 // TODO(woosuk): Merge the last two dimensions of the grid.
 // Grid: (num_heads, num_seqs, max_num_partitions).
 template <typename scalar_t, typename cache_t, int HEAD_SIZE, int BLOCK_SIZE,
-          int NUM_THREADS, vllm::Fp8KVCacheDataType KV_DTYPE,
-          bool IS_BLOCK_SPARSE,
+          int NUM_THREADS, at::ScalarType KV_DTYPE, bool IS_BLOCK_SPARSE,
           int PARTITION_SIZE = 0>  // Zero means no partitioning.
 __device__ void paged_attention_kernel(
     float* __restrict__ exp_sums,  // [num_seqs, num_heads, max_num_partitions]
@@ -272,7 +272,7 @@ __device__ void paged_attention_kernel(
         const int offset1 = (vec_idx * VEC_SIZE) / x;
         const int offset2 = (vec_idx * VEC_SIZE) % x;
 
-        if constexpr (KV_DTYPE == Fp8KVCacheDataType::kAuto) {
+        if constexpr (std::is_same_v<cache_t, scalar_t>) {
           k_vecs[j] = *reinterpret_cast<const K_vec*>(
               k_ptr + offset1 * BLOCK_SIZE * x + offset2);
         } else {
@@ -403,7 +403,7 @@ __device__ void paged_attention_kernel(
         const int offset = row_idx * BLOCK_SIZE + physical_block_offset;
         V_vec v_vec;
 
-        if constexpr (KV_DTYPE == Fp8KVCacheDataType::kAuto) {
+        if constexpr (std::is_same_v<cache_t, scalar_t>) {
           v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
         } else {
           V_quant_vec v_quant_vec =
@@ -492,7 +492,7 @@ __device__ void paged_attention_kernel(
 
 // Grid: (num_heads, num_seqs, 1).
 template <typename scalar_t, typename cache_t, int HEAD_SIZE, int BLOCK_SIZE,
-          int NUM_THREADS, vllm::Fp8KVCacheDataType KV_DTYPE,
+          int NUM_THREADS, at::ScalarType KV_DTYPE,
           bool IS_BLOCK_SPARSE>
 __global__ void paged_attention_v1_kernel(
     scalar_t* __restrict__ out,           // [num_seqs, num_heads, head_size]
@@ -523,8 +523,7 @@ __global__ void paged_attention_v1_kernel(
 
 // Grid: (num_heads, num_seqs, max_num_partitions).
 template <typename scalar_t, typename cache_t, int HEAD_SIZE, int BLOCK_SIZE,
-          int NUM_THREADS, vllm::Fp8KVCacheDataType KV_DTYPE,
-          bool IS_BLOCK_SPARSE,
+          int NUM_THREADS, at::ScalarType KV_DTYPE, bool IS_BLOCK_SPARSE,
           int PARTITION_SIZE>
 __global__ void paged_attention_v2_kernel(
     float* __restrict__ exp_sums,  // [num_seqs, num_heads, max_num_partitions]

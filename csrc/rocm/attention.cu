@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <type_traits>
+
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -324,7 +326,7 @@ __device__ float warpReduceMax(float val) {
 // block (256)
 // clang-format off
 template <typename scalar_t, typename cache_t,
-          vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
+          at::ScalarType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO, MFMAType MFMA_TYPE>
 __global__
 __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
@@ -461,7 +463,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const _B16x8* q_fetch_ptr_16B =
         reinterpret_cast<const _B16x8*>(q_fetch_ptr);
     _B16x8 tmp = *q_fetch_ptr_16B;
-    if constexpr (KV_DTYPE == vllm::Fp8KVCacheDataType::kAuto) {
+    if constexpr (sizeof(cache_t) == 2) {
       const int offset1 =
           lane16id /
           4;  // 16 contiguous chunks of head elems are spread across 4x4lanes
@@ -485,8 +487,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
             shared_logits[qkhe_depth][rowid][lane16id % GQA_RATIO]
                          [2 * qkratio + i];
   #if defined(__HIP__FP8MFMA__)
-        if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto &&
-                      MFMA_TYPE == MFMAType::Fp8) {
+        if constexpr (sizeof(cache_t) == 1 && MFMA_TYPE == MFMAType::Fp8) {
           scalar_t* qptr =
               reinterpret_cast<scalar_t*>(&Qlocal[qkhe_depth][qkratio].xy[i]);
           for (int k = 0; k < 4; k++)
@@ -589,8 +590,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
   // calculate post qk mfma scale
   float scale2 = scale;
-  if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto) {
-    // multiply by k_scale if fp8 kv cache
+  if constexpr (sizeof(cache_t) != sizeof(scalar_t)) {
+    // multiply by k_scale if quantized kv cache
     scale2 *= *k_scale;
   #if defined(__HIP__FP8MFMA__)
     q_max = warpReduceMax(q_max);
@@ -607,7 +608,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     d_out[token_depth] = {0};
     for (int qkhe_depth = 0; qkhe_depth < QKHELOOP; qkhe_depth++) {
-      if constexpr (KV_DTYPE == vllm::Fp8KVCacheDataType::kAuto) {
+      if constexpr (sizeof(cache_t) == 2) {
         for (int qkratio = 0; qkratio < QK_SIZE_RATIO; qkratio++) {
           for (int i = 0; i < 2; i++) {
             d_out[token_depth] = gcn_mfma16x16x16_instr<scalar_t, 0, 0, 0>(
@@ -802,7 +803,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     floatx4 tmp_out = {0};
 
     for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
-      if constexpr (KV_DTYPE == vllm::Fp8KVCacheDataType::kAuto) {
+      if constexpr (sizeof(cache_t) == 2) {
         for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
           for (int i = 0; i < ELEMS8_ELEMS4_RATIO; i++) {
             const int offset = rowid * VTLANELOOP * ELEMS8_ELEMS4_RATIO +
@@ -867,7 +868,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
       }
     }
     // apply post Softmax V mfma v_scale
-    if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto) {
+    if constexpr (sizeof(cache_t) != sizeof(scalar_t)) {
       tmp_out *= *v_scale;
     }
     outelems[vhe_depth] = from_floatx4<scalar_t>(tmp_out);
@@ -924,7 +925,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 // each WG handles 1 partition per sequence
 // clang-format off
 template <typename scalar_t, typename cache_t,
-          vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
+          at::ScalarType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
           int GQA_RATIO>
 __global__
@@ -1078,7 +1079,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
 
     // each K fetch is for 8 elements of cache_t which are later dequantized to
     // scalar_t for fp8
-    if constexpr (KV_DTYPE == vllm::Fp8KVCacheDataType::kAuto) {
+    if constexpr (sizeof(cache_t) == 2) {
       const _B16x8* k_ptrh8 = reinterpret_cast<const _B16x8*>(k_ptr);
       for (int d = 0; d < KHELOOP; d++) {
         Klocal[d] = k_ptrh8[d * BLOCK_SIZE + physical_block_offset];
@@ -1108,8 +1109,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     }
 
     const cache_t* v_ptr = v_cache + wg_start_kv_head_idx * kv_head_stride;
-    // fetch vcache in kv cache auto case
-    if constexpr (KV_DTYPE == vllm::Fp8KVCacheDataType::kAuto) {
+    // fetch vcache in non-quantized case
+    if constexpr (sizeof(cache_t) == 2) {
       const _B16x8* v_ptrh8 = reinterpret_cast<const _B16x8*>(v_ptr);
       // iterate over each v block
       for (int b = 0; b < VBLOCKS; b++) {
@@ -1129,9 +1130,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
           }
         }
       }
-    }  // if constexpr (KV_DTYPE == vllm::Fp8KVCacheDataType::kAuto)
+    }  // if constexpr (sizeof(cache_t) == 2)
     // fetch vcache in fp8 case
-    else {  // if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto)
+    else {  // if constexpr (sizeof(cache_t) == 1)
       const _B8x8* v_ptrh8 = reinterpret_cast<const _B8x8*>(v_ptr);
       // iterate over each v block
       for (int b = 0; b < VBLOCKS; b++) {
@@ -1153,15 +1154,15 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
       }
     }
 
-  #define QK_mfma(x)                                             \
-    if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto) { \
-      Klocal[x] = convert_b8x8_custom<scalar_t>(Klocalb8[x]);    \
-    }                                                            \
-    for (int h = 0; h < QHLOOP; h++) {                           \
-      d_out[h] = gcn_mfma4x4x4_instr<scalar_t, 4, x, 0>(         \
-          Qlocal[h].xy[0], Klocal[x].xy[0], d_out[h]);           \
-      d_out[h] = gcn_mfma4x4x4_instr<scalar_t, 4, x, 0>(         \
-          Qlocal[h].xy[1], Klocal[x].xy[1], d_out[h]);           \
+  #define QK_mfma(x)                                          \
+    if constexpr (sizeof(cache_t) == 1) {                     \
+      Klocal[x] = convert_b8x8_custom<scalar_t>(Klocalb8[x]); \
+    }                                                         \
+    for (int h = 0; h < QHLOOP; h++) {                        \
+      d_out[h] = gcn_mfma4x4x4_instr<scalar_t, 4, x, 0>(      \
+          Qlocal[h].xy[0], Klocal[x].xy[0], d_out[h]);        \
+      d_out[h] = gcn_mfma4x4x4_instr<scalar_t, 4, x, 0>(      \
+          Qlocal[h].xy[1], Klocal[x].xy[1], d_out[h]);        \
     }
     // QK mfma with Q mfma block broadcast
     // Q values across head_size dimension stored across lanes
@@ -1189,7 +1190,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
   #undef QK_mfma
 
     float scale2 = scale;
-    if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto) {
+    if constexpr (sizeof(cache_t) != sizeof(scalar_t)) {
       // post mfma scaling for fp8
       scale2 *= *k_scale;
     }
@@ -1344,7 +1345,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     }
   } else {  // warp in context
   #define SV_mfma(x)                                                  \
-    if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto) {      \
+    if constexpr (sizeof(cache_t) == 1) {                             \
       Vlocal[vh][x] = convert_b8x8_custom<scalar_t>(Vlocalb8[vh][x]); \
     }                                                                 \
     for (int qh = 0; qh < QHLOOP; qh++) {                             \
@@ -1373,7 +1374,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
       SV_mfma(7);
 
       for (int qh = 0; qh < QHLOOP; qh++) {
-        if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto) {
+        if constexpr (sizeof(cache_t) != sizeof(scalar_t)) {
           // post mfma v scale for fp8
           acc[qh] *= *v_scale;
         }
@@ -1725,7 +1726,7 @@ __device__ __forceinline__ _B16x8 from_floatx8(const floatx8& inp) {
 
 // clang-format off
 template <typename scalar_t, typename cache_t,
-          vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
+          at::ScalarType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
           MFMAType MFMA_TYPE>
 __global__
@@ -2161,9 +2162,9 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
   }
 }
 
-template <typename scalar_t, typename cache_t,
-          vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
-          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
+template <typename scalar_t, typename cache_t, at::ScalarType KV_DTYPE,
+          typename OUTT, int BLOCK_SIZE, int HEAD_SIZE, int NUM_THREADS,
+          bool ALIBI_ENABLED,
           int GQA_RATIO>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
@@ -2493,7 +2494,7 @@ __device__ __forceinline__ _B16x8 from_floatx8(const floatx8& inp) {
 
 // clang-format off
 template <typename scalar_t, typename cache_t,
-          vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
+          at::ScalarType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
           MFMAType MFMA_TYPE>
 __global__
@@ -2894,9 +2895,9 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
   }
 }
 
-template <typename scalar_t, typename cache_t,
-          vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
-          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
+template <typename scalar_t, typename cache_t, at::ScalarType KV_DTYPE,
+          typename OUTT, int BLOCK_SIZE, int HEAD_SIZE, int NUM_THREADS,
+          bool ALIBI_ENABLED,
           int GQA_RATIO>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
@@ -3125,7 +3126,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 
 // clang-format off
 template <typename scalar_t, typename cache_t,
-          vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
+          at::ScalarType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
           int GQA_RATIO, MFMAType MFMA_TYPE>
 __global__
@@ -3152,7 +3153,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
 }
 
 template <typename scalar_t, typename cache_t,
-          vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
+          at::ScalarType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
           int GQA_RATIO>
 __global__
@@ -3225,8 +3226,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
           out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, seq_lens_ptr, \
           query_start_loc_ptr, max_num_partitions, fp8_out_scale_ptr);
 
-template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
-          int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
+template <typename T, typename KVT, at::ScalarType KV_DTYPE, int BLOCK_SIZE,
+          int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
           bool ALIBI_ENABLED, MFMAType MFMA_TYPE>
 void paged_attention_custom_launcher(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
@@ -3381,8 +3382,8 @@ void paged_attention_custom_launcher(
   }
 }
 
-template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
-          int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
+template <typename T, typename KVT, at::ScalarType KV_DTYPE, int BLOCK_SIZE,
+          int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
           bool ALIBI_ENABLED, MFMAType MFMA_TYPE>
 void paged_attention_custom_launcher_navi(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
@@ -3672,33 +3673,30 @@ void paged_attention(
   if (kv_cache_dtype == "float16") {
     TORCH_CHECK(query.dtype() == at::ScalarType::Half, "KV cache dtype ",
                 kv_cache_dtype, " does not match model dtype ", query.dtype());
-    CALL_CUSTOM_LAUNCHER_BLK_HEAD(
-        _Float16, _Float16, vllm::Fp8KVCacheDataType::kAuto, MFMAType::F16);
+    CALL_CUSTOM_LAUNCHER_BLK_HEAD(_Float16, _Float16, at::ScalarType::Half,
+                                  MFMAType::F16);
   } else if (kv_cache_dtype == "bfloat16") {
     TORCH_CHECK(query.dtype() == at::ScalarType::BFloat16, "KV cache dtype ",
                 kv_cache_dtype, " does not match model dtype ", query.dtype());
     CALL_CUSTOM_LAUNCHER_BLK_HEAD(__hip_bfloat16, __hip_bfloat16,
-                                  vllm::Fp8KVCacheDataType::kAuto,
-                                  MFMAType::F16);
+                                  at::ScalarType::BFloat16, MFMAType::F16);
   } else if (kv_cache_dtype == "fp8" || kv_cache_dtype == "fp8_e4m3") {
     if (query.dtype() == at::ScalarType::Half) {
       if (mfma_type == "fp8") {
-        CALL_CUSTOM_LAUNCHER_BLK_HEAD(_Float16, uint8_t,
-                                      vllm::Fp8KVCacheDataType::kFp8E4M3,
-                                      MFMAType::Fp8);
+        CALL_CUSTOM_LAUNCHER_BLK_HEAD(
+            _Float16, uint8_t, at::ScalarType::Float8_e4m3fn, MFMAType::Fp8);
       } else {
-        CALL_CUSTOM_LAUNCHER_BLK_HEAD(_Float16, uint8_t,
-                                      vllm::Fp8KVCacheDataType::kFp8E4M3,
-                                      MFMAType::F16);
+        CALL_CUSTOM_LAUNCHER_BLK_HEAD(
+            _Float16, uint8_t, at::ScalarType::Float8_e4m3fn, MFMAType::F16);
       }
     } else if (query.dtype() == at::ScalarType::BFloat16) {
       if (mfma_type == "fp8") {
         CALL_CUSTOM_LAUNCHER_BLK_HEAD(__hip_bfloat16, uint8_t,
-                                      vllm::Fp8KVCacheDataType::kFp8E4M3,
+                                      at::ScalarType::Float8_e4m3fn,
                                       MFMAType::Fp8);
       } else {
         CALL_CUSTOM_LAUNCHER_BLK_HEAD(__hip_bfloat16, uint8_t,
-                                      vllm::Fp8KVCacheDataType::kFp8E4M3,
+                                      at::ScalarType::Float8_e4m3fn,
                                       MFMAType::F16);
       }
     } else {
