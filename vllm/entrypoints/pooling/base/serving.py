@@ -20,7 +20,7 @@ from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.typing import AnyPoolingRequest, PoolingServeContext
 from vllm.exceptions import VLLMNotFoundError
-from vllm.inputs.data import ProcessorInputs
+from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.inputs.preprocess import extract_prompt_components
@@ -106,7 +106,7 @@ class PoolingServing:
         self,
         ctx: PoolingServeContext,
     ):
-        if ctx.engine_prompts is None:
+        if ctx.engine_inputs is None:
             raise ValueError("Engine prompts not available")
 
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
@@ -120,7 +120,7 @@ class PoolingServing:
         pooling_params = self.io_processor.create_pooling_params(ctx.request)
         pooling_params.verify(self.model_config)
 
-        for i, engine_prompt in enumerate(ctx.engine_prompts):
+        for i, engine_input in enumerate(ctx.engine_inputs):
             prompt_request_id = (
                 f"{ctx.request_id}-{i}"
                 if ctx.prompt_request_ids is None
@@ -129,13 +129,13 @@ class PoolingServing:
 
             self._log_inputs(
                 prompt_request_id,
-                engine_prompt,
+                engine_input,
                 params=pooling_params,
                 lora_request=ctx.lora_request,
             )
 
             generator = self.engine_client.encode(
-                engine_prompt,
+                engine_input,
                 pooling_params,
                 prompt_request_id,
                 lora_request=ctx.lora_request,
@@ -151,13 +151,13 @@ class PoolingServing:
         self,
         ctx: PoolingServeContext,
     ):
-        if ctx.engine_prompts is None:
+        if ctx.engine_inputs is None:
             raise ValueError("Engine prompts not available")
 
         if ctx.result_generator is None:
             raise ValueError("Result generator not available")
 
-        num_inputs = len(ctx.engine_prompts)
+        num_inputs = len(ctx.engine_inputs)
         final_res_batch: list[PoolingRequestOutput | None]
         final_res_batch = [None] * num_inputs
 
@@ -317,7 +317,7 @@ class PoolingServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: ProcessorInputs,
+        inputs: EngineInput,
         params: PoolingParams,
         lora_request: LoRARequest | None,
     ) -> None:

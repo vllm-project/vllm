@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from multiprocessing.synchronize import Lock as LockType
 from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, cast
 
+from vllm.inputs import MultiModalInput
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 
@@ -19,7 +20,6 @@ from .cache import (
     ShmObjectStoreReceiverCache,
     ShmObjectStoreSenderCache,
 )
-from .inputs import MultiModalInputs
 from .processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -220,7 +220,7 @@ class MultiModalRegistry:
         *,
         cache: BaseMultiModalProcessorCache | None = None,
         processor: BaseMultiModalProcessor | None = None,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         """
         Create dummy data for profiling the memory usage of a model.
 

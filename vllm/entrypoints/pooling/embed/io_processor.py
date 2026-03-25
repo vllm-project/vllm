@@ -24,7 +24,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingCompletionRequest,
 )
 from vllm.entrypoints.pooling.typing import PoolingServeContext
-from vllm.inputs.data import ProcessorInputs, token_inputs
+from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.renderers import merge_kwargs
@@ -83,20 +83,20 @@ class EmbedIOProcessor(PoolingIOProcessor):
     #################################################################
 
     def _pre_process_chunked(self, ctx: PoolingServeContext) -> None:
-        if ctx.engine_prompts is None:
+        if ctx.engine_inputs is None:
             raise ValueError("Engine prompts not available")
 
-        ctx.intermediates = ctx.engine_prompts
+        ctx.intermediates = ctx.engine_inputs
         request_id = ctx.request_id
         max_model_len = self.model_config.max_model_len
-        chunked_engine_prompts: list[ProcessorInputs] = []
+        chunked_engine_inputs: list[EngineInput] = []
         prompt_request_ids: list[str] = []
-        for prompt_idx, engine_prompt in enumerate(ctx.engine_prompts):
-            token_ids = engine_prompt.get("prompt_token_ids", None)
+        for prompt_idx, engine_input in enumerate(ctx.engine_inputs):
+            token_ids = engine_input.get("prompt_token_ids", None)
             if token_ids is None:
                 raise NotImplementedError(
                     "Long Text Embedding with Chunked Processing does "
-                    "not support EmbedsPrompt and EncoderDecoderInputs."
+                    "not support EmbedsPrompt and EncoderDecoderInput."
                 )
 
             prompt_token_ids = cast(list[int], token_ids)
@@ -104,14 +104,14 @@ class EmbedIOProcessor(PoolingIOProcessor):
             for chunk_idx, chunk_tokens in enumerate(
                 chunk_list(prompt_token_ids, max_model_len)
             ):
-                chunked_engine_prompts.append(
-                    token_inputs(prompt_token_ids=chunk_tokens)
+                chunked_engine_inputs.append(
+                    tokens_input(prompt_token_ids=chunk_tokens)
                 )
                 prompt_request_ids.append(
                     f"{request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}"
                 )
 
-        ctx.engine_prompts = chunked_engine_prompts
+        ctx.engine_inputs = chunked_engine_inputs
         ctx.prompt_request_ids = prompt_request_ids
 
         return None
@@ -184,8 +184,8 @@ class EmbedIOProcessor(PoolingIOProcessor):
         if ctx.intermediates is None:
             raise ValueError("Original prompts inputs not available")
 
-        original_engine_prompts = cast(list[ProcessorInputs], ctx.intermediates)
-        num_prompts = len(original_engine_prompts)
+        original_engine_inputs = cast(list[EngineInput], ctx.intermediates)
+        num_prompts = len(original_engine_inputs)
 
         # Finalize aggregated results
         final_res_batch: list[PoolingRequestOutput] = []
@@ -211,12 +211,12 @@ class EmbedIOProcessor(PoolingIOProcessor):
                     pooling_output_data = PoolingOutput(data=final_embedding)
 
                     # Get original prompt token IDs for this prompt
-                    original_prompt = original_engine_prompts[prompt_idx]
+                    original_prompt = original_engine_inputs[prompt_idx]
                     token_ids = original_prompt.get("prompt_token_ids", None)
                     if token_ids is None:
                         raise NotImplementedError(
                             "Long Text Embedding with Chunked Processing does "
-                            "not support EmbedsPrompt and EncoderDecoderInputs."
+                            "not support EmbedsPrompt and EncoderDecoderInput."
                         )
 
                     original_token_ids = cast(list[int], token_ids)
@@ -372,7 +372,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 ]
                 for uri in request.images
             ]
-            ctx.engine_prompts = self._batch_render_chat(
+            ctx.engine_inputs = self._batch_render_chat(
                 request, all_messages, truncate_prompt_tokens, truncation_side
             )
 
@@ -382,7 +382,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 self._mixed_input_to_messages(inp, task_prefix=task_prefix)
                 for inp in request.inputs
             ]
-            ctx.engine_prompts = self._batch_render_chat(
+            ctx.engine_inputs = self._batch_render_chat(
                 request, all_messages, truncate_prompt_tokens, truncation_side
             )
 
@@ -396,7 +396,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 truncate_prompt_tokens=truncate_prompt_tokens,
                 truncation_side=truncation_side,
             )
-            ctx.engine_prompts = self._preprocess_completion_online(
+            ctx.engine_inputs = self._preprocess_completion_online(
                 proxy, prompt_input=proxy.input, prompt_embeds=None
             )
 
@@ -406,7 +406,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
         all_messages: Sequence[list[ChatCompletionMessageParam]],
         truncate_prompt_tokens: int | None,
         truncation_side: Literal["left", "right"] | None,
-    ) -> list[ProcessorInputs]:
+    ) -> list[EngineInput]:
         """Batch-render multiple conversations through the chat template."""
         if not all_messages:
             return []
@@ -438,8 +438,8 @@ class EmbedIOProcessor(PoolingIOProcessor):
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
         )
 
-        _, engine_prompts = renderer.render_chat(all_messages, chat_params, tok_params)
-        return engine_prompts
+        _, engine_inputs = renderer.render_chat(all_messages, chat_params, tok_params)
+        return engine_inputs
 
     def _validate_input_type(self, input_type: str | None) -> None:
         """Raise if *input_type* is not supported by this model."""
