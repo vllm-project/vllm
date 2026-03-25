@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Context as _;
 use vllm_chat::ChatLlm;
+use vllm_engine_core_client::EngineCoreClient;
 
 /// Shared router state for the minimal single-model OpenAI server.
 pub struct AppState {
@@ -22,6 +23,11 @@ impl AppState {
             chat,
             server_load: AtomicU64::new(0),
         }
+    }
+
+    /// Return a reference to the underlying engine core client for utility calls.
+    pub(crate) fn engine_core_client(&self) -> &EngineCoreClient {
+        self.chat.engine_core_client()
     }
 
     /// Return the current in-flight inference request count for the `/load` endpoint.

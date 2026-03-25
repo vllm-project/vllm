@@ -1,10 +1,11 @@
+mod cache;
 mod chat_completions;
 mod completions;
 mod health;
-mod is_sleeping;
 mod load;
 mod metrics;
 mod models;
+mod sleep;
 mod utils;
 
 use std::sync::Arc;
@@ -17,9 +18,20 @@ use tower_http::trace::TraceLayer;
 use crate::middleware;
 use crate::state::AppState;
 
+fn server_dev_mode_enabled() -> bool {
+    std::env::var("VLLM_SERVER_DEV_MODE")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .is_some_and(|value| value != 0)
+}
+
 /// Build the minimal OpenAI-compatible router for one configured model.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    build_router_with_dev_mode(state, server_dev_mode_enabled())
+}
+
+fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> Router {
+    let mut router = Router::new()
         // Health & monitoring
         .route("/health", get(health::health))
         .route("/metrics", get(metrics::scrape))
@@ -30,11 +42,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/chat/completions",
             post(chat_completions::chat_completions),
-        )
-        // Dev-mode & admin
-        // TODO: only expose this endpoint when in dev mode (`VLLM_SERVER_DEV_MODE=1`)
-        .route("/is_sleeping", get(is_sleeping::is_sleeping))
-        // State & middleware
+        );
+
+    if dev_mode_enabled {
+        // Development-only
+        router = router
+            .route("/reset_prefix_cache", post(cache::reset_prefix_cache))
+            .route("/reset_mm_cache", post(cache::reset_mm_cache))
+            .route("/reset_encoder_cache", post(cache::reset_encoder_cache))
+            .route("/sleep", post(sleep::sleep))
+            .route("/wake_up", post(sleep::wake_up))
+            .route("/is_sleeping", get(sleep::is_sleeping))
+    }
+
+    router
         .with_state(state.clone())
         .layer(from_fn_with_state(state, middleware::track_server_load))
         .layer(from_fn(middleware::track_http_metrics))

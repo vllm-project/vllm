@@ -60,8 +60,6 @@ pub enum Error {
         call_id: i64,
         message: String,
     },
-    #[error("utility call `{method}` returned no result (call_id={call_id})")]
-    UtilityResultMissing { method: String, call_id: i64 },
     #[error("utility call `{method}` returned an invalid result (call_id={call_id}): {reason}")]
     UtilityResultDecode {
         method: String,

@@ -11,6 +11,7 @@ VLLM_HOST_IP=127.0.0.1 \
 VLLM_LOOPBACK_IP=127.0.0.1 \
 python3 -m vllm.entrypoints.cli.main serve Qwen/Qwen3-0.6B \
   --headless \
+  --enable-sleep-mode \
   --data-parallel-address 127.0.0.1 \
   --data-parallel-rpc-port 62100 \
   --data-parallel-size-local 1 \
@@ -24,6 +25,16 @@ Run the Rust smoke test through the `vllm-engine-core-client` utility interface:
 cargo run -p vllm-engine-core-client --example external_engine_utility_call -- \
   --handshake-address tcp://127.0.0.1:62100 \
   --host 127.0.0.1
+```
+
+If your current engine setup does not support sleep mode, skip the `sleep` / `wake_up` part of the
+smoke:
+
+```bash
+cargo run -p vllm-engine-core-client --example external_engine_utility_call -- \
+  --handshake-address tcp://127.0.0.1:62100 \
+  --host 127.0.0.1 \
+  --skip-sleep-wake
 ```
 
 Run the Rust smoke test for sample logprobs decoding through the raw engine-core request path:

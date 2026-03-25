@@ -24,6 +24,10 @@ use crate::protocol::stats::SchedulerStats;
 /// yet strongly typed in the early-stage Rust client.
 pub type OpaqueValue = Value;
 
+fn default_opaque_value_nil() -> OpaqueValue {
+    Value::Nil
+}
+
 mod aux;
 mod classfied_outputs;
 pub mod handshake;
@@ -405,8 +409,8 @@ pub struct UtilityResultEnvelope {
     #[serde(default)]
     type_info: Option<OpaqueValue>,
     /// The actual utility result.
-    #[serde(default)]
-    result: Option<OpaqueValue>,
+    #[serde(default = "default_opaque_value_nil")]
+    result: OpaqueValue,
 }
 
 impl UtilityResultEnvelope {
@@ -414,7 +418,7 @@ impl UtilityResultEnvelope {
     pub fn without_type_info(result: OpaqueValue) -> Self {
         Self {
             type_info: None,
-            result: Some(result),
+            result,
         }
     }
 }
@@ -433,13 +437,7 @@ impl UtilityOutput {
             });
         }
 
-        let result =
-            self.result
-                .and_then(|e| e.result)
-                .ok_or_else(|| Error::UtilityResultMissing {
-                    method: method.to_string(),
-                    call_id: self.call_id,
-                })?;
+        let result = self.result.map(|e| e.result).unwrap_or(Value::Nil);
 
         rmpv::ext::from_value(result).map_err(|error| Error::UtilityResultDecode {
             method: method.to_string(),
@@ -631,5 +629,27 @@ mod tests {
                 message
             } if method == "is_sleeping" && call_id == 9 && message == "boom"
         ));
+    }
+
+    #[test]
+    fn utility_output_decodes_missing_result_as_unit() {
+        UtilityOutput {
+            call_id: 3,
+            failure_message: None,
+            result: None,
+        }
+        .into_typed_result::<()>("reset_mm_cache")
+        .unwrap();
+    }
+
+    #[test]
+    fn utility_output_decodes_nil_result_as_unit() {
+        UtilityOutput {
+            call_id: 4,
+            failure_message: None,
+            result: Some(UtilityResultEnvelope::without_type_info(Value::Nil)),
+        }
+        .into_typed_result::<()>("sleep")
+        .unwrap();
     }
 }

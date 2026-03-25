@@ -17,6 +17,11 @@ const EXCLUDED_HANDLERS: &[&str] = &[
     "/version",
     "/server_info",
     // Rust frontend extra:
+    "/reset_prefix_cache",
+    "/reset_mm_cache",
+    "/reset_encoder_cache",
+    "/sleep",
+    "/wake_up",
     "/is_sleeping",
 ];
 

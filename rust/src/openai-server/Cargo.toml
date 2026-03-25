@@ -36,7 +36,8 @@ bytes.workspace = true
 clap.workspace = true
 expect-test.workspace = true
 rmp-serde.workspace = true
-serial_test = "3.2.0"
+rmpv.workspace = true
+serial_test.workspace = true
 tower.workspace = true
 vllm-engine-core-client = { workspace = true, features = ["test-util"] }
 zeromq.workspace = true

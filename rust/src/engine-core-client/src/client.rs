@@ -251,6 +251,39 @@ impl EngineCoreClient {
         self.call_utility("is_sleeping", ()).await
     }
 
+    /// Reset the multi-modal cache.
+    pub async fn reset_mm_cache(&self) -> Result<()> {
+        self.call_utility("reset_mm_cache", ()).await
+    }
+
+    /// Reset the encoder cache.
+    pub async fn reset_encoder_cache(&self) -> Result<()> {
+        self.call_utility("reset_encoder_cache", ()).await
+    }
+
+    /// Reset the prefix cache and optionally the external connector cache.
+    pub async fn reset_prefix_cache(
+        &self,
+        reset_running_requests: bool,
+        reset_connector: bool,
+    ) -> Result<bool> {
+        self.call_utility(
+            "reset_prefix_cache",
+            (reset_running_requests, reset_connector),
+        )
+        .await
+    }
+
+    /// Put the engine to sleep.
+    pub async fn sleep(&self, level: u32, mode: &str) -> Result<()> {
+        self.call_utility("sleep", (level, mode)).await
+    }
+
+    /// Wake the engine from sleep, optionally limiting the wake-up to specific tags.
+    pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<()> {
+        self.call_utility("wake_up", (tags,)).await
+    }
+
     /// Shut down local client tasks and close transport state.
     pub async fn shutdown(self) -> Result<()> {
         let Self {

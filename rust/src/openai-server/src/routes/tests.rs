@@ -6,6 +6,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use bytes::Bytes;
 use futures::StreamExt as _;
+use rmpv::Value;
 use serde_json::json;
 use serial_test::serial;
 use tower::util::ServiceExt as _;
@@ -16,7 +17,7 @@ use vllm_chat::{
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
     EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, RequestOutputKind,
-    StopReason,
+    StopReason, UtilityOutput, UtilityResultEnvelope, decode_value,
 };
 use vllm_engine_core_client::test_utils::IpcNamespace;
 use vllm_engine_core_client::{
@@ -29,7 +30,7 @@ use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
 
-use super::build_router;
+use super::{build_router, build_router_with_dev_mode};
 use crate::routes::chat_completions::convert::prepare_chat_request;
 use crate::state::AppState;
 
@@ -110,6 +111,28 @@ fn engine_outputs_for_request(
         finished_requests: None,
         wave_complete: None,
         start_wave: None,
+    }
+}
+
+fn utility_result_value<T>(value: T) -> UtilityResultEnvelope
+where
+    T: serde::Serialize,
+{
+    UtilityResultEnvelope::without_type_info(rmpv::ext::to_value(value).expect("encode result"))
+}
+
+fn utility_none_result() -> UtilityResultEnvelope {
+    UtilityResultEnvelope::without_type_info(Value::Nil)
+}
+
+fn utility_outputs(call_id: i64, result: UtilityResultEnvelope) -> EngineCoreOutputs {
+    EngineCoreOutputs {
+        utility_output: Some(UtilityOutput {
+            call_id,
+            failure_message: None,
+            result: Some(result),
+        }),
+        ..Default::default()
     }
 }
 
@@ -373,6 +396,50 @@ where
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
     let state = Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat));
     (build_router(state.clone()), state, engine_task)
+}
+
+async fn test_admin_app_with_engine_script<F, Fut>(
+    script: F,
+) -> (axum::Router, tokio::task::JoinHandle<()>)
+where
+    F: FnOnce(DealerSocket, PushSocket) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_identity = b"engine-openai-admin".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (dealer, push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            script(dealer, push).await;
+        }
+    });
+
+    let client = EngineCoreClient::connect_with_input_output_addresses(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        Some(ipc.input_endpoint()),
+        Some(ipc.output_endpoint()),
+    )
+    .await
+    .expect("connect client");
+
+    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    (
+        build_router_with_dev_mode(
+            Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)),
+            true,
+        ),
+        engine_task,
+    )
 }
 
 async fn test_app_with_engine_handle() -> (axum::Router, tokio::task::JoinHandle<()>) {
@@ -1709,4 +1776,291 @@ async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
         "{text}"
     );
     assert!(text.contains("\"finish_reason\":\"tool_calls\""), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn reset_prefix_cache_route_sends_expected_utility_call() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|mut dealer, mut push| async move {
+        let utility = recv_engine_message(&mut dealer).await;
+        assert_eq!(utility[0].as_ref(), &[0x03]);
+
+        let payload = decode_value(&utility[1]).expect("decode utility payload");
+        let array = payload.as_array().expect("utility payload array");
+        let call_id = array[1].as_i64().expect("call id");
+
+        assert_eq!(array[2], Value::from("reset_prefix_cache"));
+        assert_eq!(
+            array[3],
+            Value::Array(vec![Value::from(true), Value::from(true)])
+        );
+
+        send_outputs(
+            &mut push,
+            utility_outputs(call_id, utility_result_value(true)),
+        )
+        .await;
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/reset_prefix_cache?reset_running_requests=true&reset_external=true")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn reset_mm_cache_route_sends_expected_utility_call() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|mut dealer, mut push| async move {
+        let utility = recv_engine_message(&mut dealer).await;
+        assert_eq!(utility[0].as_ref(), &[0x03]);
+
+        let payload = decode_value(&utility[1]).expect("decode utility payload");
+        let array = payload.as_array().expect("utility payload array");
+        let call_id = array[1].as_i64().expect("call id");
+
+        assert_eq!(array[2], Value::from("reset_mm_cache"));
+        assert_eq!(array[3], Value::Array(Vec::new()));
+
+        send_outputs(&mut push, utility_outputs(call_id, utility_none_result())).await;
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/reset_mm_cache")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn reset_encoder_cache_route_sends_expected_utility_call() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|mut dealer, mut push| async move {
+        let utility = recv_engine_message(&mut dealer).await;
+        assert_eq!(utility[0].as_ref(), &[0x03]);
+
+        let payload = decode_value(&utility[1]).expect("decode utility payload");
+        let array = payload.as_array().expect("utility payload array");
+        let call_id = array[1].as_i64().expect("call id");
+
+        assert_eq!(array[2], Value::from("reset_encoder_cache"));
+        assert_eq!(array[3], Value::Array(Vec::new()));
+
+        send_outputs(&mut push, utility_outputs(call_id, utility_none_result())).await;
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/reset_encoder_cache")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn sleep_route_uses_python_compatible_default_query_values() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|mut dealer, mut push| async move {
+        let utility = recv_engine_message(&mut dealer).await;
+        assert_eq!(utility[0].as_ref(), &[0x03]);
+
+        let payload = decode_value(&utility[1]).expect("decode utility payload");
+        let array = payload.as_array().expect("utility payload array");
+        let call_id = array[1].as_i64().expect("call id");
+
+        assert_eq!(array[2], Value::from("sleep"));
+        assert_eq!(
+            array[3],
+            Value::Array(vec![Value::from(1_u64), Value::from("abort")])
+        );
+
+        send_outputs(&mut push, utility_outputs(call_id, utility_none_result())).await;
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/sleep")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn wake_up_route_without_tags_sends_none() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|mut dealer, mut push| async move {
+        let utility = recv_engine_message(&mut dealer).await;
+        assert_eq!(utility[0].as_ref(), &[0x03]);
+
+        let payload = decode_value(&utility[1]).expect("decode utility payload");
+        let array = payload.as_array().expect("utility payload array");
+        let call_id = array[1].as_i64().expect("call id");
+
+        assert_eq!(array[2], Value::from("wake_up"));
+        assert_eq!(array[3], Value::Array(vec![Value::Nil]));
+
+        send_outputs(&mut push, utility_outputs(call_id, utility_none_result())).await;
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/wake_up")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn is_sleeping_route_returns_json_payload() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|mut dealer, mut push| async move {
+        let utility = recv_engine_message(&mut dealer).await;
+        assert_eq!(utility[0].as_ref(), &[0x03]);
+
+        let payload = decode_value(&utility[1]).expect("decode utility payload");
+        let array = payload.as_array().expect("utility payload array");
+        let call_id = array[1].as_i64().expect("call id");
+
+        assert_eq!(array[2], Value::from("is_sleeping"));
+        assert_eq!(array[3], Value::Array(Vec::new()));
+
+        send_outputs(
+            &mut push,
+            utility_outputs(call_id, utility_result_value(true)),
+        )
+        .await;
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/is_sleeping")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({ "is_sleeping": true })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
+    let (chat, engine_task) = test_chat_with_engine_handle().await;
+    let app = build_router_with_dev_mode(
+        Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)),
+        false,
+    );
+
+    for (method, uri) in [
+        ("GET", "/is_sleeping"),
+        ("POST", "/sleep"),
+        ("POST", "/wake_up"),
+        ("POST", "/reset_prefix_cache"),
+        ("POST", "/reset_mm_cache"),
+        ("POST", "/reset_encoder_cache"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+    }
+
+    engine_task.abort();
+    let _ = engine_task.await;
 }
