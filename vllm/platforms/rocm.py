@@ -743,7 +743,7 @@ class RocmPlatform(Platform):
         # Fallback for containers where amdsmi silently returns a sentinel
         # value (gfxffffffffffffffff). torch.cuda.get_device_capability()
         # correctly identifies the GPU in that case.
-        cap = torch.cuda.get_device_capability(0)
+        cap = torch.cuda.get_device_capability(torch.cuda.current_device())
         return (cap[0] == 9 and cap[1] in (4, 5)) or cap[0] >= 12
 
     @classmethod
