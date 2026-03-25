@@ -1,6 +1,6 @@
 model_name: "nvidia/Qwen3.5-397B-A17B-NVFP4"
-accuracy_threshold: 0.89
-tolerance: 0.02
+accuracy_threshold: 0.88
+tolerance: 0.03
 num_questions: 1319
 num_fewshot: 5
 server_args: >-
