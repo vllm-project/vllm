@@ -26,6 +26,7 @@ class AttentionConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
         attention_config = vllm_config.attention_config
+        parallel_config = vllm_config.parallel_config
         assert cache_config is not None
         from vllm.config import set_current_vllm_config
         from vllm.v1.attention.selector import (
@@ -38,14 +39,14 @@ class AttentionConfig(VerifyAndUpdateConfig):
         # multi-modality prefix, and so on. Thus a clear
         # of cache is required after this.
         with set_current_vllm_config(vllm_config):
+            num_heads = model_config.get_num_attention_heads(parallel_config)
             backend_cls = get_attn_backend(
                 head_size=model_config.get_head_size(),
                 dtype=model_config.dtype,
                 kv_cache_dtype=cache_config.cache_dtype,
                 use_mla=model_config.use_mla,
                 use_sparse=hasattr(model_config.hf_config, "index_topk"),
-                num_heads=model_config.hf_config.num_attention_heads
-                // vllm_config.parallel_config.tensor_parallel_size,
+                num_heads=num_heads,
             )
             ori_supported_kernel_block_sizes = (
                 backend_cls.get_supported_kernel_block_sizes()
