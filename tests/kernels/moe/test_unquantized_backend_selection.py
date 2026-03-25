@@ -16,7 +16,7 @@ from vllm.platforms import current_platform
     "platform_method,expected_backend",
     [
         ("is_cuda", UnquantizedMoeBackend.TRITON),  # Default CUDA without FlashInfer
-        ("is_rocm", UnquantizedMoeBackend.TRITON),
+        ("is_rocm", UnquantizedMoeBackend.TRITON),  # ROCm without AITER
         ("is_cpu", UnquantizedMoeBackend.CPU),
         ("is_xpu", UnquantizedMoeBackend.XPU),
         ("is_tpu", UnquantizedMoeBackend.TPU),
@@ -27,13 +27,32 @@ from vllm.platforms import current_platform
     "vllm.utils.flashinfer.has_flashinfer",
     return_value=False,
 )
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops.is_fused_moe_enabled",
+    return_value=False,
+)
 def test_select_default_backend_by_platform(
+    mock_aiter_enabled,
     mock_has_flashinfer,
     monkeypatch,
     platform_method,
     expected_backend,
 ):
-    """Test backend selection for different platforms."""
+    """Test default backend selection per platform with all optional
+    accelerators (FlashInfer, AITER) disabled."""
+    with patch(
+        "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"
+    ) as mock_platform:
+        # Set all platform checks to False
+        mock_platform.is_cuda.return_value = False
+        mock_platform.is_rocm.return_value = False
+        mock_platform.is_cpu.return_value = False
+        mock_platform.is_xpu.return_value = False
+        mock_platform.is_tpu.return_value = False
+        mock_platform.is_out_of_tree.return_value = False
+
+        # Set only the specified platform to True
+        getattr(mock_platform, platform_method).return_value = True
 
     with (
         patch.object(current_platform, "is_cuda", return_value=False),
@@ -61,7 +80,40 @@ def test_select_default_backend_by_platform(
 
 
 @patch(
-    "vllm.utils.flashinfer.has_flashinfer",
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.has_flashinfer",
+    return_value=False,
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops.is_fused_moe_enabled",
+    return_value=True,
+)
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific backend selection test"
+)
+def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
+    """Test ROCm backend selection when AITER is available."""
+    with patch(
+        "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"
+    ) as mock_platform:
+        mock_platform.is_cuda.return_value = False
+        mock_platform.is_rocm.return_value = True
+        mock_platform.is_cpu.return_value = False
+        mock_platform.is_xpu.return_value = False
+        mock_platform.is_tpu.return_value = False
+        mock_platform.is_out_of_tree.return_value = False
+
+        moe_config = make_dummy_moe_config()
+        selected_backend = select_unquantized_moe_backend(
+            moe_config=moe_config,
+            use_ep=False,
+            use_dp=False,
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.AITER
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.has_flashinfer",
     return_value=True,
 )
 @patch(
