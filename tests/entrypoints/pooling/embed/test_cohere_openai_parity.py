@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import requests
 
-from tests.utils import RemoteOpenAIServer
+from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 
 MODEL_NAME = "BAAI/bge-base-en-v1.5"
 DTYPE = "bfloat16"
@@ -28,7 +28,7 @@ def server():
         "512",
         "--gpu-memory-utilization",
         "0.02",
-    ]
+    ] + ROCM_EXTRA_ARGS
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
