@@ -18,7 +18,7 @@ from vllm.entrypoints.pooling.typing import (
     PoolingCompletionLikeRequest,
     PoolingServeContext,
 )
-from vllm.inputs.data import ProcessorInputs, SingletonPrompt
+from vllm.inputs import EngineInput, SingletonPrompt
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.tool_parsers import ToolParser
@@ -60,7 +60,7 @@ class PoolingIOProcessor:
                 chat_template_kwargs=request.chat_template_kwargs,
                 trust_request_chat_template=self.trust_request_chat_template,
             )
-            _, engine_prompts = self._preprocess_chat_online(
+            _, engine_inputs = self._preprocess_chat_online(
                 request,
                 request.messages,
                 default_template=self.chat_template,
@@ -68,7 +68,7 @@ class PoolingIOProcessor:
                 default_template_kwargs=None,
             )
         elif isinstance(request, PoolingCompletionLikeRequest):
-            engine_prompts = self._preprocess_completion_online(
+            engine_inputs = self._preprocess_completion_online(
                 request,
                 prompt_input=request.input,
                 prompt_embeds=None,
@@ -76,7 +76,7 @@ class PoolingIOProcessor:
         else:
             raise ValueError(f"Invalid {self.name} request type")
 
-        ctx.engine_prompts = engine_prompts
+        ctx.engine_inputs = engine_inputs
 
     async def pre_process_online_async(self, ctx: PoolingServeContext):
         self.pre_process_online(ctx)
@@ -100,7 +100,7 @@ class PoolingIOProcessor:
         self,
         prompts: PromptType | Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> Sequence[ProcessorInputs]:
+    ) -> Sequence[EngineInput]:
         return self._preprocess_completion_offline(
             prompts=prompts, tokenization_kwargs=tokenization_kwargs
         )
@@ -128,7 +128,7 @@ class PoolingIOProcessor:
         request: RendererRequest,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
         prompt_embeds: bytes | list[bytes] | None,
-    ) -> list[ProcessorInputs]:
+    ) -> list[EngineInput]:
         renderer = self.renderer
         model_config = self.model_config
 
@@ -167,7 +167,7 @@ class PoolingIOProcessor:
         default_template_kwargs: dict[str, Any] | None,
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: type[ToolParser] | None = None,
-    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]]:
+    ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         renderer = self.renderer
 
         default_template_kwargs = merge_kwargs(
@@ -188,7 +188,7 @@ class PoolingIOProcessor:
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
         )
 
-        (conversation,), (engine_prompt,) = renderer.render_chat(
+        (conversation,), (engine_input,) = renderer.render_chat(
             [messages],
             chat_params,
             tok_params,
@@ -199,13 +199,13 @@ class PoolingIOProcessor:
             },
         )
 
-        return conversation, [engine_prompt]
+        return conversation, [engine_input]
 
     def _preprocess_completion_offline(
         self,
         prompts: PromptType | Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> Sequence[ProcessorInputs]:
+    ) -> Sequence[EngineInput]:
         renderer = self.renderer
         model_config = self.model_config
 

@@ -21,6 +21,7 @@ from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -48,9 +49,7 @@ from vllm.multimodal.evs import (
 from vllm.multimodal.inputs import (
     AudioItem,
     BatchedTensorInputs,
-    MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalInputs,
     MultiModalKwargsItems,
     VideoItem,
 )
@@ -576,7 +575,7 @@ class NanoNemotronVLMultiModalProcessor(
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         use_audio_in_video = bool(
             inputs.hf_processor_mm_kwargs.get("use_audio_in_video", False)
         )
@@ -632,7 +631,7 @@ class NanoNemotronVLMultiModalProcessor(
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return MultiModalInputs(
+        return MultiModalInput(
             type="multimodal",
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_info.kwargs,

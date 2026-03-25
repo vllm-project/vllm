@@ -129,7 +129,7 @@ class TestValidatePrompt:
 
 
 class TestRenderPrompt:
-    def test_token_input(self):
+    def test_tokens_input(self):
         renderer = _build_renderer(MockModelConfig())
 
         tokens = [101, 7592, 2088]
@@ -339,7 +339,7 @@ class TestRenderPrompt:
                 TokenizeParams(max_total_tokens=100),
             )
 
-    def test_token_input_with_needs_detokenization(self):
+    def test_tokens_input_with_needs_detokenization(self):
         renderer = _build_renderer(MockModelConfig())
 
         tokens = [1, 2, 3, 4]

@@ -20,7 +20,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
     TokenizerInfoResponse,
 )
-from vllm.inputs import TokensPrompt, token_inputs
+from vllm.inputs import TokensPrompt, tokens_input
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 
@@ -79,7 +79,7 @@ class OpenAIServingTokenization(OpenAIServing):
             if error_check_ret is not None:
                 return error_check_ret
 
-            _, engine_prompts = await self.openai_serving_render.preprocess_chat(
+            _, engine_inputs = await self.openai_serving_render.preprocess_chat(
                 request,
                 request.messages,
                 default_template=self.chat_template,
@@ -88,22 +88,22 @@ class OpenAIServingTokenization(OpenAIServing):
                 tool_dicts=tool_dicts,
             )
         else:
-            engine_prompts = await self.openai_serving_render.preprocess_completion(
+            engine_inputs = await self.openai_serving_render.preprocess_completion(
                 request,
                 prompt_input=request.prompt,
                 prompt_embeds=None,
             )
 
         input_ids: list[int] = []
-        for engine_prompt in engine_prompts:
+        for engine_input in engine_inputs:
             self._log_inputs(
                 request_id,
-                engine_prompt,
+                engine_input,
                 params=None,
                 lora_request=lora_request,
             )
 
-            prompt_components = self._extract_prompt_components(engine_prompt)
+            prompt_components = self._extract_prompt_components(engine_input)
             if prompt_components.token_ids is not None:
                 input_ids.extend(prompt_components.token_ids)
 
@@ -134,16 +134,16 @@ class OpenAIServingTokenization(OpenAIServing):
 
         self._log_inputs(
             request_id,
-            token_inputs(request.tokens),
+            tokens_input(request.tokens),
             params=None,
             lora_request=lora_request,
         )
 
-        engine_prompt = await self.renderer.tokenize_prompt_async(
+        tok_prompt = await self.renderer.tokenize_prompt_async(
             TokensPrompt(prompt_token_ids=request.tokens),
             request.build_tok_params(self.model_config),
         )
-        prompt_text = engine_prompt["prompt"]  # type: ignore[typeddict-item]
+        prompt_text = tok_prompt["prompt"]  # type: ignore[typeddict-item]
 
         return DetokenizeResponse(prompt=prompt_text)
 

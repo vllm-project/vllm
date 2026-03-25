@@ -11,15 +11,14 @@ from typing import TYPE_CHECKING, Any, overload
 import torch
 from typing_extensions import TypeVar
 
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
-from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
     EmbeddingItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.renderers import TokenizeParams
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
@@ -32,12 +31,14 @@ if TYPE_CHECKING:
     from transformers.processing_utils import ProcessorMixin
 
     from vllm.config import ModelConfig
+    from vllm.renderers import TokenizeParams
 else:
     PretrainedConfig = object
     BatchFeature = object
     ProcessorMixin = object
 
     ModelConfig = object
+    TokenizeParams = object
 
 logger = init_logger(__name__)
 
@@ -339,6 +340,8 @@ class BaseProcessingInfo:
 
     def get_default_tok_params(self) -> TokenizeParams:
         """Construct the default parameters for tokenization."""
+        from vllm.renderers import TokenizeParams
+
         model_config = self.ctx.model_config
         encoder_config = model_config.encoder_config or {}
 
@@ -451,8 +454,7 @@ class BaseProcessingInfo:
         validate: bool = True,
     ) -> MultiModalDataItems:
         """
-        Normalize
-        [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
+        Normalize [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
         to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
         before passing them to
         [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
