@@ -896,7 +896,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 qk_nope_head_dim=self.qk_nope_head_dim,
                 kv_lora_rank=self.impl.kv_lora_rank,
                 qk_rope_head_dim=self.impl.qk_rope_head_dim,
-                block_size=self.impl.block_size,
+                block_size=kv_cache.shape[1],
             )
 
             # correct dcp attn_out with lse.
