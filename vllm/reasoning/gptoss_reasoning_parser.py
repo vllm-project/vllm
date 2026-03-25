@@ -11,6 +11,7 @@ from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.entrypoints.openai.parser.harmony_utils import parse_chat_output
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
         ChatCompletionToolsParam,
     )
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+
 
 logger = init_logger(__name__)
 
