@@ -30,7 +30,7 @@ curl -s "${BASE_URL}/v1/chat/completions" \
   }" | jq '.choices[] | {index, content: .message.content}'
 
 echo " Example 1b: simple batch with 2 requests "
-curl -s "${BASE_URL}/v1/chat/completions" \
+curl -s "${BASE_URL}/v1/chat/completions/batch" \
   -H "Content-Type: application/json" \
   -d "{
     \"model\": \"${MODEL}\",
@@ -45,7 +45,7 @@ curl -s "${BASE_URL}/v1/chat/completions" \
 # ---------------------------------------------------------------------------
 echo ""
 echo " Example 2: batch with regex constraint (yes|no) "
-curl -s "${BASE_URL}/v1/chat/completions" \
+curl -s "${BASE_URL}/v1/chat/completions/batch" \
   -H "Content-Type: application/json" \
   -d "{
     \"model\": \"${MODEL}\",
@@ -63,7 +63,7 @@ curl -s "${BASE_URL}/v1/chat/completions" \
 # ---------------------------------------------------------------------------
 echo ""
 echo " Example 3: batch with json_schema "
-curl -s "${BASE_URL}/v1/chat/completions" \
+curl -s "${BASE_URL}/v1/chat/completions/batch" \
   -H "Content-Type: application/json" \
   -d "{
     \"model\": \"${MODEL}\",
@@ -94,7 +94,7 @@ curl -s "${BASE_URL}/v1/chat/completions" \
 # ---------------------------------------------------------------------------
 echo ""
 echo " Example 4: batch book summaries "
-curl -s "${BASE_URL}/v1/chat/completions" \
+curl -s "${BASE_URL}/v1/chat/completions/batch" \
   -H "Content-Type: application/json" \
   -d "{
     \"model\": \"${MODEL}\",

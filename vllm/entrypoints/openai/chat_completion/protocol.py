@@ -150,7 +150,7 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
-    messages: list[ChatCompletionMessageParam] | list[list[ChatCompletionMessageParam]]
+    messages: list[ChatCompletionMessageParam]
     model: str | None = None
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
@@ -357,17 +357,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # --8<-- [end:chat-completion-extra-params]
 
-    @property
-    def is_batched(self) -> bool:
-        """Return True when messages is a list of conversations."""
-        return bool(self.messages) and isinstance(self.messages[0], list)
-
-    def get_conversations(self) -> list[list[ChatCompletionMessageParam]]:
-        """Return all conversations. Wraps a single conversation in a list."""
-        if self.is_batched:
-            return self.messages  # type: ignore[return-value]
-        return [self.messages]  # type: ignore[list-item]
-
     def build_chat_params(
         self,
         default_template: str | None,
@@ -533,34 +522,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
         )
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_batch_mode(cls, data):
-        messages = data.get("messages", [])
-        is_batched = bool(messages) and isinstance(messages[0], list)
-        if is_batched:
-            if data.get("stream"):
-                raise VLLMValidationError(
-                    "Streaming is not supported with batched messages.",
-                    parameter="messages",
-                )
-            if data.get("use_beam_search"):
-                raise VLLMValidationError(
-                    "Beam search is not supported with batched messages.",
-                    parameter="messages",
-                )
-            if data.get("tools"):
-                raise VLLMValidationError(
-                    "Tool use is not supported with batched messages.",
-                    parameter="messages",
-                )
-            if (data.get("n") or 1) != 1:
-                raise VLLMValidationError(
-                    "The 'n' parameter must be 1 for batched requests.",
-                    parameter="n",
-                )
-        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -826,3 +787,66 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if data.get("reasoning_effort") == "none":
             data["include_reasoning"] = False
         return data
+
+
+class BatchChatCompletionRequest(OpenAIBaseModel):
+    """Request model for the /v1/chat/completions/batch endpoint.
+
+    Accepts the same fields as ChatCompletionRequest except that ``messages``
+    is a list of conversations (each conversation is a
+    ``list[ChatCompletionMessageParam]``).  Each conversation is processed
+    independently and the response contains one choice per conversation,
+    indexed 0, 1, ..., N-1.
+
+    Current limitations compared to the single-conversation endpoint:
+    - Streaming is not supported (``stream`` must be False or omitted).
+    - Tool use is not supported (``tools`` must be omitted).
+    - Beam search is not supported (``use_beam_search`` must be False or omitted).
+    - The ``n`` parameter must be 1 (or omitted).
+    """
+
+    messages: list[list[ChatCompletionMessageParam]]
+    model: str | None = None
+
+    # Shared sampling / generation fields — mirror ChatCompletionRequest.
+    frequency_penalty: float | None = 0.0
+    logit_bias: dict[str, float] | None = None
+    logprobs: bool | None = False
+    top_logprobs: int | None = 0
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+    n: int | None = 1
+    presence_penalty: float | None = 0.0
+    response_format: Any | None = None
+    seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
+    stop: str | list[str] | None = Field(default_factory=list)
+    temperature: float | None = 0.7
+    top_p: float | None = 1.0
+    user: str | None = None
+
+    # vLLM extensions
+    best_of: int | None = None
+    use_beam_search: bool = False
+    top_k: int | None = None
+    min_p: float | None = 0.0
+    repetition_penalty: float | None = 1.0
+    length_penalty: float | None = 1.0
+    early_stopping: bool = False
+    structured_outputs: StructuredOutputsParams | None = None
+    request_id: str | None = None
+    add_generation_prompt: bool = True
+    continue_final_message: bool = False
+    chat_template: str | None = None
+    chat_template_kwargs: dict[str, Any] | None = None
+    include_stop_str_in_output: bool = False
+    guided_decoding_backend: str | None = None
+    echo: bool = False
+    return_token_ids: bool = False
+
+    def to_chat_completion_request(
+        self, messages: list[ChatCompletionMessageParam]
+    ) -> ChatCompletionRequest:
+        """Build a single-conversation ChatCompletionRequest from one conversation."""
+        data = self.model_dump(exclude={"messages"})
+        data["messages"] = messages
+        return ChatCompletionRequest.model_validate(data)

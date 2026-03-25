@@ -24,6 +24,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
@@ -178,7 +179,7 @@ class OpenAIServingChat(OpenAIServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-    ) -> tuple[list[list[ConversationMessage]], list[ProcessorInputs]] | ErrorResponse:
+    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
         """
         Validate the model and preprocess a chat completion request.
 
@@ -186,8 +187,8 @@ class OpenAIServingChat(OpenAIServing):
         engine-aware checks (LoRA model validation, engine health).
 
         Returns:
-            A tuple of (all_conversations, engine_prompts) on success
-            ErrorResponse on failure.
+            A tuple of (conversation, engine_prompts) on success,
+            or an ErrorResponse on failure.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -200,14 +201,7 @@ class OpenAIServingChat(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        if request.is_batched:
-            return await self.openai_serving_render.render_batch_chat(request)
-
-        result = await self.openai_serving_render.render_chat(request)
-        if isinstance(result, ErrorResponse):
-            return result
-        conversation, engine_prompts = result
-        return [conversation], engine_prompts
+        return await self.openai_serving_render.render_chat(request)
 
     async def create_chat_completion(
         self,
@@ -239,7 +233,7 @@ class OpenAIServingChat(OpenAIServing):
         if isinstance(result, ErrorResponse):
             return result
 
-        all_conversations, engine_prompts = result
+        conversation, engine_prompts = result
 
         request_id = (
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
@@ -333,18 +327,6 @@ class OpenAIServingChat(OpenAIServing):
 
             generators.append(generator)
 
-        if request.is_batched:
-            return await self.chat_completion_full_generator_batch(
-                request,
-                generators,
-                request_id,
-                model_name,
-                all_conversations,
-                tokenizer,
-                request_metadata,
-                reasoning_parser,
-            )
-
         assert len(generators) == 1
         (result_generator,) = generators
 
@@ -354,7 +336,7 @@ class OpenAIServingChat(OpenAIServing):
                 result_generator,
                 request_id,
                 model_name,
-                all_conversations[0],
+                conversation,
                 tokenizer,
                 request_metadata,
                 reasoning_parser,
@@ -365,16 +347,118 @@ class OpenAIServingChat(OpenAIServing):
             result_generator,
             request_id,
             model_name,
-            all_conversations[0],
+            conversation,
             tokenizer,
             request_metadata,
             reasoning_parser,
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
-        if request.add_generation_prompt or request.is_batched:
+        if request.add_generation_prompt:
             return self.response_role
-        return request.messages[-1]["role"]  # type: ignore[call-overload]
+        return request.messages[-1]["role"]
+
+    async def create_batch_chat_completion(
+        self,
+        request: BatchChatCompletionRequest,
+        raw_request: Request | None = None,
+    ) -> ChatCompletionResponse | ErrorResponse:
+        """Batch Chat Completion endpoint (/v1/chat/completions/batch).
+
+        Processes N conversations from a single request concurrently and
+        returns one choice per conversation indexed 0, 1, …, N-1.
+        Streaming, tool use, and beam search are not supported.
+        """
+        tokenizer = self.renderer.tokenizer
+        assert tokenizer is not None
+
+        reasoning_parser: ReasoningParser | None = None
+        if self.reasoning_parser_cls:
+            chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
+                request.chat_template_kwargs,
+                self.default_chat_template_kwargs,
+            )
+            reasoning_parser = self.reasoning_parser_cls(
+                tokenizer,
+                chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
+            )
+
+        # Convert to a per-conversation ChatCompletionRequest and render each.
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        if self.engine_client.errored:
+            raise self.engine_client.dead_error
+
+        render_result = await self.openai_serving_render.render_batch_chat(request)
+        if isinstance(render_result, ErrorResponse):
+            return render_result
+        all_conversations, engine_prompts = render_result
+
+        request_id = (
+            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
+        )
+        request_metadata = RequestResponseMetadata(request_id=request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
+
+        lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
+        model_name = self.models.model_name(lora_request)
+        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+        max_model_len = self.model_config.max_model_len
+
+        generators: list[AsyncGenerator[RequestOutput, None]] = []
+        for i, engine_prompt in enumerate(engine_prompts):
+            sub_request_id = f"{request_id}_{i}"
+            max_tokens = get_max_tokens(
+                max_model_len,
+                request.max_completion_tokens
+                if request.max_completion_tokens is not None
+                else request.max_tokens,
+                self._extract_prompt_len(engine_prompt),
+                self.default_sampling_params,
+                self.override_max_tokens,
+            )
+            # Build a single-conversation request for sampling params.
+            single_request = request.to_chat_completion_request(request.messages[i])
+            sampling_params = single_request.to_sampling_params(
+                max_tokens, self.default_sampling_params
+            )
+            self._log_inputs(
+                sub_request_id,
+                engine_prompt,
+                params=sampling_params,
+                lora_request=lora_request,
+            )
+            trace_headers = (
+                None
+                if raw_request is None
+                else await self._get_trace_headers(raw_request.headers)
+            )
+            generators.append(
+                self.engine_client.generate(
+                    engine_prompt,
+                    sampling_params,
+                    sub_request_id,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    priority=request.priority if hasattr(request, "priority") else 0,
+                    data_parallel_rank=data_parallel_rank,
+                    reasoning_ended=None,
+                )
+            )
+
+        return await self.chat_completion_full_generator_batch(
+            request,  # type: ignore[arg-type]
+            generators,
+            request_id,
+            model_name,
+            all_conversations,
+            tokenizer,
+            request_metadata,
+            reasoning_parser,
+        )
 
     @staticmethod
     def _bracket_level(s: str, opening="{", closing="}") -> int:

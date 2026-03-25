@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
@@ -66,6 +67,34 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         )
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@router.post(
+    "/v1/chat/completions/batch",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
+    },
+)
+@with_cancellation
+@load_aware_call
+async def create_batch_chat_completion(
+    request: BatchChatCompletionRequest, raw_request: Request
+):
+    handler = chat(raw_request)
+    if handler is None:
+        raise NotImplementedError("The model does not support Chat Completions API")
+
+    result = await handler.create_batch_chat_completion(request, raw_request)
+
+    if isinstance(result, ErrorResponse):
+        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+
+    return JSONResponse(content=result.model_dump())
 
 
 def attach_router(app: FastAPI):

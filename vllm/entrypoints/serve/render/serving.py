@@ -12,7 +12,10 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
 )
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
+    ChatCompletionRequest,
+)
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
@@ -252,29 +255,18 @@ class OpenAIServingRender:
 
     async def render_batch_chat(
         self,
-        request: ChatCompletionRequest,
+        request: BatchChatCompletionRequest,
     ) -> tuple[list[list[ConversationMessage]], list[ProcessorInputs]] | ErrorResponse:
-        """Preprocess a batch of conversations from a single ChatCompletionRequest.
+        """Preprocess a batch of conversations from a BatchChatCompletionRequest.
 
         Performs shared validation once (chat template, tool config) then calls
-        preprocess_chat for each conversation in request.get_conversations().
+        preprocess_chat for each conversation in request.messages.
 
         :returns: A tuple of (all_conversations, engine_prompts) where each list
             has one entry per conversation, or an ErrorResponse on failure.
         """
-        tokenizer = self.renderer.tokenizer
         tool_parser = self.tool_parser
-
-        if is_mistral_tokenizer(tokenizer):
-            _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
-            _mt.truncate_tool_call_ids(request)  # type: ignore[arg-type]
-            _mt.validate_request_params(request)
-
-        tool_dicts = (
-            None
-            if request.tools is None
-            else [tool.model_dump() for tool in request.tools]
-        )
+        tool_dicts: list[dict] | None = None
 
         if not self.use_harmony:
             # Common case: validate the chat template once for the whole batch.
@@ -289,15 +281,18 @@ class OpenAIServingRender:
         all_conversations: list[list[ConversationMessage]] = []
         all_engine_prompts: list[ProcessorInputs] = []
 
-        for messages in request.get_conversations():
+        for messages in request.messages:
+            # Build a single-conversation request so preprocess_chat gets the
+            # correct type — only the messages field differs per iteration.
+            single_request = request.to_chat_completion_request(messages)
             if self.use_harmony:
                 # For GPT-OSS.
                 conversation, engine_prompts = self._make_request_with_harmony(
-                    request, should_include_tools=tool_dicts is not None
+                    single_request, should_include_tools=tool_dicts is not None
                 )
             else:
                 conversation, engine_prompts = await self.preprocess_chat(
-                    request,
+                    single_request,
                     messages,
                     default_template=self.chat_template,
                     default_template_content_format=self.chat_template_content_format,

@@ -176,7 +176,7 @@ async def test_batched_chat_completions(
 
     async with httpx.AsyncClient() as http_client:
         response = await http_client.post(
-            f"{server.url_for('v1/chat/completions')}",
+            f"{server.url_for('v1/chat/completions/batch')}",
             json={
                 "model": model_name,
                 "messages": conversations,
@@ -206,6 +206,8 @@ async def test_batched_chat_completions(
 async def test_batched_chat_completions_with_json_schema(
     server: RemoteOpenAIServer, model_name: str
 ) -> None:
+    import json
+
     schema = {
         "type": "object",
         "properties": {
@@ -220,7 +222,7 @@ async def test_batched_chat_completions_with_json_schema(
 
     async with httpx.AsyncClient() as http_client:
         response = await http_client.post(
-            f"{server.url_for('v1/chat/completions')}",
+            f"{server.url_for('v1/chat/completions/batch')}",
             json={
                 "model": model_name,
                 "messages": conversations,
@@ -238,36 +240,7 @@ async def test_batched_chat_completions_with_json_schema(
     choices = data["choices"]
     assert len(choices) == 2
 
-    import json
-
     for choice in choices:
         parsed = json.loads(choice["message"]["content"])
         assert "answer" in parsed
         assert parsed["answer"] in ("yes", "no")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
-async def test_batched_chat_completions_rejects_stream(
-    server: RemoteOpenAIServer, model_name: str
-) -> None:
-    conversations = [
-        [{"role": "user", "content": "Hello"}],
-        [{"role": "user", "content": "World"}],
-    ]
-
-    async with httpx.AsyncClient() as http_client:
-        response = await http_client.post(
-            f"{server.url_for('v1/chat/completions')}",
-            json={
-                "model": model_name,
-                "messages": conversations,
-                "stream": True,
-            },
-            timeout=60,
-        )
-
-    assert response.status_code == 400
