@@ -12,10 +12,7 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
 )
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    BatchChatCompletionRequest,
-    ChatCompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
@@ -252,58 +249,6 @@ class OpenAIServingRender:
             )
 
         return conversation, engine_prompts
-
-    async def render_batch_chat(
-        self,
-        request: BatchChatCompletionRequest,
-    ) -> tuple[list[list[ConversationMessage]], list[ProcessorInputs]] | ErrorResponse:
-        """Preprocess a batch of conversations from a BatchChatCompletionRequest.
-
-        Performs shared validation once (chat template, tool config) then calls
-        preprocess_chat for each conversation in request.messages.
-
-        :returns: A tuple of (all_conversations, engine_prompts) where each list
-            has one entry per conversation, or an ErrorResponse on failure.
-        """
-        tool_parser = self.tool_parser
-        tool_dicts: list[dict] | None = None
-
-        if not self.use_harmony:
-            # Common case: validate the chat template once for the whole batch.
-            error_check_ret = self.validate_chat_template(
-                request_chat_template=request.chat_template,
-                chat_template_kwargs=request.chat_template_kwargs,
-                trust_request_chat_template=self.trust_request_chat_template,
-            )
-            if error_check_ret is not None:
-                return error_check_ret
-
-        all_conversations: list[list[ConversationMessage]] = []
-        all_engine_prompts: list[ProcessorInputs] = []
-
-        for messages in request.messages:
-            # Build a single-conversation request so preprocess_chat gets the
-            # correct type — only the messages field differs per iteration.
-            single_request = request.to_chat_completion_request(messages)
-            if self.use_harmony:
-                # For GPT-OSS.
-                conversation, engine_prompts = self._make_request_with_harmony(
-                    single_request, should_include_tools=tool_dicts is not None
-                )
-            else:
-                conversation, engine_prompts = await self.preprocess_chat(
-                    single_request,
-                    messages,
-                    default_template=self.chat_template,
-                    default_template_content_format=self.chat_template_content_format,
-                    default_template_kwargs=self.default_chat_template_kwargs,
-                    tool_dicts=tool_dicts,
-                    tool_parser=tool_parser,
-                )
-            all_conversations.append(conversation)
-            all_engine_prompts.append(engine_prompts[0])
-
-        return all_conversations, all_engine_prompts
 
     async def render_completion_request(
         self,

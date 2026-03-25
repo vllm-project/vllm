@@ -176,6 +176,67 @@ class OpenAIServingChat(OpenAIServing):
             )
         )
 
+    async def render_batch_chat_request(
+        self,
+        request: BatchChatCompletionRequest,
+    ) -> tuple[list[list[ConversationMessage]], list[ProcessorInputs]] | ErrorResponse:
+        """Validate the model and preprocess a batched chat completion request.
+
+        Performs engine-aware checks then delegates per-conversation preprocessing
+        to OpenAIServingRender, validating the chat template once for the whole batch.
+
+        Returns:
+            A tuple of (all_conversations, engine_prompts) on success — one entry
+            per conversation — or an ErrorResponse on failure.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            logger.error("Error with model %s", error_check_ret)
+            return error_check_ret
+
+        if self.engine_client.errored:
+            raise self.engine_client.dead_error
+
+        render = self.openai_serving_render
+
+        if not render.use_harmony:
+            # Common case: validate the chat template once for the whole batch.
+            error_check_ret = render.validate_chat_template(
+                request_chat_template=request.chat_template,
+                chat_template_kwargs=request.chat_template_kwargs,
+                trust_request_chat_template=render.trust_request_chat_template,
+            )
+            if error_check_ret is not None:
+                return error_check_ret
+
+        tool_parser = render.tool_parser
+        tool_dicts: list[dict] | None = None
+
+        all_conversations: list[list[ConversationMessage]] = []
+        all_engine_prompts: list[ProcessorInputs] = []
+
+        for messages in request.messages:
+            single_request = request.to_chat_completion_request(messages)
+            if render.use_harmony:
+                # For GPT-OSS.
+                conversation, engine_prompts = render._make_request_with_harmony(
+                    single_request, should_include_tools=tool_dicts is not None
+                )
+            else:
+                conversation, engine_prompts = await render.preprocess_chat(
+                    single_request,
+                    messages,
+                    default_template=render.chat_template,
+                    default_template_content_format=render.chat_template_content_format,
+                    default_template_kwargs=render.default_chat_template_kwargs,
+                    tool_dicts=tool_dicts,
+                    tool_parser=tool_parser,
+                )
+            all_conversations.append(conversation)
+            all_engine_prompts.append(engine_prompts[0])
+
+        return all_conversations, all_engine_prompts
+
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
@@ -384,14 +445,7 @@ class OpenAIServingChat(OpenAIServing):
             )
 
         # Convert to a per-conversation ChatCompletionRequest and render each.
-        error_check_ret = await self._check_model(request)
-        if error_check_ret is not None:
-            return error_check_ret
-
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
-
-        render_result = await self.openai_serving_render.render_batch_chat(request)
+        render_result = await self.render_batch_chat_request(request)
         if isinstance(render_result, ErrorResponse):
             return render_result
         all_conversations, engine_prompts = render_result
