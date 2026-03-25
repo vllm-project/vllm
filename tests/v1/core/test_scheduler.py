@@ -4242,11 +4242,9 @@ def test_jump_forward_tokens_logprobs():
     # Build LogprobsLists for 1 sampled token with top_logprobs=3.
     # Shape: [1, 4] — column 0 is sampled token, columns 1-3 are top-k.
     sampled_token_ids = np.array([[7, 10, 11, 12]], dtype=np.int32)
-    sampled_logprobs = np.array([[-0.5, -1.0, -2.0, -3.0]],
-                                dtype=np.float32)
+    sampled_logprobs = np.array([[-0.5, -1.0, -2.0, -3.0]], dtype=np.float32)
     sampled_ranks = np.array([0], dtype=np.int32)
-    logprobs = LogprobsLists(sampled_token_ids, sampled_logprobs,
-                             sampled_ranks)
+    logprobs = LogprobsLists(sampled_token_ids, sampled_logprobs, sampled_ranks)
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id],
@@ -4257,8 +4255,7 @@ def test_jump_forward_tokens_logprobs():
         pooler_output=[],
     )
 
-    engine_outputs = scheduler.update_from_output(scheduler_output,
-                                                  model_output)
+    engine_outputs = scheduler.update_from_output(scheduler_output, model_output)
 
     # Extract the EngineCoreOutput for our request.
     output = engine_outputs[req.client_index].outputs[0]

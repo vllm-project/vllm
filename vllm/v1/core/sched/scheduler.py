@@ -1500,15 +1500,11 @@ class Scheduler(SchedulerInterface):
                             )
                             new_logprobs = LogprobsLists(
                                 np.concatenate(
-                                    [new_logprobs.logprob_token_ids,
-                                     ff_token_ids]
+                                    [new_logprobs.logprob_token_ids, ff_token_ids]
                                 ),
+                                np.concatenate([new_logprobs.logprobs, ff_logprobs]),
                                 np.concatenate(
-                                    [new_logprobs.logprobs, ff_logprobs]
-                                ),
-                                np.concatenate(
-                                    [new_logprobs.sampled_token_ranks,
-                                     ff_ranks]
+                                    [new_logprobs.sampled_token_ranks, ff_ranks]
                                 ),
                                 None,
                             )
