@@ -29,10 +29,10 @@ from vllm.config import (
 from vllm.model_executor.kernels.linear import (
     AiterFp8BlockScaledMMKernel,
     ChannelWiseTorchFP8ScaledMMLinearKernel,
-    CudaFp8BlockScaledMMKernel,
     CutlassFp8BlockScaledMMKernel,
     CutlassFP8ScaledMMLinearKernel,
     DeepGemmFp8BlockScaledMMKernel,
+    FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
     FlashInferFP8ScaledMMLinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
     ROCmFP8ScaledMMLinearKernel,
@@ -71,8 +71,7 @@ CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
     # ChannelWiseTorchFP8ScaledMMLinearKernel only supports per-token
     (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
     # Blockwise group shapes
-    (CudaFp8BlockScaledMMKernel, GroupShape(1, 128)),
-    (CudaFp8BlockScaledMMKernel, GroupShape(1, 64)),
+    (FlashInferFp8DeepGEMMDynamicBlockScaledKernel, GroupShape(1, 128)),
     (CutlassFp8BlockScaledMMKernel, GroupShape(1, 128)),
     (DeepGemmFp8BlockScaledMMKernel, GroupShape(1, 128)),
     (TritonFp8BlockScaledMMKernel, GroupShape(1, 128)),
@@ -120,6 +119,7 @@ class TestModel(torch.nn.Module):
         eps: float,
         force_kernel: type[_KernelT] | None,
         group_shape: GroupShape,
+        dtype: torch.dtype,
         use_aiter_fusion: bool = False,
         use_aiter_quant: bool = False,
         *args,
@@ -161,6 +161,7 @@ class TestModel(torch.nn.Module):
                 weight_quant_key=self.weight_quant_key,
                 force_kernel=force_kernel,
                 transpose_weights=use_aiter_fusion,
+                input_dtype=dtype,
             )
             for _ in range(3)
         ]
@@ -348,6 +349,7 @@ def test_fusion_rmsnorm_quant(
             eps=eps,
             force_kernel=force_kernel,
             group_shape=group_shape,
+            dtype=dtype,
             use_aiter_fusion=False,
             use_aiter_quant=False,
         )
@@ -419,6 +421,7 @@ def test_aiter_fusion_rmsnorm_quant(
             eps=eps,
             force_kernel=force_kernel,
             group_shape=group_shape,
+            dtype=dtype,
             use_aiter_fusion=True,  # Always use aiter fusion ops in aiter test
             use_aiter_quant=use_aiter_quant_op,  # Toggle aiter quantization
         )

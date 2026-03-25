@@ -55,7 +55,11 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
     quant_key = kFp8StaticTensorSym
 
     def __init__(
-        self, hidden_size: int, force_kernel: FP8ScaledMMLinearKernel, **kwargs
+        self,
+        hidden_size: int,
+        force_kernel: FP8ScaledMMLinearKernel,
+        dtype: torch.dtype,
+        **kwargs,
     ):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
@@ -65,6 +69,7 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
             activation_quant_key=self.quant_key,
             weight_quant_key=self.quant_key,
             force_kernel=force_kernel,
+            input_dtype=dtype,
         )
 
         self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
@@ -136,7 +141,7 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
 class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
     act_quant_key = kFp8Dynamic128Sym
 
-    def __init__(self, hidden_size: int, **kwargs):
+    def __init__(self, hidden_size: int, dtype: torch.dtype, **kwargs):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
         self.weight_quant_key = create_fp8_quant_key(
@@ -147,6 +152,7 @@ class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
             weight_shape=(hidden_size, hidden_size),
             weight_quant_key=self.weight_quant_key,
             activation_quant_key=self.act_quant_key,
+            input_dtype=dtype,
         )
         self.w = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
 
@@ -188,8 +194,24 @@ TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
     "model_class, enable_quant_fp8_custom_op, force_kernel",
     list(itertools.product([TestSiluMulFp8QuantModel], [True, False], TEST_KERNELS))
     + [
-        (TestSiluMulNvfp4QuantModel, False, None),
-        (TestSiluMulGroupFp8QuantModel, False, None),
+        pytest.param(
+            TestSiluMulNvfp4QuantModel,
+            False,
+            None,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="CUDA only"
+            ),
+        ),
+        # GroupFP8Quant fusion only works with AITER on ROCm.
+        # and the enable_quant_fp8_custom_op must be True.
+        pytest.param(
+            TestSiluMulGroupFp8QuantModel,
+            True,
+            None,
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(), reason="ROCm only"
+            ),
+        ),
     ],
 )
 @pytest.mark.skipif(
@@ -207,6 +229,7 @@ def test_fusion_silu_and_mul_quant(
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
     force_kernel: FP8ScaledMMLinearKernel | None,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
         pytest.skip("NVFP4 is not supported on this GPU.")
@@ -233,18 +256,23 @@ def test_fusion_silu_and_mul_quant(
         ),
     )
 
-    with set_current_vllm_config(config):
+    with set_current_vllm_config(config), monkeypatch.context() as m:
         fusion_passes = [ActivationQuantFusionPass(config)]
-        if IS_AITER_FOUND:
+        if IS_AITER_FOUND and model_class is TestSiluMulGroupFp8QuantModel:
+            from vllm._aiter_ops import rocm_aiter_ops
             from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
                 RocmAiterSiluMulFp8GroupQuantFusionPass,
             )
 
+            m.setenv("VLLM_ROCM_USE_AITER", "1")
+            rocm_aiter_ops.refresh_env_variables()
             fusion_passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
         passes = [NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)]
         backend = TestBackend(*passes)
-        model = model_class(hidden_size=hidden_size, force_kernel=force_kernel, x=x)
+        model = model_class(
+            hidden_size=hidden_size, force_kernel=force_kernel, x=x, dtype=dtype
+        )
 
         # First dimension dynamic
         torch._dynamo.mark_dynamic(x, 0)

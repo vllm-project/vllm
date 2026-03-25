@@ -36,17 +36,10 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         self.quant_fp8 = QuantFP8(
             static=False,
             group_shape=act_scale_descriptor.group_shape,
-            use_ue8m0=is_deep_gemm_e8m0_used(),
+            use_ue8m0=self.use_deep_gemm_e8m0,
             tma_aligned_scales=envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES,
             column_major_scales=True,
         )
-
-    @classmethod
-    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
-        from .cutlass import CutlassFp8BlockScaledMMKernel
-        from .triton import TritonFp8BlockScaledMMKernel
-
-        return [CutlassFp8BlockScaledMMKernel, TritonFp8BlockScaledMMKernel]
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -71,7 +64,10 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "Supports only dynamic per token group activation "
                 "quantization with group_shape=(1,128).",
             )
-
+        if not should_use_deepgemm_for_fp8_linear(
+            config.out_dtype, config.weight_shape
+        ):
+            return False, "The provided metadata is not supported."
         return True, None
 
     def process_weights_after_loading(self, layer):
@@ -79,9 +75,7 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         params = self._get_layer_params(layer)
         assert layer.weight_block_size is not None
 
-        if self.is_deep_gemm_supported and should_use_deepgemm_for_fp8_linear(
-            layer.orig_dtype, params.weight
-        ):
+        if self.is_deep_gemm_supported:
             weight_scale_invs = params.weight_scale_inv
             scale_attr = (
                 params.WEIGHT_SCALE_INV
@@ -94,7 +88,7 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 if weight_scale_invs is not None
                 else params.weight_scale,
                 quant_block_shape=tuple(layer.weight_block_size),
-                use_e8m0=is_deep_gemm_e8m0_used(),
+                use_e8m0=self.use_deep_gemm_e8m0,
             )
             replace_parameter(layer, params.WEIGHT, dg_weight)
             replace_parameter(layer, scale_attr, dg_weight_scale)

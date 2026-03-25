@@ -205,15 +205,6 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             )
         return True, None
 
-    @classmethod
-    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
-        # TODO This import is to avoid circular import
-        # this import can be global
-        # after all scaled MM kernels inherit from base
-        from .triton import TritonFp8BlockScaledMMKernel
-
-        return [TritonFp8BlockScaledMMKernel]
-
     def apply_block_scaled_mm(
         self,
         A: torch.Tensor,

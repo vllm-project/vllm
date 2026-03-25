@@ -14,12 +14,18 @@ import vllm.envs as envs
 from vllm.config.model_arch import (
     ModelArchitectureConfig,
 )
-from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
+from vllm.config.multimodal import (
+    MMCacheType,
+    MMEncoderTPMode,
+    MMTensorIPC,
+    MultiModalConfig,
+)
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
     get_config,
@@ -87,7 +93,7 @@ LayerBlockType = Literal["attention", "linear_attention", "mamba"]
 
 _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "generate": [],
-    "pooling": ["embed", "classify", "reward"],
+    "pooling": ["embed", "classify"],
     "draft": [],
 }
 
@@ -96,8 +102,8 @@ AttnTypeStr = Literal[
 ]
 
 
-@config(config=ConfigDict(arbitrary_types_allowed=True))
-class ModelConfig:
+@config(config=ConfigDict(arbitrary_types_allowed=True))  # type: ignore[arg-type,misc]
+class ModelConfig:  # type: ignore[misc]
     """Configuration for the model."""
 
     model: str = "Qwen/Qwen3-0.6B"
@@ -115,7 +121,7 @@ class ModelConfig:
     """Convert the model using adapters defined in
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
-    tokenizer: str = Field(default=None)
+    tokenizer: str = Field(default=None)  # type: ignore[assignment]
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode | str = "auto"
@@ -126,6 +132,7 @@ class ModelConfig:
     - "slow" will always use the slow tokenizer.\n
     - "mistral" will always use the tokenizer from `mistral_common`.\n
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
+    - "qwen_vl" will always use the tokenizer from `qwen_vl`.\n
     - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
@@ -170,7 +177,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: int = Field(default=None, ge=-1)
+    max_model_len: int = Field(default=None, ge=-1)  # type: ignore[assignment]
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
@@ -215,12 +222,13 @@ class ModelConfig:
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
     model does not support sliding window, this argument is ignored."""
-    disable_cascade_attn: bool = False
+    disable_cascade_attn: bool = True
     """Disable cascade attention for V1. While cascade attention does not
     change the mathematical correctness, disabling it could be useful for
-    preventing potential numerical issues. Note that even if this is set to
-    False, cascade attention will be only used when the heuristic tells that
-    it's beneficial."""
+    preventing potential numerical issues. This defaults to True, so users
+    must opt in to cascade attention by setting this to False. Even when this
+    is set to False, cascade attention will only be used when the heuristic
+    tells that it's beneficial."""
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -307,6 +315,7 @@ class ModelConfig:
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
+    mm_tensor_ipc: InitVar[MMTensorIPC] = None
 
     def compute_hash(self) -> str:
         """
@@ -427,6 +436,7 @@ class ModelConfig:
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
+        mm_tensor_ipc: MMTensorIPC,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -444,7 +454,7 @@ class ModelConfig:
             self.hf_config_path = maybe_model_redirect(self.hf_config_path)
 
         if callable(self.hf_overrides):
-            hf_overrides_kw = {}
+            hf_overrides_kw: dict[str, Any] = {}
             hf_overrides_fn = self.hf_overrides
             dict_overrides: dict[str, Any] = {}
         else:
@@ -460,8 +470,6 @@ class ModelConfig:
             hf_overrides_fn = None
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
-
-        from vllm.platforms import current_platform
 
         if self.override_attention_dtype is not None and not current_platform.is_rocm():
             warnings.warn(
@@ -480,6 +488,7 @@ class ModelConfig:
             self.config_format,
             hf_overrides_kw=hf_overrides_kw,
             hf_overrides_fn=hf_overrides_fn,
+            token=self.hf_token,
         )
         hf_config = maybe_patch_hf_config_from_gguf(
             self.model,
@@ -531,6 +540,24 @@ class ModelConfig:
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
+        # Set default tokenizer modes based on model architecture
+        if self.tokenizer_mode == "auto":
+            if arch == "Grok1ForCausalLM":
+                self.tokenizer_mode = "grok2"
+            elif arch == "MoonshotKimiaForCausalLM":
+                self.tokenizer_mode = "kimi_audio"
+            elif arch == "QwenVLForConditionalGeneration":
+                self.tokenizer_mode = "qwen_vl"
+            elif arch == "DeepseekV32ForCausalLM":
+                self.tokenizer_mode = "deepseek_v32"
+
+            if self.tokenizer_mode != "auto":
+                logger.info(
+                    "Defaulting to tokenizer_mode=%r for %s",
+                    self.tokenizer_mode,
+                    arch,
+                )
+
         # Init pooler config if needed
         if self.runner_type == "pooling":
             if self.pooler_config is None:
@@ -556,7 +583,7 @@ class ModelConfig:
             self.dtype,
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
-            config_format=self.config_format,
+            config_format=self.config_format,  # type: ignore[arg-type]
         )
 
         self.original_max_model_len = self.max_model_len
@@ -593,13 +620,14 @@ class ModelConfig:
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
+                mm_tensor_ipc=mm_tensor_ipc,
             )
 
             mm_config_kwargs = {
                 k: v for k, v in mm_config_kwargs.items() if v is not None
             }
 
-            self.multimodal_config = MultiModalConfig(**mm_config_kwargs)
+            self.multimodal_config = MultiModalConfig(**mm_config_kwargs)  # type: ignore[arg-type]
 
         # Multimodal GGUF models must use original repo for mm processing
         if is_gguf(self.tokenizer) and self.is_multimodal_model:
@@ -705,7 +733,7 @@ class ModelConfig:
 
     @property
     def architectures(self) -> list[str]:
-        return self.model_arch_config.architectures
+        return self.model_arch_config.architectures  # type: ignore[return-value]
 
     @property
     def architecture(self) -> str:
@@ -883,6 +911,7 @@ class ModelConfig:
                 "modelopt",
                 "modelopt_fp4",
                 "modelopt_mxfp8",
+                "modelopt_mixed",
                 "petit_nvfp4",
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
@@ -939,8 +968,6 @@ class ModelConfig:
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}."
                 )
-            from vllm.platforms import current_platform
-
             current_platform.verify_quantization(self.quantization)
 
         if self.quantization in me_quant.DEPRECATED_QUANTIZATION_METHODS:
@@ -978,7 +1005,7 @@ class ModelConfig:
         is_bitsandbytes = self.quantization == "bitsandbytes"
         has_quantization_config = self.model_arch_config.quantization_config is not None
         is_8bit = (
-            self.model_arch_config.quantization_config.get("load_in_8bit", False)
+            self.model_arch_config.quantization_config.get("load_in_8bit", False)  # type: ignore[union-attr]
             if has_quantization_config
             else False
         )
@@ -1094,6 +1121,22 @@ class ModelConfig:
                 f"({parallel_config.decode_context_parallel_size})."
             )
 
+        # torch_shm uses a single IPC queue to rank 0; DP>1 is
+        # incompatible because API servers can't know which
+        # CoreEngine the scheduler will assign work to. TP>1 is
+        # also not supported because this requires broadcasting
+        # MM tensors between all TP ranks.
+        if (
+            self.multimodal_config is not None
+            and self.multimodal_config.mm_tensor_ipc == "torch_shm"
+            and parallel_config.world_size_across_dp > 1
+        ):
+            raise ValueError(
+                "mm_tensor_ipc='torch_shm' is not supported with "
+                "data_parallel_size > 1 or tensor_parallel_size > 1 "
+                "or pipeline_parallel_size > 1."
+            )
+
     def get_sliding_window(self) -> int | None:
         """Get the sliding window size from the HF text config if present."""
         return getattr(self.hf_text_config, "sliding_window", None)
@@ -1124,6 +1167,7 @@ class ModelConfig:
             return bool(self.hf_config.is_mm_prefix_lm)
         # fallback to list of known models
         MM_PREFIX_LM_MODELS = (
+            "bagel",
             "gemma3",
             "molmo2",
             "paligemma",
@@ -1249,6 +1293,7 @@ class ModelConfig:
                     "attn_type_list, or a layer_types in the hf_config, "
                     f"cannot determine the num of {block_type} layers"
                 )
+            raise AssertionError(f"Unsupported block type: {block_type}")
 
     def get_mamba_chunk_size(self) -> int | None:
         """
@@ -1297,12 +1342,14 @@ class ModelConfig:
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
                 config_format=self.config_format,
+                hf_token=self.hf_token,
             )
         else:
             config = try_get_generation_config(
                 self.generation_config,
                 trust_remote_code=self.trust_remote_code,
                 config_format=self.config_format,
+                hf_token=self.hf_token,
             )
 
         if config is None:
@@ -1365,6 +1412,41 @@ class ModelConfig:
 
         return diff_sampling_param
 
+    def get_pooling_task(
+        self, supported_tasks: tuple[SupportedTask, ...]
+    ) -> PoolingTask | None:
+        if self.pooler_config is None:
+            return None
+
+        pooling_task = self.pooler_config.task
+
+        if pooling_task is not None:
+            if self.pooler_config.task in supported_tasks:
+                return self.pooler_config.task
+            else:
+                raise RuntimeError(
+                    f"Unsupported task: {pooling_task!r} "
+                    f"Supported tasks: {supported_tasks}"
+                )
+
+        if "token_classify" in supported_tasks:
+            for architecture in self.architectures:
+                if "ForTokenClassification" in architecture:
+                    return "token_classify"
+
+        priority: list[PoolingTask] = [
+            "embed&token_classify",
+            "embed",
+            "classify",
+            "token_embed",
+            "token_classify",
+            "plugin",
+        ]
+        for task in priority:
+            if task in supported_tasks:
+                return task
+        return None
+
     @cached_property
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
@@ -1414,15 +1496,22 @@ class ModelConfig:
         return self._model_info.requires_raw_input_tokens
 
     @property
-    def is_cross_encoder(self) -> bool:
+    def score_type(self) -> ScoreType:
+        """
+        Scoring API handles score/rerank for:\n
+        - "classify" task (score_type: cross-encoder models)\n
+        - "embed" task (score_type: bi-encoder models)\n
+        - "token_embed" task (score_type: late interaction models)\n
+        """
+        # fixme: self._model_info.score_type is the score type before
+        #  as_seq_cls_model, which is "bi-encoder", rather than the
+        #  score type after as_seq_cls_model, which is "cross-encoder".
+        #  Therefore, the following logic is required.
         return (
-            self._model_info.supports_cross_encoding or self.convert_type == "classify"
+            "cross-encoder"
+            if self.convert_type == "classify"
+            else self._model_info.score_type
         )
-
-    @property
-    def is_late_interaction(self) -> bool:
-        """Check if model uses late interaction (ColBERT-style) scoring."""
-        return self._model_info.supports_late_interaction
 
     @property
     def is_pp_supported(self) -> bool:
@@ -1810,8 +1899,6 @@ def _resolve_auto_dtype(
     *,
     is_pooling_model: bool,
 ):
-    from vllm.platforms import current_platform
-
     supported_dtypes = [
         dtype
         for dtype in current_platform.supported_dtypes
@@ -1997,6 +2084,15 @@ def _get_and_verify_max_len(
 
                 if rope_type == "yarn":
                     derived_max_model_len = rp["original_max_position_embeddings"]
+        if scaling_factor is None:
+            # Fallback the factor to 1.0 if a user assigned `null`
+            logger.warning_once(
+                "The model's RoPE configuration has a null scaling "
+                "factor which is unexpected. This likely indicates a bug "
+                "in the model's HuggingFace config.json. Please notify the "
+                "model vendor. Falling back the value to 1.0. "
+            )
+            scaling_factor = 1.0
         # Do this outside loop since all layer types should have the same scaling
         derived_max_model_len *= scaling_factor
 

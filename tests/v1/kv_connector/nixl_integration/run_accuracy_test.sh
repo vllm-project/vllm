@@ -5,6 +5,12 @@ set -xe
 KV_BUFFER_DEVICE="cuda"  # Default to cuda
 ATTENTION_BACKEND=""  # Default to empty (use vllm default)
 CROSS_LAYERS_BLOCKS="False"
+ENABLE_HMA_VAR=""  # Default to empty (HMA disabled by default for kv connector)
+# Check for ENABLE_HMA_FLAG environment variable
+if [[ -n "${ENABLE_HMA_FLAG:-}" ]]; then
+  ENABLE_HMA_VAR="--no-disable-hybrid-kv-cache-manager"
+fi
+
 while [[ $# -gt 0 ]]; do
   case $1 in
     --kv_buffer_device)
@@ -30,6 +36,12 @@ done
 echo "Running accuracy tests with kv_buffer_device=$KV_BUFFER_DEVICE"
 if [[ -n "$ATTENTION_BACKEND" ]]; then
   echo "Using attention backend: $ATTENTION_BACKEND"
+fi
+if [[ -n "$ENABLE_HMA_VAR" ]]; then
+  echo "HMA (Hybrid KV Cache Manager) enabled"
+fi
+if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
+  echo "vLLM serve extra args: $VLLM_SERVE_EXTRA_ARGS"
 fi
 
 DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT:-"HND"} # Default to HND, optional NHD
@@ -70,6 +82,8 @@ DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
 PREFILL_BLOCK_SIZE=${PREFILL_BLOCK_SIZE:-128}
 DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
+# Comma-separated extra args for vllm serve (e.g. --max-model-len,2048)
+VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
 
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
@@ -95,18 +109,6 @@ cleanup_instances() {
   sleep 2
 }
 
-# Handle to get model-specific arguments for deepseek
-get_model_args() {
-  local model_name=$1
-  local extra_args=""
-
-  if [[ "$model_name" == "deepseek-ai/deepseek-vl2-tiny" ]]; then
-    extra_args="--hf_overrides '{\"architectures\": [\"DeepseekVLV2ForCausalLM\"]}' --trust-remote-code"
-  fi
-
-  echo "$extra_args"
-}
-
 get_num_gpus() {
   if [[ "$SMI_BIN" == *"nvidia"* ]]; then
     $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l
@@ -126,9 +128,6 @@ run_tests_for_model() {
   echo "================================"
   echo "Testing model: $model_name"
   echo "================================"
-
-  # Get model-specific arguments
-  local model_args=$(get_model_args "$model_name")
 
   # Arrays to store all hosts and ports
   PREFILL_HOSTS=()
@@ -166,18 +165,24 @@ run_tests_for_model() {
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config '$KV_CONFIG'"
+    if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
+      IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
+      for arg in "${extra_args[@]}"; do
+        BASE_CMD="${BASE_CMD} $arg"
+      done
+    fi
 
     # Add attention backend config if specified
     if [[ -n "$ATTENTION_BACKEND" ]]; then
       BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
     fi
 
-    if [ -n "$model_args" ]; then
-    FULL_CMD="$BASE_CMD $model_args"
-    else
-    FULL_CMD="$BASE_CMD"
+    # Add HMA flag if specified
+    if [[ -n "$ENABLE_HMA_VAR" ]]; then
+      BASE_CMD="${BASE_CMD} $ENABLE_HMA_VAR"
     fi
-
+    
+    FULL_CMD="$BASE_CMD"
     eval "$FULL_CMD &"
 
     # Store host and port for proxy configuration
@@ -212,10 +217,21 @@ run_tests_for_model() {
     --block-size ${DECODE_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --kv-transfer-config '$KV_CONFIG'"
+    if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
+      IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
+      for arg in "${extra_args[@]}"; do
+        BASE_CMD="${BASE_CMD} $arg"
+      done
+    fi
 
     # Add attention backend config if specified
     if [[ -n "$ATTENTION_BACKEND" ]]; then
       BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
+    fi
+
+    # Add HMA flag if specified
+    if [[ -n "$ENABLE_HMA_VAR" ]]; then
+      BASE_CMD="${BASE_CMD} $ENABLE_HMA_VAR"
     fi
 
   # DP-EP attention mode
@@ -227,11 +243,7 @@ run_tests_for_model() {
     --tensor-parallel-size 1 --enable-expert-parallel"
   fi
 
-    if [ -n "$model_args" ]; then
-    FULL_CMD="$BASE_CMD $model_args"
-    else
     FULL_CMD="$BASE_CMD"
-    fi
 
     eval "$FULL_CMD &"
 

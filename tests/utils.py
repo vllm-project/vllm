@@ -63,6 +63,8 @@ from vllm.utils.torch_utils import (
 FP8_DTYPE = current_platform.fp8_dtype()
 
 if current_platform.is_rocm():
+    import threading
+
     from amdsmi import (
         amdsmi_get_gpu_vram_usage,
         amdsmi_get_processor_handles,
@@ -70,13 +72,16 @@ if current_platform.is_rocm():
         amdsmi_shut_down,
     )
 
+    _amdsmi_lock = threading.Lock()
+
     @contextmanager
     def _nvml():
-        try:
-            amdsmi_init()
-            yield
-        finally:
-            amdsmi_shut_down()
+        with _amdsmi_lock:
+            try:
+                amdsmi_init()
+                yield
+            finally:
+                amdsmi_shut_down()
 elif current_platform.is_cuda():
     from vllm.third_party.pynvml import (
         nvmlDeviceGetHandleByIndex,
@@ -102,32 +107,57 @@ else:
 VLLM_PATH = Path(__file__).parent.parent
 """Path to root of the vLLM repository."""
 
+# ROCm: disable skinny GEMM to avoid non-deterministic results from
+# atomic reductions in wvSplitKrc kernel.
+# See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
+ROCM_ENV_OVERRIDES = (
+    {"VLLM_ROCM_USE_SKINNY_GEMM": "0"} if current_platform.is_rocm() else {}
+)
+# ROCm: disable prefix caching and eliminate batch variance to reduce
+# test flakiness.
+ROCM_EXTRA_ARGS = (
+    ["--no-enable-prefix-caching", "--max-num-seqs", "1"]
+    if current_platform.is_rocm()
+    else []
+)
+# Python-API equivalent of ROCM_EXTRA_ARGS for use with EngineArgs kwargs.
+ROCM_ENGINE_KWARGS: dict = (
+    {"enable_prefix_caching": False, "max_num_seqs": 1}
+    if current_platform.is_rocm()
+    else {}
+)
 
-class RemoteOpenAIServer:
+
+class RemoteVLLMServer:
+    """Base class for launching vLLM server subprocesses for testing.
+
+    Subclasses must override ``_create_cli_subcommand`` and
+    ``_start_server``.
+    """
+
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
+    proc: subprocess.Popen
+
+    def _create_cli_subcommand(self):
+        """Return a CLISubcommand instance used to parse CLI args."""
+        raise NotImplementedError
 
     def _start_server(
         self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
     ) -> None:
         """Subclasses override this method to customize server process launch"""
-        env = os.environ.copy()
-        # the current process might initialize cuda,
-        # to be safe, we should use spawn method
-        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-        if env_dict is not None:
-            env.update(env_dict)
-        serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
-        print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
-        print(f"Environment variables: {env}")
-        self.proc: subprocess.Popen = subprocess.Popen(
-            serve_cmd,
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-            # Create a dedicated process group so we can kill
-            # the entire tree (parent + EngineCore + workers) at once.
-            start_new_session=True,
-        )
+        raise NotImplementedError
+
+    def _pre_download_model(self, model: str, args) -> None:
+        """Download model weights before starting the server to avoid timeout."""
+        is_local = os.path.isdir(model)
+        if not is_local:
+            engine_args = AsyncEngineArgs.from_cli_args(args)
+            model_config = engine_args.create_model_config()
+            load_config = engine_args.create_load_config()
+
+            model_loader = get_model_loader(load_config)
+            model_loader.download_model(model_config)
 
     def __init__(
         self,
@@ -164,9 +194,9 @@ class RemoteOpenAIServer:
                 json.dumps(override_hf_configs),
             ]
 
-        parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
+        parser = FlexibleArgumentParser(description="vLLM's remote server.")
         subparsers = parser.add_subparsers(required=False, dest="subparser")
-        parser = ServeSubcommand().subparser_init(subparsers)
+        parser = self._create_cli_subcommand().subparser_init(subparsers)
         args = parser.parse_args(["--model", model, *vllm_serve_args])
         self.uds = args.uds
         if args.uds:
@@ -176,17 +206,11 @@ class RemoteOpenAIServer:
             self.host = str(args.host or "127.0.0.1")
             self.port = int(args.port)
 
-        self.show_hidden_metrics = args.show_hidden_metrics_for_version is not None
+        self.show_hidden_metrics = (
+            getattr(args, "show_hidden_metrics_for_version", None) is not None
+        )
 
-        # download the model before starting the server to avoid timeout
-        is_local = os.path.isdir(model)
-        if not is_local:
-            engine_args = AsyncEngineArgs.from_cli_args(args)
-            model_config = engine_args.create_model_config()
-            load_config = engine_args.create_load_config()
-
-            model_loader = get_model_loader(load_config)
-            model_loader.download_model(model_config)
+        self._pre_download_model(model, args)
 
         # Record GPU memory before server start so we know what
         # "released" looks like.
@@ -194,17 +218,36 @@ class RemoteOpenAIServer:
         if self._pre_server_gpu_memory is not None:
             pre_gb = self._pre_server_gpu_memory / 1e9
             print(
-                f"[RemoteOpenAIServer] GPU memory before server start: {pre_gb:.2f} GB"
+                f"[{type(self).__name__}] GPU memory before server start: "
+                f"{pre_gb:.2f} GB"
             )
 
         self._start_server(model, vllm_serve_args, env_dict)
-        max_wait_seconds = max_wait_seconds or 360
-        self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
+        max_wait_seconds = max_wait_seconds or 480
+        try:
+            self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
+        except Exception:
+            # If the server never became healthy, we must still clean up
+            # the subprocess tree. Without this, a timeout in __init__
+            # leaks the server + EngineCore processes (and their GPU
+            # memory), because __exit__ is never called when __init__
+            # raises inside a ``with`` statement.
+            self._shutdown()
+            raise
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        self._shutdown()
+
+    def _shutdown(self) -> None:
+        """Kill the server process tree and wait for GPU memory release.
+
+        Called from both ``__exit__`` (normal path) and ``__init__``
+        (when the server fails to start). Must be safe to call even if
+        the process is already dead.
+        """
         pid = self.proc.pid
 
         # Get the process group ID. Because we used
@@ -214,13 +257,10 @@ class RemoteOpenAIServer:
         except (ProcessLookupError, OSError):
             pgid = None
 
-        # Phase 1: graceful SIGTERM to the entire process group
-        if pgid is not None:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                os.killpg(pgid, signal.SIGTERM)
-                print(f"[RemoteOpenAIServer] Sent SIGTERM to process group {pgid}")
-        else:
+        # Phase 1: graceful SIGTERM to the root process
+        with contextlib.suppress(ProcessLookupError, OSError):
             self.proc.terminate()
+            print(f"[RemoteOpenAIServer] Sent SIGTERM to process {pid}")
 
         try:
             self.proc.wait(timeout=15)
@@ -241,33 +281,92 @@ class RemoteOpenAIServer:
                 self.proc.wait(timeout=10)
                 print(f"[RemoteOpenAIServer] Server {pid} killed")
             except subprocess.TimeoutExpired:
-                # Phase 3: last resort - find and kill any orphaned children
-                self._kill_orphaned_children(pid)
+                pass
 
-        # Wait for GPU memory to actually be *freed*, not just
+        # After killing the root process, ensure all children in the
+        # process group (e.g. EngineCore workers) are also dead.
+        # On ROCm especially, surviving children hold GPU contexts and
+        # prevent VRAM from being reclaimed by the driver.
+        self._kill_process_group_survivors(pgid)
+
+        # Wait for GPU memory to actually be freed, not just
         # "stabilized at whatever level it's at".
         self._wait_for_gpu_memory_release()
 
-    def _kill_orphaned_children(self, parent_pid: int) -> None:
-        """Best-effort cleanup of any lingering child processes."""
-        try:
-            import psutil
+    def _kill_process_group_survivors(
+        self, pgid: int | None, timeout: float = 15.0
+    ) -> None:
+        """SIGKILL any processes still in the server's process group
+        and wait for them to exit.
 
-            parent = psutil.Process(parent_pid)
-            children = parent.children(recursive=True)
-            for child in children:
-                print(
-                    f"[RemoteOpenAIServer] Killing orphaned child "
-                    f"pid={child.pid} name={child.name()}"
-                )
-                child.kill()
-            psutil.wait_procs(children, timeout=5)
-        except Exception as e:
-            # psutil may not be installed, or processes already gone
-            print(f"[RemoteOpenAIServer] Orphan cleanup failed: {e}")
-            # Fallback: try to kill by pgid one more time
-            with contextlib.suppress(ProcessLookupError, OSError):
-                os.killpg(parent_pid, signal.SIGKILL)
+        Because the server is launched with ``start_new_session=True``,
+        all its children (EngineCore, workers, etc.) share the same
+        pgid. After the root process is killed, stragglers -- especially
+        on ROCm where GPU contexts linger until the *process* exits --
+        must be reaped explicitly.
+
+        Uses ``/proc`` to scan for pgid members so this works even after
+        the parent has been reaped (unlike ``psutil.Process.children``).
+        """
+        if pgid is None:
+            return
+
+        # Send SIGKILL to the entire process group one more time.
+        # This is cheap and harmless if everyone is already dead.
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.killpg(pgid, signal.SIGKILL)
+
+        # Collect surviving PIDs by scanning /proc for matching pgid.
+        # This works on Linux even after the parent has been waited on
+        # and is more reliable than psutil.Process(parent).children().
+        survivor_pids = self._find_pgid_members(pgid)
+
+        if not survivor_pids:
+            return
+
+        print(
+            f"[RemoteOpenAIServer] {len(survivor_pids)} process(es) still "
+            f"in pgid {pgid} after SIGKILL: {survivor_pids}"
+        )
+
+        # Wait for each survivor to actually exit so the GPU driver
+        # releases its VRAM.
+        deadline = time.time() + timeout
+        while survivor_pids and time.time() < deadline:
+            still_alive = []
+            for spid in survivor_pids:
+                try:
+                    os.kill(spid, 0)  # Check if still alive
+                    still_alive.append(spid)
+                except (ProcessLookupError, OSError):
+                    pass
+            survivor_pids = still_alive
+            if survivor_pids:
+                time.sleep(0.5)
+
+        if survivor_pids:
+            print(
+                f"[RemoteOpenAIServer] WARNING: processes {survivor_pids} "
+                f"in pgid {pgid} could not be killed within {timeout}s"
+            )
+
+    @staticmethod
+    def _find_pgid_members(pgid: int) -> list[int]:
+        """Return PIDs of all living processes whose pgid matches."""
+        members: list[int] = []
+        proc_path = Path("/proc")
+        if not proc_path.is_dir():
+            return members
+        for entry in proc_path.iterdir():
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            try:
+                if os.getpgid(pid) == pgid:
+                    members.append(pid)
+            except OSError:
+                continue
+        return members
 
     def _get_gpu_memory_used(self) -> float | None:
         """Get total GPU memory used across all visible devices in bytes."""
@@ -294,13 +393,16 @@ class RemoteOpenAIServer:
             return None
         return None
 
-    def _wait_for_gpu_memory_release(self, timeout: float = 60.0):
+    def _wait_for_gpu_memory_release(
+        self, timeout: float = 120.0, log_interval: float = 10.0
+    ):
         """Wait for GPU memory to drop back toward pre-server levels.
 
-        Two-phase strategy:
-          1. Try to wait for memory to return close to pre-server baseline.
-          2. If that doesn't happen, fall back to waiting for stabilization
-             and log a warning (the next server might still OOM).
+        Waits the full timeout for memory to return close to the
+        pre-server baseline. Does NOT fall back to a "stabilization"
+        heuristic -- if memory is still held when the timeout expires,
+        the test fails so the problem is surfaced immediately rather
+        than causing cascading OOM failures in every subsequent test.
         """
         baseline = self._pre_server_gpu_memory
         if baseline is None:
@@ -313,8 +415,7 @@ class RemoteOpenAIServer:
         target = baseline + headroom_bytes
 
         start = time.time()
-        last_used: float | None = None
-        stable_count = 0
+        next_log_time = start + log_interval
 
         while time.time() - start < timeout:
             used = self._get_gpu_memory_used()
@@ -326,7 +427,6 @@ class RemoteOpenAIServer:
             target_gb = target / 1e9
             elapsed = time.time() - start
 
-            # Phase 1: memory dropped to near baseline - we're done.
             if used <= target:
                 print(
                     f"[RemoteOpenAIServer] GPU memory released to "
@@ -335,28 +435,19 @@ class RemoteOpenAIServer:
                 )
                 return
 
-            # Phase 2 (after 40s): fall back to stabilization check.
-            # This handles cases where another process is using GPU memory
-            # and we'll never reach baseline.
-            if elapsed > 40.0 and last_used is not None:
-                delta = abs(used - last_used)
-                if delta < 200 * 1024 * 1024:  # 200 MB
-                    stable_count += 1
-                    if stable_count >= 3:
-                        print(
-                            f"[RemoteOpenAIServer] WARNING: GPU memory "
-                            f"stabilized at {used_gb:.2f} GB "
-                            f"(target was {target_gb:.2f} GB). "
-                            f"Proceeding - next server may OOM."
-                        )
-                        return
-                else:
-                    stable_count = 0
+            now = time.time()
+            if now >= next_log_time:
+                print(
+                    f"[RemoteOpenAIServer] Waiting for GPU memory release: "
+                    f"{used_gb:.2f} GB (target: {target_gb:.2f} GB) "
+                    f"[{elapsed:.0f}s/{timeout:.0f}s]"
+                )
+                next_log_time = now + log_interval
 
-            last_used = used
             time.sleep(1.0)
 
-        # Timeout - log clearly so CI failures are diagnosable
+        # Timeout -- raise so the current test fails with a clear
+        # message instead of silently poisoning subsequent tests.
         final_used = self._get_gpu_memory_used()
         final_gb = final_used / 1e9 if final_used else 0.0
         raise RuntimeError(
@@ -443,6 +534,77 @@ class RemoteOpenAIServer:
         return anthropic.AsyncAnthropic(
             base_url=self.url_for(), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs
         )
+
+
+class RemoteOpenAIServer(RemoteVLLMServer):
+    """Launches ``vllm serve`` for testing OpenAI-compatible endpoints."""
+
+    def _create_cli_subcommand(self):
+        return ServeSubcommand()
+
+    def _start_server(
+        self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
+    ) -> None:
+        env = os.environ.copy()
+        # the current process might initialize cuda,
+        # to be safe, we should use spawn method
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        if env_dict is not None:
+            env.update(env_dict)
+        serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
+        print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
+        print(f"Environment variables: {env}")
+        self.proc: subprocess.Popen = subprocess.Popen(
+            serve_cmd,
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            # Create a dedicated process group so we can kill
+            # the entire tree (parent + EngineCore + workers) at once.
+            start_new_session=True,
+        )
+
+
+class RemoteLaunchRenderServer(RemoteVLLMServer):
+    """Launches ``vllm launch render`` for GPU-less serving tests."""
+
+    def _create_cli_subcommand(self):
+        return ServeSubcommand()
+
+    def _start_server(
+        self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
+    ) -> None:
+        env = os.environ.copy()
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        if env_dict is not None:
+            env.update(env_dict)
+        serve_cmd = ["vllm", "launch", "render", model, *vllm_serve_args]
+        print(f"Launching RemoteLaunchRenderServer with: {' '.join(serve_cmd)}")
+        self.proc: subprocess.Popen = subprocess.Popen(
+            serve_cmd,
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            start_new_session=True,
+        )
+
+    def _pre_download_model(self, model: str, args) -> None:
+        """Download only the tokenizer files (no model weights needed)."""
+        is_local = os.path.isdir(model)
+        if not is_local:
+            engine_args = AsyncEngineArgs.from_cli_args(args)
+            model_config = engine_args.create_model_config()
+            get_tokenizer(
+                model_config.tokenizer,
+                tokenizer_mode=model_config.tokenizer_mode,
+                trust_remote_code=model_config.trust_remote_code,
+                revision=model_config.tokenizer_revision,
+            )
+
+    def _wait_for_gpu_memory_release(
+        self, timeout: float = 30.0, log_interval: float = 10.0
+    ):
+        pass  # No GPU used
 
 
 class RemoteOpenAIServerCustom(RemoteOpenAIServer):
@@ -893,6 +1055,36 @@ def compare_all_settings(
                     )
 
 
+@contextmanager
+def ensure_current_vllm_config():
+    """Ensures a vllm config is set for the duration of the context.
+
+    If a config is already set, this is a no-op. Otherwise, it creates a default
+    VllmConfig and sets it for the duration of the context.
+
+    Used for tests that call functions which require a vllm config but don't
+    need a specific config.
+
+    Example:
+        with ensure_current_vllm_config():
+            init_distributed_environment(...)
+            ensure_model_parallel_initialized(...)
+    """
+    from vllm.config import (
+        VllmConfig,
+        get_current_vllm_config_or_none,
+        set_current_vllm_config,
+    )
+
+    if get_current_vllm_config_or_none() is not None:
+        # Config already set, just yield
+        yield
+    else:
+        # No config set, create a default one for the duration
+        with set_current_vllm_config(VllmConfig()):
+            yield
+
+
 def init_test_distributed_environment(
     tp_size: int,
     pp_size: int,
@@ -919,6 +1111,7 @@ def init_test_distributed_environment(
             distributed_init_method=distributed_init_method,
             local_rank=local_rank,
         )
+        ensure_model_parallel_initialized(tp_size, pp_size)
     else:
         # No config set, create a default one for the test
         with set_current_vllm_config(VllmConfig()):
@@ -928,7 +1121,7 @@ def init_test_distributed_environment(
                 distributed_init_method=distributed_init_method,
                 local_rank=local_rank,
             )
-    ensure_model_parallel_initialized(tp_size, pp_size)
+            ensure_model_parallel_initialized(tp_size, pp_size)
 
 
 def multi_process_parallel(
@@ -1325,6 +1518,57 @@ def multi_gpu_test(*, num_gpus: int):
     return wrapper
 
 
+def gpu_tier_mark(*, min_gpus: int = 1, max_gpus: int | None = None):
+    """
+    Mark a test to only run when the GPU count falls within [min_gpus, max_gpus].
+
+    Examples:
+        @gpu_tier_mark(min_gpus=2)          # only on multi-GPU
+        @gpu_tier_mark(max_gpus=1)          # only on single-GPU
+        @gpu_tier_mark(min_gpus=2, max_gpus=4)  # 2-4 GPUs only
+    """
+    gpu_count = cuda_device_count_stateless()
+    marks = []
+
+    if min_gpus > 1:
+        marks.append(pytest.mark.distributed(num_gpus=min_gpus))
+
+    reasons = []
+    if gpu_count < min_gpus:
+        reasons.append(f"Need at least {min_gpus} GPUs (have {gpu_count})")
+    if max_gpus is not None and gpu_count > max_gpus:
+        reasons.append(f"Need at most {max_gpus} GPUs (have {gpu_count})")
+
+    if reasons:
+        marks.append(pytest.mark.skipif(True, reason="; ".join(reasons)))
+
+    return marks
+
+
+def single_gpu_only(f=None):
+    """Skip this test when running in a multi-GPU environment."""
+    marks = gpu_tier_mark(max_gpus=1)
+
+    def wrapper(func):
+        for mark in reversed(marks):
+            func = mark(func)
+        return func
+
+    return wrapper(f) if f is not None else wrapper
+
+
+def multi_gpu_only(*, num_gpus: int = 2):
+    """Skip this test when running on fewer than num_gpus GPUs."""
+    marks = gpu_tier_mark(min_gpus=num_gpus)
+
+    def wrapper(f):
+        for mark in reversed(marks):
+            f = mark(f)
+        return f
+
+    return wrapper
+
+
 async def completions_with_server_args(
     prompts: list[str],
     model_name: str,
@@ -1446,6 +1690,41 @@ def override_cutlass_fp8_supported(value: bool):
         yield
 
 
+def disable_aiter_plain_rmsnorm(monkeypatch) -> None:
+    """Patch dispatch_rocm_rmsnorm_func so the plain (non-fused) rms_norm path
+    always uses the native float32 kernel for the duration of a test.
+
+    The fused path (rms_norm2d_with_add, selected when with_fused_add=True) is
+    left on AITER -- only the plain path is redirected to native.
+
+    AITER's plain rms_norm accumulates variance in bfloat16 (~1 ULP/call),
+    which drifts the KV cache over many decode steps. This drift is irrelevant
+    for a trained model (rank-1/rank-2 gap ~1-3 nats >> 1 ULP), but breaks
+    logprob comparison tests with randomly-initialised models like
+    TitanML/tiny-mixtral whose rank-1/rank-2 gap is only O(1/sqrt(V)) ~0.006
+    nats -- smaller than the accumulated per-step error.
+    """
+    import torch
+
+    import vllm.model_executor.layers.layernorm as _ln_mod
+    from vllm.model_executor.layers.layernorm import rms_norm as _native
+
+    _orig = _ln_mod.dispatch_rocm_rmsnorm_func
+
+    def _native_plain(
+        with_fused_add: bool, dtype: torch.dtype, use_aiter: bool = False
+    ):
+        if (
+            use_aiter
+            and not with_fused_add
+            and dtype in (torch.float16, torch.bfloat16)
+        ):
+            return _native
+        return _orig(with_fused_add, dtype, use_aiter)
+
+    monkeypatch.setattr(_ln_mod, "dispatch_rocm_rmsnorm_func", _native_plain)
+
+
 def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):
     """
     Generate prompts which a bunch of assignments,
@@ -1531,6 +1810,7 @@ class TestFP8Layer(torch.nn.Module):
         weight_shape: tuple[int, int],
         activation_quant_key: QuantKey,
         weight_quant_key: QuantKey,
+        input_dtype: torch.dtype,
         out_dtype: torch.dtype | None = None,
         transpose_weights: bool = False,
         device: torch.device | None = None,
@@ -1574,6 +1854,8 @@ class TestFP8Layer(torch.nn.Module):
         self.kernel = init_fp8_linear_kernel(
             activation_quant_key=activation_quant_key,
             weight_quant_key=weight_quant_key,
+            weight_shape=weight_shape,
+            input_dtype=input_dtype,
             out_dtype=out_dtype,
             force_kernel=force_kernel,
         )

@@ -62,6 +62,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         self.kv_cache_dtype = kv_cache_dtype
         self.device = device
         self.vllm_config = vllm_config
+        self.dtype = vllm_config.model_config.dtype
 
         self.attn = Attention(
             num_heads=self.num_qo_heads,
@@ -127,7 +128,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         raw_tensor = raw_tensor.view(kv_cache_shape)
         kv_cache = raw_tensor.permute(*inv_order)
 
-        self.attn.kv_cache = [kv_cache]
+        self.attn.kv_cache = kv_cache
 
         # Build attn metadata
         self.attn_metadata = self.builder.build(
@@ -151,6 +152,7 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
             activation_quant_key=self.quant_key,
             weight_quant_key=self.quant_key,
             device=self.device,
+            input_dtype=self.dtype,
         )
 
         w = kwargs.get("w")

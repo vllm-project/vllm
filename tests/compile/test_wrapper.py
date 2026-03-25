@@ -95,7 +95,7 @@ def test_torch_compile_wrapper(use_bytecode_hook, monkeypatch):
             f"Expected {expected1}, got {result1}"
         )
 
-        # Second call should triger another compilation
+        # Second call should trigger another compilation
         x2 = torch.tensor([1, 2, 3])
         result2 = wrapper(x2)
         expected2 = torch.tensor([100, 200, 300])

@@ -25,7 +25,7 @@ from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
     PerTensorScaleParameter,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -899,7 +899,7 @@ def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
         import torch.nn.functional as F
 
         weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
     return weight
 
 
@@ -1091,34 +1091,6 @@ def process_fp8_weight_block_strategy(
 
     weight = _maybe_pad_fp8_weight(weight)
     return weight, weight_scale
-
-
-def maybe_post_process_fp8_weight_block(layer: torch.nn.Module):
-    assert layer.weight_block_size is not None
-
-    from vllm.utils.deep_gemm import (
-        is_deep_gemm_e8m0_used,
-        should_use_deepgemm_for_fp8_linear,
-    )
-
-    # On Blackwell or Hopper, if E8M0 for DeepGemm is used, we need to
-    # requantize the weight and input to the specific scale
-    # at the same time.
-    should_use_deepgemm = should_use_deepgemm_for_fp8_linear(
-        layer.orig_dtype, layer.weight
-    )
-    if should_use_deepgemm:
-        scale_attr = (
-            "weight_scale_inv" if hasattr(layer, "weight_scale_inv") else "weight_scale"
-        )
-        dg_weight, dg_weight_scale = deepgemm_post_process_fp8_weight_block(
-            wq=layer.weight.data,
-            ws=getattr(layer, scale_attr).data,
-            quant_block_shape=tuple(layer.weight_block_size),
-            use_e8m0=is_deep_gemm_e8m0_used(),
-        )
-        replace_parameter(layer, "weight", dg_weight)
-        replace_parameter(layer, scale_attr, dg_weight_scale)
 
 
 def process_fp8_weight_tensor_strategy_moe(

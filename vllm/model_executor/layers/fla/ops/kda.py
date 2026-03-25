@@ -12,6 +12,7 @@
 import torch
 import torch.nn as nn
 
+from vllm.model_executor.custom_op import CustomOp
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
 
@@ -37,7 +38,7 @@ def fused_recurrent_kda_fwd(
     scale: float,
     initial_state: torch.Tensor,
     inplace_final_state: bool = True,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
@@ -115,7 +116,7 @@ def fused_recurrent_kda(
     initial_state: torch.Tensor = None,
     inplace_final_state: bool = True,
     use_qk_l2norm_in_kernel: bool = True,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.LongTensor | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -431,7 +432,8 @@ def rms_norm_gated(
     return y if not prenorm else (y, residual_out.reshape(x_shape_og))
 
 
-class FusedRMSNormGated(nn.Module):
+@CustomOp.register("fused_rms_norm_gated")
+class FusedRMSNormGated(CustomOp):
     def __init__(
         self,
         hidden_size: int,
@@ -458,7 +460,33 @@ class FusedRMSNormGated(nn.Module):
             self.register_parameter("weight", None)
         self.register_parameter("bias", None)
 
-    def forward(
+    def forward_native(
+        self,
+        x: torch.Tensor,
+        g: torch.Tensor,
+        residual: torch.Tensor | None = None,
+        prenorm: bool = False,
+        residual_in_fp32: bool = False,
+    ) -> torch.Tensor:
+        """Decomposed PyTorch ops for torch.compile/inductor fusion."""
+        # TODO(https://github.com/vllm-project/vllm/issues/36175): implement
+        # native residual/prenorm path and unify with RMSNormGated.
+        # For now, fall back to the triton kernel.
+        if residual is not None or prenorm:
+            return self.forward_cuda(x, g, residual, prenorm, residual_in_fp32)
+        x_float = x.float()
+        variance = x_float.pow(2).mean(dim=-1, keepdim=True)
+        x_normed = x_float * torch.rsqrt(variance + self.eps)
+        if self.weight is not None:
+            x_normed = x_normed * self.weight.float()
+        g_float = g.float()
+        if self.activation in ("swish", "silu"):
+            out = x_normed * g_float * torch.sigmoid(g_float)
+        else:  # sigmoid
+            out = x_normed * torch.sigmoid(g_float)
+        return out.to(x.dtype)
+
+    def forward_cuda(
         self,
         x: torch.Tensor,
         g: torch.Tensor,
@@ -692,7 +720,7 @@ def chunk_kda_scaled_dot_kkt_fwd(
     gk: torch.Tensor | None = None,
     beta: torch.Tensor | None = None,
     scale: float | None = None,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -706,7 +734,7 @@ def chunk_kda_scaled_dot_kkt_fwd(
             The beta tensor of shape `[B, T, H]`.
         gk (torch.Tensor):
             The cumulative sum of the gate tensor of shape `[B, T, H, K]` applied to the key tensor. Default: `None`.
-        cu_seqlens (torch.LongTensor):
+        cu_seqlens (torch.Tensor):
             The cumulative sequence lengths of the input tensor.
             Default: None
         chunk_size (int):
@@ -936,7 +964,7 @@ def recompute_w_u_fwd(
     A: torch.Tensor,
     q: torch.Tensor | None = None,
     gk: torch.Tensor | None = None,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = A.shape[-1]
@@ -1104,7 +1132,7 @@ def chunk_gla_fwd_o_gk(
     h: torch.Tensor,
     o: torch.Tensor,
     scale: float,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
 ):
     B, T, H, K, V = *q.shape, v.shape[-1]
@@ -1148,7 +1176,7 @@ def chunk_kda_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
 ):
     chunk_size = 64
     g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens)
@@ -1208,7 +1236,7 @@ def chunk_kda(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     **kwargs,
 ):
     if scale is None:

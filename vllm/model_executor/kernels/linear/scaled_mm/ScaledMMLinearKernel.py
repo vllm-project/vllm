@@ -36,7 +36,9 @@ class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
 class FP8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     weight_quant_key: QuantKey
     activation_quant_key: QuantKey
-    out_dtype: torch.dtype | None
+    weight_shape: tuple[int, int]
+    input_dtype: torch.dtype
+    out_dtype: torch.dtype
 
 
 class FP8ScaledMMLinearKernel(

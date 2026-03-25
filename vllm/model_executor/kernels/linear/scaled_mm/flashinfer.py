@@ -18,6 +18,7 @@ from vllm.utils.flashinfer import (
     flashinfer_scaled_fp8_mm,
     has_flashinfer,
     is_flashinfer_fp8_blockscale_gemm_supported,
+    should_use_flashinfer_for_blockscale_fp8_gemm,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -25,7 +26,6 @@ from ..base import DynamicMMLinearKernel, FP8Params
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,
 )
-from .cutlass import CutlassFp8BlockScaledMMKernel
 from .deep_gemm import DeepGemmFp8BlockScaledMMKernel
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
@@ -82,13 +82,15 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
 
 class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    IS_SUPPORTED: bool = is_flashinfer_fp8_blockscale_gemm_supported()
+
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
         # flashinfer does not require input fp8 op.
         # since flashinfer for block_scaled_mm
         # is used dynamically with deepgemm.
-        # the quant_fp8 is instantiated indentical to
+        # the quant_fp8 is instantiated identical to
         # deepgemm input quant.
         self.quant_fp8 = QuantFP8(
             static=act_scale_descriptor.static,
@@ -112,27 +114,27 @@ class FlashInferFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "Supports only dynamic per token group activation "
                 "quantization with group_shape=(1,128).",
             )
+
+        if not should_use_flashinfer_for_blockscale_fp8_gemm(
+            cls.IS_SUPPORTED,
+            config.out_dtype,
+            config.input_dtype,
+            config.weight_quant_key.dtype,
+            config.weight_shape,
+        ):
+            return (
+                False,
+                "The provided metadata is not supported.",
+            )
+
         return True, None
-
-    @classmethod
-    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMLinearKernel"]]:
-        # TODO This import is to avoid circular import
-        # this import can be global
-        # after all scaled MM kernels inherit from base
-        from .triton import TritonFp8BlockScaledMMKernel
-
-        return [
-            DeepGemmFp8BlockScaledMMKernel,
-            CutlassFp8BlockScaledMMKernel,
-            TritonFp8BlockScaledMMKernel,
-        ]
 
     @classmethod
     def is_supported(cls, compute_capability=None):
         if not current_platform.is_cuda():
             return False, "only cuda devices are supported."
 
-        if not is_flashinfer_fp8_blockscale_gemm_supported():
+        if not cls.IS_SUPPORTED:
             return False, "FlashInfer block-scale FP8 GEMM is not available."
 
         return True, None
@@ -217,7 +219,7 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
 
     This batch-size-dependent selection is essential for maintaining model accuracy.
     Benchmarks on GSM8K show a significant accuracy gap (88% vs 95%) for DeepSeek-V3.1
-    when using FlashInfer's DeepGEMM on M>=32. The M < 32 strategy fixes the accurracy
+    when using FlashInfer's DeepGEMM on M>=32. The M < 32 strategy fixes the accuracy
     drop.
 
     """
@@ -245,6 +247,13 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
     ):
         input_2d = x.view(-1, x.shape[-1])
         return input_2d.shape[0] < 32
+
+    def apply_weights(self, layer, x, bias=None, **kwargs):
+        # if bacth_invariant run deepgemm only.
+        if envs.VLLM_BATCH_INVARIANT:
+            return self.fallback.apply_weights(layer, x, bias, **kwargs)
+
+        return super().apply_weights(layer, x, bias, **kwargs)
 
 
 def _flashinfer_fp8_blockscale_gemm_impl(
