@@ -557,6 +557,49 @@ class ElasticEPScalingExecutor:
             old_num_physical_experts,
         )
 
+    def receive_weights_from_donor(self, donor_dp_rank: int) -> None:
+        """Replacement rank receives model weights from the donor rank during peer-swap recovery.
+
+        Unlike ``receive_weights`` (which computes the sender from
+        ``dp_rank - old_dp_size``), recovery is a same-size swap so the
+        replacement rank has the same index as the dead rank.  The donor is
+        the lowest-numbered surviving DP rank.
+        """
+        dp_group = get_dp_group()
+        assert isinstance(dp_group, StatelessGroupCoordinator)
+        model = self.worker.model_runner.get_model()
+        batch_transfer_weights(
+            model=model,
+            is_sender=False,
+            peer_rank=donor_dp_rank,
+            dp_group=dp_group,
+            expert_weights=model.expert_weights,
+        )
+        torch.accelerator.synchronize()
+
+    def transfer_weights_to_replacement(
+        self, dead_dp_rank: int, donor_dp_rank: int
+    ) -> None:
+        """Donor rank sends model weights to the replacement rank during peer-swap recovery.
+
+        Only the donor rank acts as sender; all other surviving ranks are
+        no-ops so the collective_rpc call can be issued to all workers
+        uniformly.  The donor is the lowest-numbered surviving DP rank.
+        """
+        dp_group = get_dp_group()
+        assert isinstance(dp_group, StatelessGroupCoordinator)
+        if dp_group.rank_in_group != donor_dp_rank:
+            return
+        model = self.worker.model_runner.get_model()
+        batch_transfer_weights(
+            model=model,
+            is_sender=True,
+            peer_rank=dead_dp_rank,
+            dp_group=dp_group,
+            expert_weights=model.expert_weights,
+        )
+        torch.accelerator.synchronize()
+
     def prepare_new_worker(self) -> None:
         with set_current_vllm_config(self.worker.vllm_config):
             prepare_communication_buffer_for_model(self.worker.model_runner.get_model())

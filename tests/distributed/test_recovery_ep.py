@@ -7,6 +7,20 @@ Level 1 — No GPUs, runs in CI:
   test_replace_peer_sequence — unit test for NixlEPAll2AllManager.replace_peer.
       Uses FakeNixlEPBuffer. No distributed, no GPU.
 
+  test_donor_rank_selection — unit test for ElasticEPScalingState.donor_dp_rank.
+      Verifies the lowest surviving DP rank is always chosen as donor, and
+      that dead_dp_rank=0 is handled correctly. No distributed, no GPU.
+
+  test_transfer_weights_noop_for_non_donor — unit test for
+      ElasticEPScalingExecutor.transfer_weights_to_replacement.
+      Verifies that non-donor ranks are a no-op (batch_transfer_weights is
+      never called). No distributed, no GPU.
+
+  test_transfer_weights_sends_for_donor — unit test for
+      ElasticEPScalingExecutor.transfer_weights_to_replacement.
+      Verifies that the donor rank calls batch_transfer_weights with
+      is_sender=True and peer_rank=dead_dp_rank. No distributed, no GPU.
+
 Level 2 — 2 GPUs, no NIXL:
 
   Both tests share a single worker (_recovery_worker) parameterised by
@@ -21,6 +35,10 @@ Level 2 — 2 GPUs, no NIXL:
   test_recovery_groups[gloo] — runs with backend="gloo".
   test_recovery_groups[nccl] — runs with backend="nccl".
 
+  test_weight_transfer_round_trip — spawns 2 processes: donor (rank 0) fills
+      a FakeModel with 1.0, replacement (rank 1) fills with 0.0.  After
+      batch_transfer_weights, replacement's weights must equal donor's (1.0).
+
 Level 3 — 2 SM 90+ GPUs + NIXL-EP + RDMA, end-to-end:
 
   test_recovery_ep — starts a DP=2 vllm server with NIXL-EP, runs baseline
@@ -32,7 +50,11 @@ Level 3 — 2 SM 90+ GPUs + NIXL-EP + RDMA, end-to-end:
 
 Run with:
     pytest tests/distributed/test_recovery_ep.py::test_replace_peer_sequence -v
+    pytest tests/distributed/test_recovery_ep.py::test_donor_rank_selection -v
+    pytest tests/distributed/test_recovery_ep.py::test_transfer_weights_noop_for_non_donor -v
+    pytest tests/distributed/test_recovery_ep.py::test_transfer_weights_sends_for_donor -v
     pytest tests/distributed/test_recovery_ep.py::test_recovery_groups -v
+    pytest tests/distributed/test_recovery_ep.py::test_weight_transfer_round_trip -v
     pytest tests/distributed/test_recovery_ep.py::test_recovery_ep -v
 """
 
@@ -110,6 +132,144 @@ def test_replace_peer_sequence():
         assert NixlEPAll2AllManager._buffer[1] == 4, "ep_size must not change"
     finally:
         NixlEPAll2AllManager._buffer = None
+
+
+# ---------------------------------------------------------------------------
+# Level 1b: unit tests — Gap C (donor selection + weight transfer guards)
+# ---------------------------------------------------------------------------
+
+
+class _FakeDPGroup:
+    """Minimal stand-in for StatelessGroupCoordinator for isinstance checks.
+
+    Subclasses StatelessGroupCoordinator in name only so that
+    ``isinstance(obj, StatelessGroupCoordinator)`` passes without requiring
+    any real distributed setup.
+    """
+
+    def __new__(cls, rank_in_group: int):
+        from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
+
+        # Dynamically create a subclass so isinstance checks pass.
+        fake_cls = type("_FakeDPGroup", (StatelessGroupCoordinator,), {})
+        obj = object.__new__(fake_cls)
+        obj.rank_in_group = rank_in_group
+        return obj
+
+
+@pytest.mark.parametrize("dead_dp_rank,dp_size,expected_donor", [
+    (0, 2, 1),  # dead rank 0, only survivor is rank 1
+    (1, 2, 0),  # dead rank 1, only survivor is rank 0
+    (0, 4, 1),  # dead rank 0, lowest survivor is rank 1
+    (1, 4, 0),  # dead rank 1, lowest survivor is rank 0
+    (3, 4, 0),  # dead rank 3, lowest survivor is rank 0
+])
+def test_donor_rank_selection(dead_dp_rank: int, dp_size: int, expected_donor: int):
+    """ElasticEPScalingState.donor_dp_rank is always the lowest surviving rank.
+
+    Critically, when dead_dp_rank=0 the donor must NOT be 0 — it must fall
+    back to the next surviving rank (1).
+    """
+    from unittest.mock import MagicMock
+
+    from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
+    from vllm.v1.engine import ReconfigureDistributedRequest
+
+    reconfig_request = ReconfigureDistributedRequest(
+        new_data_parallel_size=dp_size,
+        new_data_parallel_rank=dead_dp_rank,
+        new_data_parallel_rank_local=dead_dp_rank,
+        new_data_parallel_master_ip=_HOST,
+        new_data_parallel_master_port=0,
+        new_data_parallel_master_port_list=[],
+        coord_store_port=0,
+        dead_data_parallel_rank=dead_dp_rank,
+    )
+
+    state = ElasticEPScalingState(
+        model_executor=MagicMock(),
+        engine_core=MagicMock(),
+        vllm_config=MagicMock(),
+        new_parallel_config=MagicMock(),
+        worker_type="new",
+        scale_type="recovery",
+        reconfig_request=reconfig_request,
+    )
+
+    assert state.donor_dp_rank == expected_donor, (
+        f"dead={dead_dp_rank}, dp_size={dp_size}: "
+        f"expected donor {expected_donor}, got {state.donor_dp_rank}"
+    )
+    assert state.donor_dp_rank != dead_dp_rank, (
+        "donor must never be the dead rank"
+    )
+
+
+def test_transfer_weights_noop_for_non_donor():
+    """transfer_weights_to_replacement is a no-op when rank_in_group != donor.
+
+    All surviving ranks except the donor must return immediately without
+    calling batch_transfer_weights, so only one P2P send is issued.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
+
+    fake_dp_group = _FakeDPGroup(rank_in_group=2)  # not the donor (0)
+
+    executor = object.__new__(ElasticEPScalingExecutor)
+    executor.worker_ref = lambda: MagicMock()
+
+    with patch(
+        "vllm.distributed.elastic_ep.elastic_execute.get_dp_group",
+        return_value=fake_dp_group,
+    ):
+        with patch(
+            "vllm.distributed.elastic_ep.elastic_execute.batch_transfer_weights"
+        ) as mock_transfer:
+            executor.transfer_weights_to_replacement(
+                dead_dp_rank=1, donor_dp_rank=0
+            )
+            mock_transfer.assert_not_called()
+
+
+def test_transfer_weights_sends_for_donor():
+    """transfer_weights_to_replacement calls batch_transfer_weights for the donor.
+
+    The donor rank must call batch_transfer_weights with is_sender=True and
+    peer_rank=dead_dp_rank.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from vllm.distributed.elastic_ep.elastic_execute import ElasticEPScalingExecutor
+
+    fake_dp_group = _FakeDPGroup(rank_in_group=0)  # is the donor
+    mock_model = MagicMock()
+
+    mock_worker = MagicMock()
+    mock_worker.model_runner.get_model.return_value = mock_model
+
+    executor = object.__new__(ElasticEPScalingExecutor)
+    executor.worker_ref = lambda: mock_worker
+
+    with patch(
+        "vllm.distributed.elastic_ep.elastic_execute.get_dp_group",
+        return_value=fake_dp_group,
+    ):
+        with patch(
+            "vllm.distributed.elastic_ep.elastic_execute.batch_transfer_weights"
+        ) as mock_transfer:
+            with patch("torch.accelerator.synchronize"):
+                executor.transfer_weights_to_replacement(
+                    dead_dp_rank=1, donor_dp_rank=0
+                )
+                mock_transfer.assert_called_once_with(
+                    model=mock_model,
+                    is_sender=True,
+                    peer_rank=1,
+                    dp_group=fake_dp_group,
+                    expert_weights=mock_model.expert_weights,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +489,151 @@ def test_recovery_groups(backend: str):
     """create_recovery_groups on a fresh store produces a live DP group
     that passes an all_reduce sanity check."""
     _run_recovery_test(backend=backend)
+
+
+# ---------------------------------------------------------------------------
+# Level 2b: weight transfer round-trip (Gap C)
+# ---------------------------------------------------------------------------
+
+
+class FakeModel(torch.nn.Module):
+    """Minimal model for weight-transfer tests: one linear layer, no MoE."""
+
+    def __init__(self, device: torch.device):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(4, 4, device=device))
+        # Empty expert_weights means all params in state_dict are transferred.
+        self.expert_weights: list = []
+
+
+def _weight_transfer_worker(
+    rank: int,
+    world_size: int,
+    dist_ports: list[int],
+    coord_port: int,
+    result_queue: "mp.Queue",
+) -> None:
+    """Worker for test_weight_transfer_round_trip.
+
+    Donor (rank 0) fills FakeModel.weight with 1.0 and sends it.
+    Replacement (rank 1, dead_dp_rank=1) fills with 0.0 and receives.
+    After transfer, replacement must have weight == 1.0.
+    """
+    import sys
+    import traceback
+
+    import torch.distributed as dist
+
+    import vllm.distributed.parallel_state as ps
+    from vllm.distributed.elastic_ep.elastic_execute import batch_transfer_weights
+    from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
+
+    def _log(msg: str) -> None:
+        print(f"[Rank {rank}] {msg}", flush=True)
+        sys.stdout.flush()
+
+    try:
+        device = torch.device(f"cuda:{rank}")
+        torch.cuda.set_device(device)
+
+        # Init a local torch.distributed group (world_size=1, elastic EP topology).
+        dist.init_process_group(
+            backend="gloo",
+            init_method=f"tcp://{_HOST}:{dist_ports[rank]}",
+            world_size=1,
+            rank=0,
+        )
+
+        # Build a real StatelessGroupCoordinator as the DP group (nccl for P2P).
+        coord_store = _create_tcp_store(rank, coord_port, world_size)
+        dp_group = StatelessGroupCoordinator(
+            group_ranks=[list(range(world_size))],
+            local_rank=rank,
+            torch_distributed_backend="nccl",
+            use_device_communicator=True,
+            coord_store=coord_store,
+            group_name="dp",
+            host=_HOST,
+            global_rank=rank,
+            global_world_size=world_size,
+        )
+        ps._DP = dp_group
+
+        # Build model: donor fills with 1.0, replacement fills with 0.0.
+        model = FakeModel(device)
+        donor_dp_rank = 0
+        dead_dp_rank = 1
+        if rank == donor_dp_rank:
+            model.weight.data.fill_(1.0)
+        else:
+            model.weight.data.fill_(0.0)
+
+        # Execute the P2P weight transfer.
+        batch_transfer_weights(
+            model=model,
+            is_sender=(rank == donor_dp_rank),
+            peer_rank=dead_dp_rank if rank == donor_dp_rank else donor_dp_rank,
+            dp_group=dp_group,
+            expert_weights=model.expert_weights,
+        )
+        torch.cuda.synchronize()
+
+        # Only the replacement rank verifies it received the correct weights.
+        if rank == dead_dp_rank:
+            expected = torch.ones(4, 4, device=device)
+            assert model.weight.data.allclose(expected), (
+                f"Rank {rank}: weight transfer failed — "
+                f"got {model.weight.data}, expected all 1.0"
+            )
+            _log("weight transfer verified: replacement has donor weights")
+
+        result_queue.put((rank, None))
+
+    except Exception:
+        result_queue.put((rank, traceback.format_exc()))
+
+
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2,
+    reason="Need at least 2 GPUs",
+)
+def test_weight_transfer_round_trip():
+    """Donor sends model weights to replacement via batch_transfer_weights.
+
+    Verifies the P2P transfer mechanism used by receive_weights_from_donor
+    and transfer_weights_to_replacement: after the transfer the replacement
+    rank holds an exact copy of the donor's weights.
+    """
+    world_size = 2
+    dist_ports = [_get_open_port() for _ in range(world_size)]
+    coord_port = _get_open_port()
+
+    ctx = mp.get_context("spawn")
+    result_queue: mp.Queue = ctx.Queue()
+
+    processes = []
+    for rank in range(world_size):
+        p = ctx.Process(
+            target=_weight_transfer_worker,
+            args=(rank, world_size, dist_ports, coord_port, result_queue),
+        )
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join(timeout=120)
+
+    errors = []
+    while not result_queue.empty():
+        rank_id, err = result_queue.get_nowait()
+        if err is not None:
+            errors.append(f"Rank {rank_id}:\n{err}")
+
+    for i, p in enumerate(processes):
+        if p.exitcode != 0:
+            errors.append(f"Process {i} exited with code {p.exitcode}")
+
+    assert not errors, "\n\n".join(errors)
 
 
 # ---------------------------------------------------------------------------

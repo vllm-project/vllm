@@ -31,6 +31,8 @@ from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
+    from vllm.v1.engine import ReconfigureDistributedRequest
+
 logger = init_logger(__name__)
 
 STARTUP_POLL_PERIOD_MS = 10000
@@ -115,6 +117,13 @@ class CoreEngineProcManager:
 
         from vllm.v1.engine.core import EngineCoreProc
 
+        # Store construction state for respawn_rank.
+        self._common_kwargs = common_kwargs
+        self._vllm_config = vllm_config
+        self._is_dp = is_dp
+        # global_dp_rank -> list index and local_dp_rank
+        self._rank_info: dict[int, tuple[int, int]] = {}
+
         self.processes: list[BaseProcess] = []
         local_dp_ranks = []
         for index in range(local_engine_count):
@@ -123,6 +132,7 @@ class CoreEngineProcManager:
 
             # Start EngineCore in background process.
             local_dp_ranks.append(local_index)
+            self._rank_info[global_index] = (index, local_index)
             self.processes.append(
                 context.Process(
                     target=EngineCoreProc.run_engine_core,
@@ -171,6 +181,69 @@ class CoreEngineProcManager:
             for proc in self.processes
             if proc.exitcode is not None
         }
+
+    def respawn_rank(
+        self,
+        global_dp_rank: int,
+        reconfig_request: "ReconfigureDistributedRequest",
+    ) -> None:
+        """Spawn a replacement process for the failed DP rank.
+
+        The replacement process is started with ``VLLM_ELASTIC_EP_RECOVERY_LAUNCH=1``
+        so it follows the recovery initialization path in
+        ``DPEngineCoreProc._eep_scale_up_before_kv_init``.
+
+        The ``vllm_config.parallel_config`` is updated with the recovery
+        rendezvous coordinates from *reconfig_request* so the replacement
+        joins the same fresh TCPStore as the surviving ranks.
+
+        Args:
+            global_dp_rank: DP rank of the failed worker to replace.
+            reconfig_request: Recovery reconfiguration parameters, must have
+                ``dead_data_parallel_rank == global_dp_rank``.
+        """
+        import copy
+        import os
+
+        from vllm.v1.engine.core import EngineCoreProc
+
+        proc_idx, local_dp_rank = self._rank_info[global_dp_rank]
+
+        # Deep-copy config and update rendezvous coordinates.
+        vllm_config = copy.deepcopy(self._vllm_config)
+        pc = vllm_config.parallel_config
+        pc.data_parallel_master_ip = reconfig_request.new_data_parallel_master_ip
+        pc.data_parallel_master_port = reconfig_request.new_data_parallel_master_port
+        pc._data_parallel_master_port_list = (
+            reconfig_request.new_data_parallel_master_port_list
+        )
+        pc._coord_store_port = reconfig_request.coord_store_port
+
+        kwargs = dict(self._common_kwargs)
+        kwargs["vllm_config"] = vllm_config
+
+        context = get_mp_context()
+        proc = context.Process(
+            target=EngineCoreProc.run_engine_core,
+            name=f"EngineCore_DP{global_dp_rank}",
+            kwargs=kwargs | {"dp_rank": global_dp_rank, "local_dp_rank": local_dp_rank},
+        )
+
+        self.processes[proc_idx] = proc
+
+        with patch.dict(os.environ, {"VLLM_ELASTIC_EP_RECOVERY_LAUNCH": "1"}):
+            if self._is_dp and (
+                not current_platform.is_cuda_alike()
+                or self._vllm_config.parallel_config.use_ray
+            ):
+                with set_device_control_env_var(self._vllm_config, local_dp_rank):
+                    proc.start()
+            else:
+                proc.start()
+
+        logger.info(
+            "Spawned replacement for DP rank %d (PID %d)", global_dp_rank, proc.pid
+        )
 
 
 class SignalCallback:

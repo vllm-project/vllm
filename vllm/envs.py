@@ -245,6 +245,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
+    VLLM_ELASTIC_EP_RECOVERY_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = False
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
@@ -1637,6 +1638,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Should only be set by EngineCoreClient.
     "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": lambda: bool(
         int(os.getenv("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH", "0"))
+    ),
+    # Whether this is a recovery launch (replacement rank for a dead DP rank).
+    # Set by CoreEngineProcManager.respawn_rank before spawning the replacement.
+    "VLLM_ELASTIC_EP_RECOVERY_LAUNCH": lambda: bool(
+        int(os.getenv("VLLM_ELASTIC_EP_RECOVERY_LAUNCH", "0"))
     ),
     # Whether to wait for all requests to drain before sending the
     # scaling command in elastic EP.

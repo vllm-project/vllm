@@ -117,7 +117,7 @@ class EngineCore:
 
         self.available_gpu_memory_for_kv_cache = -1
 
-        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH or envs.VLLM_ELASTIC_EP_RECOVERY_LAUNCH:
             self._eep_scale_up_before_kv_init()
 
         # Setup KV Caches and update CacheConfig after profiling.
@@ -234,7 +234,7 @@ class EngineCore:
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
-            if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH or envs.VLLM_ELASTIC_EP_RECOVERY_LAUNCH:
                 # NOTE(yongji): should already be set
                 # during _eep_scale_up_before_kv_init
                 assert self.available_gpu_memory_for_kv_cache > 0
@@ -838,7 +838,7 @@ class EngineCoreProc(EngineCore):
 
             self.addresses = addresses
             self.process_input_queue_block = True
-            if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH or envs.VLLM_ELASTIC_EP_RECOVERY_LAUNCH:
                 self._eep_send_engine_core_notification(
                     EEPNotificationType.NEW_CORE_ENGINES_INIT_READY,
                     vllm_config=vllm_config,
@@ -1790,14 +1790,25 @@ class DPEngineCoreProc(EngineCoreProc):
             reconfig_request.new_data_parallel_rank
             == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
         )
+        is_recovery = reconfig_request.dead_data_parallel_rank >= 0
+
+        if is_recovery:
+            scale_type = "recovery"
+            worker_type = "existing"
+        elif is_scale_down:
+            scale_type = "scale_down"
+            worker_type = "removing" if is_shutdown else "existing"
+        else:
+            scale_type = "scale_up"
+            worker_type = "existing"
 
         self.eep_scaling_state = ElasticEPScalingState(
             model_executor=self.model_executor,
             engine_core=self,
             vllm_config=self.vllm_config,
             new_parallel_config=new_parallel_config,
-            worker_type="removing" if is_shutdown else "existing",
-            scale_type="scale_down" if is_scale_down else "scale_up",
+            worker_type=worker_type,
+            scale_type=scale_type,
             reconfig_request=reconfig_request,
         )
         self.process_input_queue_block = False
@@ -1858,15 +1869,17 @@ class DPEngineCoreProc(EngineCoreProc):
         self.eep_scaling_state.handle_notification(notification_type)
 
     def _eep_scale_up_before_kv_init(self):
+        from vllm import envs
         from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
 
+        scale_type = "recovery" if envs.VLLM_ELASTIC_EP_RECOVERY_LAUNCH else "scale_up"
         self.eep_scaling_state = ElasticEPScalingState(
             model_executor=self.model_executor,
             engine_core=self,
             vllm_config=self.vllm_config,
             new_parallel_config=self.vllm_config.parallel_config,
             worker_type="new",
-            scale_type="scale_up",
+            scale_type=scale_type,
             reconfig_request=None,
         )
         self.eep_scaling_state.run_pre_kv_init_states()

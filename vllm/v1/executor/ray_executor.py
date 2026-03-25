@@ -383,7 +383,7 @@ class RayDistributedExecutor(Executor):
         self.collective_rpc("init_worker", args=(all_kwargs,))
 
         self.collective_rpc("init_device")
-        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH or envs.VLLM_ELASTIC_EP_RECOVERY_LAUNCH:
             self.collective_rpc("elastic_ep_execute", args=("load_model",))
         else:
             self.collective_rpc("load_model")
