@@ -11,13 +11,13 @@ import os
 import pathlib
 import textwrap
 from collections.abc import Callable, Mapping, Sequence, Set
-from dataclasses import MISSING, dataclass, field, fields, is_dataclass
+from dataclasses import MISSING, field, fields, is_dataclass
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, overload
 
 import torch
 from pydantic import ConfigDict
-from pydantic.dataclasses import dataclass as pydantic_dataclass
+from pydantic.dataclasses import dataclass
 from pydantic.fields import Field as PydanticField
 from pydantic.fields import FieldInfo
 from typing_extensions import dataclass_transform, runtime_checkable
@@ -34,6 +34,16 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
+
+
+@overload
+def config(cls: type[ConfigT]) -> type[ConfigT]: ...
+
+
+@overload
+def config(
+    *, config: ConfigDict | None = None, **kwargs: Any
+) -> Callable[[type[ConfigT]], type[ConfigT]]: ...
 
 
 @dataclass_transform(field_specifiers=(PydanticField,))
@@ -59,7 +69,7 @@ def config(
         merged_config.update(config)
 
     def decorator(cls: type[ConfigT]) -> type[ConfigT]:
-        return pydantic_dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value]
+        return dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value]
 
     # Called with arguments: @config(config=...)
     if cls is None:

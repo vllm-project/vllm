@@ -388,7 +388,7 @@ class EngineArgs:
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
     download_dir: str | None = LoadConfig.download_dir
-    safetensors_load_strategy: str = LoadConfig.safetensors_load_strategy
+    safetensors_load_strategy: str | None = LoadConfig.safetensors_load_strategy
     load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
@@ -1935,7 +1935,7 @@ class EngineArgs:
             )
 
         offload_config = OffloadConfig(
-            offload_backend=self.offload_backend,  # type: ignore[arg-type]
+            offload_backend=self.offload_backend,
             uva=UVAOffloadConfig(
                 cpu_offload_gb=self.cpu_offload_gb,
                 cpu_offload_params=self.cpu_offload_params,
