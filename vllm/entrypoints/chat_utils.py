@@ -1679,3 +1679,4 @@ def make_tool_call_id(id_type: str = "random", func_name=None, idx=None):
     else:
         # by default return random
         return f"chatcmpl-tool-{random_uuid()}"
+        
