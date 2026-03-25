@@ -10,18 +10,15 @@ import torch
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     persistent_masked_m_silu_mul_quant,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT, has_deep_gemm
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import set_random_seed
 
-if current_platform.is_fp8_fnuz():
-    pytest.skip(
-        "Tests in this file require float8_e4m3fn and platform does not support",
-        allow_module_level=True,
-    )
-
-fp8_dtype = torch.float8_e4m3fn
+fp8_dtype = current_platform.fp8_dtype()
 
 CASES = [
     (1, 1, 128, fp8_dtype),
@@ -68,14 +65,11 @@ def silu(x: torch.Tensor) -> torch.Tensor:
 
 
 def do_quant(x: torch.Tensor, group_size: int, ceil_ue8m0: bool):
+    fp8_min_val, fp8_max_val = get_fp8_min_max()
     eps_bf16 = torch.tensor([1e-10], device=x.device, dtype=torch.bfloat16)
     one_bf16 = torch.tensor([1.0], device=x.device, dtype=torch.bfloat16)
-    fp8_max_bf16 = torch.tensor(
-        [torch.finfo(fp8_dtype).max], device=x.device, dtype=torch.bfloat16
-    )
-    fp8_min_bf16 = torch.tensor(
-        [torch.finfo(fp8_dtype).min], device=x.device, dtype=torch.bfloat16
-    )
+    fp8_max_bf16 = torch.tensor([fp8_max_val], device=x.device, dtype=torch.bfloat16)
+    fp8_min_bf16 = torch.tensor([fp8_min_val], device=x.device, dtype=torch.bfloat16)
     fp8_max_inv = one_bf16 / fp8_max_bf16
     assert fp8_max_inv.dtype == torch.bfloat16
 
@@ -104,8 +98,7 @@ def do_quant(x: torch.Tensor, group_size: int, ceil_ue8m0: bool):
     else:
         # Triton fallback computes in f32. Use multiply-by-reciprocal
         # to match Triton's constexpr evaluation of 1.0/fp8_max.
-        fp8_max_f = torch.finfo(fp8_dtype).max
-        fp8_min_f = torch.finfo(fp8_dtype).min
+        fp8_min_f, fp8_max_f = get_fp8_min_max()
 
         x = x.to(torch.float32).view((-1, group_size))
         amax = x.abs().amax(dim=1).clamp(min=1e-10)
