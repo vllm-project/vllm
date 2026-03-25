@@ -246,7 +246,7 @@ You can set the type of cache that is being used via `mm_processor_cache_type`. 
 | ---- | ------------------------- | ---------- | ----------- |
 | Key-Replicated LRU Cache | `"lru"` (default) | 1:1 relation between `P0` and `P1` processes | `mm_processor_cache_gb * api_server_count` |
 | Shared Memory Cache | `"shm"` | 1:1 relation between `P0` and `P1` processes | `mm_processor_cache_gb` |
-| Processor-only Cache | N/A | (Fallback) | `mm_processor_cache_gb * data_parallel_size` |
+| Processor-Only Cache | N/A | (Fallback) | `mm_processor_cache_gb * data_parallel_size` |
 
 K: Stores the hashes of multi-modal items
 V: Stores the processed tensor data of multi-modal items
