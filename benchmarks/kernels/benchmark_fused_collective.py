@@ -335,25 +335,23 @@ class VllmFusedAllreduce:
         output_scale: torch.Tensor,
     ):
         allreduce_out = tensor_model_parallel_all_reduce(input_tensor)
-        rms_out = self.rms_norm(allreduce_out, residual)
+        rms_output = self.rms_norm(allreduce_out, residual)
         if residual is None:
-            SCALED_FP4_QUANT_OUT_OP(
-                rms_out,
-                input_global_scale,
-                True,
-                output=quant_out,
-                output_scale=output_scale,
-            )
+            rms_out = rms_output
+        else:
+            rms_out, residual_out = rms_output
+
+        SCALED_FP4_QUANT_OUT_OP(
+            rms_out,
+            input_global_scale,
+            True,
+            output=quant_out,
+            output_scale=output_scale,
+        )
+
+        if residual is None:
             return quant_out, output_scale
         else:
-            rms_out, residual_out = rms_out
-            SCALED_FP4_QUANT_OUT_OP(
-                rms_out,
-                input_global_scale,
-                True,
-                output=quant_out,
-                output_scale=output_scale,
-            )
             return quant_out, residual_out, output_scale
 
 
