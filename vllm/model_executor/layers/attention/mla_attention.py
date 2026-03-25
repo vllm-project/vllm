@@ -2226,6 +2226,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
+            _nan_mark_mla(
+                kv_nope, 20, self._nan_layer_idx
+            )  # after kv_b_proj in prefill context chunk
 
             # To Do: Use epilogue of kv_b_proj to generate fp8 kv_nope.
             if use_fp8_prefill:
@@ -2398,6 +2401,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
+        _nan_mark_mla(kv_nope, 19, self._nan_layer_idx)  # after kv_b_proj in prefill
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
