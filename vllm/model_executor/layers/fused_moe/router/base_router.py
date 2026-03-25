@@ -81,7 +81,7 @@ if current_platform.is_cuda_alike():
         expert_load_view: torch.Tensor,
         record_enabled: torch.Tensor,
     ) -> torch.Tensor:
-        topk_ids_in = topk_ids.contiguous().flatten().to(dtype=torch.int32)
+        topk_ids_in = topk_ids.contiguous().to(dtype=torch.int32)
         numel = topk_ids_in.numel()
         if numel == 0:
             return topk_ids
