@@ -9,7 +9,6 @@ on HuggingFace model repository.
 """
 
 import os
-from dataclasses import asdict
 from typing import Any, NamedTuple
 
 from huggingface_hub import snapshot_download
@@ -70,6 +69,29 @@ def run_audioflamingo3(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# CohereASR
+def run_cohere_asr(question: str, audio_count: int) -> ModelRequestData:
+    assert audio_count == 1, "CohereASR only support single audio input per prompt"
+    # TODO (ekagra): add HF ckpt after asr release
+    model_name = "/host/engines/vllm/audio/2b-release"
+
+    prompt = (
+        "<|startofcontext|><|startoftranscript|>"
+        "<|emo:undefined|><|en|><|en|><|pnc|><|noitn|>"
+        "<|notimestamp|><|nodiarize|>"
+    )
+    engine_args = EngineArgs(
+        model=model_name,
+        limit_mm_per_prompt={"audio": audio_count},
+        trust_remote_code=True,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # MusicFlamingo
 def run_musicflamingo(question: str, audio_count: int) -> ModelRequestData:
     model_name = "nvidia/music-flamingo-2601-hf"
@@ -81,12 +103,22 @@ def run_musicflamingo(question: str, audio_count: int) -> ModelRequestData:
         enforce_eager=True,
     )
 
-    # MusicFlamingo uses <sound> token for audio
+    # MusicFlamingo prompt placeholders use <sound>; vLLM's MusicFlamingo
+    # multimodal processor expands each one into <|sound_bos|> + audio tokens +
+    # <|sound_eos|> based on extracted audio feature lengths.
     audio_placeholder = "<sound>" * audio_count
+    system_prompt = (
+        "You are Music Flamingo, a multimodal assistant for language and music. "
+        "On each turn you receive an audio clip which contains music and optional "
+        "text, you will receive at least one or both; use your world knowledge and "
+        "reasoning to help the user with any task. Interpret the entirety of the "
+        "content any input music--regardlenss of whether the user calls it audio, "
+        "music, or sound."
+    )
 
     prompt = (
         "<|im_start|>system\n"
-        "You are a helpful assistant.<|im_end|>\n"
+        f"{system_prompt}<|im_end|>\n"
         "<|im_start|>user\n"
         f"{audio_placeholder}{question}<|im_end|>\n"
         "<|im_start|>assistant\n"
@@ -508,14 +540,15 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
-    "musicflamingo": run_musicflamingo,
+    "cohere_asr": run_cohere_asr,
+    "funaudiochat": run_funaudiochat,
     "gemma3n": run_gemma3n,
     "glmasr": run_glmasr,
-    "funaudiochat": run_funaudiochat,
     "granite_speech": run_granite_speech,
     "kimi_audio": run_kimi_audio,
     "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
+    "musicflamingo": run_musicflamingo,
     "phi4_mm": run_phi4mm,
     "qwen2_audio": run_qwen2_audio,
     "qwen2_5_omni": run_qwen2_5_omni,
@@ -599,7 +632,7 @@ def main(args):
         req_data.engine_args.limit_mm_per_prompt or {}
     )
 
-    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+    engine_args = vars(req_data.engine_args) | {"seed": args.seed}
     if args.tensor_parallel_size is not None:
         engine_args["tensor_parallel_size"] = args.tensor_parallel_size
     llm = LLM(**engine_args)
