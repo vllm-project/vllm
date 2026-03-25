@@ -17,9 +17,9 @@ import librosa
 import pytest
 import soundfile
 import torch
-from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 from datasets import load_dataset
 from evaluate import load
+from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
 from vllm.tokenizers import get_tokenizer
 
@@ -32,6 +32,7 @@ def to_bytes(y, sr):
     soundfile.write(buffer, y, sr, format="WAV")
     buffer.seek(0)
     return buffer
+
 
 # not all models have a normalizer so use the one from whisper as a standard option
 normalizer_model_info = HF_EXAMPLE_MODELS.find_hf_info("openai/whisper-large-v3")
