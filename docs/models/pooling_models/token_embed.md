@@ -13,6 +13,12 @@ The difference between the (sequence) embedding task and the token embedding tas
 
 Many embedding models support both (sequence) embedding and token embedding. For further details on (sequence) embedding, please refer to [this page](embed.md).
 
+!!! note
+
+    Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task (embed) is not 
+    what you want, you need to manually specify it via via `PoolerConfig(task="token_embed")` offline or
+    `--pooler-config.task token_embed` online.
+
 ## Typical Use Cases
 
 ### Multi-Vector Retrieval
@@ -39,6 +45,7 @@ Models of any architecture can be converted into embedding models using `--conve
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `ColBERTLfm2Model` | LFM2 | `LiquidAI/LFM2-ColBERT-350M` | | |
 | `ColBERTModernBertModel` | ModernBERT | `lightonai/GTE-ModernColBERT-v1` | | |
 | `ColBERTJinaRobertaModel` | Jina XLM-RoBERTa | `jinaai/jina-colbert-v2` | | |
 | `HF_ColBERT` | BERT | `answerdotai/answerai-colbert-small-v1`, `colbert-ir/colbertv2.0` | | |

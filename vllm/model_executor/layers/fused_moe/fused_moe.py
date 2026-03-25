@@ -14,9 +14,6 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
@@ -1051,7 +1048,7 @@ def get_moe_configs(
     """
 
     # Avoid optimizing for the batch invariant case. Use default config
-    if vllm_is_batch_invariant():
+    if envs.VLLM_BATCH_INVARIANT:
         return None
 
     # First look up if an optimized configuration is available in the configs
@@ -1232,7 +1229,7 @@ def get_default_config(
     dtype: str | None,
     block_shape: list[int] | None = None,
 ) -> dict[str, int]:
-    if vllm_is_batch_invariant():
+    if envs.VLLM_BATCH_INVARIANT:
         return {
             "BLOCK_SIZE_M": 64,
             "BLOCK_SIZE_N": 64,
@@ -1616,7 +1613,7 @@ def _get_config_quant_dtype(
     fused_experts_impl.
     """
     if use_fp8_w8a8:
-        return torch.float8_e4m3fn
+        return current_platform.fp8_dtype()
     elif use_int8_w8a8:
         return torch.int8
     elif ocp_mx_scheme == "w_mxfp4_a_mxfp4":

@@ -11,6 +11,7 @@ vLLM supports ColBERT models with multiple encoder backbones:
 | `HF_ColBERT` | BERT | `answerdotai/answerai-colbert-small-v1`, `colbert-ir/colbertv2.0` |
 | `ColBERTModernBertModel` | ModernBERT | `lightonai/GTE-ModernColBERT-v1` |
 | `ColBERTJinaRobertaModel` | Jina XLM-RoBERTa | `jinaai/jina-colbert-v2` |
+| `ColBERTLfm2Model` | LFM2 | `LiquidAI/LFM2-ColBERT-350M` |
 
 **BERT-based ColBERT** models work out of the box:
 
@@ -29,6 +30,10 @@ vllm serve lightonai/GTE-ModernColBERT-v1 \
 vllm serve jinaai/jina-colbert-v2 \
     --hf-overrides '{"architectures": ["ColBERTJinaRobertaModel"]}' \
     --trust-remote-code
+
+# LFM2 backbone
+vllm serve LiquidAI/LFM2-ColBERT-350M \
+    --hf-overrides '{"architectures": ["ColBERTLfm2Model"]}'
 ```
 
 Then you can use the rerank API:

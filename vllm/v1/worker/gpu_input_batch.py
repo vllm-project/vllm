@@ -134,7 +134,13 @@ class InputBatch:
             pin_memory=pin_memory,
         )
         self.num_tokens_no_spec = self.num_tokens_no_spec_cpu_tensor.numpy()
-        self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_prompt_tokens_cpu_tensor = torch.zeros(
+            (max_num_reqs,),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=pin_memory,
+        )
+        self.num_prompt_tokens = self.num_prompt_tokens_cpu_tensor.numpy()
         self.num_computed_tokens_cpu_tensor = torch.zeros(
             (max_num_reqs,),
             device="cpu",
@@ -213,7 +219,7 @@ class InputBatch:
 
         # Speculative decoding
         self.num_accepted_tokens_cpu_tensor = torch.ones(
-            (max_num_reqs,), dtype=torch.int64, device="cpu", pin_memory=pin_memory
+            (max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=pin_memory
         )
         self.num_accepted_tokens_cpu = self.num_accepted_tokens_cpu_tensor.numpy()
 
@@ -490,6 +496,7 @@ class InputBatch:
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
         self.spec_token_ids[req_index].clear()
+        self.block_table.clear_row(req_index)
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
@@ -886,7 +893,7 @@ class InputBatch:
         pooling_states = self.get_pooling_states()
 
         return PoolingMetadata(
-            prompt_lens=torch.from_numpy(self.num_prompt_tokens[: self.num_reqs]),
+            prompt_lens=self.num_prompt_tokens_cpu_tensor[: self.num_reqs].clone(),
             prompt_token_ids=self.sampling_metadata.prompt_token_ids,
             pooling_params=pooling_params,
             pooling_states=pooling_states,
@@ -983,13 +990,15 @@ class InputBatch:
                 continue
             num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
             # Also account for case where there may be a smaller number of
-            # output placeholders (tokens can be discarded after a kv-load failure).
+            # output placeholders (tokens can be discarded after kv-load
+            # failure) or a larger number (async spec decode adds optimistic
+            # placeholders that may exceed the actual acceptance count).
             first_placeholder = req_output_token_ids.index(-1)
             num_placeholders = len(req_output_token_ids) - first_placeholder
             num_to_replace = min(num_sampled_ids, num_placeholders)
             del new_ids[num_to_replace:]
-            end_index = first_placeholder + num_to_replace
-            req_output_token_ids[first_placeholder:end_index] = new_ids
+            req_output_token_ids[first_placeholder:] = new_ids
+            # ^ Implicitly resizes to (first_placeholder + num_to_replace)
 
     def update_async_spec_token_ids(self, draft_token_ids: list[list[int]]) -> None:
         """
