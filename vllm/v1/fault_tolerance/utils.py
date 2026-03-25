@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import json
 import time
 import uuid
@@ -124,5 +125,5 @@ def notify_engine_down(engine_down_socket, engine_id):
         engine_id=str(engine_id),
         engine_status=EngineStatusType.DEAD,
     )
-
-    engine_down_socket.send_multipart([b"", msgspec.msgpack.encode(fault_info)])
+    with contextlib.suppress(zmq.ZMQError):
+        engine_down_socket.send_multipart([b"", msgspec.msgpack.encode(fault_info)])
