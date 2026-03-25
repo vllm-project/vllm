@@ -22,7 +22,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.utils import get_max_tokens
-from vllm.inputs.data import ProcessorInputs
+from vllm.inputs import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.reasoning import ReasoningParser
