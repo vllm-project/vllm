@@ -135,10 +135,10 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
         a2_scale: torch.Tensor | None,
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
+        workspace13: torch.Tensor | None,
+        workspace2: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        apply_router_weight_on_input: bool,
+        apply_router_weight_on_input: bool | None,
     ):
         assert self.quant_dtype == "nvfp4"
         assert a1q_scale is not None
