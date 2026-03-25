@@ -167,6 +167,9 @@ class Platform:
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
 
+    def is_zen_cpu(self) -> bool:
+        return False
+
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
 
@@ -706,6 +709,13 @@ class Platform:
     def support_static_graph_mode(cls) -> bool:
         """
         Returns if the graph mode is supported by the current platform.
+        """
+        return False
+
+    @classmethod
+    def support_deep_gemm(cls) -> bool:
+        """
+        Returns if DeepGEMM is supported by the current platform.
         """
         return False
 

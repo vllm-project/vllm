@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import final
 
 import torch
-from huggingface_hub import constants
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import PretrainedConfig
 
@@ -23,22 +20,6 @@ from vllm.transformers_utils.config import (
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
-
-
-@contextmanager
-def _maybe_patch_hf_hub_constants(config_format: ConfigFormat) -> Iterator[None]:
-    if config_format == "mistral":
-        hf_safetensors_single_file = constants.SAFETENSORS_SINGLE_FILE
-        hf_safetensors_index_file = constants.SAFETENSORS_INDEX_FILE
-        constants.SAFETENSORS_SINGLE_FILE = "consolidated.safetensors"
-        constants.SAFETENSORS_INDEX_FILE = "consolidated.safetensors.index.json"
-        try:
-            yield
-        finally:
-            constants.SAFETENSORS_SINGLE_FILE = hf_safetensors_single_file
-            constants.SAFETENSORS_INDEX_FILE = hf_safetensors_index_file
-    else:
-        yield
 
 
 class ModelArchConfigConvertorBase:
@@ -164,8 +145,7 @@ class ModelArchConfigConvertorBase:
 
         # Try to read the dtype of the weights if they are in safetensors format
         if config_dtype is None:
-            with _maybe_patch_hf_hub_constants(config_format):
-                param_mt = get_safetensors_params_metadata(model_id, revision=revision)
+            param_mt = get_safetensors_params_metadata(model_id, revision=revision)
 
             if param_mt:
                 param_dtypes: set[torch.dtype] = {
@@ -248,7 +228,7 @@ class ModelArchConfigConvertorBase:
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
         ):
-            return self.hf_text_config.kv_lora_rank is not None
+            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
         elif self.hf_text_config.model_type == "eagle":
             # if the model is an EAGLE module, check for the
             # underlying architecture
@@ -261,7 +241,7 @@ class ModelArchConfigConvertorBase:
                     "deepseek_v32",
                     "deepseek_mtp",
                 )
-                and self.hf_text_config.kv_lora_rank is not None
+                and getattr(self.hf_text_config, "kv_lora_rank", None) is not None
             )
         return False
 
@@ -318,6 +298,28 @@ class ModelArchConfigConvertorBase:
         )
 
         return model_arch_config
+
+
+class CohereAsrModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_total_num_attention_heads(self) -> int:
+        return self.hf_text_config.transf_decoder["config_dict"]["num_attention_heads"]
+
+    def get_head_size(self) -> int:
+        hidden_size = self.hf_text_config.transf_decoder["config_dict"]["hidden_size"]
+        num_attention_heads = self.hf_text_config.transf_decoder["config_dict"][
+            "num_attention_heads"
+        ]
+        return hidden_size // num_attention_heads
+
+    def get_total_num_kv_heads(self) -> int:
+        enc_num_kv_heads = self.hf_text_config.encoder["n_heads"]
+        dec_num_kv_heads = self.hf_text_config.transf_decoder["config_dict"][
+            "num_attention_heads"
+        ]
+        assert enc_num_kv_heads == dec_num_kv_heads, (
+            "Encoder and decoder must have the same number of kv heads"
+        )
+        return enc_num_kv_heads
 
 
 class MambaModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -445,6 +447,7 @@ class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
+    "cohere_asr": CohereAsrModelArchConfigConvertor,
     "mamba": MambaModelArchConfigConvertor,
     "falcon_mamba": MambaModelArchConfigConvertor,
     "timm_wrapper": TerratorchModelArchConfigConvertor,

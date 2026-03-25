@@ -759,7 +759,7 @@ class MooncakeConnectorWorker:
             remote_block_size=self._block_size,  # shared state
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
-            attn_backend=backend,
+            attn_backends=[backend],
         )
 
         self.async_zmq_ctx = zmq.asyncio.Context()
