@@ -559,6 +559,7 @@ class AsyncLLM(EngineClient):
         """
 
         q: RequestOutputCollector | None = None
+        is_streaming_input = isinstance(prompt, AsyncGenerator)
         try:
             q = await self.add_request(
                 request_id,
@@ -581,12 +582,17 @@ class AsyncLLM(EngineClient):
                 # task switching under load which helps performance).
                 out = q.get_nowait() or await q.get()
 
+                if out is STREAM_FINISHED:
+                    break
+
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
                 assert isinstance(out, RequestOutput)
-                finished = out.finished
-                if out is not STREAM_FINISHED:
-                    yield out
+                # For streaming input, individual segments complete with
+                # finished=True but the overall stream continues until
+                # the STREAM_FINISHED sentinel arrives.
+                finished = out.finished and not is_streaming_input
+                yield out
 
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,
