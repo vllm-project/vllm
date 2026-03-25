@@ -414,9 +414,12 @@ def test_cudagraph_sizes_post_init(
         ctx,
         patch("vllm.config.parallel.cuda_device_count_stateless", return_value=tp_size),
     ):
+        kwargs = {}
+        if cudagraph_capture_sizes is not None:
+            kwargs["cudagraph_capture_sizes"] = cudagraph_capture_sizes
+        if max_cudagraph_capture_size is not None:
+            kwargs["max_cudagraph_capture_size"] = max_cudagraph_capture_size
         compilation_config = CompilationConfig(
-            cudagraph_capture_sizes=cudagraph_capture_sizes,
-            max_cudagraph_capture_size=max_cudagraph_capture_size,
             pass_config=PassConfig(
                 enable_sp=enable_sp,
                 fuse_norm_quant=True,
@@ -425,6 +428,7 @@ def test_cudagraph_sizes_post_init(
                 sp_min_token_num=512 if enable_sp else None,
             ),
             cudagraph_mode=cudagraph_mode,
+            **kwargs,
         )
         engine_args = EngineArgs(
             model="facebook/opt-125m",

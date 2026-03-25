@@ -6,7 +6,6 @@ import argparse
 import json
 import os
 import time
-from dataclasses import fields
 from typing import Any
 
 import numpy as np
@@ -85,7 +84,7 @@ def main(args: argparse.Namespace):
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
-    llm = LLM(**{f.name: getattr(engine_args, f.name) for f in fields(engine_args)})
+    llm = LLM.from_engine_args(engine_args)
     assert llm.llm_engine.model_config.max_model_len >= (
         args.input_len + args.output_len
     ), (
