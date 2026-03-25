@@ -164,12 +164,6 @@ class LLM:
             compared with using gpu_memory_utilization. Note that
             kv_cache_memory_bytes (when not-None) ignores
             gpu_memory_utilization
-        swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
-            This can be used for temporarily storing the states of the requests
-            when their `best_of` sampling parameters are larger than 1. If all
-            requests will have `best_of=1`, you can safely set this to 0.
-            Noting that `best_of` is only supported in V0. Otherwise, too small
-            values may cause out-of-memory (OOM) errors.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
@@ -240,7 +234,6 @@ class LLM:
         chat_template: Path | str | None = None,
         seed: int = 0,
         gpu_memory_utilization: float = 0.9,
-        swap_space: float = 4,
         cpu_offload_gb: float = 0,
         offload_group_size: int = 0,
         offload_num_in_group: int = 1,
@@ -264,6 +257,17 @@ class LLM:
         **kwargs: Any,
     ) -> None:
         """LLM constructor."""
+
+        if "swap_space" in kwargs:
+            kwargs.pop("swap_space")
+            import warnings
+
+            warnings.warn(
+                "The 'swap_space' parameter is deprecated and ignored. "
+                "It will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
@@ -353,7 +357,6 @@ class LLM:
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             kv_cache_memory_bytes=kv_cache_memory_bytes,
-            swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             offload_group_size=offload_group_size,
             offload_num_in_group=offload_num_in_group,
@@ -379,22 +382,25 @@ class LLM:
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args=engine_args, usage_context=UsageContext.LLM_CLASS
         )
+        self.model_config = self.llm_engine.model_config
         self.engine_class = type(self.llm_engine)
 
         self.request_counter = Counter()
         self.default_sampling_params: dict[str, Any] | None = None
 
         supported_tasks = self.llm_engine.get_supported_tasks()
-        logger.info("Supported tasks: %s", supported_tasks)
         self.supported_tasks = supported_tasks
+        self.pooling_task = self.model_config.get_pooling_task(supported_tasks)
+        if self.pooling_task is not None:
+            logger.info("Supported pooling task: %s", self.pooling_task)
 
-        self.model_config = self.llm_engine.model_config
+        self.runner_type = self.model_config.runner_type
         self.renderer = self.llm_engine.renderer
         self.chat_template = load_chat_template(chat_template)
         self.io_processor = self.llm_engine.io_processor
         self.input_processor = self.llm_engine.input_processor
         self.chat_template_config = ChatTemplateConfig(chat_template=self.chat_template)
-        self.init_pooling_io_processors = init_pooling_io_processors(
+        self.pooling_io_processors = init_pooling_io_processors(
             supported_tasks=supported_tasks,
             model_config=self.model_config,
             renderer=self.renderer,
@@ -402,6 +408,11 @@ class LLM:
         )
         # Cache for __repr__ to avoid repeated collective_rpc calls
         self._cached_repr: str | None = None
+
+    @classmethod
+    def from_engine_args(cls, engine_args: EngineArgs) -> "LLM":
+        """Create an LLM instance from EngineArgs."""
+        return cls(**vars(engine_args))
 
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
@@ -733,10 +744,6 @@ class LLM:
             if prompt["type"] == "embeds":
                 raise NotImplementedError(
                     "Embedding prompt not supported for beam search"
-                )
-            if prompt["type"] == "enc_dec":
-                raise NotImplementedError(
-                    "Encoder-decoder prompt not supported for beam search"
                 )
 
             instances.append(
@@ -1073,31 +1080,7 @@ class LLM:
             pooled hidden states in the same order as the input prompts.
         """
 
-        if pooling_task is None:
-            raise ValueError(
-                "pooling_task required for `LLM.encode`\n"
-                "Please use one of the more specific methods or set the "
-                "pooling_task when using `LLM.encode`:\n"
-                "  - For embeddings, use `LLM.embed(...)` "
-                'or `pooling_task="embed"`.\n'
-                "  - For classification logits, use `LLM.classify(...)` "
-                'or `pooling_task="classify"`.\n'
-                "  - For similarity scores, use `LLM.score(...)`.\n"
-                "  - For rewards, use `LLM.reward(...)` "
-                'or `pooling_task="token_classify"`\n'
-                "  - For token classification, "
-                'use `pooling_task="token_classify"`\n'
-                '  - For multi-vector retrieval, use `pooling_task="token_embed"`'
-            )
-
-        model_config = self.model_config
-        runner_type = model_config.runner_type
-        if runner_type != "pooling":
-            raise ValueError(
-                "LLM.encode() is only supported for pooling models. "
-                "Try passing `--runner pooling` to use the model as a "
-                "pooling model."
-            )
+        self._verify_pooling_task(pooling_task)
 
         if isinstance(prompts, dict) and "data" in prompts:
             if self.io_processor is None:
@@ -1175,8 +1158,8 @@ class LLM:
                     )
                     raise ValueError(msg)
 
-            if pooling_task in self.init_pooling_io_processors:
-                io_processor = self.init_pooling_io_processors[pooling_task]
+            if pooling_task in self.pooling_io_processors:
+                io_processor = self.pooling_io_processors[pooling_task]
                 processor_inputs = io_processor.pre_process_offline(
                     prompts_seq, tokenization_kwargs
                 )
@@ -1195,7 +1178,7 @@ class LLM:
                 outputs = self._run_engine(
                     use_tqdm=use_tqdm, output_type=PoolingRequestOutput
                 )
-                outputs = io_processor.post_process(outputs)
+                outputs = io_processor.post_process_offline(outputs)
             else:
                 outputs = self._run_completion(
                     prompts=prompts_seq,
@@ -1206,6 +1189,65 @@ class LLM:
                     tokenization_kwargs=tokenization_kwargs,
                 )
         return outputs
+
+    def _verify_pooling_task(self, pooling_task: PoolingTask | None):
+        if self.runner_type != "pooling":
+            raise ValueError(
+                "LLM.encode() is only supported for pooling models. "
+                "Try passing `--runner pooling` to use the model as a "
+                "pooling model."
+            )
+
+        if pooling_task is None:
+            raise ValueError(
+                "pooling_task required for `LLM.encode`\n"
+                "Please use one of the more specific methods or set the "
+                "pooling_task when using `LLM.encode`:\n"
+                "  - For embeddings, use `LLM.embed(...)` "
+                'or `pooling_task="embed"`.\n'
+                "  - For classification logits, use `LLM.classify(...)` "
+                'or `pooling_task="classify"`.\n'
+                "  - For similarity scores, use `LLM.score(...)`.\n"
+                "  - For rewards, use `LLM.reward(...)` "
+                'or `pooling_task="token_classify"`\n'
+                "  - For token classification, "
+                'use `pooling_task="token_classify"`\n'
+                '  - For multi-vector retrieval, use `pooling_task="token_embed"`'
+            )
+
+        if (
+            pooling_task in ("embed", "token_embed")
+            and pooling_task not in self.supported_tasks
+        ):
+            raise ValueError(
+                "Embedding API is not supported by this model. "
+                "Try converting the model using `--convert embed`."
+            )
+
+        if (
+            pooling_task in ("classify", "token_classify")
+            and pooling_task not in self.supported_tasks
+        ):
+            raise ValueError(
+                "Classification API is not supported by this model. "
+                "Try converting the model using `--convert classify`."
+            )
+
+        # plugin task uses io_processor.parse_request to verify inputs
+        if pooling_task != "plugin" and pooling_task != self.pooling_task:
+            if pooling_task not in self.supported_tasks:
+                raise ValueError(
+                    f"Unsupported task: {pooling_task!r} "
+                    f"Supported tasks: {self.supported_tasks}"
+                )
+            else:
+                logger.warning_once(
+                    "Pooling multitask support is deprecated and will "
+                    "be removed in v0.20. When the default pooling task is "
+                    "not what you want, you need to manually specify it "
+                    'via PoolerConfig(task="%s"). ',
+                    pooling_task,
+                )
 
     def embed(
         self,
@@ -1240,11 +1282,6 @@ class LLM:
             A list of `EmbeddingRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
         """
-        if "embed" not in self.supported_tasks:
-            raise ValueError(
-                "Embedding API is not supported by this model. "
-                "Try converting the model using `--convert embed`."
-            )
 
         items = self.encode(
             prompts,
@@ -1290,11 +1327,6 @@ class LLM:
             A list of `ClassificationRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
         """
-        if "classify" not in self.supported_tasks:
-            raise ValueError(
-                "Classification API is not supported by this model. "
-                "Try converting the model using `--convert classify`."
-            )
 
         items = self.encode(
             prompts,
@@ -1478,9 +1510,9 @@ class LLM:
             data_1 = data_1 * len(data_2)
 
         if pooling_params is None:
-            pooling_params = PoolingParams(task="score")
+            pooling_params = PoolingParams(task="classify")
         elif pooling_params.task is None:
-            pooling_params.task = "score"
+            pooling_params.task = "classify"
 
         pooling_params_list = list[PoolingParams]()
 
@@ -1585,8 +1617,11 @@ class LLM:
             )
 
         supported_tasks = self.supported_tasks
+        score_type = self.model_config.score_type
+        is_late_interaction = score_type == "late-interaction"
+        is_cross_encoder = score_type == "cross-encoder"
+
         # Late interaction models (e.g., ColBERT) use token_embed for scoring
-        is_late_interaction = model_config.is_late_interaction
         if not is_late_interaction and all(
             t not in supported_tasks for t in ("embed", "classify")
         ):
@@ -1596,13 +1631,10 @@ class LLM:
                 "`--convert embed` or `--convert classify`."
             )
 
-        if (
-            model_config.is_cross_encoder
-            and getattr(model_config.hf_config, "num_labels", 0) != 1
-        ):
+        if is_cross_encoder and getattr(model_config.hf_config, "num_labels", 0) != 1:
             raise ValueError("Score API is only enabled for num_labels == 1.")
 
-        if not model_config.is_cross_encoder and chat_template is not None:
+        if not is_cross_encoder and chat_template is not None:
             raise ValueError(
                 "chat_template is only supported for cross-encoder models."
             )
@@ -1623,7 +1655,7 @@ class LLM:
         )
         encode_kwargs = tok_params.get_encode_kwargs()
 
-        if model_config.is_cross_encoder:
+        if is_cross_encoder:
             return self._cross_encoding_score(
                 score_data_1,
                 score_data_2,

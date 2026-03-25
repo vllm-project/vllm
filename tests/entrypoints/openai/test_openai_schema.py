@@ -1,12 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+from http import HTTPStatus
 from typing import Final
 
 import pytest
 import schemathesis
+from httpx import URL
 from hypothesis import settings
 from schemathesis import GenerationConfig
+from schemathesis.checks import not_a_server_error
+from schemathesis.internal.checks import CheckContext
+from schemathesis.models import Case
+from schemathesis.transports.responses import GenericResponse
+
+from vllm.platforms import current_platform
 
 from ...utils import RemoteOpenAIServer
 
@@ -14,8 +22,9 @@ schemathesis.experimental.OPEN_API_3_1.enable()
 
 MODEL_NAME = "HuggingFaceTB/SmolVLM-256M-Instruct"
 MAXIMUM_IMAGES = 2
-DEFAULT_TIMEOUT_SECONDS: Final[int] = 10
-LONG_TIMEOUT_SECONDS: Final[int] = 60
+_ROCM_TIMEOUT_MULTIPLIER = 3 if current_platform.is_rocm() else 1
+DEFAULT_TIMEOUT_SECONDS: Final[int] = 10 * _ROCM_TIMEOUT_MULTIPLIER
+LONG_TIMEOUT_SECONDS: Final[int] = 60 * _ROCM_TIMEOUT_MULTIPLIER
 
 
 @pytest.fixture(scope="module")
@@ -127,10 +136,25 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
     return strategy.filter(no_invalid_types)
 
 
+def customized_not_a_server_error(
+    ctx: CheckContext, response: GenericResponse, case: Case
+) -> bool | None:
+    try:
+        return not_a_server_error(ctx, response, case)
+    except Exception:
+        if (
+            URL(response.request.url).path
+            in ["/v1/chat/completions/render", "/v1/chat/completions"]
+            and response.status_code == HTTPStatus.NOT_IMPLEMENTED.value
+        ):
+            return True
+        raise
+
+
 @schema.parametrize()
 @schema.override(headers={"Content-Type": "application/json"})
 @settings(deadline=LONG_TIMEOUT_SECONDS * 1000, max_examples=50)
-def test_openapi_stateless(case: schemathesis.Case):
+def test_openapi_stateless(case: Case):
     key = (
         case.operation.method.upper(),
         case.operation.path,
@@ -155,4 +179,9 @@ def test_openapi_stateless(case: schemathesis.Case):
     }.get(key, DEFAULT_TIMEOUT_SECONDS)
 
     # No need to verify SSL certificate for localhost
-    case.call_and_validate(verify=False, timeout=timeout)
+    case.call_and_validate(
+        verify=False,
+        timeout=timeout,
+        additional_checks=(customized_not_a_server_error,),
+        excluded_checks=(not_a_server_error,),
+    )

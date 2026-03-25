@@ -29,6 +29,9 @@ class LoadConfig:
     back to the pytorch bin format if safetensors format is not available.\n
     - "pt" will load the weights in the pytorch bin format.\n
     - "safetensors" will load the weights in the safetensors format.\n
+    - "instanttensor" will load the Safetensors weights on CUDA devices using
+    InstantTensor, which enables distributed loading with pipelined prefetching
+    and fast direct I/O.\n
     - "npcache" will load the weights in pytorch format and store a numpy cache
     to speed up the loading.\n
     - "dummy" will initialize the weights with random values, which is mainly
@@ -46,19 +49,26 @@ class LoadConfig:
     - "gguf" will load weights from GGUF format files (details specified in
     https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).\n
     - "mistral" will load weights from consolidated safetensors files used by
-    Mistral models.
+    Mistral models.\n
     - Other custom values can be supported via plugins."""
     download_dir: str | None = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
-    safetensors_load_strategy: str = "lazy"
+    safetensors_load_strategy: str | None = None
     """Specifies the loading strategy for safetensors weights.
-    - "lazy" (default): Weights are memory-mapped from the file. This enables
+    - None (default): Uses memory-mapped (lazy) loading. When an NFS
+      filesystem is detected and the total checkpoint size fits within 90%%
+      of available RAM, prefetching is enabled automatically.
+    - "lazy": Weights are memory-mapped from the file. This enables
       on-demand loading and is highly efficient for models on local storage.
+      Unlike the default (None), auto-prefetch on NFS is not performed.
     - "eager": The entire file is read into CPU memory upfront before loading.
       This is recommended for models on network filesystems (e.g., Lustre, NFS)
       as it avoids inefficient random reads, significantly speeding up model
       initialization. However, it uses more CPU RAM.
+    - "prefetch": Checkpoint files are read into the OS page cache before
+      workers load them, speeding up the model loading phase. Useful on
+      network or high-latency storage.
     - "torchao": Weights are loaded in upfront and then reconstructed
       into torchao tensor subclasses. This is used when the checkpoint
       was quantized using torchao and saved using safetensors.

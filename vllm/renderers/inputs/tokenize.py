@@ -1,5 +1,5 @@
 """
-Schemas and utilites for tokenization inputs.
+Schemas and utilities for tokenization inputs.
 """
 
 # SPDX-License-Identifier: Apache-2.0

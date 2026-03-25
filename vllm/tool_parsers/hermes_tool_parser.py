@@ -368,6 +368,9 @@ class Hermes2ProToolParser(ToolParser):
             # now, the nitty-gritty of tool calls
             # now we have the portion to parse as tool call.
 
+            if current_tool_call is None:
+                return None
+
             logger.debug(
                 "Trying to parse current tool call with ID %s", self.current_tool_id
             )
@@ -382,6 +385,7 @@ class Hermes2ProToolParser(ToolParser):
             prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get(
                 "arguments"
             )
+            assert current_tool_call is not None
             cur_arguments = current_tool_call.get("arguments")
 
             logger.debug("diffing old arguments: %s", prev_arguments)
@@ -486,6 +490,7 @@ class Hermes2ProToolParser(ToolParser):
 
             # handle saving the state for the current tool into
             # the "prev" list for use in diffing for the next iteration
+            assert isinstance(current_tool_call, dict)
             if self.current_tool_id == len(self.prev_tool_call_arr) - 1:
                 self.prev_tool_call_arr[self.current_tool_id] = current_tool_call
             else:

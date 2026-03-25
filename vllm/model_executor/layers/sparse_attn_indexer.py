@@ -9,13 +9,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import (
-    fp8_mqa_logits,
-    fp8_mqa_logits_torch,
-    fp8_paged_mqa_logits,
-    fp8_paged_mqa_logits_torch,
-    is_deep_gemm_supported,
-)
+from vllm.utils.deep_gemm import fp8_mqa_logits, fp8_paged_mqa_logits, has_deep_gemm
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
@@ -96,6 +90,7 @@ def sparse_attn_indexer(
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = attn_metadata.prefill
+        assert prefill_metadata is not None
 
         # Get the full shared workspace buffers once (will allocate on first use)
         workspace_manager = current_workspace_manager()
@@ -113,38 +108,42 @@ def sparse_attn_indexer(
                 chunk.block_table,
                 chunk.cu_seq_lens,
             )
-            if is_deep_gemm_supported():
-                logits = fp8_mqa_logits(
-                    q_fp8[chunk.token_start : chunk.token_end],
-                    (k_fp8, k_scale.view(torch.float32).flatten()),
-                    weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    clean_logits=False,
-                )
-            else:
-                logits = fp8_mqa_logits_torch(
-                    q_fp8[chunk.token_start : chunk.token_end],
-                    (k_fp8, k_scale.view(torch.float32).flatten()),
-                    weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                )
+            logits = fp8_mqa_logits(
+                q_fp8[chunk.token_start : chunk.token_end],
+                (k_fp8, k_scale.view(torch.float32).flatten()),
+                weights[chunk.token_start : chunk.token_end],
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+                clean_logits=False,
+            )
             num_rows = logits.shape[0]
 
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
+
+            if current_platform.is_xpu():
+                ops.top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
+            else:
+                torch.ops._C.top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
 
             # Compute lengths from row spans
             # lengths = (chunk.cu_seqlen_ke - chunk.cu_seqlen_ks).to(torch.int32)
@@ -157,6 +156,8 @@ def sparse_attn_indexer(
 
     if has_decode:
         decode_metadata = attn_metadata.decode
+        assert decode_metadata is not None
+        # kv_cache shape [
         # kv_cache size requirement [num_block, block_size, n_head, head_dim],
         # we only have [num_block, block_size, head_dim],
         kv_cache = kv_cache.unsqueeze(-2)
@@ -178,26 +179,16 @@ def sparse_attn_indexer(
         next_n = padded_q_fp8_decode_tokens.shape[1]
         assert batch_size == decode_metadata.seq_lens.shape[0]
         num_padded_tokens = batch_size * next_n
-        if is_deep_gemm_supported():
-            logits = fp8_paged_mqa_logits(
-                padded_q_fp8_decode_tokens,
-                kv_cache,
-                weights[:num_padded_tokens],
-                decode_metadata.seq_lens,
-                decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len=max_model_len,
-                clean_logits=False,
-            )
-        else:
-            logits = fp8_paged_mqa_logits_torch(
-                padded_q_fp8_decode_tokens,
-                kv_cache,
-                weights[:num_padded_tokens],
-                decode_metadata.seq_lens,
-                decode_metadata.block_table,
-                max_model_len=max_model_len,
-            )
+        logits = fp8_paged_mqa_logits(
+            padded_q_fp8_decode_tokens,
+            kv_cache,
+            weights[:num_padded_tokens],
+            decode_metadata.seq_lens,
+            decode_metadata.block_table,
+            decode_metadata.schedule_metadata,
+            max_model_len=max_model_len,
+            clean_logits=False,
+        )
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
@@ -220,16 +211,28 @@ def sparse_attn_indexer(
                 None,
             )
         else:
-            torch.ops._C.top_k_per_row_decode(
-                logits,
-                next_n,
-                decode_metadata.seq_lens,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
+            if current_platform.is_xpu():
+                ops.top_k_per_row_decode(
+                    logits,
+                    next_n,
+                    decode_metadata.seq_lens,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
+            else:
+                torch.ops._C.top_k_per_row_decode(
+                    logits,
+                    next_n,
+                    decode_metadata.seq_lens,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
@@ -305,12 +308,9 @@ class SparseAttnIndexer(CustomOp):
         self.max_model_len = max_model_len
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
-        if current_platform.is_cuda() and not is_deep_gemm_supported():
-            logger.warning_once(
-                "DeepGEMM is not supported or available. SparseAttnIndexer will use a "
-                "less efficient PyTorch implementation. "
-                "Please make sure you have the required hardware and software setup "
-                "for DeepGEMM to achieve optimal performance."
+        if current_platform.is_cuda() and not has_deep_gemm():
+            raise RuntimeError(
+                "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
             )
 
     def forward_native(
@@ -320,14 +320,14 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
-        if current_platform.is_cuda():
+        if current_platform.is_cuda() or current_platform.is_xpu():
             return self.forward_cuda(hidden_states, q_fp8, k, weights)
         elif current_platform.is_rocm():
             return self.forward_hip(hidden_states, q_fp8, k, weights)
         else:
             raise NotImplementedError(
                 "SparseAttnIndexer native forward is only implemented for "
-                "CUDA and ROCm platform."
+                "CUDA, ROCm and XPU platforms."
             )
 
     def forward_cuda(
@@ -340,7 +340,7 @@ class SparseAttnIndexer(CustomOp):
         return torch.ops.vllm.sparse_attn_indexer(
             hidden_states,
             self.k_cache.prefix,
-            self.k_cache.kv_cache[0],
+            self.k_cache.kv_cache,
             q_fp8,
             k,
             weights,
@@ -364,7 +364,7 @@ class SparseAttnIndexer(CustomOp):
             return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
                 hidden_states,
                 self.k_cache.prefix,
-                self.k_cache.kv_cache[0],
+                self.k_cache.kv_cache,
                 q_fp8,
                 k,
                 weights,

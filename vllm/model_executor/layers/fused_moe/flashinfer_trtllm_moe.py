@@ -25,12 +25,12 @@ def _supports_current_device() -> bool:
 
 
 def _supports_no_act_and_mul() -> bool:
-    """Supports non-gated MoE."""
-    return True
+    """BF16 kernels do not support non-gated MoE"""
+    return False
 
 
 def _supports_activation(activation: MoEActivation) -> bool:
-    return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+    return activation in [MoEActivation.SILU]
 
 
 def _supports_routing_method_bf16(

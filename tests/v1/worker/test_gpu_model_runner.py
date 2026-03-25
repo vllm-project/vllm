@@ -38,7 +38,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
+from vllm.v1.worker.utils import select_common_block_size
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
@@ -96,7 +96,6 @@ def get_vllm_config():
     cache_config = CacheConfig(
         block_size=BLOCK_SIZE,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
     )
     parallel_config = ParallelConfig()
@@ -204,37 +203,25 @@ def _make_kv_cache_spec() -> FullAttentionSpec:
 def test_select_common_block_size_prefers_manager_block_size():
     backend_a = _make_mock_backend_for_kernel_block_size([MultipleOf(32)])
     backend_b = _make_mock_backend_for_kernel_block_size([64, MultipleOf(16)])
-    attn_groups = [
-        AttentionGroup(backend_a, [], [], _make_kv_cache_spec(), 0),
-        AttentionGroup(backend_b, [], [], _make_kv_cache_spec(), 0),
-    ]
 
-    selected_size = select_common_block_size(128, attn_groups)
+    selected_size = select_common_block_size(128, [backend_a, backend_b])
     assert selected_size == 128
 
 
 def test_select_common_block_size_uses_largest_shared_int():
     backend_a = _make_mock_backend_for_kernel_block_size([128, 64])
     backend_b = _make_mock_backend_for_kernel_block_size([64, 32])
-    attn_groups = [
-        AttentionGroup(backend_a, [], [], _make_kv_cache_spec(), 0),
-        AttentionGroup(backend_b, [], [], _make_kv_cache_spec(), 0),
-    ]
 
-    selected_size = select_common_block_size(256, attn_groups)
+    selected_size = select_common_block_size(256, [backend_a, backend_b])
     assert selected_size == 64
 
 
 def test_select_common_block_size_no_valid_option():
     backend_a = _make_mock_backend_for_kernel_block_size([64])
     backend_b = _make_mock_backend_for_kernel_block_size([MultipleOf(16)])
-    attn_groups = [
-        AttentionGroup(backend_a, [], [], _make_kv_cache_spec(), 0),
-        AttentionGroup(backend_b, [], [], _make_kv_cache_spec(), 0),
-    ]
 
     with pytest.raises(ValueError):
-        select_common_block_size(48, attn_groups)
+        select_common_block_size(48, [backend_a, backend_b])
 
 
 def test_update_states_new_request(model_runner, dist_init):
@@ -683,8 +670,8 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config):
 
     runner.initialize_kv_cache(kv_cache_config)
 
-    layer_0_kv = vllm_ctx[layer_0].kv_cache[0]
-    layer_1_kv = vllm_ctx[layer_1].kv_cache[0]
+    layer_0_kv = vllm_ctx[layer_0].kv_cache
+    layer_1_kv = vllm_ctx[layer_1].kv_cache
     # check layer 1 kv cache does NOT share memory with layer 0
     assert id(layer_1_kv) != id(layer_0_kv)
 
@@ -753,8 +740,8 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     runner.initialize_kv_cache(kv_cache_config)
     kv_cache_config_after_init = runner.kv_cache_config
 
-    layer_0_kv = vllm_ctx[layer_0].kv_cache[0]
-    layer_1_kv = vllm_ctx[layer_1].kv_cache[0]
+    layer_0_kv = vllm_ctx[layer_0].kv_cache
+    layer_1_kv = vllm_ctx[layer_1].kv_cache
     # check layer 1 kv cache shares memory with layer 0
     assert id(layer_1_kv) == id(layer_0_kv)
 
@@ -809,7 +796,6 @@ def test_hybrid_attention_mamba_tensor_shapes():
     cache_config = CacheConfig(
         block_size=BLOCK_SIZE,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
     )
     parallel_config = ParallelConfig()
@@ -878,9 +864,9 @@ def test_hybrid_attention_mamba_tensor_shapes():
     np.random.shuffle(ind)
     blocks0, blocks1 = ind[: (num_blocks // 2)], ind[(num_blocks // 2) :]
 
-    attn_shape = vllm_ctx[layer_0].kv_cache[0].shape
-    conv_shape = vllm_ctx[layer_2].kv_cache[0][0].shape
-    ssm_shape = vllm_ctx[layer_2].kv_cache[0][1].shape
+    attn_shape = vllm_ctx[layer_0].kv_cache.shape
+    conv_shape = vllm_ctx[layer_2].kv_cache[0].shape
+    ssm_shape = vllm_ctx[layer_2].kv_cache[1].shape
 
     # assert we are using FlashInfer
     assert attn_shape[0] % num_blocks == 0
@@ -919,21 +905,21 @@ def test_hybrid_attention_mamba_tensor_shapes():
     kernel_blocks_for_attention = kv_blocks_for_attention * block_split_ratio
 
     for layer in [layer_0, layer_1]:
-        # attention: kv_cache[0][kernel_block_idx, kv_idx, ...]
+        # attention: kv_cache[kernel_block_idx, kv_idx, ...]
         for i, kernel_block in enumerate(kernel_blocks_for_attention):
-            vllm_ctx[layer].kv_cache[0][kernel_block, :] = attn_blocks_constant[i]
+            vllm_ctx[layer].kv_cache[kernel_block, :] = attn_blocks_constant[i]
 
     # fill mamba blocks with constants using kernel block indices
     for layer in [layer_2, layer_3, layer_4, layer_5]:
-        # mamba: kv_cache[0][component][kernel_block_idx, ...]
+        # mamba: kv_cache[component][kernel_block_idx, ...]
         for i, kv_block in enumerate(kv_blocks_for_mamba):
-            vllm_ctx[layer].kv_cache[0][0][kv_block, :] = conv_blocks_constant[i]
-            vllm_ctx[layer].kv_cache[0][1][kv_block, :] = ssm_blocks_constant[i]
+            vllm_ctx[layer].kv_cache[0][kv_block, :] = conv_blocks_constant[i]
+            vllm_ctx[layer].kv_cache[1][kv_block, :] = ssm_blocks_constant[i]
 
     # verify attention and mamba contents are correct
     for layer in [layer_0, layer_1]:
         for i, kernel_block in enumerate(kernel_blocks_for_attention):
-            actual_kv = vllm_ctx[layer].kv_cache[0][kernel_block, :]
+            actual_kv = vllm_ctx[layer].kv_cache[kernel_block, :]
             expected = attn_blocks_constant[i]
 
             # Check K and V separately
@@ -942,8 +928,8 @@ def test_hybrid_attention_mamba_tensor_shapes():
 
     for layer in [layer_2, layer_3, layer_4, layer_5]:
         for i, kv_block in enumerate(kv_blocks_for_mamba):
-            actual_conv = vllm_ctx[layer].kv_cache[0][0][kv_block, :]
-            actual_ssm = vllm_ctx[layer].kv_cache[0][1][kv_block, :]
+            actual_conv = vllm_ctx[layer].kv_cache[0][kv_block, :]
+            actual_ssm = vllm_ctx[layer].kv_cache[1][kv_block, :]
             expected_conv = conv_blocks_constant[i]
             expected_ssm = ssm_blocks_constant[i]
 
@@ -952,8 +938,8 @@ def test_hybrid_attention_mamba_tensor_shapes():
 
     for layer in [layer_2, layer_3, layer_4, layer_5]:
         for i, kv_block in enumerate(kv_blocks_for_mamba):
-            actual_conv = vllm_ctx[layer].kv_cache[0][0][kv_block, :]
-            actual_ssm = vllm_ctx[layer].kv_cache[0][1][kv_block, :]
+            actual_conv = vllm_ctx[layer].kv_cache[0][kv_block, :]
+            actual_ssm = vllm_ctx[layer].kv_cache[1][kv_block, :]
             expected_conv = conv_blocks_constant[i]
             expected_ssm = ssm_blocks_constant[i]
             assert torch.equal(actual_conv, expected_conv)
@@ -1242,7 +1228,6 @@ def test_cudagraph_sizes_capped_for_mamba_cache():
     cache_config = CacheConfig(
         block_size=BLOCK_SIZE,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
     )
     parallel_config = ParallelConfig()
