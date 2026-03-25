@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Inference-only Qwen3Next model."""
+"""Inference-only Qwen3-Next/Qwen3.5 model."""
 
 import torch
 from einops import rearrange
@@ -117,15 +117,11 @@ def fi_chunk_gated_delta_rule(
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
         super().__init__()
-        backend = (
-            str(
-                get_current_vllm_config().additional_config.get(
-                    "gdn_prefill_backend", "auto"
-                )
-            )
-            .strip()
-            .lower()
+        backend_cfg = get_current_vllm_config().additional_config.get(
+            "gdn_prefill_backend", "auto"
         )
+        backend = str(backend_cfg).strip().lower()
+
         supports_flashinfer = (
             current_platform.is_cuda() and current_platform.is_device_capability(90)
         )
@@ -328,20 +324,14 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
 
-        delattr(self.conv1d.weight, "weight_loader")
-        set_weight_attrs(
-            self.conv1d.weight,
-            {
-                "weight_loader": mamba_v2_sharded_weight_loader(
-                    [
-                        query_key_settings,
-                        query_key_settings,
-                        value_settings,
-                    ],
-                    self.tp_size,
-                    self.tp_rank,
-                )
-            },
+        self.conv1d.weight.weight_loader = mamba_v2_sharded_weight_loader(
+            [
+                query_key_settings,
+                query_key_settings,
+                value_settings,
+            ],
+            self.tp_size,
+            self.tp_rank,
         )
 
         # selective projection used to make dt, B and C input dependent
@@ -538,7 +528,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 sum(self.in_proj_ba.output_sizes) // self.tp_size,
                 self.prefix,
             )
-            
+
             if self.gqa_interleaved_layout:
                 # Qwen3-Next: unpack the interleaved GQA layout
                 query, key, value, z, b, a = self.fix_query_key_value_ordering(
