@@ -5,7 +5,7 @@ from http import HTTPStatus
 from typing import ClassVar
 
 from fastapi import Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 from starlette.datastructures import Headers
 
 from vllm import PoolingParams, PoolingRequestOutput, envs
@@ -19,7 +19,6 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.typing import AnyPoolingRequest, PoolingServeContext
-from vllm.entrypoints.utils import create_error_response
 from vllm.exceptions import VLLMNotFoundError
 from vllm.inputs.data import ProcessorInputs
 from vllm.lora.request import LoRARequest
@@ -99,11 +98,7 @@ class PoolingServing:
         self._maybe_get_adapters(ctx)
         await self.io_processor.pre_process_online_async(ctx)
         await self._prepare_generators(ctx)
-        try:
-            await self._collect_batch(ctx)
-        except (ValueError, TypeError) as e:
-            err = create_error_response(e)
-            return JSONResponse(err.model_dump(), status_code=err.error.code)
+        await self._collect_batch(ctx)
         await self.io_processor.post_process_online_async(ctx)
         return await self._build_response(ctx)
 
@@ -123,6 +118,7 @@ class PoolingServing:
         )
 
         pooling_params = self.io_processor.create_pooling_params(ctx.request)
+        pooling_params.verify(self.model_config)
 
         for i, engine_prompt in enumerate(ctx.engine_prompts):
             prompt_request_id = (
