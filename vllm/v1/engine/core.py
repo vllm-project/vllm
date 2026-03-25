@@ -1039,14 +1039,7 @@ class EngineCoreProc(EngineCore):
             parallel_config: ParallelConfig = vllm_config.parallel_config
             data_parallel = parallel_config.data_parallel_size > 1 or dp_rank > 0
             if data_parallel:
-                # Prefer VLLM_DP_RANK_LOCAL (set by external launchers
-                # like DPServer that know the true within-node DP
-                # position) over local_dp_rank from CoreEngineProcManager
-                # (which is always 0 when each launcher manages 1 engine).
-                if envs.VLLM_DP_RANK_LOCAL >= 0:
-                    parallel_config.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
-                else:
-                    parallel_config.data_parallel_rank_local = local_dp_rank
+                parallel_config.data_parallel_rank_local = local_dp_rank
                 process_title = f"EngineCore_DP{dp_rank}"
             else:
                 process_title = "EngineCore"

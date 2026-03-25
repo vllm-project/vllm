@@ -226,14 +226,6 @@ class Worker(WorkerBase):
                 not in ("ray", "external_launcher")
                 and parallel_config.data_parallel_backend != "ray"
                 and parallel_config.nnodes_within_dp == 1
-            ) or (
-                # RayExecutorV2 workers see all GPUs via
-                # RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1 so they
-                # need the DP local-rank offset applied here.
-                envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND
-                and parallel_config.distributed_executor_backend == "ray"
-                and parallel_config.data_parallel_size > 1
-                and parallel_config.nnodes_within_dp == 1
             ):
                 # Use local DP rank if available, otherwise use global DP rank.
                 dp_local_rank = self.parallel_config.data_parallel_rank_local

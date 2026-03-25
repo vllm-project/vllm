@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import threading
 import weakref
 from collections import defaultdict, deque
@@ -65,28 +66,60 @@ class RayWorkerHandle:
 
 
 class RayWorkerProc(WorkerProc):
-    """Worker process that runs inside a Ray actor."""
+    """Worker process that runs inside a Ray actor.
+
+    Initialization is split into two phases:
+    1. __init__: lightweight setup, stores init args (no device/model init)
+    2. initialize_worker: called after GPU IDs are discovered, completes
+       the full WorkerProc initialization with the correct local_rank and
+       CUDA_VISIBLE_DEVICES.
+    """
 
     def __init__(
         self,
         vllm_config: VllmConfig,
-        local_rank: int,
         rank: int,
         distributed_init_method: str,
         input_shm_handle: Handle,
         is_driver_worker: bool,
         is_driver_node: bool = False,
     ):
+        # Defer WorkerProc.__init__ until GPU IDs are known.
         self._is_driver_node = is_driver_node
-        self.local_rank = local_rank
-        super().__init__(
+        self._init_kwargs = dict(
             vllm_config=vllm_config,
-            local_rank=local_rank,
             rank=rank,
             distributed_init_method=distributed_init_method,
             input_shm_handle=input_shm_handle,
             shared_worker_lock=None,
             is_driver_worker=is_driver_worker,
+        )
+
+    def get_node_and_gpu_ids(self) -> tuple[str, list[int]]:
+        """Return (node_id, gpu_ids) assigned to this actor by Ray."""
+        node_id = ray.get_runtime_context().get_node_id()
+        device_key = current_platform.ray_device_key
+        if not device_key:
+            raise RuntimeError(
+                "current platform %s does not support ray.",
+                current_platform.device_name,
+            )
+        gpu_ids = ray.get_runtime_context().get_accelerator_ids()[device_key]
+        return node_id, [int(x) for x in gpu_ids]
+
+    def initialize_worker(self, local_rank: int, env_vars: dict[str, str]) -> None:
+        """Complete initialization after GPU assignment is known.
+
+        Sets CUDA_VISIBLE_DEVICES and initializes the underlying WorkerProc
+        with the correct local_rank.
+        """
+        for key, value in env_vars.items():
+            os.environ[key] = value
+
+        self.local_rank = local_rank
+        super().__init__(
+            local_rank=local_rank,
+            **self._init_kwargs,
         )
 
     def _init_message_queues(
@@ -179,16 +212,11 @@ class RayExecutorV2(MultiprocExecutor):
             bundle_to_node_id = get_bundles_sorted_by_node(placement_group)
         driver_node = ray.get_runtime_context().get_node_id()
 
-        # Assign each worker a local rank
-        node_rank_counter: dict[str, int] = defaultdict(int)
         bundle_assignments: list[dict[str, Any]] = []
         for rank, (bundle_id_idx, node_id, node_ip) in enumerate(bundle_to_node_id):
-            local_rank = node_rank_counter[node_id]
-            node_rank_counter[node_id] += 1
             bundle_assignments.append(
                 {
                     "rank": rank,
-                    "local_rank": local_rank,
                     "bundle_id_idx": bundle_id_idx,
                     "node_id": node_id,
                     "node_ip": node_ip,
@@ -213,14 +241,13 @@ class RayExecutorV2(MultiprocExecutor):
         )
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
-        # Step 5: Spawn RayWorkerProc actors into PG bundles
+        # Step 5: Spawn RayWorkerProc actors into PG bundles (deferred init).
+        # Workers are created lightweight here; full initialization happens
+        # in Step 7 after GPU IDs are discovered.
         self.ray_worker_handles: list[RayWorkerHandle] = []
         instance_id = self.vllm_config.instance_id
 
-        # Create exactly world_size remote actors despite the number of bundles
-        # in the placement group.
         for bundle_idx in range(self.world_size):
-            # Fail fast if the placement group has less than world_size bundles.
             bundle = bundle_assignments[bundle_idx]
             is_driver_worker = self._is_driver_worker(bundle["rank"])
             is_driver_node = bundle["node_id"] == driver_node
@@ -230,15 +257,11 @@ class RayExecutorV2(MultiprocExecutor):
                 placement_group_bundle_index=bundle["bundle_id_idx"],
             )
 
-            # Prevent Ray from setting CUDA_VISIBLE_DEVICES
+            # Prevent Ray from setting CUDA_VISIBLE_DEVICES; we set it
+            # in initialize_worker after discovering GPU IDs.
             env_vars = {
                 env_var: "1" for env_var in current_platform.ray_noset_device_env_vars
             }
-            # Propagate V2 executor flag and DP local rank to workers
-            if envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND:
-                env_vars["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] = "1"
-                if envs.VLLM_DP_RANK_LOCAL >= 0:
-                    env_vars["VLLM_DP_RANK_LOCAL"] = str(envs.VLLM_DP_RANK_LOCAL)
             runtime_env = {"env_vars": env_vars}
 
             actor_name = build_actor_name(
@@ -256,7 +279,6 @@ class RayExecutorV2(MultiprocExecutor):
                 )
                 .remote(
                     vllm_config=self.vllm_config,
-                    local_rank=bundle["local_rank"],
                     rank=bundle["rank"],
                     distributed_init_method=distributed_init_method,
                     input_shm_handle=scheduler_output_handle,
@@ -268,13 +290,45 @@ class RayExecutorV2(MultiprocExecutor):
             handle = RayWorkerHandle(
                 actor=actor,
                 rank=bundle["rank"],
-                local_rank=bundle["local_rank"],
+                local_rank=-1,  # Set in Step 7 after GPU ID discovery
                 node_id=bundle["node_id"],
                 bundle_id_idx=bundle["bundle_id_idx"],
             )
             self.ray_worker_handles.append(handle)
 
-        # Step 6: Collect response MQ handles
+        # Step 6: Discover GPU IDs assigned to each worker via Ray runtime context.
+        worker_node_and_gpu_ids = ray.get(
+            [h.actor.get_node_and_gpu_ids.remote() for h in self.ray_worker_handles]
+        )
+
+        node_workers: dict[str, list[int]] = defaultdict(list)
+        node_gpus: dict[str, list[int]] = defaultdict(list)
+        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
+            node_workers[node_id].append(i)
+            node_gpus[node_id].extend(gpu_ids)
+        for node_id, gpu_ids in node_gpus.items():
+            node_gpus[node_id] = sorted(gpu_ids)
+
+        # Step 7: Initialize workers with correct local_rank and
+        # CUDA_VISIBLE_DEVICES. Each worker sees all GPUs assigned to
+        # this executor on its node; local_rank indexes into that set.
+        init_worker_refs = []
+        for i, (node_id, _) in enumerate(worker_node_and_gpu_ids):
+            local_rank = node_workers[node_id].index(i)
+            worker_env_vars = {
+                current_platform.device_control_env_var: ",".join(
+                    map(str, node_gpus[node_id])
+                ),
+            }
+            self.ray_worker_handles[i].local_rank = local_rank
+            init_worker_refs.append(
+                self.ray_worker_handles[i].actor.initialize_worker.remote(
+                    local_rank, worker_env_vars
+                )
+            )
+        ray.get(init_worker_refs)
+
+        # Step 8: Collect response MQ handles
         init_refs = [h.actor.wait_for_init.remote() for h in self.ray_worker_handles]
         init_results = ray.get(init_refs)
 
@@ -286,12 +340,12 @@ class RayExecutorV2(MultiprocExecutor):
                 MessageQueue.create_from_handle(result["handle"], 0)
             )
 
-        # Step 7: Start run() before wait_until_ready() to avoid
+        # Step 9: Start run() before wait_until_ready() to avoid
         # deadlock — workers send subscriptions inside run().
         for handle in self.ray_worker_handles:
             handle.run_ref = handle.actor.run.remote()
 
-        # Step 8: wait_until_ready() barrier
+        # Step 10: wait_until_ready() barrier
         self.rpc_broadcast_mq.wait_until_ready()
         for response_mq in self.response_mqs:
             response_mq.wait_until_ready()
