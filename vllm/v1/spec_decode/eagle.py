@@ -83,6 +83,24 @@ class SpecDecodeBaseProposer:
         self.hidden_size = self.draft_model_config.get_hidden_size()
         self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
 
+        # Check if target and draft hidden sizes differ (for nonparallel drafting)
+        self.target_hidden_size = vllm_config.model_config.get_hidden_size()
+        self._hidden_state_proj: nn.Linear | None = None
+        if (self.method == "eagle3" and not self.parallel_drafting
+                and self.target_hidden_size != self.hidden_size):
+            logger.info(
+                "Target hidden size (%d) differs from draft hidden size (%d). "
+                "Creating projection layer for hidden states.",
+                self.target_hidden_size, self.hidden_size
+            )
+            self._hidden_state_proj = nn.Linear(
+                self.target_hidden_size,
+                self.hidden_size,
+                bias=False,
+                device=device,
+                dtype=self.dtype,
+            )
+
         # Unifying eagle, draft model, and parallel drafting support
         self.parallel_drafting: bool = self.speculative_config.parallel_drafting
         self.extra_slots_per_request = (
@@ -675,6 +693,8 @@ class SpecDecodeBaseProposer:
                 target_positions = target_positions[0]
             self._set_positions(num_tokens, target_positions)
 
+            if self._hidden_state_proj is not None:
+                target_hidden_states = self._hidden_state_proj(target_hidden_states)
             self.hidden_states[:num_tokens] = target_hidden_states
 
             return num_tokens, token_indices_to_sample, cad
@@ -745,6 +765,8 @@ class SpecDecodeBaseProposer:
             )
             if self.pass_hidden_states_to_model:
                 assert self.parallel_drafting_hidden_state_tensor is not None
+                if self._hidden_state_proj is not None:
+                    target_hidden_states = self._hidden_state_proj(target_hidden_states)
                 self.hidden_states[out_hidden_state_mapping] = target_hidden_states
                 # Use torch.where to avoid DtoH sync from boolean indexing
                 mask = self.is_masked_token_mask[:total_num_output_tokens]
