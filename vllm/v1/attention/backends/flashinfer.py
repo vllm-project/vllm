@@ -65,7 +65,6 @@ from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.workspace import current_workspace_manager
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 
@@ -75,6 +74,7 @@ FP4_DTYPE = torch.uint8
 logger = init_logger(__name__)
 
 trtllm_gen_workspace_buffer = None
+flashinfer_workspace_buffer = None
 
 
 # Must be zero-initialized and only used for the trtllm kernels as they properly reset
@@ -89,13 +89,16 @@ def _get_trtllm_gen_workspace_buffer():
 
 
 def _get_workspace_buffer():
-    buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
-    if envs.VLLM_BATCH_INVARIANT:
-        buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
-    (workspace,) = current_workspace_manager().get_simultaneous(
-        ((buffer_size,), torch.uint8),
-    )
-    return workspace
+    global flashinfer_workspace_buffer
+    if flashinfer_workspace_buffer is None:
+        buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+        if envs.VLLM_BATCH_INVARIANT:
+            buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
+        flashinfer_workspace_buffer = torch.zeros(
+            buffer_size, dtype=torch.uint8, device="cuda"
+        )
+
+    return flashinfer_workspace_buffer
 
 
 @triton.jit
