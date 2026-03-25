@@ -1550,7 +1550,7 @@ class Scheduler(SchedulerInterface):
     @staticmethod
     def _is_blocked_waiting_status(status: RequestStatus) -> bool:
         return status in (
-            RequestStatus.WAITING_FOR_FSM,
+            RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,
             RequestStatus.WAITING_FOR_REMOTE_KVS,
             RequestStatus.WAITING_FOR_STREAMING_REQ,
         )
@@ -2084,7 +2084,7 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.WAITING
             return True
 
-        if request.status == RequestStatus.WAITING_FOR_FSM:
+        if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
             structured_output_req = request.structured_output_request
             if not (structured_output_req and structured_output_req.grammar):
                 return False
