@@ -114,6 +114,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
         if self.worker_handler is not None:
+            assert isinstance(kv_connector_metadata, SimpleCPUOffloadMetadata)
             self.worker_handler.handle_preemptions(kv_connector_metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
