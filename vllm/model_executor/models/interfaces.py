@@ -1516,6 +1516,13 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig": ...
 
+    def is_image_inputs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> bool:
+        """Return True if the inputs are images, False otherwise (video)."""
+        ...
+
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config: "VllmConfig",
