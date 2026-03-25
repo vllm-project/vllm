@@ -26,6 +26,7 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import (
@@ -642,11 +643,11 @@ class FlashAttentionImpl(AttentionImpl):
         if vllm_config is not None and self.dcp_world_size > 1:
             n = vllm_config.scheduler_config.max_num_seqs
             dt = vllm_config.model_config.dtype
-            self._dcp_context_out = torch.empty(
-                n, num_heads * self.dcp_world_size, head_size, dtype=dt, device="cuda"
-            )
-            self._dcp_query_out = torch.empty(
-                n, num_heads, head_size, dtype=dt, device="cuda"
+            self._dcp_context_out, self._dcp_query_out = (
+                current_workspace_manager().get_simultaneous(
+                    ((n, num_heads * self.dcp_world_size, head_size), dt),
+                    ((n, num_heads, head_size), dt),
+                )
             )
 
     def _dcp_fa_out(
