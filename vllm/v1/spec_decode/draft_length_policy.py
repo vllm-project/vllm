@@ -43,9 +43,10 @@ class DraftLengthPolicy(Protocol):
     """Protocol for GPU-async dynamic draft-length policies.
 
     ``update()`` is called once per draft step; it performs only GPU tensor
-    operations and never causes a GPU→CPU synchronisation.  After all K steps
-    the caller reads ``k_valid_gpu`` (a GPU int32 scalar) via an async D→H
-    copy; ``k_valid_gpu is None`` signals "always use full K" (no-op policy).
+    operations and never causes a GPU→CPU synchronisation.  The draft loop
+    breaks after ``k_valid`` steps (fewer than K when confidence drops early),
+    skipping the remaining forward passes.  ``k_valid_gpu is None`` signals
+    "always use full K" (AlwaysContinuePolicy).
 
     Args for update():
         step: Zero-based loop index of the draft token just appended
@@ -84,9 +85,12 @@ class ConfidenceThresholdPolicy:
     All exit-detection state is maintained as GPU tensors updated by
     ``update()``.  No GPU→CPU sync occurs inside the draft loop.
 
-    After all K draft steps, the caller copies ``k_valid_gpu`` to CPU via a
-    single async D→H transfer, reducing from K blocking syncs to one
-    deferred sync per decode step.
+    The draft loop breaks after ``k_valid`` steps: ``update()`` kicks off an
+    async 1-byte D→H copy of ``_exited_gpu`` after each step; the next
+    iteration checks ``exited`` (near-free — copy completes during Python
+    loop overhead) and breaks early, skipping up to ``K − k_valid`` forward
+    passes.  ``k_valid_gpu`` is read by the caller after the loop to trim the
+    CPU token list handed to the scheduler.
 
     ``k_valid`` starts at ``num_spec_tokens`` (no exit).  On the first step
     where ``mean(token_probs) < threshold``, it is frozen to ``step + 2``
