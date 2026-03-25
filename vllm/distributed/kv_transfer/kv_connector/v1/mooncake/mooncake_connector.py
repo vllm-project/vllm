@@ -258,6 +258,7 @@ class MooncakeConnectorScheduler:
         self.is_kv_consumer: bool = (
             vllm_config.kv_transfer_config.kv_role == "kv_consumer"
         )
+        self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False)
         logger.info("Initializing Mooncake Transfer Engine Scheduler %s", engine_id)
 
         # Requests that need to start recv/send.
@@ -268,6 +269,9 @@ class MooncakeConnectorScheduler:
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[TransferId] = set()
+        # layerwise TODO 1. prefiller engine core0 add boostserver to record engine addr
+        # layerwise TODO 2. prefiller engine cores add listenserver for [req, block_ids, kv_addr, worker_addr] from decoder
+        # layerwise TODO 3. decoder engine cores gather all workers [kv_addr, worker_addr]
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -305,10 +309,12 @@ class MooncakeConnectorScheduler:
             count = len(token_ids) - num_computed_tokens
             if count > 0:
                 return count, True
-
-        # No remote prefill for this request.
-        return 0, False
-
+        if self.use_layerwise:
+            # layerwise TODO 5. if use layerwise prefiller engine core do not schedule this req until decoder send [req, block_ids, kv_addr, worker_addr]
+            return None, False
+        else:
+            return 0, False
+ 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
@@ -325,6 +331,7 @@ class MooncakeConnectorScheduler:
             return
 
         if params.get("do_remote_prefill"):
+            # layerwise TODO 4. decoder engine core send [req, block_ids, kv_addr, worker_addr] to prefiller engine core
             assert not self.is_kv_producer
             if all(
                 p in params
@@ -373,6 +380,7 @@ class MooncakeConnectorScheduler:
             self._reqs_need_recv.clear()
 
         if not self.is_kv_consumer:
+            # layerwise TODO 6. prefiller engine core pass req info [req, block_ids, kv_addr, worker_addr] to worker
             for req_id, (req, block_ids) in self._reqs_need_send.items():
                 assert req.kv_transfer_params is not None
                 meta.add_new_req(
@@ -455,6 +463,7 @@ class MooncakeConnectorWorker:
         assert (kv_transfer_config := vllm_config.kv_transfer_config)
         self.is_kv_producer: bool = kv_transfer_config.kv_role == "kv_producer"
         self.is_kv_consumer: bool = kv_transfer_config.kv_role == "kv_consumer"
+        self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False)
         self.num_sender_workers = kv_transfer_config.kv_connector_extra_config.get(
             "num_workers", 10
         )
@@ -571,7 +580,24 @@ class MooncakeConnectorWorker:
         self._encoder = msgspec.msgpack.Encoder()
         self._xfer_meta_decoder = msgspec.msgpack.Decoder(MooncakeXferMetadata)
         self._xfer_resp_decoder = msgspec.msgpack.Decoder(MooncakeXferResponse)
+        self._reqs_consumer_ready = set()
+        self._reqs_consumer_ready_lock = threading.Lock()
 
+    def save_kv_layer(
+        self,
+        layer_name: str,
+        kv_layer: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        **kwargs,
+    ) -> None:
+        """MooncakeConnector does not save explicitly."""
+        # layerwise TODO 7.1 if use layerwise prefiller worker add layerwise send task
+        pass
+    
+    async def _mooncake_recv_listener(self, ready_event: threading.Event):
+        # layerwise TODO 8. decoder worker listen for prefiller push done
+        pass
+    
     def __del__(self):
         self.shutdown()
 
@@ -646,6 +672,10 @@ class MooncakeConnectorWorker:
         try:
             while True:
                 identity, metadata_bytes = await sock.recv_multipart()
+                metadata = await self._xfer_meta_decoder.decode(metadata_bytes)
+                with self._reqs_consumer_ready_lock:
+                    for req_id in metadata.req_blocks.keys():
+                        self._reqs_consumer_ready.add(req_id)
                 await self.sender_worker_queue.put((identity, metadata_bytes))
         except zmq.ContextTerminated:
             logger.debug("ZMQ context terminated, exiting Mooncake sender thread.")
@@ -921,9 +951,15 @@ class MooncakeConnectorWorker:
         split_k_and_v = self.kv_topo.split_k_and_v
         tensor_size_bytes = None
         for layer_name, cache_or_caches in kv_caches.items():
-            logger.debug(
-                "registering layer %s with shape %s", layer_name, cache_or_caches.shape
-            )
+            try:
+                shape_info = cache_or_caches.shape
+            except AttributeError:
+                if isinstance(cache_or_caches, (tuple, list)):
+                    shape_info = [getattr(c, 'shape', 'unknown') for c in cache_or_caches]
+                else:
+                    shape_info = str(type(cache_or_caches))
+
+            logger.debug("registering layer %s with shape %s", layer_name, shape_info)
             cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
 
             for cache in cache_list:
@@ -1033,6 +1069,11 @@ class MooncakeConnectorWorker:
                 len(finished_sending_reqs),
                 len(finished_recving_reqs),
             )
+        if self.use_layerwise and self.is_kv_producer():
+            with self._reqs_consumer_ready_lock:
+                reqs_consumer_ready = self._reqs_consumer_ready.copy()
+                self._reqs_consumer_ready.clear()
+            finished_sending_reqs.update(reqs_consumer_ready)
 
         return finished_sending_reqs or None, finished_recving_reqs or None
 
@@ -1227,6 +1268,7 @@ class MooncakeConnectorWorker:
                 assert not send_meta.ready.is_set()
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
+        # layerwise TODO 7.2 if not use layerwise prefiller worker add send task
         if not self.is_kv_producer and metadata.reqs_to_recv:
             asyncio.run_coroutine_threadsafe(
                 self._start_load_kv(metadata.reqs_to_recv), self.receiver_loop
