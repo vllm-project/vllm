@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
-from transformers import PixtralVisionConfig
+from transformers import BatchFeature, PixtralVisionConfig
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens,
 )
@@ -62,6 +62,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.transformers_utils.processors.pixtral import MistralCommonPixtralProcessor
+from vllm.utils.collection_utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -212,6 +213,27 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(images=MultiModalFieldConfig.batched("image"))
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            # Avoid padding issue
+            tok_kwargs={**tok_kwargs, "return_tensors": None},
+        )
+
+        # Missing batch dimension
+        if is_list_of(outputs["input_ids"], int):
+            outputs["input_ids"] = [outputs["input_ids"]]
+
+        return outputs
 
     def _get_prompt_updates(
         self,

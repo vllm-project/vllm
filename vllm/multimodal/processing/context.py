@@ -195,7 +195,7 @@ class InputProcessingContext:
 
         tokenizer = self.tokenizer
         if is_mistral_tokenizer(tokenizer):
-            tokenizer = tokenizer.transformers_tokenizer
+            tokenizer = tokenizer.transformers_tokenizer  # type: ignore[union-attr]
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
         merged_kwargs.pop("tokenizer", None)
@@ -262,9 +262,10 @@ class InputProcessingContext:
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
+        allowed_kwargs.setdefault("return_tensors", "pt")
 
         try:
-            output = hf_processor(**data, **allowed_kwargs, return_tensors="pt")
+            output = hf_processor(**data, **allowed_kwargs)
         except Exception as exc:
             # See https://github.com/huggingface/tokenizers/issues/537
             if (

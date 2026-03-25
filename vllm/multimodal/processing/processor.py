@@ -1156,7 +1156,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
         processed_data.update(passthrough_data)
 
-        (prompt_ids,) = processed_data.pop("input_ids").tolist()
+        input_ids = processed_data.pop("input_ids")
+        if not isinstance(input_ids, list):
+            input_ids = input_ids.tolist()
+
+        (prompt_ids,) = input_ids
 
         is_update_applied = self._hf_processor_applies_updates(
             prompt_text=prompt_text,

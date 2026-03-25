@@ -276,7 +276,6 @@ def get_processor_kwargs_keys(
         "images_kwargs",
         "videos_kwargs",
         "audio_kwargs",
-        "common_kwargs",
     }
 
     try:
@@ -565,5 +564,5 @@ def call_hf_processor_mm_only(
 
     return BatchFeature(
         data={**audio_inputs, **images_inputs, **videos_inputs},
-        tensor_type=output_kwargs["common_kwargs"].get("return_tensors"),
+        tensor_type=kwargs.get("return_tensors"),
     )
