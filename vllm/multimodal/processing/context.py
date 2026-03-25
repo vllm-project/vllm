@@ -194,7 +194,7 @@ class InputProcessingContext:
             typ = ProcessorMixin
 
         tokenizer = self.tokenizer
-        if is_mistral_tokenizer(tokenizer):
+        if tokenizer is not None and is_mistral_tokenizer(tokenizer):
             tokenizer = tokenizer.transformers_tokenizer
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
@@ -255,10 +255,15 @@ class InputProcessingContext:
         assert callable(hf_processor)
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
+        # use_audio_in_video must not be passed to HF Processor; vLLM handles
+        # interleaving in _maybe_apply_prompt_updates to avoid StopIteration.
+        kwargs_for_processor = {
+            k: v for k, v in merged_kwargs.items() if k != "use_audio_in_video"
+        }
 
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
-            merged_kwargs,
+            kwargs_for_processor,
             requires_kw_only=False,
             allow_var_kwargs=True,
         )

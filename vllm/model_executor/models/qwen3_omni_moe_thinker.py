@@ -1211,6 +1211,16 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
 
+        # Fall back to global use_audio_in_video when not set per-request.
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        global_mm_kwargs = mm_config.mm_processor_kwargs or {}
+        if (
+            mm_kwargs.get("use_audio_in_video") is None
+            and "use_audio_in_video" in global_mm_kwargs
+        ):
+            mm_kwargs = dict(mm_kwargs)
+            mm_kwargs["use_audio_in_video"] = global_mm_kwargs["use_audio_in_video"]
+
         def pad_to_hop_length(x: np.ndarray, hop_length: int) -> np.ndarray:
             length = x.shape[-1]
             if length % hop_length != 0:
@@ -1484,7 +1494,14 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             token_id = image_token_id if modality == "image" else video_token_id
             return [token_id] * (int(grid_thw.prod()) // merge_length)
 
-        use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
+        use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", None)
+        if use_audio_in_video is None:
+            mm_config = self.info.ctx.model_config.get_multimodal_config()
+            global_mm_kwargs = mm_config.mm_processor_kwargs or {}
+            use_audio_in_video = global_mm_kwargs.get("use_audio_in_video", False)
+        # Disable interleaving when no audio (e.g. warmup) to avoid AssertionError.
+        if use_audio_in_video and not audio_output_lengths:
+            use_audio_in_video = False
         thinker_config = self.info.get_hf_config()
 
         def get_replacement_qwen2_use_audio_in_video(item_idx: int):

@@ -509,6 +509,10 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             hf_inputs["second_per_grid_ts"] = video_second_per_grid
 
         use_audio_in_video = mm_kwargs.get("use_audio_in_video", False)
+        # Only enable interleaving when request has real audio (warmup has none).
+        has_audio = bool(audios) or bool(mm_data.get("audio"))
+        if use_audio_in_video and not has_audio:
+            use_audio_in_video = False
         hf_inputs["use_audio_in_video"] = torch.tensor(use_audio_in_video)
 
         return hf_inputs
