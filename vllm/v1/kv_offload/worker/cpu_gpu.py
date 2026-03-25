@@ -347,7 +347,6 @@ class CpuGpuOffloadingHandlers:
                 "(cpu_block_size must equal kernel_block_size). "
                 f"Got cpu_block_size_factor={cpu_block_size_factor}."
             )
-            tp_rank = get_tensor_model_parallel_rank()
 
         gpu_tensors: list[torch.Tensor] = []
         cpu_tensors: list[torch.Tensor] = []
@@ -357,21 +356,8 @@ class CpuGpuOffloadingHandlers:
 
             logger.debug("Allocating CPU tensor of shape %r", cpu_shape)
             if mmap_region is not None:
-                cpu_tensor = mmap_region.alloc_tensor(
-                    shape=tuple(cpu_shape),
-                    dtype=gpu_tensor.dtype,
-                    split_kv=split_k_and_v,
-                )
-                if split_k_and_v:
-                    # cpu_tensor shape: (2, num_cpu_blocks, num_workers * page)
-                    cpu_tensor = cpu_tensor.view(2, num_cpu_blocks, num_workers, -1)[
-                        :, :, tp_rank, :
-                    ]
-                else:
-                    # cpu_tensor shape: (num_cpu_blocks, num_workers * page)
-                    cpu_tensor = cpu_tensor.view(num_cpu_blocks, num_workers, -1)[
-                        :, tp_rank, :
-                    ]
+                tensor_size = gpu_tensor.stride(0) * gpu_tensor.element_size()
+                cpu_tensor = mmap_region.alloc_tensor(tensor_size)
             else:
                 cpu_tensor = torch.zeros(
                     cpu_shape,

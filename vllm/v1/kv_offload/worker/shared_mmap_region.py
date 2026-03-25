@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import atexit
 import contextlib
-import math
 import mmap
 import os
 import time
@@ -43,14 +42,23 @@ class SharedMmapRegion:
     """
 
     def __init__(
-        self, instance_id: str, total_size_bytes: int, num_blocks: int
+        self,
+        instance_id: str,
+        total_size_bytes: int,
+        num_blocks: int,
+        rank: int,
+        num_workers: int,
+        cpu_page_size: int,
     ) -> None:
         self.page_size = mmap.PAGESIZE
         self.total_size_bytes = _page_align(total_size_bytes, self.page_size)
         self.mmap_path = f"/dev/shm/vllm_offload_{instance_id}.mmap"
-        self._alloc_offset = 0  # bytes consumed so far
         self._creator = False  # set True only if this worker creates the file
         self.num_blocks = num_blocks
+        # interleaved-layout stride: one row = all workers' data for one block
+        self._row_stride = cpu_page_size * num_workers
+        # byte offset to this worker's first slot within each block row
+        self._worker_offset = rank * cpu_page_size
         try:
             # Exclusive create — only one worker succeeds
             self.fd = os.open(
@@ -74,33 +82,33 @@ class SharedMmapRegion:
             flags=mmap.MAP_SHARED | mmap.MAP_POPULATE,
             prot=mmap.PROT_READ | mmap.PROT_WRITE,
         )
+        # int8 base — one element == one byte, so strides equal byte offsets
+        self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
         atexit.register(self.cleanup)
 
-    def alloc_tensor(
-        self, shape: tuple, dtype: torch.dtype, split_kv: bool = False
-    ) -> torch.Tensor:
-        """Allocate the next tensor sequentially from the mmap buffer.
+    def alloc_tensor(self, tensor_size: int) -> torch.Tensor:
+        """Allocate a strided int8 view for this worker, one layer.
 
-        If split_kv=True the shape is expected to have a leading dimension of 2
-        (K and V) and the tensor is reshaped to (2, num_blocks, -1) so that
-        unbind(0) yields the K and V slabs separately.
+        The mmap layout per block row is:
+            [ w0_data (tensor_size bytes) | w1_data | ... | w{N-1}_data ]
+        Consecutive block rows are separated by row_stride = cpu_page_size * N.
+
+        Returns an int8 tensor of shape (num_blocks, tensor_size) with stride
+        (row_stride, 1).  Using int8 keeps stride == bytes, so swap_blocks
+        address arithmetic works without any dtype conversion.
+
+        Args:
+            tensor_size: Bytes per block for this layer
+                         (= gpu_tensor.stride(0) * gpu_tensor.element_size()).
         """
-        num_elements = math.prod(shape)
-        tensor_bytes = num_elements * torch.tensor([], dtype=dtype).element_size()
-        assert self._alloc_offset + tensor_bytes <= self.total_size_bytes, (
-            f"mmap region exhausted: need {tensor_bytes} more bytes "
-            f"but only {self.total_size_bytes - self._alloc_offset} remain"
+        worker_layer_view = torch.as_strided(
+            self._base,
+            size=(self.num_blocks, tensor_size),
+            stride=(self._row_stride, 1),
+            storage_offset=self._worker_offset,
         )
-        start = self._alloc_offset
-        mv = memoryview(self.mmap_obj)[start : start + tensor_bytes]
-        flat = torch.frombuffer(mv, dtype=dtype, count=num_elements)
-        tensor = (
-            flat.reshape(2, self.num_blocks, -1)
-            if split_kv
-            else flat.reshape(self.num_blocks, -1)
-        )
-        self._alloc_offset += tensor_bytes
-        return tensor
+        self._worker_offset += tensor_size
+        return worker_layer_view
 
     def cleanup(self) -> None:
         if getattr(self, "mmap_obj", None) is not None:

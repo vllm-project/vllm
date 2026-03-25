@@ -5,6 +5,7 @@ from collections.abc import Iterator
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -115,10 +116,17 @@ class CPUOffloadingSpec(OffloadingSpec):
             assert len(self.gpu_block_size) == 1
             gpu_block_size = self.gpu_block_size[0]
 
+            num_workers = self.vllm_config.parallel_config.world_size
+            cpu_page_size = sum(
+                t.stride(0) * t.element_size() for t in kv_caches.values()
+            )
             mmap_region = SharedMmapRegion(
                 instance_id=self.vllm_config.instance_id,
                 total_size_bytes=int(self.extra_config["cpu_bytes_to_use"]),
                 num_blocks=self.num_blocks,
+                rank=get_tensor_model_parallel_rank(),
+                num_workers=num_workers,
+                cpu_page_size=cpu_page_size,
             )
             self._handlers = CpuGpuOffloadingHandlers(
                 attn_backends=attn_backends,
