@@ -184,10 +184,15 @@ class CpuPlatform(Platform):
             )
 
         if cache_config.cache_dtype.startswith("fp8"):
+            from vllm.utils.torch_utils import TORCH_DTYPE_TO_KV_CACHE_STR
+
+            fallback = TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype]
             logger.warning(
-                "CPU backend doesn't support KV cache quantization fallback to auto."
+                "CPU backend doesn't support KV cache quantization, "
+                "falling back to %s.",
+                fallback,
             )
-            cache_config.cache_dtype = "auto"
+            cache_config.cache_dtype = fallback
 
         cache_config.cpu_kvcache_space_bytes = CpuPlatform.get_device_total_memory()
 

@@ -1784,7 +1784,7 @@ def create_scheduler_with_priority(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        cache_dtype="auto",
+        cache_dtype="float16",
         enable_prefix_caching=enable_prefix_caching,
     )
     kv_transfer_config = (
@@ -3822,7 +3822,7 @@ def _create_encoder_decoder_scheduler(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        cache_dtype="auto",
+        cache_dtype="float16",
         enable_prefix_caching=False,
     )
     cache_config.num_gpu_blocks = num_blocks

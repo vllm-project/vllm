@@ -37,7 +37,6 @@ class XPUMLASparseBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "auto",
         "float16",
         "bfloat16",
     ]
@@ -72,7 +71,7 @@ class XPUMLASparseBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,  # assumed to be 1 for MLA
         head_size: int,
-        cache_dtype_str: str = "auto",
+        cache_dtype_str: str,
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
 

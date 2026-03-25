@@ -94,7 +94,7 @@ def create_scheduler(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        cache_dtype="auto",
+        cache_dtype="float16",
         enable_prefix_caching=enable_prefix_caching,
     )
     kv_transfer_config = None

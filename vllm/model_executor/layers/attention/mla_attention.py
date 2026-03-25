@@ -240,6 +240,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer, has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import (
+    TORCH_DTYPE_TO_KV_CACHE_STR,
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
@@ -324,7 +325,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = cache_config.cache_dtype
             calculate_kv_scales = cache_config.calculate_kv_scales
         else:
-            kv_cache_dtype = "auto"
+            kv_cache_dtype = TORCH_DTYPE_TO_KV_CACHE_STR[
+                get_current_vllm_config().model_config.dtype
+            ]
             calculate_kv_scales = False
         self.quant_config = quant_config
 
@@ -833,9 +836,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        kv_cache_dtype = kv_cache_dtype_str_to_dtype(
-            self.kv_cache_dtype, vllm_config.model_config
-        )
+        kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype)
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
@@ -1132,7 +1133,7 @@ class MLACommonBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,  # assumed to be 1 for MLA
         head_size: int,
-        cache_dtype_str: str = "auto",
+        cache_dtype_str: str,
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
 

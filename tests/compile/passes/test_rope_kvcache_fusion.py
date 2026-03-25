@@ -207,7 +207,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("kv_cache_dtype", ["bfloat16", "fp8"])
 @pytest.mark.skipif(
     not is_aiter_found_and_supported(),
     reason="Only test on ROCm with AITER installed and supported",

@@ -84,7 +84,7 @@ def test_models(
             max_model_len=MAX_MODEL_LEN,
             tensor_parallel_size=tensor_parallel_size,
             enforce_eager=enforce_eager,
-            kv_cache_dtype="auto",
+            kv_cache_dtype="bfloat16",
             attention_config={"backend": backend},
         ) as vllm_model:
             baseline_outputs = vllm_model.generate_greedy_logprobs(
@@ -149,7 +149,7 @@ def test_cpu_models(
             base_model,
             max_model_len=MAX_MODEL_LEN,
             dtype="bfloat16",
-            kv_cache_dtype="auto",
+            kv_cache_dtype="bfloat16",
         ) as vllm_model:
             baseline_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, NUM_LOG_PROBS

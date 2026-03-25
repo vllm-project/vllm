@@ -329,7 +329,7 @@ class MockSparseMLAAttentionLayer:
         output: torch.Tensor,
     ) -> torch.Tensor:
         """Forward for sparse MLA - uses forward_mqa for all tokens."""
-        kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
+        kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "float16")
         fp8_attention = kv_cache_dtype.startswith("fp8")
 
         # Write to KV cache
@@ -462,7 +462,7 @@ class MockMLAAttentionLayer(AttentionLayerBase):
     ) -> torch.Tensor:
         """Replicates MLAAttention.forward_impl logic for testing."""
         # Write to KV cache
-        kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
+        kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "float16")
         fp8_attention = kv_cache_dtype.startswith("fp8")
         if kv_cache.numel() > 0:
             ops.concat_and_cache_mla(
@@ -558,7 +558,7 @@ def run_attention_backend(
     mock_kv_b_proj,
     q_scale: float,
     k_scale: float,
-    kv_cache_dtype: str = "auto",
+    kv_cache_dtype: str = "float16",
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
@@ -665,7 +665,7 @@ def run_attention_backend(
 )
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
+@pytest.mark.parametrize("kv_cache_dtype", ["float16", "fp8", "fp8_e4m3"])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 def test_backend_correctness(
     default_vllm_config,

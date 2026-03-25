@@ -149,7 +149,7 @@ class LoopCoderAttention(nn.Module):
                 else:
                     loop_cache_config = CacheConfig(
                         sliding_window=self.loop_window_size,
-                        cache_dtype="auto",
+                        cache_dtype="bfloat16",
                     )
 
             self.attn.append(
