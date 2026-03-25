@@ -266,7 +266,9 @@ class TestTouchTelSafeBlock:
         pool.free_blocks_tlru(blocks, req_total_blocks=5)
 
         tel_safe_blocks = [b for b in blocks if b.is_tel_safe]
-        assert len(tel_safe_blocks) > 0, "Pre-condition: need at least one TEL-safe block"
+        assert len(tel_safe_blocks) > 0, (
+            "Pre-condition: need at least one TEL-safe block"
+        )
 
         # Simulate a prefix-cache hit: touch should NOT raise RuntimeError.
         pool.touch(tel_safe_blocks[:1])
@@ -287,7 +289,9 @@ class TestTouchTelSafeBlock:
         pool.free_blocks_tlru(blocks, req_total_blocks=5)
 
         normal_blocks = [b for b in blocks if not b.is_tel_safe]
-        assert len(normal_blocks) > 0, "Pre-condition: need at least one non-TEL-safe block"
+        assert len(normal_blocks) > 0, (
+            "Pre-condition: need at least one non-TEL-safe block"
+        )
 
         # touch() must work as before for normal blocks.
         pool.touch(normal_blocks[:1])
