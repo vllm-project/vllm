@@ -16,6 +16,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -274,7 +275,7 @@ if current_platform.is_rocm():
         new_key_cache = key_cache.view_as(k_cache_template)
         new_value_cache = value_cache.view_as(v_cache_template)
         QUANT = False
-        if kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(kv_cache_dtype):
             QUANT = True
         grid = (
             num_tokens,
@@ -477,7 +478,7 @@ class AiterFlashAttentionMetadataBuilder(
         if (
             rocm_aiter_ops.is_shuffle_kv_cache_enabled()
             and self.scale.numel() == 1
-            and self.vllm_config.cache_config.cache_dtype.startswith("fp8")
+            and is_quantized_kv_cache(self.vllm_config.cache_config.cache_dtype)
         ):
             layers = get_layers_from_vllm_config(self.vllm_config, Attention)
             first_layer_name = [k for k in layers][0]
@@ -868,7 +869,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             cu_seqlens_kv=swa_cu_seqlens,
             token_to_batch=swa_token_to_batch,
             seq_starts=swa_seq_starts,
-            dequant=self.kv_cache_dtype.startswith("fp8"),
+            dequant=is_quantized_kv_cache(self.kv_cache_dtype),
             kv_cache_layout="NHD",
             total_tokens=swa_total_tokens,
         )
@@ -963,7 +964,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 cu_seqlens_kv=cu_seqlens_kv[chunk_idx],
                 token_to_batch=token_to_batch[chunk_idx],
                 seq_starts=chunk_starts[chunk_idx],
-                dequant=self.kv_cache_dtype.startswith("fp8"),
+                dequant=is_quantized_kv_cache(self.kv_cache_dtype),
                 kv_cache_layout="SHUFFLE"
                 if rocm_aiter_ops.is_shuffle_kv_cache_enabled()
                 else "NHD",
@@ -1062,7 +1063,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
         key_cache, value_cache = kv_cache.unbind(0)
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
 
@@ -1317,7 +1318,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
         # in KV cache.
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
         # Reshape the input keys and values and store them in the cache.
@@ -1381,7 +1382,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         key_cache, value_cache = kv_cache.unbind(0)
         flash_layout = True
 
-        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())

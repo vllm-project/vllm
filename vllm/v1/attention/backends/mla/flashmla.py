@@ -25,6 +25,7 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     MultipleOf,
+    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.utils import (
     reshape_attn_output_for_spec_decode,
@@ -127,7 +128,9 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
         self.cg_buf_tile_scheduler_metadata = None
         self.cg_buf_num_splits = None
-        self.is_fp8_kvcache = vllm_config.cache_config.cache_dtype.startswith("fp8")
+        self.is_fp8_kvcache = is_quantized_kv_cache(
+            vllm_config.cache_config.cache_dtype
+        )
 
         num_sms = num_compute_units(self.device.index)
 
@@ -253,7 +256,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         q = reshape_query_for_spec_decode(q, num_decodes)
 
         scheduler_metadata = attn_metadata.decode.scheduler_metadata
-        if envs.VLLM_BATCH_INVARIANT and not self.kv_cache_dtype.startswith("fp8"):
+        if envs.VLLM_BATCH_INVARIANT and not is_quantized_kv_cache(self.kv_cache_dtype):
             device = q.device
             dtype = torch.int32
 
@@ -283,7 +286,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             scheduler_metadata.tile_scheduler_metadata = tile_scheduler_metadata
             scheduler_metadata.num_splits = num_splits
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             o, lse = flash_mla_with_kvcache_fp8(
                 q=q,
                 k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1

@@ -66,6 +66,11 @@ TORCH_DTYPE_TO_KV_CACHE_STR: dict[torch.dtype, str] = {
     torch.bfloat16: "bfloat16",
 }
 
+
+def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
+    return kv_cache_dtype.startswith("fp8")
+
+
 T = TypeVar("T")
 
 
@@ -390,7 +395,7 @@ def create_kv_caches_with_random_flash(
         ).permute(*stride_order)
         if cache_dtype in ("auto", "half", "bfloat16", "float", "float16", "float32"):
             key_value_cache.uniform_(-scale, scale)
-        elif isinstance(cache_dtype, str) and cache_dtype.startswith("fp8"):
+        elif isinstance(cache_dtype, str) and is_quantized_kv_cache(cache_dtype):
             _generate_random_fp8(key_value_cache, -scale, scale)
         elif isinstance(cache_dtype, torch.dtype):
             key_value_cache.uniform_(-scale, scale)
@@ -429,7 +434,7 @@ def create_kv_caches_with_random(
         key_cache = torch.empty(size=key_cache_shape, dtype=dtype, device=device)
         if cache_dtype in ("auto", "half", "bfloat16", "float", "float16", "float32"):
             key_cache.uniform_(-scale, scale)
-        elif isinstance(cache_dtype, str) and cache_dtype.startswith("fp8"):
+        elif isinstance(cache_dtype, str) and is_quantized_kv_cache(cache_dtype):
             _generate_random_fp8(key_cache, -scale, scale)
         elif isinstance(cache_dtype, torch.dtype):
             key_cache.uniform_(-scale, scale)
@@ -443,7 +448,7 @@ def create_kv_caches_with_random(
         value_cache = torch.empty(size=value_cache_shape, dtype=dtype, device=device)
         if cache_dtype in ("auto", "half", "bfloat16", "float", "float16", "float32"):
             value_cache.uniform_(-scale, scale)
-        elif isinstance(cache_dtype, str) and cache_dtype.startswith("fp8"):
+        elif isinstance(cache_dtype, str) and is_quantized_kv_cache(cache_dtype):
             _generate_random_fp8(value_cache, -scale, scale)
         elif isinstance(cache_dtype, torch.dtype):
             value_cache.uniform_(-scale, scale)

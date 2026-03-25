@@ -10,6 +10,8 @@ import numpy as np
 import torch
 from typing_extensions import deprecated
 
+from vllm.utils.torch_utils import is_quantized_kv_cache as is_quantized_kv_cache
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
@@ -933,10 +935,6 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
         )
-
-
-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype.startswith("fp8")
 
 
 def subclass_attention_backend(

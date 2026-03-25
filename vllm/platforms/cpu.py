@@ -183,7 +183,7 @@ class CpuPlatform(Platform):
                 "backend is not compatible with FP8 KV cache."
             )
 
-        if cache_config.cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(cache_config.cache_dtype):
             from vllm.utils.torch_utils import TORCH_DTYPE_TO_KV_CACHE_STR
 
             fallback = TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype]

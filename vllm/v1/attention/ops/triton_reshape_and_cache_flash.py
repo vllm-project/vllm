@@ -5,6 +5,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import is_quantized_kv_cache
 
 
 @triton.jit
@@ -147,11 +148,13 @@ def triton_reshape_and_cache_flash(
 
     kv_cache_torch_dtype = (
         current_platform.fp8_dtype()
-        if kv_cache_dtype.startswith("fp8")
+        if is_quantized_kv_cache(kv_cache_dtype)
         else key_cache.dtype
     )
 
-    if key_cache.dtype != kv_cache_torch_dtype and kv_cache_dtype.startswith("fp8"):
+    if key_cache.dtype != kv_cache_torch_dtype and is_quantized_kv_cache(
+        kv_cache_dtype
+    ):
         # to avoid erounous implicit cast in triton kernel (tl.store to uint8)
         # (e.g. explicit cast to fp8e4m3fnuz is not supported in triton 3.4)
         key_cache = key_cache.view(kv_cache_torch_dtype)
@@ -161,7 +164,7 @@ def triton_reshape_and_cache_flash(
         "uint8 is not supported by triton reshape_and_cache_flash"
     )
 
-    FP8_KV_CACHE = kv_cache_dtype.startswith("fp8")
+    FP8_KV_CACHE = is_quantized_kv_cache(kv_cache_dtype)
     assert (not FP8_KV_CACHE) or kv_cache_torch_dtype in [
         torch.float8_e4m3fn,
         torch.float8_e5m2,
@@ -322,11 +325,11 @@ def triton_reshape_and_cache_flash_diffkv(
 
     kv_cache_torch_dtype = (
         current_platform.fp8_dtype()
-        if kv_cache_dtype.startswith("fp8")
+        if is_quantized_kv_cache(kv_cache_dtype)
         else kv_cache.dtype
     )
 
-    if kv_cache.dtype != kv_cache_torch_dtype and kv_cache_dtype.startswith("fp8"):
+    if kv_cache.dtype != kv_cache_torch_dtype and is_quantized_kv_cache(kv_cache_dtype):
         # to avoid erounous implicit cast in triton kernel (tl.store to uint8)
         # (e.g. explicit cast to fp8e4m3fnuz is not supported in triton 3.4)
         kv_cache = kv_cache.view(kv_cache_torch_dtype)
@@ -335,7 +338,7 @@ def triton_reshape_and_cache_flash_diffkv(
         "uint8 is not supported by triton reshape_and_cache_flash_diffkv"
     )
 
-    FP8_KV_CACHE = kv_cache_dtype.startswith("fp8")
+    FP8_KV_CACHE = is_quantized_kv_cache(kv_cache_dtype)
     assert (not FP8_KV_CACHE) or kv_cache_torch_dtype in [
         torch.float8_e4m3fn,
         torch.float8_e5m2,

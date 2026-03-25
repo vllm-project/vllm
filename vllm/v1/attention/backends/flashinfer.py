@@ -42,7 +42,7 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import is_strictly_contiguous
+from vllm.utils.torch_utils import is_quantized_kv_cache, is_strictly_contiguous
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -601,7 +601,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.page_size = self.kv_cache_spec.block_size
 
         self.cache_dtype = self.cache_config.cache_dtype
-        if self.cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.cache_dtype):
             self.kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
                 self.cache_dtype
             )
@@ -1268,7 +1268,7 @@ class FlashInferImpl(AttentionImpl):
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return (
             self.support_trtllm_attn
-            and self.kv_cache_dtype.startswith("fp8")
+            and is_quantized_kv_cache(self.kv_cache_dtype)
             and quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
         )
 
@@ -1316,12 +1316,12 @@ class FlashInferImpl(AttentionImpl):
 
         if self.bmm1_scale is None:
             self.bmm1_scale = self.scale
-            if self.kv_cache_dtype.startswith("fp8"):
+            if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
 
         if self.bmm2_scale is None:
             self.bmm2_scale = 1.0
-            if self.kv_cache_dtype.startswith("fp8"):
+            if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._v_scale_float
 
         prefill_use_trtllm = isinstance(attn_metadata.prefill, TRTLLMPrefill)
@@ -1374,8 +1374,8 @@ class FlashInferImpl(AttentionImpl):
 
         # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
         # to process the cache when the kv_cache_dtype is fp8
-        if self.kv_sharing_target_layer_name is None and self.kv_cache_dtype.startswith(
-            "fp8"
+        if self.kv_sharing_target_layer_name is None and is_quantized_kv_cache(
+            self.kv_cache_dtype
         ):
             torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
                 self.kv_cache_dtype
@@ -1485,9 +1485,8 @@ class FlashInferImpl(AttentionImpl):
                     assert self.o_sf_scale is None
                     out = output[num_decode_tokens:]
 
-                if (
-                    attn_metadata.q_data_type != FP8_DTYPE
-                    and self.kv_cache_dtype.startswith("fp8")
+                if attn_metadata.q_data_type != FP8_DTYPE and is_quantized_kv_cache(
+                    self.kv_cache_dtype
                 ):
                     # TRTLLM prefill attention does not support BF16 Q
                     # and fp8 kv cache. So to enable prefill attention

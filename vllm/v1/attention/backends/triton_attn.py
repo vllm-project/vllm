@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -471,7 +472,7 @@ class TritonAttentionImpl(AttentionImpl):
 
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             if key_cache.dtype != self.fp8_dtype:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
@@ -545,7 +546,7 @@ class TritonAttentionImpl(AttentionImpl):
             layer: The attention layer
         """
         # For encoder attention, process FP8 quantization if needed
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "quantization is not supported for encoder attention"
             )
@@ -587,7 +588,7 @@ class TritonAttentionImpl(AttentionImpl):
         key_cache, value_cache = kv_cache.unbind(1)
 
         # Reshape the input keys and values and store them in the cache.
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
             # triton kernel does not support uint8 kv_cache
@@ -622,7 +623,7 @@ class TritonAttentionImpl(AttentionImpl):
         key_cache, value_cache = kv_cache.unbind(1)
         flash_layout = True
 
-        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)

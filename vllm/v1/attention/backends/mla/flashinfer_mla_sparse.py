@@ -36,6 +36,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
     SparseMLAAttentionImpl,
+    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
@@ -340,11 +341,11 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
 
         if self.bmm1_scale is None:
             self.bmm1_scale = self.scale
-            if self.kv_cache_dtype.startswith("fp8"):
+            if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
         if self.bmm2_scale is None:
             self.bmm2_scale = 1.0
-            if self.kv_cache_dtype.startswith("fp8"):
+            if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._k_scale_float
 
         o = trtllm_batch_decode_with_kv_cache_mla(

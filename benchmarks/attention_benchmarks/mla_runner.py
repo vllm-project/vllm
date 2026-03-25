@@ -29,6 +29,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.utils.torch_utils import is_quantized_kv_cache
 
 # ============================================================================
 # VllmConfig Creation
@@ -794,7 +795,7 @@ def _run_single_benchmark(
     num_prefill = total_q - num_decode
 
     # Some backends requires fp8 queries when using fp8 KV cache.
-    is_fp8_kvcache = kv_cache_dtype.startswith("fp8")
+    is_fp8_kvcache = is_quantized_kv_cache(kv_cache_dtype)
     quantize_query = is_fp8_kvcache and getattr(
         impl, "supports_quant_query_input", False
     )

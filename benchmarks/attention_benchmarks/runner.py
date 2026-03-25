@@ -28,6 +28,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     get_kv_cache_layout,
@@ -542,7 +543,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             )
 
             # Only quantize queries when the impl supports it
-            quantize_query = config.kv_cache_dtype.startswith("fp8") and getattr(
+            quantize_query = is_quantized_kv_cache(config.kv_cache_dtype) and getattr(
                 impl, "supports_quant_query_input", False
             )
             q_list, k_list, v_list = _create_input_tensors(

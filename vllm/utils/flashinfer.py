@@ -20,6 +20,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import is_quantized_kv_cache
 
 logger = init_logger(__name__)
 
@@ -384,12 +385,12 @@ def use_trtllm_attention(
         # CLI argument not set - use auto-detection
         if is_prefill:
             # Prefill auto-detection
-            use_trtllm = not kv_cache_dtype.startswith("fp8")
+            use_trtllm = not is_quantized_kv_cache(kv_cache_dtype)
             if use_trtllm:
                 logger.warning_once("Using TRTLLM prefill attention (auto-detected).")
         else:
             # Decode auto-detection
-            use_trtllm = num_tokens <= 256 and not kv_cache_dtype.startswith("fp8")
+            use_trtllm = num_tokens <= 256 and not is_quantized_kv_cache(kv_cache_dtype)
             if use_trtllm:
                 logger.warning_once("Using TRTLLM decode attention (auto-detected).")
         return use_trtllm

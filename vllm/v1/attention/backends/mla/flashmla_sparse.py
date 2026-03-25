@@ -25,6 +25,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
     SparseMLAAttentionImpl,
+    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
@@ -571,7 +572,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         q_concat_shape = (max_tokens, num_heads, head_size)
-        if kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(kv_cache_dtype):
             assert kv_cache_dtype == "fp8_ds_mla", (
                 "FlashMLA Sparse Attention backend fp8 only supports "
                 "fp8_ds_mla kv-cache dtype"

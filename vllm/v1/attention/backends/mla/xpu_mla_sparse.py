@@ -21,6 +21,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     SparseMLAAttentionImpl,
+    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,
@@ -230,7 +231,7 @@ class XPUMLASparseImpl(SparseMLAAttentionImpl[XPUMLASparseMetadata]):
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError("FP8 kv is not supported with XPU MLA Sparse yet")
 
         # Concatenate q if it's a tuple (ql_nope, q_pe)

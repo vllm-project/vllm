@@ -28,6 +28,7 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     CommonAttentionMetadata,
@@ -97,7 +98,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
 
         kv_cache_dtype_str = vllm_config.cache_config.cache_dtype
         self.kv_cache_dtype = (
-            FP8_DTYPE if kv_cache_dtype_str.startswith("fp8") else self.dtype
+            FP8_DTYPE if is_quantized_kv_cache(kv_cache_dtype_str) else self.dtype
         )
 
         # Initialize attn MetadataBuilder

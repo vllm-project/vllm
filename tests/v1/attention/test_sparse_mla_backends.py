@@ -35,6 +35,7 @@ if not current_platform.is_cuda():
     )
 
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseBackend,
 )
@@ -196,7 +197,7 @@ def test_sparse_backend_decode_correctness(
 
     if (
         backend_cls == FlashMLASparseBackend
-        and kv_cache_dtype.startswith("fp8")
+        and is_quantized_kv_cache(kv_cache_dtype)
         and kv_cache_dtype != "fp8_ds_mla"
     ):
         pytest.skip(
@@ -517,7 +518,7 @@ def test_sparse_backend_decode_correctness(
 
     # FP8 quantization introduces some error, but should be within reasonable bounds
     # BF16 (auto) should be very accurate, FP8 allows slightly more tolerance
-    if kv_cache_dtype.startswith("fp8"):
+    if is_quantized_kv_cache(kv_cache_dtype):
         torch.testing.assert_close(
             backend_output, sdpa_reference, rtol=0.065, atol=0.05
         )

@@ -164,7 +164,7 @@ class FlashAttentionBackend(AttentionBackend):
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
             return True
-        if kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(kv_cache_dtype):
             return flash_attn_supports_fp8()
         return kv_cache_dtype in ["float16", "bfloat16"]
 
@@ -406,7 +406,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             batch_size, cu_query_lens, max_query_len, seqlens, max_seq_len, causal
         ):
             cache_dtype = self.cache_config.cache_dtype
-            if cache_dtype.startswith("fp8"):
+            if is_quantized_kv_cache(cache_dtype):
                 qkv_dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
                     cache_dtype
                 )
@@ -600,7 +600,7 @@ class FlashAttentionImpl(AttentionImpl):
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
 
-        if is_quantized_kv_cache(self.kv_cache_dtype) and not flash_attn_supports_fp8():
+        if is_quantized_kv_cache(kv_cache_dtype) and not flash_attn_supports_fp8():
             raise NotImplementedError(
                 "FlashAttention does not support fp8 kv-cache on this device."
             )
@@ -695,7 +695,7 @@ class FlashAttentionImpl(AttentionImpl):
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(0)
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             # queries are quantized in the attention layer
             dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
                 self.kv_cache_dtype
@@ -937,7 +937,7 @@ class FlashAttentionImpl(AttentionImpl):
         )
 
         # For encoder attention, process FP8 quantization if needed
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "quantization is not supported for encoder attention"
             )
