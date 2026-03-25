@@ -46,6 +46,7 @@ import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
+from vllm.distributed.flashinfer_async_tp_ops import register_flashinfer_async_tp_ops
 from vllm.distributed.utils import (
     StatelessProcessGroup,
     get_cached_tcp_store_client,
@@ -285,142 +286,6 @@ direct_register_custom_op(
     op_func=patched_fused_scaled_matmul_reduce_scatter,
     fake_impl=patched_fused_scaled_matmul_reduce_scatter_fake,
 )
-
-
-# --- FlashInfer bmm_fp8 fused ops for AsyncTP on Blackwell (SM >= 100) ---
-
-
-def fused_flashinfer_scaled_matmul_reduce_scatter(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    A_scale: torch.Tensor,
-    B_scale: torch.Tensor,
-    reduce_op: str,
-    orig_scatter_dim: int,
-    scatter_dim_after_maybe_reshape: int,
-    group_name: str,
-    output_shape: list[int],
-    out_dtype: torch.dtype | None = None,
-) -> torch.Tensor:
-    from flashinfer import bmm_fp8 as flashinfer_bmm_fp8
-
-    if reduce_op != "sum":
-        raise NotImplementedError(
-            "Only sum reduce_op is supported for FlashInfer AsyncTP RS"
-        )
-
-    # This wrapper intentionally stays close to the unfused eager baseline:
-    # GEMM first, then TP reduce-scatter. That lets us isolate whether the
-    # regression comes from the symm_mem helper path or from FlashInfer itself.
-    mm_out = torch.empty(
-        output_shape, dtype=out_dtype or torch.bfloat16, device=A.device
-    )
-    flashinfer_bmm_fp8(
-        A.unsqueeze(0),
-        B.unsqueeze(0),
-        A_scale,
-        B_scale,
-        out_dtype or mm_out.dtype,
-        mm_out.unsqueeze(0),
-        "auto",
-    )
-    return get_tp_group()._reduce_scatter_out_place(mm_out, orig_scatter_dim)
-
-
-def fused_flashinfer_scaled_matmul_reduce_scatter_fake(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    A_scale: torch.Tensor,
-    B_scale: torch.Tensor,
-    reduce_op: str,
-    orig_scatter_dim: int,
-    scatter_dim_after_maybe_reshape: int,
-    group_name: str,
-    output_shape: list[int],
-    out_dtype: torch.dtype | None = None,
-) -> torch.Tensor:
-    out_dtype = out_dtype or A.dtype
-    rs_shape = list(output_shape)
-    group_size = get_tensor_model_parallel_world_size()
-    rs_shape[orig_scatter_dim] = rs_shape[orig_scatter_dim] // max(group_size, 1)
-    return torch.empty(rs_shape, dtype=out_dtype, device=A.device)
-
-
-direct_register_custom_op(
-    op_name="fused_flashinfer_scaled_matmul_reduce_scatter",
-    op_func=fused_flashinfer_scaled_matmul_reduce_scatter,
-    fake_impl=fused_flashinfer_scaled_matmul_reduce_scatter_fake,
-)
-
-
-def fused_all_gather_flashinfer_scaled_matmul(
-    A_shard: torch.Tensor,
-    B: torch.Tensor,
-    A_scale: torch.Tensor,
-    B_scale: torch.Tensor,
-    gather_dim: int,
-    group_name: str,
-    out_dtype: torch.dtype | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from flashinfer import bmm_fp8 as flashinfer_bmm_fp8
-
-    # This wrapper intentionally stays close to the unfused eager baseline:
-    # TP all-gather first, then GEMM.
-    A = get_tp_group()._all_gather_out_place(A_shard, gather_dim)
-    mm_shape = (*A.shape[:-1], B.shape[1])
-    mm_out = torch.empty(mm_shape, dtype=out_dtype or torch.bfloat16, device=A.device)
-    flashinfer_bmm_fp8(
-        A.unsqueeze(0),
-        B.unsqueeze(0),
-        A_scale,
-        B_scale,
-        out_dtype or mm_out.dtype,
-        mm_out.unsqueeze(0),
-        "auto",
-    )
-    return A, mm_out
-
-
-def fused_all_gather_flashinfer_scaled_matmul_fake(
-    A_shard: torch.Tensor,
-    B: torch.Tensor,
-    A_scale: torch.Tensor,
-    B_scale: torch.Tensor,
-    gather_dim: int,
-    group_name: str,
-    out_dtype: torch.dtype | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    out_dtype = out_dtype or A_shard.dtype
-    gathered_shape = list(A_shard.shape)
-    group_size = get_tensor_model_parallel_world_size()
-    gathered_shape[gather_dim] = gathered_shape[gather_dim] * max(group_size, 1)
-    gathered = torch.empty(gathered_shape, dtype=A_shard.dtype, device=A_shard.device)
-    mm_out = torch.empty(
-        (gathered_shape[0], B.shape[1]),
-        dtype=out_dtype,
-        device=A_shard.device,
-    )
-    return gathered, mm_out
-
-
-direct_register_custom_op(
-    op_name="fused_all_gather_flashinfer_scaled_matmul",
-    op_func=fused_all_gather_flashinfer_scaled_matmul,
-    fake_impl=fused_all_gather_flashinfer_scaled_matmul_fake,
-)
-
-
-def _register_inductor_lowering_for_flashinfer_collective_fp8_ops() -> None:
-    """Register explicit Inductor lowerings for FlashInfer AsyncTP custom ops."""
-    import torch._inductor.lowering as _lowering
-
-    ops = (
-        torch.ops.vllm.fused_flashinfer_scaled_matmul_reduce_scatter.default,
-        torch.ops.vllm.fused_all_gather_flashinfer_scaled_matmul.default,
-    )
-    for op in ops:
-        if op not in _lowering.lowerings:
-            _lowering.make_fallback(op)
 
 
 class GroupCoordinator:
@@ -1966,6 +1831,12 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
 def get_tensor_model_parallel_world_size() -> int:
     """Return world size for the tensor model parallel group."""
     return get_tp_group().world_size
+
+
+register_flashinfer_async_tp_ops(
+    get_tp_group=get_tp_group,
+    get_tp_world_size=get_tensor_model_parallel_world_size,
+)
 
 
 def get_tensor_model_parallel_rank() -> int:

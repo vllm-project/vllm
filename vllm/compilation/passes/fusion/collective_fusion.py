@@ -10,8 +10,10 @@ from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group
-from vllm.distributed.parallel_state import (
+from vllm.distributed.flashinfer_async_tp_ops import (
     _register_inductor_lowering_for_flashinfer_collective_fp8_ops,
+)
+from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
