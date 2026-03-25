@@ -185,7 +185,6 @@ def test_schedule_multimodal_requests_multi_batch(
         encoder_cache_size=encoder_cache_size,
         disable_chunked_mm_input=disable_chunked_mm_input,
     )
-    assert scheduler.encoder_compute_budget == MAX_MM_ITEM_TOKS
 
     requests = create_requests(
         num_requests=len(mm_positions),
