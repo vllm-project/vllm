@@ -85,6 +85,9 @@ def _get_trtllm_gen_workspace_buffer():
     return trtllm_gen_workspace_buffer
 
 
+_flashinfer_workspace_buffer = None
+
+
 @triton.jit
 def _trtllm_prefill_attn_kvfp8_dequant(
     kv_cache_ptr,
@@ -535,7 +538,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.cache_config = vllm_config.cache_config
         self.model_config = vllm_config.model_config
         self.attention_config = vllm_config.attention_config
-        self._workspace_buffer = None
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
         ) = None  # Wrapper for prefill/append
@@ -714,17 +716,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def _get_workspace_buffer(self):
-        if self._workspace_buffer is None:
+        global _flashinfer_workspace_buffer
+        if _flashinfer_workspace_buffer is None:
             buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
             if envs.VLLM_BATCH_INVARIANT:
                 buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
-            self._workspace_buffer = torch.zeros(
+            _flashinfer_workspace_buffer = torch.zeros(
                 buffer_size, dtype=torch.uint8, device=self.device
             )
-        return self._workspace_buffer
-
-    def set_workspace_buffer(self, workspace_buffer: torch.Tensor):
-        self._workspace_buffer = workspace_buffer
+        return _flashinfer_workspace_buffer
 
     def _get_prefill_wrapper(
         self,
