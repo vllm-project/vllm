@@ -149,6 +149,8 @@ class RequestState:
         n: int | None = None,
         temperature: float | None = None,
         stream_input: bool = False,
+        mm_preprocess_time_s: float = 0.0,
+        mm_cache_time_s: float = 0.0,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -174,6 +176,13 @@ class RequestState:
         self.num_cached_tokens = 0
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
+
+        # Multimodal timing metrics.
+        self.mm_preprocess_time_s = mm_preprocess_time_s
+        self.mm_cache_time_s = mm_cache_time_s
+        if self.stats is not None:
+            self.stats.mm_preprocess_time_s = mm_preprocess_time_s
+            self.stats.mm_cache_time_s = mm_cache_time_s
 
         # Stream Interval
         self.stream_interval = stream_interval
@@ -264,6 +273,8 @@ class RequestState:
             log_stats=log_stats,
             stream_interval=stream_interval,
             stream_input=request.resumable,
+            mm_preprocess_time_s=request.mm_preprocess_time_s,
+            mm_cache_time_s=request.mm_cache_time_s,
         )
 
     def make_request_output(

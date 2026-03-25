@@ -253,6 +253,10 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # Per-request MM encoder timing (req_id -> seconds).
+    # Populated by gpu_model_runner via CUDA events.
+    mm_encoder_time_s: dict[str, float] | None = None
+
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):

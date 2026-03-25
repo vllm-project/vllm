@@ -132,6 +132,11 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_corrupted_reqs: int = 0
         self.num_preemptions: int = 0
 
+        # Multimodal timing samples collected during this interval.
+        self.mm_preprocess_times: list[float] = []
+        self.mm_cache_times: list[float] = []
+        self.mm_encoder_times: list[float] = []
+
     def _enable_perf_stats(self) -> bool:
         return self.vllm_config.observability_config.enable_mfu_metrics
 
@@ -142,6 +147,19 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
         self.num_preemptions += iteration_stats.num_preempted_reqs
+
+        # Collect MM timing samples from finished requests.
+        for finished_req in iteration_stats.finished_requests:
+            if finished_req.mm_preprocess_time_s > 0.0:
+                self.mm_preprocess_times.append(
+                    finished_req.mm_preprocess_time_s
+                )
+            if finished_req.mm_cache_time_s > 0.0:
+                self.mm_cache_times.append(finished_req.mm_cache_time_s)
+            if finished_req.mm_encoder_time_s > 0.0:
+                self.mm_encoder_times.append(
+                    finished_req.mm_encoder_time_s
+                )
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
@@ -193,6 +211,23 @@ class LoggingStatLogger(StatLoggerBase):
         now = time.monotonic()
         prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
         generation_throughput = self._get_throughput(self.num_generation_tokens, now)
+
+        # Compute MM timing averages before _reset() clears the lists.
+        self.last_mm_preprocess_avg = (
+            sum(self.mm_preprocess_times) / len(self.mm_preprocess_times)
+            if self.mm_preprocess_times
+            else 0.0
+        )
+        self.last_mm_cache_avg = (
+            sum(self.mm_cache_times) / len(self.mm_cache_times)
+            if self.mm_cache_times
+            else 0.0
+        )
+        self.last_mm_encoder_avg = (
+            sum(self.mm_encoder_times) / len(self.mm_encoder_times)
+            if self.mm_encoder_times
+            else 0.0
+        )
 
         self._reset(now)
         self.engine_is_idle = not any(
@@ -267,6 +302,28 @@ class LoggingStatLogger(StatLoggerBase):
             self.cudagraph_logging.log(log_fn=log_fn)
         if self._enable_perf_stats():
             self.perf_metrics_logging.log(log_fn=log_fn, log_prefix=self.log_prefix)
+
+        # Log multimodal timing averages (only when MM requests exist).
+        if (
+            self.last_mm_preprocess_avg > 0.0
+            or self.last_mm_cache_avg > 0.0
+            or self.last_mm_encoder_avg > 0.0
+        ):
+            mm_parts: list[str] = []
+            mm_args: list[float] = []
+            if self.last_mm_preprocess_avg > 0.0:
+                mm_parts.append("Avg MM preprocess: %.3fs")
+                mm_args.append(self.last_mm_preprocess_avg)
+            if self.last_mm_cache_avg > 0.0:
+                mm_parts.append("Avg MM cache: %.3fs")
+                mm_args.append(self.last_mm_cache_avg)
+            if self.last_mm_encoder_avg > 0.0:
+                mm_parts.append("Avg MM encoder: %.3fs")
+                mm_args.append(self.last_mm_encoder_avg)
+            log_fn(
+                self.log_prefix + ", ".join(mm_parts),
+                *mm_args,
+            )
 
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:
@@ -904,6 +961,69 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
 
         #
+        # Multimodal timing histograms
+        #
+        mm_timing_buckets = [
+            0.001,
+            0.005,
+            0.01,
+            0.02,
+            0.04,
+            0.06,
+            0.08,
+            0.1,
+            0.25,
+            0.5,
+            0.75,
+            1.0,
+            2.5,
+            5.0,
+            7.5,
+            10.0,
+            20.0,
+            40.0,
+            80.0,
+            160.0,
+        ]
+
+        histogram_mm_preprocess_time = self._histogram_cls(
+            name="vllm:request_mm_preprocess_time_seconds",
+            documentation=(
+                "Histogram of multimodal preprocessing time in seconds."
+            ),
+            buckets=mm_timing_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_mm_preprocess_time = make_per_engine(
+            histogram_mm_preprocess_time, engine_indexes, model_name
+        )
+
+        histogram_mm_cache_time = self._histogram_cls(
+            name="vllm:request_mm_cache_time_seconds",
+            documentation=(
+                "Histogram of multimodal cache operation time in seconds."
+            ),
+            buckets=mm_timing_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_mm_cache_time = make_per_engine(
+            histogram_mm_cache_time, engine_indexes, model_name
+        )
+
+        histogram_mm_encoder_time = self._histogram_cls(
+            name="vllm:request_mm_encoder_time_seconds",
+            documentation=(
+                "Histogram of multimodal encoder forward pass time "
+                "in seconds."
+            ),
+            buckets=mm_timing_buckets,
+            labelnames=labelnames,
+        )
+        self.histogram_mm_encoder_time = make_per_engine(
+            histogram_mm_encoder_time, engine_indexes, model_name
+        )
+
+        #
         # KV Cache residency metrics
         #
         if self.kv_cache_metrics_enabled:
@@ -1179,6 +1299,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             if finished_request.max_tokens_param:
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param
+                )
+
+            # Observe MM timing metrics (only for multimodal requests).
+            if finished_request.mm_preprocess_time_s > 0.0:
+                self.histogram_mm_preprocess_time[engine_idx].observe(
+                    finished_request.mm_preprocess_time_s
+                )
+            if finished_request.mm_cache_time_s > 0.0:
+                self.histogram_mm_cache_time[engine_idx].observe(
+                    finished_request.mm_cache_time_s
+                )
+            if finished_request.mm_encoder_time_s > 0.0:
+                self.histogram_mm_encoder_time[engine_idx].observe(
+                    finished_request.mm_encoder_time_s
                 )
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):

@@ -172,6 +172,7 @@ class InputPreprocessor:
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
+                mm_uuids=parsed_content.get("multi_modal_uuids"),
             )
         else:
             prompt_token_ids = self._tokenize_prompt(

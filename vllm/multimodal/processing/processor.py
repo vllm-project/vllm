@@ -1673,12 +1673,30 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return mm_inputs(
+        result = mm_inputs(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_info.kwargs,
             mm_hashes=mm_info.hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
+
+        # Compute cache time from individually recorded stages.
+        # These stages only exist in the cached path.
+        if "get_cache_missing_items" in timing_ctx.stage_secs:
+            cache_time = sum(
+                timing_ctx.stage_secs.get(k, 0.0)
+                for k in (
+                    "get_mm_hashes",
+                    "get_cache_missing_items",
+                    "merge_mm_kwargs",
+                )
+            )
+            if cache_time > 0.0:
+                timing_stats = result.get("mm_timing_stats", {})
+                timing_stats["mm_cache_time_s"] = cache_time
+                result["mm_timing_stats"] = timing_stats
+
+        return result
 
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):

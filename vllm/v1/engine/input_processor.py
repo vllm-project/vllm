@@ -285,6 +285,10 @@ class InputProcessor:
         # Multimodal related.
         mm_features: list[MultiModalFeatureSpec] | None = None
 
+        # MM timing metrics (only present for multimodal requests).
+        mm_preprocess_time_s = 0.0
+        mm_cache_time_s = 0.0
+
         if decoder_inputs["type"] == "multimodal":
             decoder_mm_inputs = decoder_inputs["mm_kwargs"]
             decoder_mm_positions = decoder_inputs["mm_placeholders"]
@@ -320,6 +324,12 @@ class InputProcessor:
                     )
                 )
 
+            # Extract MM timing metrics from processing results.
+            mm_timing_stats = decoder_inputs.get("mm_timing_stats", {})
+            mm_preprocess_time_s = mm_timing_stats.get(
+                "mm_preprocess_time_s", 0.0)
+            mm_cache_time_s = mm_timing_stats.get("mm_cache_time_s", 0.0)
+
         return EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
@@ -334,6 +344,8 @@ class InputProcessor:
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
             resumable=resumable,
+            mm_preprocess_time_s=mm_preprocess_time_s,
+            mm_cache_time_s=mm_cache_time_s,
         )
 
     def _validate_prompt_len(
