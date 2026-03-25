@@ -1370,7 +1370,7 @@ def generate_legend() -> str:
 | Column | Description |
 | ------ | ----------- |
 | **Dtypes** | Supported model data types (fp16, bf16, fp32) |
-| **KV Dtypes** | KV cache dtypes (`auto` = inferred). |
+| **KV Dtypes** | Supported KV cache dtypes (`auto` = inferred). |
 | **Block Sizes** | Supported KV cache block sizes (%N means multiples of N) |
 | **Head Sizes** | Supported attention head sizes |
 | **Sink** | Attention sink support (for StreamingLLM) |
