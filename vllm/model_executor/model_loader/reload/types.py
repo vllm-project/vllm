@@ -17,7 +17,7 @@ class LayerReloadingInfo:
     restore_metadata: LayerTensors = field(default_factory=lambda: ({}, {}))
 
     # kernel format (device)
-    kernel_tensors: LayerTensors = field(default_factory=lambda: ({}, {}))
+    kernel_tensors: LayerTensors | None = None
 
     # track how many restored elements are ready for loading
     load_numel: int = 0
@@ -29,5 +29,5 @@ class LayerReloadingInfo:
     def reset(self):
         self.__init__(restore_metadata=self.restore_metadata)  # type: ignore[misc]
 
-    def can_process(self) -> bool:
+    def can_load(self) -> bool:
         return self.load_numel_total is not None
