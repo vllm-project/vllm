@@ -75,20 +75,18 @@ FP4_DTYPE = torch.uint8
 logger = init_logger(__name__)
 
 
-_trtllm_workspace_buffer = None
+trtllm_gen_workspace_buffer = None
 
 
 # Must be zero-initialized and only used for the trtllm kernels as they properly reset
 # the workspace to zero after use; see: https://github.com/vllm-project/vllm/pull/25520
 def _get_trtllm_gen_workspace_buffer():
-    global _trtllm_workspace_buffer
-    if _trtllm_workspace_buffer is None:
-        _trtllm_workspace_buffer = torch.zeros(
-            envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
-            dtype=torch.uint8,
-            device="cuda",
+    global trtllm_gen_workspace_buffer
+    if trtllm_gen_workspace_buffer is None:
+        trtllm_gen_workspace_buffer = torch.zeros(
+            envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device="cuda"
         )
-    return _trtllm_workspace_buffer
+    return trtllm_gen_workspace_buffer
 
 
 def _get_workspace_buffer():
