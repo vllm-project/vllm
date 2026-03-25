@@ -297,6 +297,7 @@ def _events_reasoning_done(
 
 def _events_add_content_output_text_item(
     state: SimpleStreamingState,
+    logprobs: list | None = None,
 ) -> list[StreamingResponsesResponse]:
     return [
         ResponseOutputItemAddedEvent(
@@ -321,14 +322,16 @@ def _events_add_content_output_text_item(
                 type="output_text",
                 text="",
                 annotations=[],
-                logprobs=[],
+                logprobs=logprobs if logprobs is not None else [],
             ),
         ),
     ]
 
 
 def _event_output_text_delta(
-    state: SimpleStreamingState, delta_message: DeltaMessage
+    state: SimpleStreamingState,
+    delta_message: DeltaMessage,
+    logprobs: list | None = None,
 ) -> StreamingResponsesResponse:
     return ResponseTextDeltaEvent(
         type="response.output_text.delta",
@@ -337,13 +340,14 @@ def _event_output_text_delta(
         output_index=state.current_output_index,
         item_id=state.current_item_id,
         delta=delta_message.content,
-        logprobs=[],
+        logprobs=logprobs if logprobs is not None else [],
     )
 
 
 def _events_output_text_done(
     state: SimpleStreamingState,
     text_content: str,
+    logprobs: list | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Events when output text completes."""
     events: list[StreamingResponsesResponse] = []
@@ -356,7 +360,7 @@ def _events_output_text_done(
             output_index=state.current_output_index,
             content_index=state.current_content_index,
             text=text_content,
-            logprobs=[],
+            logprobs=logprobs if logprobs is not None else [],
         )
     )
     events.append(
@@ -391,7 +395,7 @@ def _events_output_text_done(
                 status="completed",
                 id=state.current_item_id,
                 annotations=[],
-                logprobs=[],  # TODO: proper logprobs?
+                logprobs=logprobs if logprobs is not None else [],
             ),
         )
     )
@@ -523,6 +527,17 @@ async def process_simple_stream(
             continue
         output = output.outputs[0]
 
+
+        # Pre-compute logprobs for this iteration if needed
+        current_token_ids = as_list(output.token_ids)
+        logprobs_data: list | None = None
+        if get_logprobs and request and request.is_include_output_logprobs():
+            logprobs_data = get_logprobs(
+                current_token_ids,
+                output.logprobs,
+                tokenizer,  # type: ignore[arg-type]
+                request.top_logprobs,
+            )
         result = _parse_delta_message(
             request=request,
             output=output,
@@ -530,7 +545,7 @@ async def process_simple_stream(
             tool_parser=tool_parser,
             state=state,
         )
-        delta_message, current_text, current_token_ids = result
+        delta_message, current_text, _ = result
 
         # Update state
         state.previous_text = current_text
@@ -556,7 +571,9 @@ async def process_simple_stream(
                     yield _emit_event(event)
             elif delta_message.content:
                 state.current_item_id = random_uuid()
-                for event in _events_add_content_output_text_item(state):
+                for event in _events_add_content_output_text_item(
+                    state, logprobs_data
+                ):
                     yield _emit_event(event)
 
             state.event_stream_started = True
@@ -587,15 +604,13 @@ async def process_simple_stream(
             state.previous_delta_messages = []
 
             state.current_item_id = random_uuid()
-            for event in _events_add_content_output_text_item(
-                state,
-            ):
+            for event in _events_add_content_output_text_item(state, logprobs_data):
                 yield _emit_event(event)
             delta_message.content = (
                 state.maybe_important_output_text_spaces + delta_message.content
             )
             state.maybe_important_output_text_spaces = ""
-            event = _event_output_text_delta(state, delta_message)
+            event = _event_output_text_delta(state, delta_message, logprobs_data)
             yield _emit_event(event)
         # handle tool calls
         elif delta_message.tool_calls and delta_message.tool_calls[0].function:
@@ -627,12 +642,16 @@ async def process_simple_stream(
                     pm.content for pm in state.previous_delta_messages if pm.content
                 )
                 if delta_message.content is not None:
-                    yield _emit_event(_event_output_text_delta(state, delta_message))
+                    yield _emit_event(
+                        _event_output_text_delta(state, delta_message, logprobs_data)
+                    )
                     final_content += delta_message.content
                     delta_message.content = None
 
                 if state.previous_delta_messages[-1].content:
-                    for event in _events_output_text_done(state, final_content):
+                    for event in _events_output_text_done(
+                        state, final_content, logprobs_data
+                    ):
                         yield _emit_event(event)
                     state.current_output_index += 1
 
@@ -680,7 +699,7 @@ async def process_simple_stream(
         elif delta_message.reasoning is not None:
             yield _emit_event(_event_reasoning_delta(state, delta_message))
         elif delta_message.content is not None:
-            yield _emit_event(_event_output_text_delta(state, delta_message))
+            yield _emit_event(_event_output_text_delta(state, delta_message, logprobs_data))
         state.previous_delta_messages.append(delta_message)
 
     # result_generator is finished, finalize any open items
@@ -709,5 +728,5 @@ async def process_simple_stream(
             final_content = "".join(
                 pm.content or "" for pm in state.previous_delta_messages if pm.content
             )
-            for event in _events_output_text_done(state, final_content):
+            for event in _events_output_text_done(state, final_content, logprobs_data):
                 yield _emit_event(event)
