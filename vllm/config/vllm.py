@@ -13,10 +13,12 @@ from dataclasses import is_dataclass
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
+from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
 
 import torch
+from packaging.version import Version
 from pydantic import ConfigDict, Field, model_validator
 
 import vllm.envs as envs
@@ -40,6 +42,7 @@ from .observability import ObservabilityConfig
 from .offload import OffloadConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
+from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
@@ -302,6 +305,8 @@ class VllmConfig:  # type: ignore[misc]
     """The configurations for event publishing."""
     ec_transfer_config: ECTransferConfig | None = None
     """The configurations for distributed EC cache transfer."""
+    reasoning_config: ReasoningConfig | None = None
+    """The configurations for reasoning model."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -547,26 +552,37 @@ class VllmConfig:  # type: ignore[misc]
 
         model_config = copy.deepcopy(self.model_config)
 
+        # In Transformers v5, tie_word_embeddings belongs to the config of the class
+        # that can see both layers to be tied. For example:
+        #
+        # SomeVLModel:
+        #   self.language_model = SomeLanguageModel(SomeVLTextConfig)
+        #   self.vision_model = SomeVisionModel(SomeVLVisionConfig)
+        #
+        # SomeVLModelForMultimodalLM:
+        #   self.model = SomeVLModel(SomeVLConfig)
+        #   self.lm_head = nn.Linear()
+        #
+        # Therefore, tie_word_embeddings is defined in SomeVLConfig and is not present
+        # in SomeVLTextConfig*. In vLLM, the lm_head belongs to the language_model, so
+        # we must ensure that tie_word_embeddings is set in the language_model's config.
+        #
+        # *For some models, SomeVLTextConfig may also have a tie_word_embeddings field.
+        # This is only the case if SomeVLTextConfig is also used for a text only version
+        # of the same model. For example:
+        #
+        # SomeVLModelForCausalLM:
+        #   self.model = SomeLanguageModel(SomeVLTextConfig)
+        #   self.lm_head = nn.Linear()
+        #
+        # Therefore, the presence of tie_word_embeddings in SomeVLTextConfig cannot
+        # be used as a signal for whether tie_word_embeddings should be copied from
+        # hf_config to the language_model config.
         if (
-            model_config.is_multimodal_model
+            Version(version("transformers")) >= Version("5.0.0")
+            and model_config.is_multimodal_model
             and hasattr(model_config.hf_config, "tie_word_embeddings")
-            and not hasattr(hf_config.get_text_config(), "tie_word_embeddings")
         ):
-            # In Transformers v5, tie_word_embeddings belongs to the config of the class
-            # that can see both layers to be tied. For example:
-            #
-            # SomeVLModel:
-            #   self.language_model = SomeLanguageModel()
-            #   self.vision_model = SomeVisionModel()
-            #
-            # SomeVLModelForMultimodalLM:
-            #   self.model = SomeVLModel()
-            #   self.lm_head = nn.Linear()
-            #
-            # Therefore, tie_word_embeddings is defined in SomeVLModelForMultimodalLM's
-            # config and is not present in SomeVLModel's config. In vLLM, the lm_head
-            # belongs to the language_model, so we must ensure that tie_word_embeddings
-            # is set in the language_model's config.
             tie_word_embeddings = model_config.hf_config.tie_word_embeddings
             hf_config.get_text_config().tie_word_embeddings = tie_word_embeddings
 
@@ -1142,6 +1158,9 @@ class VllmConfig:  # type: ignore[misc]
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
+
+        if self.reasoning_config is not None and self.model_config is not None:
+            self.reasoning_config.initialize_token_ids(self.model_config)
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
