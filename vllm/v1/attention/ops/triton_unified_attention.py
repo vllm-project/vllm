@@ -61,16 +61,10 @@ def _dequant_kv_tile(
     if KV_QUANT_MODE == 1:  # FP8 per-tensor
         if Q.dtype.is_fp8():
             return data.to(Q.dtype), dummy_scales
-        return (data.to(tl.float32) * tl.load(tensor_scale)).to(
-            Q.dtype
-        ), dummy_scales
+        return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype), dummy_scales
     if KV_QUANT_MODE == 2:  # per-token
-        scale_idx = (
-            physical_block_idx * stride_s_blk + (seq_offset % BLOCK_SIZE)
-        )
-        token_scales = tl.load(
-            scale_cache_ptr + scale_idx, mask=tile_mask, other=1.0
-        )
+        scale_idx = physical_block_idx * stride_s_blk + (seq_offset % BLOCK_SIZE)
+        token_scales = tl.load(scale_cache_ptr + scale_idx, mask=tile_mask, other=1.0)
         return data.to(Q.dtype), token_scales
     return data.to(Q.dtype), dummy_scales  # no quant
 
@@ -310,9 +304,16 @@ def kernel_unified_attention_2d(
             other=0.0,
         )
         K, k_token_scales = _dequant_kv_tile(
-            K_load, Q, k_scale,
-            k_scale_cache_ptr, physical_block_idx, seq_offset,
-            stride_ks_blk, tile_mask, BLOCK_SIZE, KV_QUANT_MODE,
+            K_load,
+            Q,
+            k_scale,
+            k_scale_cache_ptr,
+            physical_block_idx,
+            seq_offset,
+            stride_ks_blk,
+            tile_mask,
+            BLOCK_SIZE,
+            KV_QUANT_MODE,
         )
 
         # V : (TILE_SIZE, HEAD_SIZE)
@@ -322,9 +323,16 @@ def kernel_unified_attention_2d(
             other=0.0,
         )
         V, v_token_scales = _dequant_kv_tile(
-            V_load, Q, v_scale,
-            v_scale_cache_ptr, physical_block_idx, seq_offset,
-            stride_vs_blk, tile_mask, BLOCK_SIZE, KV_QUANT_MODE,
+            V_load,
+            Q,
+            v_scale,
+            v_scale_cache_ptr,
+            physical_block_idx,
+            seq_offset,
+            stride_vs_blk,
+            tile_mask,
+            BLOCK_SIZE,
+            KV_QUANT_MODE,
         )
 
         # Compute attention mask: causal by default (key <= query)
@@ -676,9 +684,16 @@ def kernel_unified_attention_3d(
             other=0.0,
         )
         K, k_token_scales = _dequant_kv_tile(
-            K_load, Q, k_scale,
-            k_scale_cache_ptr, physical_block_idx, seq_offset,
-            stride_ks_blk, tile_mask, BLOCK_SIZE, KV_QUANT_MODE,
+            K_load,
+            Q,
+            k_scale,
+            k_scale_cache_ptr,
+            physical_block_idx,
+            seq_offset,
+            stride_ks_blk,
+            tile_mask,
+            BLOCK_SIZE,
+            KV_QUANT_MODE,
         )
 
         # V : (TILE_SIZE, HEAD_SIZE)
@@ -688,9 +703,16 @@ def kernel_unified_attention_3d(
             other=0.0,
         )
         V, v_token_scales = _dequant_kv_tile(
-            V_load, Q, v_scale,
-            v_scale_cache_ptr, physical_block_idx, seq_offset,
-            stride_vs_blk, tile_mask, BLOCK_SIZE, KV_QUANT_MODE,
+            V_load,
+            Q,
+            v_scale,
+            v_scale_cache_ptr,
+            physical_block_idx,
+            seq_offset,
+            stride_vs_blk,
+            tile_mask,
+            BLOCK_SIZE,
+            KV_QUANT_MODE,
         )
 
         # Compute attention mask: causal by default (key <= query)
