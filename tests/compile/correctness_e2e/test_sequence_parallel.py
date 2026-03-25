@@ -258,6 +258,9 @@ def _compare_sp(
             "fuse_norm_quant": fuse_norm_quant,
             "fuse_act_quant": fuse_act_quant,
             "eliminate_noops": True,
+            # Override threshold to ensure SP is applied even for small
+            # models (e.g. tiny-random-LlamaForCausalLM).
+            "sp_min_token_num": 0,
         },
         "use_inductor_graph_partition": use_inductor_graph_partition,
     }
