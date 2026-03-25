@@ -463,7 +463,9 @@ class OpenAIServingResponses(OpenAIServing):
                     context = SimpleContext()
 
             if self.parser and self.parser.reasoning_parser_cls is not None:
-                self.parser.reasoning_parser_cls(tokenizer).adjust_structured_outputs_for_reasoning(
+                self.parser.reasoning_parser_cls(
+                    tokenizer
+                ).adjust_structured_outputs_for_reasoning(
                     sampling_params,
                     mode="responses",
                     tool_server=self.tool_server,

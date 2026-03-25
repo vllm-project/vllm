@@ -15,9 +15,10 @@ from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
-    from openai.types.responses.tool import Tool
-
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+        ChatCompletionToolsParam,
+    )
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
@@ -155,7 +156,7 @@ class GptOssReasoningParser(ReasoningParser):
     def extract_reasoning(
         self,
         model_output: str,
-        request: "ChatCompletionRequest | ResponsesRequest",
+        request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
         raise NotImplementedError(
             "gpt-oss has a special branch for parsing reasoning in non-streaming mode. This method shouldn't be used."  # noqa: E501
@@ -167,7 +168,7 @@ class GptOssReasoningParser(ReasoningParser):
         original_tag: str | StructuredOutputsParams | None,
         tool_server: ToolServer | None,
         sampling_params: SamplingParams | None = None,
-        tools: list[Tool] | None = None,
+        tools: list[ChatCompletionToolsParam] | None = None,
         model_architecture: str | None = None,
     ) -> str | None:
         if original_tag is None:

@@ -16,9 +16,10 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
 
 if TYPE_CHECKING:
-    from openai.types.responses.tool import Tool
-
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+        ChatCompletionToolsParam,
+    )
     from vllm.entrypoints.openai.engine.protocol import DeltaMessage
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
@@ -159,7 +160,7 @@ class ReasoningParser:
         original_tag: str | StructuredOutputsParams | None,
         tool_server: ToolServer | None,
         sampling_params: SamplingParams | None = None,
-        tools: list[Tool] | None = None,
+        tools: list[ChatCompletionToolsParam] | None = None,
         model_architecture: str | None = None,
     ) -> str | None:
         """
@@ -167,9 +168,10 @@ class ReasoningParser:
         Called when structured_outputs is set. original_tag may be:
         - str | None: existing structural_tag (or None for default reasoning tag).
         - StructuredOutputsParams: user-provided JSON schema / grammar / json_object
-          to be converted to a structural tag (e.g. via convert_schema_to_structural_tags).
-        model_architecture: optional architecture name (e.g. from model_config.architectures[0])
-          for parsers that need it to build structural tags (e.g. Cohere MODEL_TO_TAG_STYLE).
+          to be converted to a structural tag (e.g. via
+          convert_schema_to_structural_tags).
+        model_architecture: optional architecture name (e.g. from
+        model_config.architectures[0]) for parsers that need it to build tags
         Returns the structural tag string, or None to leave constraints unchanged.
         """
         return None
@@ -395,7 +397,7 @@ class ReasoningParserManager:
 
             if isinstance(name, str):
                 names = [name]
-            elif is_list_of(name, str):
+            elif name is not None and is_list_of(name, str):
                 names = name
             else:
                 names = [class_name]
