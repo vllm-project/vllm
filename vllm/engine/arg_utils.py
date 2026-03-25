@@ -1935,7 +1935,7 @@ class EngineArgs:
             )
 
         offload_config = OffloadConfig(
-            offload_backend=self.offload_backend,  # type: ignore[arg-type]
+            offload_backend=self.offload_backend,
             uva=UVAOffloadConfig(
                 cpu_offload_gb=self.cpu_offload_gb,
                 cpu_offload_params=self.cpu_offload_params,

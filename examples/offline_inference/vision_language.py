@@ -11,7 +11,6 @@ on HuggingFace model repository.
 import os
 import random
 from contextlib import contextmanager
-from dataclasses import asdict
 from typing import NamedTuple
 
 from huggingface_hub import snapshot_download
@@ -2434,13 +2433,13 @@ def main(args):
         req_data.engine_args.limit_mm_per_prompt or {}
     )
 
-    engine_args = asdict(req_data.engine_args) | {
-        "seed": args.seed,
-        "mm_processor_cache_gb": 0 if args.disable_mm_processor_cache else 4,
-    }
+    engine_args = req_data.engine_args
+    engine_args.seed = args.seed
+    mm_processor_cache_gb = 0 if args.disable_mm_processor_cache else 4
+    engine_args.mm_processor_cache_gb = mm_processor_cache_gb
     if args.tensor_parallel_size is not None:
-        engine_args["tensor_parallel_size"] = args.tensor_parallel_size
-    llm = LLM(**engine_args)
+        engine_args.tensor_parallel_size = args.tensor_parallel_size
+    llm = LLM.from_engine_args(engine_args)
 
     # Don't want to check the flag multiple times, so just hijack `prompts`.
     prompts = (
