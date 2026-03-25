@@ -1947,13 +1947,11 @@ class LLM:
             and not isinstance(self.llm_engine.engine_core, InprocClient)
             and not self.llm_engine.is_sleeping()
         )
-        scheduler_paused = False
 
         if pause_scheduler_for_batch_invariant:
             # keep the background engine from starting prefill before this
             # offline batch has finished enqueuing all of its requests.
             self.llm_engine.sleep(level=0, mode="keep")
-            scheduler_paused = True
 
         try:
             for i, prompt in enumerate(prompts):
@@ -1972,7 +1970,7 @@ class LLM:
                 self.llm_engine.abort_request(added_request_ids, internal=True)
             raise e
         finally:
-            if scheduler_paused:
+            if pause_scheduler_for_batch_invariant:
                 self.llm_engine.wake_up(["scheduling"])
 
         return added_request_ids
