@@ -51,6 +51,42 @@ class SimpleSharedExperts(nn.Module):
         return self.down(nn.functional.silu(gate) * up)
 
 
+def _assert_close(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    atol: float,
+    rtol: float,
+    label: str,
+) -> None:
+    """assert_close that prints diff diagnostics on both success and failure."""
+    diff = (actual - expected).abs()
+    n_total = diff.numel()
+    max_diff = diff.max().item()
+    mean_diff = diff.mean().item()
+    n_exceed = int((diff > atol).sum().item())
+    pct_exceed = n_exceed / n_total * 100
+
+    print(
+        f"[{label}] "
+        f"max_diff={max_diff:.6e}, "
+        f"mean_diff={mean_diff:.6e}, "
+        f"exceed_atol({atol})={n_exceed}/{n_total} ({pct_exceed:.2f}%), "
+        f"actual=[{actual.min().item():.4f}, {actual.max().item():.4f}], "
+        f"expected=[{expected.min().item():.4f}, {expected.max().item():.4f}]"
+    )
+
+    torch.testing.assert_close(
+        actual,
+        expected,
+        atol=atol,
+        rtol=rtol,
+        msg=(
+            f"{label}: max_diff={max_diff:.6e}, mean_diff={mean_diff:.6e}, "
+            f"exceed_atol({atol})={n_exceed}/{n_total} ({pct_exceed:.2f}%)"
+        ),
+    )
+
+
 @pytest.fixture(autouse=True)
 def setup_cuda():
     if not torch.cuda.is_available():
@@ -149,19 +185,19 @@ def test_routed_input_transform_inside_vs_outside(
                 transformed_hidden, router_logits
             )
 
-        torch.testing.assert_close(
+        expected_shared_out = shared_experts(hidden_states)
+
+        _assert_close(
             routed_out_A,
             routed_out_B,
             atol=1e-3,
             rtol=1e-3,
-            msg="Routed output should match: transform inside vs outside",
+            label="Routed output: transform inside vs outside",
         )
-
-        expected_shared_out = shared_experts(hidden_states)
-
-        torch.testing.assert_close(
+        _assert_close(
             shared_out_A,
             expected_shared_out,
             atol=1e-3,
             rtol=1e-3,
+            label="Shared expert output",
         )
