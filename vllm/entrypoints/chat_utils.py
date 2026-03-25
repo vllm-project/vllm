@@ -11,7 +11,16 @@ from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Generic,
+    Literal,
+    ReadOnly,
+    TypeAlias,
+    TypeVar,
+    cast,
+)
 
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
@@ -307,10 +316,10 @@ ChatCompletionMessageParam: TypeAlias = (
 
 
 class ConversationMessage(TypedDict, total=False):
-    role: Required[str]
+    role: Required[ReadOnly[str]]
     """The role of the message's author."""
 
-    content: str | None | list[dict[str, str]]
+    content: ReadOnly[str | None | list[dict[str, str]]]
     """The contents of the message"""
 
     tool_call_id: str | None
