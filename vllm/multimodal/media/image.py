@@ -124,8 +124,8 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
     def load_bytes(self, data: bytes) -> torch.Tensor:
         if data[:6] == MAGIC_NUMPY_PREFIX:
             return self._load_numpy(data)
-        else:
-            return self._load_pickled_torch(data)
+
+        return self._load_pickled_torch(data)
 
     def load_base64(self, media_type: str, data: str) -> torch.Tensor:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
