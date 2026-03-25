@@ -1128,7 +1128,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer_mode="mistral",
     ),
     # [Encoder-decoder]
-    "CohereASRForConditionalGeneration": _HfExamplesInfo(
+    "CohereAsrForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/cohere-transcribe-03-2026",
         trust_remote_code=True,
         is_available_online=False,  # TODO (ekagra): revert after asr release

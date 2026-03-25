@@ -1989,7 +1989,7 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
     info=CohereASRProcessingInfo,
     dummy_inputs=CohereASRDummyInputsBuilder,
 )
-class CohereASRForConditionalGeneration(
+class CohereAsrForConditionalGeneration(
     nn.Module, SupportsTranscription, SupportsMultiModal
 ):
     packed_modules_mapping = {
