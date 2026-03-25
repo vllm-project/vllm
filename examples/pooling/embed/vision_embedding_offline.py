@@ -14,7 +14,7 @@ from pathlib import Path
 
 from PIL.Image import Image
 
-from vllm import LLM, EngineArgs
+from vllm import LLM
 from vllm.multimodal.utils import fetch_image
 from vllm.utils.print_utils import print_embeddings
 
@@ -27,13 +27,12 @@ multi_modal_data = {"image": fetch_image(image_url)}
 
 
 def run_clip(seed: int):
-    engine_args = EngineArgs(
+    llm = LLM(
         model="openai/clip-vit-base-patch32",
         runner="pooling",
         limit_mm_per_prompt={"image": 1},
+        seed=seed,
     )
-
-    llm = LLM(**vars(engine_args) | {"seed": seed})
 
     print("Text embedding output:")
     outputs = llm.embed(text, use_tqdm=False)
@@ -52,14 +51,13 @@ def run_clip(seed: int):
 
 
 def run_e5_v(seed: int):
-    engine_args = EngineArgs(
+    llm = LLM(
         model="royokong/e5-v",
         runner="pooling",
         max_model_len=4096,
         limit_mm_per_prompt={"image": 1},
+        seed=seed,
     )
-
-    llm = LLM(**vars(engine_args) | {"seed": seed})
 
     llama3_template = "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n"  # noqa: E501
 
@@ -107,20 +105,20 @@ def run_qwen3_vl(seed: int):
 
         multi_modal_data["image"] = post_process_image(multi_modal_data["image"])
 
-    engine_args = EngineArgs(
-        model="Qwen/Qwen3-VL-Embedding-2B",
-        runner="pooling",
-        max_model_len=8192,
-        limit_mm_per_prompt={"image": 1},
-        mm_processor_kwargs={"do_resize": False} if smart_resize is not None else None,
-    )
     default_instruction = "Represent the user's input."
     image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
     prompt_text = f"<|im_start|>system\n{default_instruction}<|im_end|>\n<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
     prompt_image = f"<|im_start|>system\n{default_instruction}<|im_end|>\n<|im_start|>user\n{image_placeholder}<|im_end|>\n<|im_start|>assistant\n"
     prompt_image_text = f"<|im_start|>system\n{default_instruction}<|im_end|>\n<|im_start|>user\n{image_placeholder}{text}<|im_end|>\n<|im_start|>assistant\n"
 
-    llm = LLM(**vars(engine_args) | {"seed": seed})
+    llm = LLM(
+        model="Qwen/Qwen3-VL-Embedding-2B",
+        runner="pooling",
+        max_model_len=8192,
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_kwargs={"do_resize": False} if smart_resize is not None else None,
+        seed=seed,
+    )
 
     print("Text embedding output:")
     outputs = llm.embed(prompt_text, use_tqdm=False)
@@ -148,13 +146,12 @@ def run_qwen3_vl(seed: int):
 
 
 def run_siglip(seed: int):
-    engine_args = EngineArgs(
+    llm = LLM(
         model="google/siglip-base-patch16-224",
         runner="pooling",
         limit_mm_per_prompt={"image": 1},
+        seed=seed,
     )
-
-    llm = LLM(**vars(engine_args) | {"seed": seed})
 
     print("Text embedding output:")
     outputs = llm.embed(text, use_tqdm=False)
@@ -173,16 +170,15 @@ def run_siglip(seed: int):
 
 
 def run_vlm2vec_phi3v(seed: int):
-    engine_args = EngineArgs(
+    llm = LLM(
         model="TIGER-Lab/VLM2Vec-Full",
         runner="pooling",
         max_model_len=4096,
         trust_remote_code=True,
         mm_processor_kwargs={"num_crops": 4},
         limit_mm_per_prompt={"image": 1},
+        seed=seed,
     )
-
-    llm = LLM(**vars(engine_args) | {"seed": seed})
     image_token = "<|image_1|>"
 
     print("Text embedding output:")
@@ -258,7 +254,7 @@ def run_vlm2vec_qwen2vl(seed: int):
     processor.save_pretrained(merged_path)
     print("Done!")
 
-    engine_args = EngineArgs(
+    llm = LLM(
         model=merged_path,
         runner="pooling",
         max_model_len=4096,
@@ -267,9 +263,8 @@ def run_vlm2vec_qwen2vl(seed: int):
             "max_pixels": 12845056,
         },
         limit_mm_per_prompt={"image": 1},
+        seed=seed,
     )
-
-    llm = LLM(**vars(engine_args) | {"seed": seed})
     image_token = "<|image_pad|>"
 
     print("Text embedding output:")

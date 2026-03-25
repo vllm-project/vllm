@@ -62,7 +62,7 @@ def main():
     print(f"Tensor parallel size: {engine_args.tensor_parallel_size}")
 
     # Load the model using engine args
-    llm = LLM(**vars(engine_args))
+    llm = LLM.from_engine_args(engine_args)
 
     # Prepare sampling parameters
     sampling_params = SamplingParams(

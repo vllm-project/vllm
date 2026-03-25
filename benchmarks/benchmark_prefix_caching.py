@@ -196,7 +196,7 @@ def main(args):
 
     engine_args = EngineArgs.from_cli_args(args)
 
-    llm = LLM(**vars(engine_args))
+    llm = LLM.from_engine_args(engine_args)
 
     sampling_params = SamplingParams(
         temperature=0,

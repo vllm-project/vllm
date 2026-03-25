@@ -10,7 +10,6 @@ import urllib3
 
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.engine.arg_utils import EngineArgs
 
 MODEL_CONFIGS = [
     {
@@ -154,8 +153,7 @@ def test_model_from_huggingface_offline(monkeypatch: pytest.MonkeyPatch):
             # Need to re-import huggingface_hub
             # and friends to set up offline mode
             _re_import_modules()
-            engine_args = EngineArgs(model="facebook/opt-125m")
-            LLM(**vars(engine_args))
+            LLM(model="facebook/opt-125m")
         finally:
             # Reset the environment after the test
             # NB: Assuming tests are run in online mode

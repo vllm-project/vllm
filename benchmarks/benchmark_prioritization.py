@@ -78,7 +78,7 @@ def run_vllm(
 ) -> float:
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**vars(engine_args))
+    llm = LLM.from_engine_args(engine_args)
 
     assert all(
         llm.llm_engine.model_config.max_model_len >= (request[1] + request[2])

@@ -123,7 +123,7 @@ def main(args):
 
     # Create the LLM engine
     engine_args = EngineArgs.from_cli_args(args)
-    llm = LLM(**vars(engine_args))
+    llm = LLM.from_engine_args(engine_args)
     sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
 
     print("------warm up------")

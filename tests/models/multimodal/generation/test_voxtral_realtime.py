@@ -74,7 +74,7 @@ def tokenizer() -> MistralTokenizer:
 @pytest.fixture
 def engine():
     engine_args = EngineArgs(**ENGINE_CONFIG)
-    llm = LLM(**vars(engine_args))
+    llm = LLM.from_engine_args(engine_args)
     try:
         yield llm
     finally:

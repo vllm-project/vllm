@@ -52,7 +52,7 @@ def run_vllm(
 ) -> tuple[float, list[RequestOutput] | None]:
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**vars(engine_args))
+    llm = LLM.from_engine_args(engine_args)
     assert all(
         llm.llm_engine.model_config.max_model_len
         >= (request.prompt_len + request.expected_output_len)
@@ -140,7 +140,7 @@ def run_vllm_chat(
     """
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**vars(engine_args))
+    llm = LLM.from_engine_args(engine_args)
 
     assert all(
         llm.llm_engine.model_config.max_model_len

@@ -124,7 +124,7 @@ def main(args: Namespace):
     model_request = model_example_map[args.model_name]()
     engine_args = model_request.engine_args
 
-    llm = LLM(**vars(engine_args))
+    llm = LLM.from_engine_args(engine_args)
 
     print("Query: string & Document: string")
     outputs = llm.score(query, document)
