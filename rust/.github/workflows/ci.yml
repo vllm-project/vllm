@@ -38,11 +38,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
       - name: Run tests
-        run: cargo test --workspace --all-targets --no-fail-fast
+        run: cargo nextest run --workspace --all-targets --no-fail-fast
 
   clippy:
     runs-on: ubuntu-latest
