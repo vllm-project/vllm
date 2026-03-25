@@ -600,3 +600,18 @@ class TestInitInvariantValidation:
     def test_min_greater_than_max_raises(self):
         with pytest.raises(ValueError, match="min_budget=200 > max_budget=100"):
             self._make_mgr(min_budget=200, max_budget=100)
+
+    # --- Finding 7: user-provided budgets with non-positive values ---
+
+    def test_user_budgets_zero_raises(self):
+        """Non-positive budgets should be caught at config validation."""
+        from vllm.config.compilation import CompilationConfig
+
+        with pytest.raises(ValueError, match="must be positive"):
+            CompilationConfig(encoder_cudagraph_token_budgets=[0, 128])
+
+    def test_user_budgets_negative_raises(self):
+        from vllm.config.compilation import CompilationConfig
+
+        with pytest.raises(ValueError, match="must be positive"):
+            CompilationConfig(encoder_cudagraph_token_budgets=[-1, 64])
