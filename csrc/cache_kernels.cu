@@ -797,38 +797,47 @@ void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
   dim3 block(std::min(block_stride, int64_t(512)));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  if (kv_cache_dtype == "auto") {
-    if (src_cache.dtype() == at::ScalarType::Float) {
-      CALL_CONVERT_FP8(uint8_t, float, vllm::Fp8KVCacheDataType::kAuto);
-    } else if (src_cache.dtype() == at::ScalarType::Half) {
-      CALL_CONVERT_FP8(uint8_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto);
-    } else if (src_cache.dtype() == at::ScalarType::BFloat16) {
-      CALL_CONVERT_FP8(uint8_t, __nv_bfloat16, vllm::Fp8KVCacheDataType::kAuto);
-    } else if (dst_cache.dtype() == at::ScalarType::Float) {
-      CALL_CONVERT_FP8(float, uint8_t, vllm::Fp8KVCacheDataType::kAuto);
-    } else if (dst_cache.dtype() == at::ScalarType::Half) {
-      CALL_CONVERT_FP8(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kAuto);
-    } else if (dst_cache.dtype() == at::ScalarType::BFloat16) {
-      CALL_CONVERT_FP8(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kAuto);
-    }
-  } else if (kv_cache_dtype == "fp8" || kv_cache_dtype == "fp8_e4m3") {
-    if (src_cache.dtype() == at::ScalarType::Float) {
-      CALL_CONVERT_FP8(uint8_t, float, vllm::Fp8KVCacheDataType::kFp8E4M3);
-    } else if (src_cache.dtype() == at::ScalarType::Half) {
-      CALL_CONVERT_FP8(uint8_t, uint16_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
-    } else if (src_cache.dtype() == at::ScalarType::BFloat16) {
-      CALL_CONVERT_FP8(uint8_t, __nv_bfloat16,
-                       vllm::Fp8KVCacheDataType::kFp8E4M3);
-    } else if (dst_cache.dtype() == at::ScalarType::Float) {
+  // Exactly one of src/dst must be uint8 (fp8).
+  bool src_is_fp8 = src_cache.dtype() == at::ScalarType::Byte;
+  bool dst_is_fp8 = dst_cache.dtype() == at::ScalarType::Byte;
+  TORCH_CHECK(src_is_fp8 != dst_is_fp8,
+              "convert_fp8 requires exactly one of src/dst to be fp8 (uint8), "
+              "got src=",
+              src_cache.dtype(), " dst=", dst_cache.dtype());
+
+  // Determine the non-fp8 dtype.
+  auto other_dtype = src_is_fp8 ? dst_cache.dtype() : src_cache.dtype();
+
+  TORCH_CHECK(
+      kv_cache_dtype != "float16" && kv_cache_dtype != "bfloat16" &&
+          kv_cache_dtype != "float32",
+      "convert_fp8 requires a quantized kv_cache_dtype, got: ", kv_cache_dtype);
+
+  TORCH_CHECK(kv_cache_dtype == "fp8" || kv_cache_dtype == "fp8_e4m3",
+              "Unsupported kv_cache_dtype: ", kv_cache_dtype);
+
+  if (other_dtype == at::ScalarType::Float) {
+    if (src_is_fp8) {
       CALL_CONVERT_FP8(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
-    } else if (dst_cache.dtype() == at::ScalarType::Half) {
+    } else {
+      CALL_CONVERT_FP8(uint8_t, float, vllm::Fp8KVCacheDataType::kFp8E4M3);
+    }
+  } else if (other_dtype == at::ScalarType::Half) {
+    if (src_is_fp8) {
       CALL_CONVERT_FP8(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
-    } else if (dst_cache.dtype() == at::ScalarType::BFloat16) {
+    } else {
+      CALL_CONVERT_FP8(uint8_t, uint16_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
+    }
+  } else if (other_dtype == at::ScalarType::BFloat16) {
+    if (src_is_fp8) {
       CALL_CONVERT_FP8(__nv_bfloat16, uint8_t,
+                       vllm::Fp8KVCacheDataType::kFp8E4M3);
+    } else {
+      CALL_CONVERT_FP8(uint8_t, __nv_bfloat16,
                        vllm::Fp8KVCacheDataType::kFp8E4M3);
     }
   } else {
-    TORCH_CHECK(false, "Unsupported data type: ", kv_cache_dtype);
+    TORCH_CHECK(false, "Unsupported native dtype: ", other_dtype);
   }
 }
 
