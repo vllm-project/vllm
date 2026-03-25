@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import gc
+import logging
 import time
 from collections.abc import Generator
 from dataclasses import dataclass, field
@@ -14,6 +15,8 @@ import torch.types
 from vllm.platforms import current_platform
 
 from .mem_constants import GiB_bytes, MiB_bytes
+
+logger = logging.getLogger(__name__)
 
 
 def format_mib(b: int) -> str:
@@ -101,7 +104,29 @@ class MemorySnapshot:
             "allocated_bytes.all.peak", 0
         )
 
-        self.free_memory, self.total_memory = current_platform.mem_get_info(device)
+        try:
+            self.free_memory, self.total_memory = current_platform.mem_get_info(device)
+        except (RuntimeError, AttributeError) as e:
+            # Fallback for platforms that don't support memory querying (e.g., simulators)
+            if current_platform.is_xpu():
+                self.total_memory = 0
+                self.free_memory = 0
+                logger.warning("XPU memory query raised %s: %s", type(e).__name__, e)
+            else:
+                raise e
+
+        # On XPU simulators mem_get_info() may return (0, 0) without raising.
+        # Use hardcoded values so KV cache allocation can proceed.
+        if current_platform.is_xpu() and self.total_memory == 0:
+            self.total_memory = 10 * 1024 * 1024       # 10 MB
+            self.free_memory = int(9.5 * 1024 * 1024)   # 9.5 MB
+            logger.warning(
+                "XPU reports 0 bytes total memory — using hardcoded fallback: "
+                "total=%.1fMB, free=%.1fMB",
+                self.total_memory / (1024**2),
+                self.free_memory / (1024**2),
+            )
+
         shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
         if (
             current_platform.is_cuda()
