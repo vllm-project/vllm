@@ -1,5 +1,4 @@
 use std::convert::TryFrom;
-use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +18,7 @@ use vllm_engine_core_client::protocol::{
     EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, RequestOutputKind,
     StopReason,
 };
+use vllm_engine_core_client::test_utils::IpcNamespace;
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig,
 };
@@ -32,13 +32,6 @@ use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
 use super::build_router;
 use crate::routes::chat_completions::convert::prepare_chat_request;
 use crate::state::AppState;
-
-fn unique_tcp_endpoint() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("read local addr").port();
-    drop(listener);
-    format!("tcp://127.0.0.1:{port}")
-}
 
 fn ready_message(status: &str) -> ReadyMessage {
     ReadyMessage {
@@ -264,7 +257,8 @@ async fn test_models_with_engine_outputs_and_backend_inner(
     expected_prompt_token_ids: Option<Vec<u32>>,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, tokio::task::JoinHandle<()>) {
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = engine_identity.to_vec();
 
     let engine_task = tokio::spawn({
@@ -291,13 +285,17 @@ async fn test_models_with_engine_outputs_and_backend_inner(
         }
     });
 
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
+    let client = EngineCoreClient::connect_with_input_output_addresses(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        Some(ipc.input_endpoint()),
+        Some(ipc.output_endpoint()),
+    )
     .await
     .expect("connect client");
 
@@ -345,7 +343,8 @@ where
     F: FnOnce(PushSocket) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = b"engine-openai-health".to_vec();
 
     let engine_task = tokio::spawn({
@@ -357,13 +356,17 @@ where
         }
     });
 
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
+    let client = EngineCoreClient::connect_with_input_output_addresses(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        Some(ipc.input_endpoint()),
+        Some(ipc.output_endpoint()),
+    )
     .await
     .expect("connect client");
 
@@ -1242,7 +1245,8 @@ async fn non_stream_completions_echo_prepends_prompt_text() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn non_stream_chat_uses_final_only_output_kind() {
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = b"engine-openai-chat-final-only".to_vec();
 
     let engine_task = tokio::spawn({
@@ -1269,13 +1273,17 @@ async fn non_stream_chat_uses_final_only_output_kind() {
         }
     });
 
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
+    let client = EngineCoreClient::connect_with_input_output_addresses(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        Some(ipc.input_endpoint()),
+        Some(ipc.output_endpoint()),
+    )
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
@@ -1307,7 +1315,8 @@ async fn non_stream_chat_uses_final_only_output_kind() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn non_stream_completions_use_final_only_output_kind() {
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = b"engine-openai-completion-final-only".to_vec();
 
     let engine_task = tokio::spawn({
@@ -1334,13 +1343,17 @@ async fn non_stream_completions_use_final_only_output_kind() {
         }
     });
 
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
+    let client = EngineCoreClient::connect_with_input_output_addresses(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        Some(ipc.input_endpoint()),
+        Some(ipc.output_endpoint()),
+    )
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));

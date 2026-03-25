@@ -38,6 +38,7 @@ tempfile.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+vllm-engine-core-client = { workspace = true, features = ["test-util"] }
 zeromq.workspace = true
 
 [lints]

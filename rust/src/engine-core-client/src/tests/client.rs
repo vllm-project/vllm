@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::convert::TryFrom;
 use std::io::Cursor;
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Once;
@@ -12,18 +11,18 @@ use rmpv::Value;
 use thiserror_ext::AsReport as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
-use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
-use vllm_engine_core_client::protocol::{
+use zeromq::prelude::{Socket, SocketRecv, SocketSend};
+use zeromq::util::PeerIdentity;
+use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
+
+use crate::protocol::handshake::ReadyMessage;
+use crate::protocol::{
     EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams, FinishReason,
     MaybeWireLogprobs, RequestOutputKind, UtilityOutput, UtilityResultEnvelope,
     decode_engine_core_outputs,
 };
-use vllm_engine_core_client::{
-    ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, Error,
-};
-use zeromq::prelude::{Socket, SocketRecv, SocketSend};
-use zeromq::util::PeerIdentity;
-use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
+use crate::test_utils::{IpcNamespace, spawn_mock_engine_task};
+use crate::{ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, Error};
 
 static TRACING: Once = Once::new();
 
@@ -63,13 +62,6 @@ fn expect_prompt_logprobs(actual: &MaybeWireLogprobs) {
         }
     "#]]
     .assert_debug_eq(actual.as_direct().expect("prompt logprobs resolved"));
-}
-
-fn unique_tcp_endpoint() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    format!("tcp://127.0.0.1:{port}")
 }
 
 fn sample_request() -> EngineCoreRequest {
@@ -159,52 +151,17 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
     dealer.recv().await.unwrap().into_vec()
 }
 
-async fn setup_mock_engine(
-    engine_handshake: String,
-    engine_identity: Vec<u8>,
-) -> (DealerSocket, PushSocket) {
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let mut options = SocketOptions::default();
-    options.peer_identity(PeerIdentity::try_from(engine_identity.clone()).unwrap());
-    let mut handshake = DealerSocket::with_options(options);
-    handshake.connect(&engine_handshake).await.unwrap();
-    handshake
-        .send(ZmqMessage::from(
-            rmp_serde::to_vec_named(&ready_message("HELLO")).unwrap(),
-        ))
-        .await
-        .unwrap();
-
-    let init_frames = handshake.recv().await.unwrap().into_vec();
-    assert_eq!(init_frames.len(), 1);
-    let init: HandshakeInitMessage = rmp_serde::from_slice(init_frames[0].as_ref()).unwrap();
-    assert_eq!(init.addresses.inputs.len(), 1);
-    assert_eq!(init.addresses.outputs.len(), 1);
-
-    let engine_input = init.addresses.inputs[0].clone();
-    let engine_output = init.addresses.outputs[0].clone();
-
-    let mut input_options = SocketOptions::default();
-    input_options.peer_identity(PeerIdentity::try_from(engine_identity).unwrap());
-    let mut dealer = DealerSocket::with_options(input_options);
-    dealer.connect(&engine_input).await.unwrap();
-    dealer
-        .send(ZmqMessage::from(Vec::<u8>::new()))
-        .await
-        .unwrap();
-
-    let mut push = PushSocket::new();
-    push.connect(&engine_output).await.unwrap();
-
-    handshake
-        .send(ZmqMessage::from(
-            rmp_serde::to_vec_named(&ready_message("READY")).unwrap(),
-        ))
-        .await
-        .unwrap();
-
-    (dealer, push)
+async fn connect_client_with_ipc(
+    config: EngineCoreClientConfig,
+    ipc: &IpcNamespace,
+) -> EngineCoreClient {
+    EngineCoreClient::connect_with_input_output_addresses(
+        config,
+        Some(ipc.input_endpoint()),
+        Some(ipc.output_endpoint()),
+    )
+    .await
+    .unwrap()
 }
 
 fn init_tracing() {
@@ -304,109 +261,112 @@ where
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_streams_outputs_per_request_and_ignores_other_messages() {
     init_tracing();
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = b"engine-0".to_vec();
 
-    let engine_task = tokio::spawn({
-        let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
-        async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_identity.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add_1 = recv_engine_message(dealer).await;
+                assert_eq!(add_1[0].as_ref(), &[0x00]);
+                let request_1: EngineCoreRequest = rmp_serde::from_slice(&add_1[1]).unwrap();
+                assert_eq!(request_1.client_index, 7);
+                assert_eq!(request_1.request_id, "req-1");
 
-            let add_1 = recv_engine_message(&mut dealer).await;
-            assert_eq!(add_1[0].as_ref(), &[0x00]);
-            let request_1: EngineCoreRequest = rmp_serde::from_slice(&add_1[1]).unwrap();
-            assert_eq!(request_1.client_index, 7);
-            assert_eq!(request_1.request_id, "req-1");
+                let add_2 = recv_engine_message(dealer).await;
+                assert_eq!(add_2[0].as_ref(), &[0x00]);
+                let request_2: EngineCoreRequest = rmp_serde::from_slice(&add_2[1]).unwrap();
+                assert_eq!(request_2.client_index, 7);
+                assert_eq!(request_2.request_id, "req-2");
 
-            let add_2 = recv_engine_message(&mut dealer).await;
-            assert_eq!(add_2[0].as_ref(), &[0x00]);
-            let request_2: EngineCoreRequest = rmp_serde::from_slice(&add_2[1]).unwrap();
-            assert_eq!(request_2.client_index, 7);
-            assert_eq!(request_2.request_id, "req-2");
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        utility_output: Some(UtilityOutput {
+                            call_id: 1,
+                            failure_message: None,
+                            result: None,
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await;
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        start_wave: Some(3),
+                        ..Default::default()
+                    },
+                )
+                .await;
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        outputs: vec![request_output("req-1", vec![999], None)],
+                        utility_output: Some(UtilityOutput {
+                            call_id: 2,
+                            failure_message: None,
+                            result: None,
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await;
 
-            send_outputs(
-                &mut push,
-                EngineCoreOutputs {
-                    utility_output: Some(UtilityOutput {
-                        call_id: 1,
-                        failure_message: None,
-                        result: None,
-                    }),
-                    ..Default::default()
-                },
-            )
-            .await;
-            send_outputs(
-                &mut push,
-                EngineCoreOutputs {
-                    start_wave: Some(3),
-                    ..Default::default()
-                },
-            )
-            .await;
-            send_outputs(
-                &mut push,
-                EngineCoreOutputs {
-                    outputs: vec![request_output("req-1", vec![999], None)],
-                    utility_output: Some(UtilityOutput {
-                        call_id: 2,
-                        failure_message: None,
-                        result: None,
-                    }),
-                    ..Default::default()
-                },
-            )
-            .await;
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        outputs: vec![
+                            request_output("req-2", vec![22], None),
+                            request_output("req-1", vec![11], None),
+                        ],
+                        ..Default::default()
+                    },
+                )
+                .await;
 
-            send_outputs(
-                &mut push,
-                EngineCoreOutputs {
-                    outputs: vec![
-                        request_output("req-2", vec![22], None),
-                        request_output("req-1", vec![11], None),
-                    ],
-                    ..Default::default()
-                },
-            )
-            .await;
+                let abort = recv_engine_message(dealer).await;
+                assert_eq!(abort[0].as_ref(), &[0x01]);
+                let aborted_ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
+                assert_eq!(aborted_ids, vec!["req-1".to_string()]);
 
-            let abort = recv_engine_message(&mut dealer).await;
-            assert_eq!(abort[0].as_ref(), &[0x01]);
-            let aborted_ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
-            assert_eq!(aborted_ids, vec!["req-1".to_string()]);
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        outputs: vec![request_output("req-2", vec![], Some(FinishReason::Length))],
+                        finished_requests: Some(BTreeSet::from(["req-2".to_string()])),
+                        ..Default::default()
+                    },
+                )
+                .await;
 
-            send_outputs(
-                &mut push,
-                EngineCoreOutputs {
-                    outputs: vec![request_output("req-2", vec![], Some(FinishReason::Length))],
-                    finished_requests: Some(BTreeSet::from(["req-2".to_string()])),
-                    ..Default::default()
-                },
-            )
-            .await;
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        outputs: vec![request_output("req-1", vec![], Some(FinishReason::Abort))],
+                        finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            })
+        },
+    );
 
-            send_outputs(
-                &mut push,
-                EngineCoreOutputs {
-                    outputs: vec![request_output("req-1", vec![], Some(FinishReason::Abort))],
-                    finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
-                    ..Default::default()
-                },
-            )
-            .await;
-        }
-    });
-
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 7,
-    })
-    .await
-    .unwrap();
+    let client = connect_client_with_ipc(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 7,
+        },
+        &ipc,
+    )
+    .await;
     assert_eq!(client.engine_identity(), b"engine-0");
     assert_eq!(
         client
@@ -472,54 +432,58 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
             .is_none()
     );
 
-    client.shutdown().await.unwrap();
+    let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
     init_tracing();
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = b"engine-dup".to_vec();
 
-    let engine_task = tokio::spawn({
-        let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
-        async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_identity.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add_1 = recv_engine_message(dealer).await;
+                assert_eq!(add_1[0].as_ref(), &[0x00]);
+                let request_1: EngineCoreRequest = rmp_serde::from_slice(&add_1[1]).unwrap();
+                assert_eq!(request_1.request_id, "req-1");
 
-            let add_1 = recv_engine_message(&mut dealer).await;
-            assert_eq!(add_1[0].as_ref(), &[0x00]);
-            let request_1: EngineCoreRequest = rmp_serde::from_slice(&add_1[1]).unwrap();
-            assert_eq!(request_1.request_id, "req-1");
+                assert!(
+                    timeout(Duration::from_millis(200), dealer.recv())
+                        .await
+                        .is_err()
+                );
 
-            assert!(
-                timeout(Duration::from_millis(200), dealer.recv())
-                    .await
-                    .is_err()
-            );
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        outputs: vec![request_output("req-1", vec![], Some(FinishReason::Length))],
+                        finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            })
+        },
+    );
 
-            send_outputs(
-                &mut push,
-                EngineCoreOutputs {
-                    outputs: vec![request_output("req-1", vec![], Some(FinishReason::Length))],
-                    finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
-                    ..Default::default()
-                },
-            )
-            .await;
-        }
-    });
-
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
-    .await
-    .unwrap();
+    let client = connect_client_with_ipc(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        &ipc,
+    )
+    .await;
 
     let mut stream = client.call(sample_request()).await.unwrap();
     let error = match client.call(sample_request()).await {
@@ -543,51 +507,56 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
             .unwrap()
             .is_none()
     );
-    client.shutdown().await.unwrap();
+    let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finished_requests_without_final_output_is_treated_as_unexpected_close() {
     init_tracing();
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = b"engine-finished-only".to_vec();
 
-    let engine_task = tokio::spawn({
-        let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
-        async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_identity.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                assert_eq!(add[0].as_ref(), &[0x00]);
 
-            let add = recv_engine_message(&mut dealer).await;
-            assert_eq!(add[0].as_ref(), &[0x00]);
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
+                        ..Default::default()
+                    },
+                )
+                .await;
 
-            send_outputs(
-                &mut push,
-                EngineCoreOutputs {
-                    finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
-                    ..Default::default()
-                },
-            )
-            .await;
+                assert!(
+                    timeout(Duration::from_millis(200), dealer.recv())
+                        .await
+                        .is_err()
+                );
+                let _ = push;
+            })
+        },
+    );
 
-            assert!(
-                timeout(Duration::from_millis(200), dealer.recv())
-                    .await
-                    .is_err()
-            );
-        }
-    });
-
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
-    .await
-    .unwrap();
+    let client = connect_client_with_ipc(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        &ipc,
+    )
+    .await;
 
     let mut stream = client.call(sample_request()).await.unwrap();
     let error = timeout(Duration::from_secs(1), stream.next())
@@ -606,51 +575,55 @@ async fn finished_requests_without_final_output_is_treated_as_unexpected_close()
             .is_none()
     );
 
-    client.shutdown().await.unwrap();
+    let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropping_a_live_stream_triggers_abort() {
     init_tracing();
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = b"engine-drop".to_vec();
 
-    let engine_task = tokio::spawn({
-        let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
-        async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_identity.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                assert_eq!(add[0].as_ref(), &[0x00]);
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        outputs: vec![request_output("req-1", vec![99], None)],
+                        ..Default::default()
+                    },
+                )
+                .await;
 
-            let add = recv_engine_message(&mut dealer).await;
-            assert_eq!(add[0].as_ref(), &[0x00]);
-            send_outputs(
-                &mut push,
-                EngineCoreOutputs {
-                    outputs: vec![request_output("req-1", vec![99], None)],
-                    ..Default::default()
-                },
-            )
-            .await;
+                let abort = timeout(Duration::from_secs(1), recv_engine_message(dealer))
+                    .await
+                    .unwrap();
+                assert_eq!(abort[0].as_ref(), &[0x01]);
+                let aborted_ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
+                assert_eq!(aborted_ids, vec!["req-1".to_string()]);
+            })
+        },
+    );
 
-            let abort = timeout(Duration::from_secs(1), recv_engine_message(&mut dealer))
-                .await
-                .unwrap();
-            assert_eq!(abort[0].as_ref(), &[0x01]);
-            let aborted_ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
-            assert_eq!(aborted_ids, vec!["req-1".to_string()]);
-        }
-    });
-
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
-    .await
-    .unwrap();
+    let client = connect_client_with_ipc(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        &ipc,
+    )
+    .await;
 
     let mut stream = client.call(sample_request()).await.unwrap();
     let first = timeout(Duration::from_secs(1), stream.next())
@@ -661,6 +634,7 @@ async fn dropping_a_live_stream_triggers_abort() {
     assert_eq!(first.new_token_ids, vec![99]);
     drop(stream);
 
+    let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
     client.shutdown().await.unwrap();
 }
@@ -668,31 +642,34 @@ async fn dropping_a_live_stream_triggers_abort() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
     init_tracing();
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = b"engine-fail".to_vec();
 
-    let engine_task = tokio::spawn({
-        let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
-        async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_identity.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let _ = recv_engine_message(dealer).await;
+                let _ = recv_engine_message(dealer).await;
 
-            let _ = recv_engine_message(&mut dealer).await;
-            let _ = recv_engine_message(&mut dealer).await;
+                push.send(ZmqMessage::from(vec![0xc1])).await.unwrap();
+            })
+        },
+    );
 
-            push.send(ZmqMessage::from(vec![0xc1])).await.unwrap();
-        }
-    });
-
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
-    .await
-    .unwrap();
+    let client = connect_client_with_ipc(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        &ipc,
+    )
+    .await;
 
     let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
     let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
@@ -725,112 +702,120 @@ async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
     };
     assert!(is_decode_error(&add_error));
 
-    client.shutdown().await.unwrap();
+    let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn is_sleeping_wrapper_sends_typed_request_and_returns_typed_response() {
     init_tracing();
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = b"engine-utility-success".to_vec();
 
-    let engine_task = tokio::spawn({
-        let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
-        async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_identity.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
 
-            let utility = recv_engine_message(&mut dealer).await;
-            assert_eq!(utility[0].as_ref(), &[0x03]);
+                let payload = decode_value(&utility[1]);
+                let array = match payload {
+                    Value::Array(array) => array,
+                    other => panic!("expected utility payload array, got {other:?}"),
+                };
+                assert_eq!(array.len(), 4);
+                assert_eq!(array[0], Value::from(5));
+                let call_id = array[1].as_i64().expect("call_id");
+                assert_eq!(array[2], Value::from("is_sleeping"));
+                assert_eq!(array[3], Value::Array(Vec::new()));
 
-            let payload = decode_value(&utility[1]);
-            let array = match payload {
-                Value::Array(array) => array,
-                other => panic!("expected utility payload array, got {other:?}"),
-            };
-            assert_eq!(array.len(), 4);
-            assert_eq!(array[0], Value::from(5));
-            let call_id = array[1].as_i64().expect("call_id");
-            assert_eq!(array[2], Value::from("is_sleeping"));
-            assert_eq!(array[3], Value::Array(Vec::new()));
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        utility_output: Some(UtilityOutput {
+                            call_id,
+                            failure_message: None,
+                            result: Some(utility_result_value(true)),
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            })
+        },
+    );
 
-            send_outputs(
-                &mut push,
-                EngineCoreOutputs {
-                    utility_output: Some(UtilityOutput {
-                        call_id,
-                        failure_message: None,
-                        result: Some(utility_result_value(true)),
-                    }),
-                    ..Default::default()
-                },
-            )
-            .await;
-        }
-    });
-
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 5,
-    })
-    .await
-    .unwrap();
+    let client = connect_client_with_ipc(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 5,
+        },
+        &ipc,
+    )
+    .await;
 
     let result = client.is_sleeping().await.unwrap();
     assert!(result);
 
-    client.shutdown().await.unwrap();
+    let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn call_utility_failure_message_surfaces_as_error() {
     init_tracing();
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = b"engine-utility-fail".to_vec();
 
-    let engine_task = tokio::spawn({
-        let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
-        async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_identity.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
+                let payload = decode_value(&utility[1]);
+                let call_id = payload
+                    .as_array()
+                    .and_then(|array| array[1].as_i64())
+                    .expect("call_id");
 
-            let utility = recv_engine_message(&mut dealer).await;
-            assert_eq!(utility[0].as_ref(), &[0x03]);
-            let payload = decode_value(&utility[1]);
-            let call_id = payload
-                .as_array()
-                .and_then(|array| array[1].as_i64())
-                .expect("call_id");
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        utility_output: Some(UtilityOutput {
+                            call_id,
+                            failure_message: Some("boom".to_string()),
+                            result: None,
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            })
+        },
+    );
 
-            send_outputs(
-                &mut push,
-                EngineCoreOutputs {
-                    utility_output: Some(UtilityOutput {
-                        call_id,
-                        failure_message: Some("boom".to_string()),
-                        result: None,
-                    }),
-                    ..Default::default()
-                },
-            )
-            .await;
-        }
-    });
-
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
-    .await
-    .unwrap();
+    let client = connect_client_with_ipc(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        &ipc,
+    )
+    .await;
 
     let error = client
         .call_utility::<bool, _>("is_sleeping", ())
@@ -845,38 +830,42 @@ async fn call_utility_failure_message_surfaces_as_error() {
         } if method == "is_sleeping" && message == "boom"
     ));
 
-    client.shutdown().await.unwrap();
+    let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatcher_failure_propagates_to_waiting_utility_calls() {
     init_tracing();
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = b"engine-utility-dispatcher-fail".to_vec();
 
-    let engine_task = tokio::spawn({
-        let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
-        async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_identity.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
 
-            let utility = recv_engine_message(&mut dealer).await;
-            assert_eq!(utility[0].as_ref(), &[0x03]);
+                push.send(ZmqMessage::from(vec![0xc1])).await.unwrap();
+            })
+        },
+    );
 
-            push.send(ZmqMessage::from(vec![0xc1])).await.unwrap();
-        }
-    });
-
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
-    .await
-    .unwrap();
+    let client = connect_client_with_ipc(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        &ipc,
+    )
+    .await;
 
     let error = client
         .call_utility::<bool, _>("is_sleeping", ())
@@ -890,14 +879,16 @@ async fn dispatcher_failure_propagates_to_waiting_utility_calls() {
             .expect("health error recorded")
     ));
 
-    client.shutdown().await.unwrap();
+    let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connect_times_out_without_ready_message() {
     init_tracing();
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
     let engine_handshake = handshake_address.clone();
     let engine_task = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -916,13 +907,17 @@ async fn connect_times_out_without_ready_message() {
         let _ = handshake.recv().await.unwrap();
     });
 
-    let result = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_millis(100),
-        client_index: 0,
-    })
+    let result = EngineCoreClient::connect_with_input_output_addresses(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_millis(100),
+            client_index: 0,
+        },
+        Some(ipc.input_endpoint()),
+        Some(ipc.output_endpoint()),
+    )
     .await;
 
     let error = match result {
@@ -939,29 +934,33 @@ async fn connect_times_out_without_ready_message() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn engine_core_dead_sentinel_marks_client_unhealthy_and_sticks() {
     init_tracing();
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = b"engine-dead".to_vec();
 
-    let engine_task = tokio::spawn({
-        let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
-        async move {
-            let (_dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
-            push.send(ZmqMessage::from(ENGINE_CORE_DEAD_SENTINEL.to_vec()))
-                .await
-                .unwrap();
-        }
-    });
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_identity.clone(),
+        |_dealer, push| {
+            Box::pin(async move {
+                push.send(ZmqMessage::from(ENGINE_CORE_DEAD_SENTINEL.to_vec()))
+                    .await
+                    .unwrap();
+            })
+        },
+    );
 
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
-    .await
-    .unwrap();
+    let client = connect_client_with_ipc(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        &ipc,
+    )
+    .await;
 
     timeout(Duration::from_secs(2), async {
         while client.is_healthy() {
@@ -990,41 +989,46 @@ async fn engine_core_dead_sentinel_marks_client_unhealthy_and_sticks() {
         Some(Error::EngineCoreDead)
     ));
 
-    client.shutdown().await.unwrap();
+    let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn output_loop_failure_marks_client_unhealthy_and_records_first_error() {
     init_tracing();
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = b"engine-output-failure".to_vec();
 
-    let engine_task = tokio::spawn({
-        let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
-        async move {
-            let (_dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
-            send_output_frames(
-                &mut push,
-                vec![
-                    bytes::Bytes::from_static(b"frame-1"),
-                    bytes::Bytes::from_static(b"frame-2"),
-                ],
-            )
-            .await;
-        }
-    });
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_identity.clone(),
+        |_dealer, push| {
+            Box::pin(async move {
+                send_output_frames(
+                    push,
+                    vec![
+                        bytes::Bytes::from_static(b"frame-1"),
+                        bytes::Bytes::from_static(b"frame-2"),
+                    ],
+                )
+                .await;
+            })
+        },
+    );
 
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
-    .await
-    .unwrap();
+    let client = connect_client_with_ipc(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        &ipc,
+    )
+    .await;
 
     timeout(Duration::from_secs(2), async {
         while client.is_healthy() {
@@ -1043,40 +1047,44 @@ async fn output_loop_failure_marks_client_unhealthy_and_records_first_error() {
             .expect("health error recorded")
     ));
 
-    client.shutdown().await.unwrap();
+    let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_decodes_multipart_logprob_outputs() {
     init_tracing();
-    let handshake_address = unique_tcp_endpoint();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
     let engine_identity = b"engine-multipart-logprobs".to_vec();
 
-    let engine_task = tokio::spawn({
-        let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
-        async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_identity.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                assert_eq!(add[0].as_ref(), &[0x00]);
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert_eq!(request.request_id, "req-1");
 
-            let add = recv_engine_message(&mut dealer).await;
-            assert_eq!(add[0].as_ref(), &[0x00]);
-            let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
-            assert_eq!(request.request_id, "req-1");
+                send_output_frames(push, multipart_logprob_output_frames("req-1")).await;
+            })
+        },
+    );
 
-            send_output_frames(&mut push, multipart_logprob_output_frames("req-1")).await;
-        }
-    });
-
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        handshake_address,
-        model_name: "test-model".to_string(),
-        local_host: "127.0.0.1".to_string(),
-        ready_timeout: Duration::from_secs(2),
-        client_index: 0,
-    })
-    .await
-    .unwrap();
+    let client = connect_client_with_ipc(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        &ipc,
+    )
+    .await;
 
     let stream = client.call(sample_request()).await.unwrap();
     let outputs = stream.collect::<Vec<_>>().await;
@@ -1093,14 +1101,15 @@ async fn client_decodes_multipart_logprob_outputs() {
             .expect("logprobs decoded"),
     );
 
-    client.shutdown().await.unwrap();
+    let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
 }
 
 #[test]
 fn python_msgpack_fixtures_match_rust_encoding() {
     init_tracing();
-    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/python_compat.py");
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/python_compat.py");
     let output = Command::new(&script)
         .output()
         .unwrap_or_else(|error| panic!("failed to execute {:?}: {error}", script));

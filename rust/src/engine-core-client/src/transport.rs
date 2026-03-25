@@ -41,6 +41,8 @@ pub struct ConnectedTransport {
 pub async fn connect(
     handshake_address: &str,
     local_host: &str,
+    local_input_address: Option<&str>,
+    local_output_address: Option<&str>,
     ready_timeout: Duration,
 ) -> Result<ConnectedTransport> {
     info!("waiting for engine to connect");
@@ -56,7 +58,7 @@ pub async fn connect(
     handshake_socket.bind(handshake_address).await?;
 
     let (input_address, mut input_socket, output_address, output_socket) =
-        bind_local_sockets(local_host).await?;
+        bind_local_sockets(local_host, local_input_address, local_output_address).await?;
     debug!(%input_address, %output_address, "bound local transport sockets");
 
     // 2. Wait for HELLO from engine, extract engine identity, and send INIT with local socket
@@ -115,9 +117,15 @@ pub async fn connect(
 /// Bind new input and output sockets.
 async fn bind_local_sockets(
     local_host: &str,
+    local_input_address: Option<&str>,
+    local_output_address: Option<&str>,
 ) -> Result<(String, RouterSocket, String, PullSocket)> {
-    let input_address = allocate_tcp_address(local_host).await?;
-    let output_address = allocate_tcp_address(local_host).await?;
+    let input_address = local_input_address
+        .map(ToOwned::to_owned)
+        .unwrap_or(allocate_tcp_address(local_host).await?);
+    let output_address = local_output_address
+        .map(ToOwned::to_owned)
+        .unwrap_or(allocate_tcp_address(local_host).await?);
 
     let mut input_socket = RouterSocket::new();
     input_socket.bind(&input_address).await?;

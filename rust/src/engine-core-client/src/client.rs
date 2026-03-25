@@ -62,12 +62,26 @@ pub struct EngineCoreClient {
 impl EngineCoreClient {
     /// Connect to an already running Python engine and complete the startup handshake.
     pub async fn connect(config: EngineCoreClientConfig) -> Result<Self> {
+        Self::connect_with_input_output_addresses(config, None, None).await
+    }
+
+    /// Connect to an already running Python engine and complete the startup handshake, while
+    /// allowing the caller to specify explicit local input/output addresses instead of allocating
+    /// TCP ports on `local_host`.
+    pub async fn connect_with_input_output_addresses(
+        config: EngineCoreClientConfig,
+        local_input_address: Option<String>,
+        local_output_address: Option<String>,
+    ) -> Result<Self> {
         let connected = transport::connect(
             &config.handshake_address,
             &config.local_host,
+            local_input_address.as_deref(),
+            local_output_address.as_deref(),
             config.ready_timeout,
         )
         .await?;
+
         Self::from_connected(config, connected)
     }
 
