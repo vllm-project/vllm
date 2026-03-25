@@ -240,10 +240,10 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer, has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
     TORCH_DTYPE_TO_KV_CACHE_STR,
     direct_register_custom_op,
     is_quantized_kv_cache,
-    kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -837,7 +837,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype)
+        kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.kv_cache_dtype]
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,

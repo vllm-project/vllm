@@ -108,9 +108,9 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.platform_utils import is_pin_memory_available, num_compute_units
 from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
     get_dtype_size,
     is_quantized_kv_cache,
-    kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -414,7 +414,7 @@ class GPUModelRunner(
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
 
-        self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(cache_config.cache_dtype)
+        self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         self.is_pooling_model = model_config.runner_type == "pooling"
         self.enable_prompt_embeds = model_config.enable_prompt_embeds

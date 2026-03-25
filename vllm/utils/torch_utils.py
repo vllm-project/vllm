@@ -351,10 +351,6 @@ def resolve_kv_cache_dtype_string(
     return TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype]
 
 
-def kv_cache_dtype_str_to_dtype(kv_cache_dtype: str) -> torch.dtype:
-    return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
-
-
 def set_random_seed(seed: int | None) -> None:
     if seed is not None:
         random.seed(seed)

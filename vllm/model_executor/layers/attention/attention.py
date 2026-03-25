@@ -25,9 +25,9 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
     TORCH_DTYPE_TO_KV_CACHE_STR,
     direct_register_custom_op,
-    kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -241,7 +241,7 @@ class Attention(nn.Module, AttentionLayerBase):
             and kv_cache_scheme.get("strategy") == "attn_head"
         )
 
-        self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(kv_cache_dtype)
+        self.kv_cache_torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
         self.kv_cache_dtype = kv_cache_dtype
         self.calculate_kv_scales = calculate_kv_scales
         if num_kv_heads is None:

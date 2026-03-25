@@ -24,8 +24,8 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
     TORCH_DTYPE_TO_KV_CACHE_STR,
-    kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -268,7 +268,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
             "CacheOnlyAttentionLayer doesn't currently support quantized kv cache but"
             f" kv cache dtype was set to {kv_cache_dtype}"
         )
-        self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(kv_cache_dtype)
+        self.kv_cache_torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
 
         # Initialize KV cache quantization attributes
         set_default_quant_scales(self, register_buffer=True)
