@@ -345,6 +345,125 @@ direct_register_custom_op(
 )
 
 
+@triton.jit
+def _fused_rmsnorm_fp8_quant_kernel(
+    x_ptr,
+    weight_ptr,
+    out_ptr,
+    scale_ptr,
+    hidden_dim,
+    batch_size,
+    num_groups,
+    eps,
+    fp8_min,
+    fp8_max,
+    min_scale,
+    GROUP_SIZE: tl.constexpr,
+):
+    """Fused RMSNorm + per-block FP8 quantization in a single kernel.
+
+    Two-pass algorithm:
+      Pass 1: Read x, compute variance = mean(x^2) per row
+      Pass 2: Read x again (L1 cache hit), normalize (x * rsqrt(var+eps) * weight),
+              per-group quantize (amax, scale, fp8 cast)
+
+    Column-major scales: stores into [num_groups, batch_size] contiguous
+    tensor, which equals [batch_size, num_groups] col-major via .t() view.
+    """
+    pid = tl.program_id(0)
+
+    sum_sq = 0.0
+    for g in range(num_groups):
+        offs = tl.arange(0, GROUP_SIZE)
+        idx = pid.to(tl.int64) * hidden_dim + g * GROUP_SIZE + offs
+        x = tl.load(x_ptr + idx).to(tl.float32)
+        sum_sq += tl.sum(x * x)
+
+    inv_rms = tl.math.rsqrt(sum_sq / hidden_dim + eps)
+
+    for g in range(num_groups):
+        offs = tl.arange(0, GROUP_SIZE)
+        idx = pid.to(tl.int64) * hidden_dim + g * GROUP_SIZE + offs
+
+        x = tl.load(x_ptr + idx).to(tl.float32)
+        w = tl.load(weight_ptr + g * GROUP_SIZE + offs).to(tl.float32)
+
+        x_norm = x * inv_rms * w
+
+        amax = tl.max(tl.abs(x_norm))
+        scale = tl.maximum(amax / fp8_max, min_scale)
+
+        x_q = tl.clamp(x_norm / scale, fp8_min, fp8_max)
+        x_q = x_q.to(out_ptr.dtype.element_ty)
+
+        tl.store(out_ptr + idx, x_q)
+        tl.store(scale_ptr + g * batch_size + pid, scale)
+
+
+def _fused_rmsnorm_fp8_quant_impl(
+    x: torch.Tensor,
+    norm_weight: torch.Tensor,
+    eps: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    fp8_dtype = current_platform.fp8_dtype()
+    fp8_max = torch.finfo(fp8_dtype).max
+    fp8_min = -fp8_max
+    min_scale = 1.0 / (fp8_max * 512.0)
+
+    batch_size = x.shape[0]
+    hidden_dim = x.shape[-1]
+    num_groups = hidden_dim // group_size
+
+    x_quant = torch.empty_like(x, dtype=fp8_dtype)
+    scales = torch.empty(
+        num_groups, batch_size, device=x.device, dtype=torch.float32
+    )
+
+    grid = (batch_size,)
+    _fused_rmsnorm_fp8_quant_kernel[grid](
+        x,
+        norm_weight,
+        x_quant,
+        scales,
+        hidden_dim,
+        batch_size,
+        num_groups,
+        eps,
+        fp8_min,
+        fp8_max,
+        min_scale,
+        GROUP_SIZE=group_size,
+    )
+
+    return x_quant, scales.t()
+
+
+def _fused_rmsnorm_fp8_quant_fake(
+    x: torch.Tensor,
+    norm_weight: torch.Tensor,
+    eps: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    fp8_dtype = current_platform.fp8_dtype()
+    batch_size = x.shape[0]
+    hidden_dim = x.shape[-1]
+    num_groups = hidden_dim // group_size
+    x_quant = torch.empty_like(x, dtype=fp8_dtype)
+    scales = torch.empty(
+        num_groups, batch_size, device=x.device, dtype=torch.float32
+    ).t()
+    return x_quant, scales
+
+
+direct_register_custom_op(
+    op_name="fused_rmsnorm_fp8_quant",
+    op_func=_fused_rmsnorm_fp8_quant_impl,
+    mutates_args=[],
+    fake_impl=_fused_rmsnorm_fp8_quant_fake,
+)
+
+
 # TODO fix ROCm->Triton custom path:
 #  https://github.com/vllm-project/vllm/issues/14397
 class W8A8BlockFp8LinearOp:
@@ -367,6 +486,24 @@ class W8A8BlockFp8LinearOp:
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
         self.is_flashinfer_supported = is_flashinfer_fp8_blockscale_gemm_supported()
 
+        # When True, use pure aten ops for input quantization instead of
+        # the QuantFP8 CustomOp. This allows Inductor to see through the
+        # quant ops and fuse them with a preceding RMSNorm.
+        # Only set True for norm-adjacent linear layers.
+        self.use_native_quant = False
+
+        # When set, the fused Triton kernel is used to combine RMSNorm +
+        # FP8 quant into a single kernel, eliminating the intermediate
+        # DRAM round-trip between norm and quant.
+        self.norm_weight: torch.Tensor | None = None
+        self.norm_eps: float | None = None
+
+        _FP8_DTYPE = current_platform.fp8_dtype()
+        self._FP8_MAX = torch.finfo(_FP8_DTYPE).max
+        self._FP8_MIN = -self._FP8_MAX
+        self._FP8_MIN_SCALING_FACTOR = 1.0 / (self._FP8_MAX * 512.0)
+        self._FP8_DTYPE = _FP8_DTYPE
+
         # Get the correct blockscale mul and input quant operations.
         # We can't use _dispatch_w8a8_blockscale_op to figure out if we want
         # to use deepgemm because we don't know the shape of weights (and
@@ -387,6 +524,51 @@ class W8A8BlockFp8LinearOp:
             if self.is_deep_gemm_supported
             else None
         )
+
+    def _quantize_input_native(
+        self, x: torch.Tensor, column_major_scales: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pure aten ops for group FP8 quantization.
+
+        When used instead of QuantFP8 CustomOp, Inductor can see these ops
+        and fuse them with a preceding decomposed RMSNorm.
+
+        Column-major scales are produced without .contiguous() by computing
+        amax on a transposed view: [B,G,128] -> permute(1,0,2) -> [G,B,128]
+        -> amax(dim=-1) -> [G,B] contiguous = [B,G] col-major via .t() view.
+        """
+        group_size = self.act_quant_group_shape.col
+        orig_shape = x.shape
+        hidden_dim = x.shape[-1]
+        num_groups = hidden_dim // group_size
+
+        x_grouped = x.reshape(-1, num_groups, group_size).float()
+
+        if column_major_scales:
+            x_for_scale = x_grouped.permute(1, 0, 2)
+            absmax = x_for_scale.abs().amax(dim=-1, keepdim=True)
+            scales = (absmax / self._FP8_MAX).clamp(
+                min=self._FP8_MIN_SCALING_FACTOR
+            )
+            x_quant = (x_grouped / scales.permute(1, 0, 2)).clamp(
+                self._FP8_MIN, self._FP8_MAX
+            ).to(self._FP8_DTYPE)
+            x_quant = x_quant.reshape(orig_shape)
+            scales_out = scales.squeeze(-1).t()
+        else:
+            absmax = x_grouped.abs().amax(dim=-1, keepdim=True)
+            scales = (absmax / self._FP8_MAX).clamp(
+                min=self._FP8_MIN_SCALING_FACTOR
+            )
+            x_quant = (x_grouped / scales).clamp(
+                self._FP8_MIN, self._FP8_MAX
+            ).to(self._FP8_DTYPE)
+            x_quant = x_quant.reshape(orig_shape)
+            scales_out = scales.squeeze(-1).reshape(
+                orig_shape[:-1] + (num_groups,)
+            )
+
+        return x_quant, scales_out
 
     def apply(
         self,
@@ -428,8 +610,15 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
-        assert self.deepgemm_input_quant_op is not None
-        q_input, input_scale = self.deepgemm_input_quant_op(input_2d)
+        if self.use_native_quant and self.norm_weight is not None:
+            q_input, input_scale = torch.ops.vllm.fused_rmsnorm_fp8_quant(
+                input_2d, self.norm_weight, self.norm_eps,
+                self.act_quant_group_shape.col)
+        elif self.use_native_quant:
+            q_input, input_scale = self._quantize_input_native(input_2d)
+        else:
+            assert self.deepgemm_input_quant_op is not None
+            q_input, input_scale = self.deepgemm_input_quant_op(input_2d)
         output = torch.empty(
             (q_input.shape[0], weight.shape[0]),
             dtype=torch.bfloat16,
@@ -449,7 +638,14 @@ class W8A8BlockFp8LinearOp:
     ) -> torch.Tensor:
         assert input_scale is None
         assert self.input_quant_op is not None
-        q_input, input_scale = self.input_quant_op(input_2d)
+        if self.use_native_quant and self.norm_weight is not None:
+            q_input, input_scale = torch.ops.vllm.fused_rmsnorm_fp8_quant(
+                input_2d, self.norm_weight, self.norm_eps,
+                self.act_quant_group_shape.col)
+        elif self.use_native_quant:
+            q_input, input_scale = self._quantize_input_native(input_2d)
+        else:
+            q_input, input_scale = self.input_quant_op(input_2d)
         if self.is_hopper:
             return torch.ops.vllm.padded_cutlass(
                 q_input,
@@ -513,7 +709,14 @@ class W8A8BlockFp8LinearOp:
     ) -> torch.Tensor:
         assert input_scale is None
         assert self.input_quant_op is not None
-        q_input, input_scale = self.input_quant_op(input_2d)
+        if self.use_native_quant and self.norm_weight is not None:
+            q_input, input_scale = torch.ops.vllm.fused_rmsnorm_fp8_quant(
+                input_2d, self.norm_weight, self.norm_eps,
+                self.act_quant_group_shape.col)
+        elif self.use_native_quant:
+            q_input, input_scale = self._quantize_input_native(input_2d)
+        else:
+            q_input, input_scale = self.input_quant_op(input_2d)
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
             q_input,
             weight,

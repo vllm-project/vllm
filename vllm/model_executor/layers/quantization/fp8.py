@@ -3,6 +3,8 @@
 
 from typing import TYPE_CHECKING, Any
 
+import os
+
 import torch
 from torch.nn import Module
 from torch.utils._python_dispatch import TorchDispatchMode
@@ -185,6 +187,18 @@ class Fp8Config(QuantizationConfig):
             else:
                 offline_method = Fp8LinearMethod(self)
                 offline_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+                # Enable native aten quant for norm-adjacent linears.
+                # Only q_b_proj benefits from fused RMSNorm+FP8Quant kernel.
+                # Other linears (qkv_a, kv_b) keep CUDA CustomOp because
+                # native quant (triton_red + triton_per) is 2 kernels vs
+                # 1 CUDA kernel, net slower.
+                if (
+                    os.environ.get("VLLM_SKIP_NATIVE_QUANT", "0") != "1"
+                    and offline_method.block_quant
+                    and hasattr(offline_method, "w8a8_block_fp8_linear")
+                    and "q_b_proj" in prefix
+                ):
+                    offline_method.w8a8_block_fp8_linear.use_native_quant = True
                 return offline_method
         elif isinstance(layer, FusedMoE):
             if is_layer_skipped(
