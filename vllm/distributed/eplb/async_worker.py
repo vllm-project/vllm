@@ -61,6 +61,7 @@ def run_rebalance_experts(
     model_state: "EplbModelState",
     eplb_state: "EplbState",
     physical_to_logical_map_cpu: torch.Tensor,
+    cuda_stream: torch.cuda.Stream,
 ) -> torch.Tensor:
     assert model_state.eplb_stats is not None
     eplb_stats = model_state.eplb_stats
@@ -72,7 +73,8 @@ def run_rebalance_experts(
     model_state.window_ready_event = None
 
     # Move the global expert load window to CPU for computation.
-    global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
+    with torch.cuda.stream(cuda_stream):
+        global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
     # Compute new expert mappings for the model
     new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
         global_expert_load_window,
@@ -94,7 +96,7 @@ async def transfer_run_periodically(
     is_profile: bool = False,
 ) -> None:
     while True:
-        await asyncio.to_thread(state.rearrange_event.wait)
+        state.rearrange_event.wait()
         logger.info("async worker woke up for EPLB transfer")
 
         assert state.is_async
@@ -103,11 +105,11 @@ async def transfer_run_periodically(
             current_num_layers = model_state.model.num_moe_layers
 
             # Snapshot the physical_to_logical_map and copy it to CPU
-            with model_state.map_lock:
+            with torch.cuda.stream(cuda_stream):
                 physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
 
             new_physical_to_logical_map = run_rebalance_experts(
-                model_state, state, physical_to_logical_map_cpu
+                model_state, state, physical_to_logical_map_cpu, cuda_stream
             )
             logger.info(
                 "Async worker computed new indices for model %s",
@@ -149,5 +151,3 @@ async def transfer_run_periodically(
 
                 consumed_event.wait(stream=cuda_stream)
                 layer_idx += 1
-
-        state.rearrange_event.clear()

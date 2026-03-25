@@ -45,6 +45,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .async_worker import start_async_worker
+from .eplb_utils import EPLBEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     AsyncEPLBLayerResult,
@@ -171,11 +172,6 @@ class EplbModelState:
     """
     The buffer to store the expert weights during transfer.
     """
-    map_lock: threading.Lock
-    """
-    Protects physical_to_logical_map. Acquired by the async worker when copying the map
-    to CPU and by the main thread when updating the map with the result from rearrange.
-    """
     window_ready_event: torch.cuda.Event | None
     """
     CUDA event recorded after all-reduce and clone on the main thread.
@@ -245,7 +241,7 @@ class EplbState:
         """
         The flag indicates whether the EPLB is running in async mode.
         """
-        self.rearrange_event = threading.Event()
+        self.rearrange_event: EPLBEvent = EPLBEvent()
         """
         Event to signal when a new rearrangement is needed for the async thread.
         """
@@ -443,7 +439,6 @@ class EplbState:
             model_name=model_config.model,
             model=model,
             expert_buffer=expert_buffer,
-            map_lock=threading.Lock(),
             window_ready_event=None,
             rebalanced=False,
             eplb_stats=None,
@@ -764,7 +759,7 @@ class EplbState:
                 eplb_model_state.rebalanced = True
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
-            self.rearrange_event.set()
+            self.rearrange_event.record()
         return None
 
     def start_async_loop(
@@ -786,16 +781,15 @@ class EplbState:
         layer = result.layer_idx
 
         new_physical = result.new_physical_to_logical_map
-        with model_state.map_lock:
-            target_device = model_state.physical_to_logical_map.device
-            # If the number of physical experts has changed, then the new map needs to
-            # be copied synchronously to avoid a race condition with the async worker
-            if model_state.physical_to_logical_map.shape[1] != new_physical.shape[1]:
-                model_state.physical_to_logical_map = new_physical.to(target_device)
-            else:
-                model_state.physical_to_logical_map[layer].copy_(
-                    new_physical[layer].to(target_device, non_blocking=True)
-                )
+        target_device = model_state.physical_to_logical_map.device
+        # If the number of physical experts has changed, then the new map needs to
+        # be copied synchronously to avoid a race condition with the async worker
+        if model_state.physical_to_logical_map.shape[1] != new_physical.shape[1]:
+            model_state.physical_to_logical_map = new_physical.to(target_device)
+        else:
+            model_state.physical_to_logical_map[layer].copy_(
+                new_physical[layer].to(target_device, non_blocking=True)
+            )
 
         num_logical_experts = model_state.logical_to_physical_map.shape[1]
         new_logical, new_replica_count = compute_logical_maps(
