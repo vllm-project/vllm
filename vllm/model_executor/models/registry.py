@@ -525,9 +525,9 @@ _MULTIMODAL_MODELS = {
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),
     # [Encoder-decoder]
-    "CohereASRForConditionalGeneration": (
+    "CohereAsrForConditionalGeneration": (
         "cohere_asr",
-        "CohereASRForConditionalGeneration",
+        "CohereAsrForConditionalGeneration",
     ),
     "NemotronParseForConditionalGeneration": (
         "nemotron_parse",
