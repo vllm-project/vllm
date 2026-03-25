@@ -3160,8 +3160,8 @@ class GPUModelRunner(
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+        dispatch_cudagraph = lambda num_tokens, disable_full: (
+            self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
@@ -3383,7 +3383,11 @@ class GPUModelRunner(
             # Update persistent batch states.
             self._update_states(scheduler_output)
 
-            if has_ec_transfer() and get_ec_transfer().is_producer:
+            if (
+                has_ec_transfer()
+                and get_ec_transfer().is_producer
+                and not get_ec_transfer().is_consumer
+            ):
                 with self.maybe_get_ec_connector_output(
                     scheduler_output,
                     encoder_cache=self.encoder_cache,
@@ -6217,7 +6221,11 @@ class GPUModelRunner(
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
-        if has_ec_transfer() and get_ec_transfer().is_producer:
+        if (
+            has_ec_transfer()
+            and get_ec_transfer().is_producer
+            and not get_ec_transfer().is_consumer
+        ):
             return {}
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         layer_type = cast(type[Any], AttentionLayerBase)

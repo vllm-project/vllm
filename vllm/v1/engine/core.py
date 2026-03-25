@@ -190,6 +190,7 @@ class EngineCore:
         self.is_ec_producer = (
             vllm_config.ec_transfer_config is not None
             and vllm_config.ec_transfer_config.is_ec_producer
+            and not vllm_config.ec_transfer_config.is_ec_consumer
         )
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
@@ -1119,8 +1120,9 @@ class EngineCoreProc(EngineCore):
             client_idx, call_id, method_name, args = request
             output = UtilityOutput(call_id)
             # Lazily look-up utility method so that failure will be handled/returned.
-            get_result = lambda: (method := getattr(self, method_name)) and method(
-                *self._convert_msgspec_args(method, args)
+            get_result = lambda: (
+                (method := getattr(self, method_name))
+                and method(*self._convert_msgspec_args(method, args))
             )
             enqueue_output = lambda out: self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=out))
