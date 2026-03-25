@@ -166,6 +166,7 @@ class RocmAttentionBackend(AttentionBackend):
     ]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
         "fp8",
         "fp8_e4m3",
@@ -194,7 +195,10 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_sink(cls) -> bool:
-        return True
+        # ROCM custom attention kernel does not support sinks.
+        # Callink this backend with sinks will cause it to fall back to the Triton
+        # kernel, which is less efficient than the proper triton backends.
+        return False
 
     forward_includes_kv_cache_update: bool = False
 

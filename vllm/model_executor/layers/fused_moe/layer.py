@@ -52,7 +52,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -218,7 +217,6 @@ def maybe_roundup_hidden_size(
     moe_parallel_config: FusedMoEParallelConfig,
     is_lora_enabled: bool,
     model_type: str | None,
-    is_mxfp4_quant: bool,
 ) -> int:
     """
     Given layer hidden size and MoE configurations, round up hidden_size
@@ -232,7 +230,6 @@ def maybe_roundup_hidden_size(
             is used in the case of mxfp4 quantization in selecting the
             MxFP4Backend.
         model_type: for checking if gpt-oss
-        is_mxfp4_quant: whether the layer is quantized with mxfp4
 
     Return:
         Rounded up hidden_size if rounding up is required based on the configs.
@@ -245,28 +242,6 @@ def maybe_roundup_hidden_size(
     hidden_size = maybe_roundup_layer_hidden_size(
         hidden_size, act_dtype, moe_parallel_config
     )
-
-    # we are padding globally so EP buffer allocation works
-    if model_type == "gpt_oss" and is_mxfp4_quant:
-        from vllm.model_executor.layers.quantization.mxfp4 import (
-            Mxfp4Backend,
-            get_mxfp4_backend,
-        )
-
-        current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
-
-        if (
-            current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-        ):
-            hidden_size = round_up(hidden_size, 128)
-        elif (
-            current_platform.is_rocm()
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
-            or current_mxfp4_backend == Mxfp4Backend.MARLIN
-        ):
-            hidden_size = round_up(hidden_size, 256)
 
     return hidden_size
 
@@ -504,6 +479,8 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = MoEActivation.from_str(activation)
 
+        # TODO(bnell): we should not have to create a router if the kernel is
+        # monolithic.
         self.router = create_fused_moe_router(
             top_k=top_k,
             global_num_experts=self.global_num_experts,
@@ -538,9 +515,6 @@ class FusedMoE(CustomOp):
             moe_parallel_config=self.moe_parallel_config,
             is_lora_enabled=vllm_config.lora_config is not None,
             model_type=self.model_type,
-            is_mxfp4_quant=(
-                quant_config is not None and quant_config.is_mxfp4_quant(prefix, self)
-            ),
         )
         self.hidden_size = hidden_size
 
@@ -593,6 +567,13 @@ class FusedMoE(CustomOp):
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
+        # Quant methods (e.g. Mxfp4MoEMethod) may round up hidden_dim
+        # and intermediate_size in moe_config during __init__. Sync
+        # self.hidden_size so downstream consumers (e.g. LoRA) see the
+        # padded value.
+        if self.moe_config.hidden_dim != self.hidden_size:
+            self.hidden_size = self.moe_config.hidden_dim
+
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(
                 "is_act_and_mul=False is supported only for CUDA and ROCm for now"
@@ -612,7 +593,7 @@ class FusedMoE(CustomOp):
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
-            "hidden_size": hidden_size,
+            "hidden_size": self.hidden_size,
             "unpadded_hidden_size": unpadded_hidden_size,
             "intermediate_size_per_partition": self.intermediate_size_per_partition,
             "params_dtype": params_dtype,
@@ -1421,18 +1402,22 @@ class FusedMoE(CustomOp):
         weights = list(self.named_parameters())
         weights = [(name, _maybe_make_contiguous(name, p)) for name, p in weights]
 
+        # `w13_input_scale` and `w2_input_scale` are global per-tensor
+        # activation scales shared across all experts (e.g. NVFP4).
+        # They are broadcast views (stride 0) from .expand() and are
+        # not actual expert weights, so exclude them from EPLB.
+        NON_EXPERT_WEIGHTS = {
+            "e_score_correction_bias",
+            "w13_input_scale",
+            "w2_input_scale",
+        }
+
         assert all(
             weight.is_contiguous()
             for name, weight in weights
             if not (name.startswith("_shared_experts.") or name.startswith("_gate."))
+            and name not in NON_EXPERT_WEIGHTS
         )
-
-        # Filter out the non-expert weights.
-        # `e_score_correction_bias` is a bias for each logical expert,
-        # with shape (num_logical_experts,), not an expert weight.
-        NON_EXPERT_WEIGHTS = {
-            "e_score_correction_bias",
-        }
 
         return [
             weight.view(self.local_num_experts, -1)
