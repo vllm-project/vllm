@@ -202,6 +202,7 @@ class MoERunnerBase(MoERunner):
         self.moe_config = moe_config
         self.router = router
         self.routed_input_transform = routed_input_transform
+        self.routed_output_transform = routed_output_transform
         self.gate = gate
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
@@ -213,7 +214,6 @@ class MoERunnerBase(MoERunner):
         self._quant_method = quant_method
         self.enable_dbo = enable_dbo
         self.enable_eplb = moe_config.moe_parallel_config.enable_eplb
-        self.routed_output_transform = routed_output_transform
         self.apply_scale_to_output = (
             apply_scale_to_output and routed_scaling_factor != 1.0
         )
@@ -256,9 +256,6 @@ class MoERunnerBase(MoERunner):
             if self._shared_experts is None
             else torch.ops.vllm.moe_forward_shared
         )
-
-    def is_internal_router(self) -> bool:
-        return self.gate is not None
 
     def apply_routed_input_transform(
         self, hidden_states: torch.Tensor
