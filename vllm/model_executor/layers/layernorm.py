@@ -242,7 +242,7 @@ class RMSNorm(CustomOp):
         """PyTorch-native implementation equivalent to forward()."""
         if residual is None:
             return ir.ops.rms_norm(
-                x, self.weight, self.variance_epsilon, self.variance_size_override
+                x, self.weight.data, self.variance_epsilon, self.variance_size_override
             )
 
         return self.forward_static(
@@ -262,7 +262,7 @@ class RMSNorm(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is None and not envs.VLLM_BATCH_INVARIANT:
             return ir.ops.rms_norm(
-                x, self.weight, self.variance_epsilon, self.variance_size_override
+                x, self.weight.data, self.variance_epsilon, self.variance_size_override
             )
 
         if self.variance_size_override is not None:
@@ -324,7 +324,7 @@ class RMSNorm(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is None and not envs.VLLM_BATCH_INVARIANT:
             return ir.ops.rms_norm(
-                x, self.weight, self.variance_epsilon, self.variance_size_override
+                x, self.weight.data, self.variance_epsilon, self.variance_size_override
             )
 
         if self.variance_size_override is not None:
