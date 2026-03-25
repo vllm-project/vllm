@@ -238,7 +238,7 @@ There are several levels of caches for multi-modal inputs:
 
 #### Cache Type
 
-You can set the type of cache that is being used via `mm_processor_cache_type`. According to the selected cache type, the conditions and maximum memory usage of the multi-modal input caches are as follows:
+You can set the type of cache that is being used via `mm_processor_cache_type`. A summary of each cache type is provided below:
 
 | Name | `mm_processor_cache_type` | Conditions | Levels | Max. Memory |
 | ---- | ------------------------- | ---------- | ------ | ----------- |
