@@ -70,8 +70,8 @@ class MarlinLinearKernel(MPLinearKernel):
         is_a_8bit = c.act_type is not None and c.act_type.itemsize == 1
 
         if is_a_8bit:
-            assert c.weight_type == scalar_types.uint4b8, (
-                "W8A8 is not supported by marlin kernel."
+            assert c.weight_type in (scalar_types.uint4b8, scalar_types.int4), (
+                "W4A8-INT8 marlin only supports uint4b8 or int4 weights."
             )
 
         if c.act_type == torch.float8_e4m3fn:
@@ -95,7 +95,18 @@ class MarlinLinearKernel(MPLinearKernel):
 
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
-            permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
+            if c.weight_type == scalar_types.int4:
+                # int-quantized format: [N, K] int8 (signed int4 in [-8, 7])
+                # pack 8 int4 values into one int32, then transpose to [K//8, N]
+                w = x.data
+                w_u4 = (w.to(torch.int32) + 8) & 0xF
+                w_u4 = w_u4.reshape(w.shape[0], w.shape[1] // 8, 8)
+                shifts = torch.arange(0, 32, 4, dtype=torch.int32, device=w.device)
+                packed = (w_u4 << shifts[None, None, :]).sum(dim=2).to(torch.int32)
+                x.data = packed.T.contiguous()
+            else:
+                permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
+
             x.data = ops.gptq_marlin_repack(
                 x.data.contiguous(),
                 perm=layer.g_idx_sort_indices,
@@ -179,6 +190,11 @@ class MarlinLinearKernel(MPLinearKernel):
         c = self.config
         w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
 
+
+        # Use uint4b8 at kernel invocation for signed int4 packed weights.
+        effective_wtype = (
+            scalar_types.uint4b8 if c.weight_type == scalar_types.int4 else c.weight_type
+        )
         # `process_weights_after_loading` will ensure w_zp and w_gidx are not
         #  None for marlin
 
@@ -190,7 +206,7 @@ class MarlinLinearKernel(MPLinearKernel):
             g_idx=w_gidx,  # type: ignore
             g_idx_sort_indices=layer.g_idx_sort_indices,
             workspace=self.workspace,
-            wtype=c.weight_type,
+            wtype=effective_wtype,
             input_size_per_partition=c.partition_weight_shape[0],
             output_size_per_partition=c.partition_weight_shape[1],
             is_k_full=self.is_k_full,

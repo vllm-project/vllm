@@ -96,8 +96,8 @@ class CompressedTensorsW4A8Int(CompressedTensorsScheme):
                 output_size_per_partition,
             ),
             weight_type=self.quant_type,
-            act_type=params_dtype,
-            group_size=effective_group_size,
+            act_type=torch.int8,
+            group_size=-1 if self.group_size == -1 else effective_group_size,
             zero_points=False,
             has_g_idx=False,
         )
