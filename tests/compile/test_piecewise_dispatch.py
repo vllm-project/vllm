@@ -9,9 +9,46 @@ requiring a full VllmConfig, FX graph, or GPU — making them fast and CI-safe.
 
 import types
 
-from vllm.compilation.backends import _SHAPE_CACHE_UNSET
 from vllm.compilation.piecewise_backend import PiecewiseBackend, RangeEntry
 from vllm.config.utils import Range
+
+# Upper bound for preallocated index mapping in tests.
+_TEST_MAX_TOKENS = 10000
+
+
+def _build_size_to_range_index(
+    compile_sizes: list[int] | None,
+    compile_ranges: list[Range],
+    max_tokens: int = _TEST_MAX_TOKENS,
+) -> tuple[list[int], int]:
+    """Build a (size_to_range_index, num_range_entries) pair.
+
+    Mirrors the eager mapping logic in VllmBackend.__init__.
+    """
+    next_idx = len(compile_ranges)
+    extra_size_indices: dict[int, int] = {}
+    if compile_sizes is not None:
+        for s in compile_sizes:
+            if isinstance(s, int):
+                r = Range(start=s, end=s)
+                if r not in compile_ranges and s not in extra_size_indices:
+                    extra_size_indices[s] = next_idx
+                    next_idx += 1
+
+    num_range_entries = next_idx
+
+    mapping: list[int] = [-1] * (max_tokens + 1)
+    for i in range(len(compile_ranges) - 1, -1, -1):
+        cr = compile_ranges[i]
+        lo = max(0, cr.start)
+        hi = min(max_tokens, cr.end)
+        for size in range(lo, hi + 1):
+            mapping[size] = i
+    for s, idx in extra_size_indices.items():
+        if 0 <= s <= max_tokens:
+            mapping[s] = idx
+
+    return mapping, num_range_entries
 
 
 def _make_backend(
@@ -24,13 +61,22 @@ def _make_backend(
     _find_range_for_shape, mirroring the population logic in __init__.
 
     Pass a shared *vllm_backend* stub (e.g. a SimpleNamespace with
-    _shape_dispatch_cache) to exercise the cross-instance cache path.
+    _size_to_range_index and _num_range_entries) to exercise the
+    cross-instance cache path.  When omitted, a local stub is created
+    automatically.
     """
     b = object.__new__(PiecewiseBackend)
     b.compile_sizes = compile_sizes
     b.compile_ranges = compile_ranges
-    if vllm_backend is not None:
-        b.vllm_backend = vllm_backend
+
+    # Auto-create a local index mapping when no shared backend is provided.
+    if vllm_backend is None:
+        mapping, num_entries = _build_size_to_range_index(compile_sizes, compile_ranges)
+        vllm_backend = types.SimpleNamespace(
+            _size_to_range_index=mapping,
+            _num_range_entries=num_entries,
+        )
+    b.vllm_backend = vllm_backend
 
     # Mirror __init__ range_entries population
     b.range_entries = {}
@@ -136,19 +182,21 @@ def test_multiple_non_overlapping_ranges():
 
 
 def test_shared_dispatch_cache_across_instances():
-    """All instances sharing the same vllm_backend share one dispatch cache.
+    """All instances sharing the same vllm_backend share one index mapping.
 
     Simulates the Llama3-70B scenario where 81 subgraph PiecewiseBackend
-    instances share a single VllmBackend.  The first instance to look up a
-    shape pays the O(#ranges) scan; subsequent ones get an O(1) list hit.
+    instances share a single VllmBackend.  Both backends use the same shared
+    _size_to_range_index list but have independent _range_index_to_entry arrays.
     """
-    # A minimal stub for VllmBackend — preallocated list large enough
-    # for all test shapes (max index used is 9999).
-    _MAX = 10000
-    fake_backend = types.SimpleNamespace(
-        _shape_dispatch_cache=[_SHAPE_CACHE_UNSET] * (_MAX + 1)
-    )
     ranges = [Range(1, 8), Range(9, 64), Range(65, 512)]
+
+    mapping, num_entries = _build_size_to_range_index(
+        compile_sizes=[], compile_ranges=ranges
+    )
+    fake_backend = types.SimpleNamespace(
+        _size_to_range_index=mapping,
+        _num_range_entries=num_entries,
+    )
 
     # Build two independent PiecewiseBackend instances that share fake_backend.
     b1 = _make_backend(
@@ -158,22 +206,21 @@ def test_shared_dispatch_cache_across_instances():
         compile_sizes=[], compile_ranges=ranges, vllm_backend=fake_backend
     )
 
-    # Both must reference the SAME underlying list.
-    assert b1._shape_dispatch_cache is b2._shape_dispatch_cache
+    # Both must reference the SAME underlying index list.
+    assert b1._size_to_range_index is b2._size_to_range_index
 
-    # b1 performs the range scan and populates the shared cache.
+    # But each has its own entry array (different RangeEntry objects).
+    assert b1._range_index_to_entry is not b2._range_index_to_entry
+
+    # Both dispatch shape 32 to the Range(9, 64) entry.
     entry1 = b1._find_range_for_shape(32)
     assert entry1 is not None
     assert entry1.compile_range == Range(9, 64)
-    assert fake_backend._shape_dispatch_cache[32] == Range(9, 64)  # cache written
 
-    # b2 sees the same shape: it gets an O(1) list hit, no scan.
     entry2 = b2._find_range_for_shape(32)
     assert entry2 is not None
     assert entry2.compile_range == Range(9, 64)
 
-    # A shape that matches no range is also cached (as None) after first scan.
-    none_entry = b1._find_range_for_shape(9999)
-    assert none_entry is None
-    assert fake_backend._shape_dispatch_cache[9999] is None  # cached as miss
+    # A shape that matches no range returns None.
+    assert b1._find_range_for_shape(9999) is None
     assert b2._find_range_for_shape(9999) is None
