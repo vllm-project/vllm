@@ -1259,12 +1259,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     )
                     new_key_cache = key_cache.view_as(k_cache_template)
                     new_value_cache = value_cache.view_as(v_cache_template)
-                    k_qscale_asm = (
+                    k_qscale = (
                         layer._k_scale
                         if attn_metadata.k_scale is None
                         else attn_metadata.k_scale
                     )
-                    v_qscale_asm = (
+                    v_qscale = (
                         layer._v_scale
                         if attn_metadata.v_scale is None
                         else attn_metadata.v_scale
@@ -1283,10 +1283,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
                             :num_decodes
                         ].stride(0),
                         scale=self.scale,
-                        K_QScale_hip=attn_metadata.k_scale if attn_metadata.k_scale is not None else layer._k_scale,
-                        V_QScale_hip=attn_metadata.v_scale if attn_metadata.v_scale is not None else layer._v_scale,
-                        K_QScale_asm=k_qscale_asm,
-                        V_QScale_asm=v_qscale_asm,
+                        K_QScale_hip=k_qscale,
+                        V_QScale_hip=v_qscale,
+                        K_QScale_asm=k_qscale,
+                        V_QScale_asm=v_qscale,
                         out_=output[:num_decode_tokens],
                         kv_cache_dtype=self.kv_cache_dtype,
                     )
