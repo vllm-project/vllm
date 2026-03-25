@@ -44,7 +44,69 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.scalar_type import ScalarType, scalar_types
+
+GPT_OSS_SM89_MOE_BLOCK_SIZE_M_SMALL_M = 64
+GPT_OSS_SM89_MOE_BLOCK_SIZE_M_LARGE_M = 32
+GPT_OSS_SM89_MOE_SMALL_M_THRESHOLD = 128
+
+
+def _use_gpt_oss_sm89_marlin_block_size_policy(
+    *,
+    num_experts: int,
+    topk: int,
+    hidden_size: int,
+    quant_type: ScalarType,
+    device_capability: DeviceCapability | None,
+) -> bool:
+    return (
+        device_capability == DeviceCapability(8, 9)
+        and num_experts == 32
+        and topk == 4
+        and hidden_size == 2880
+        and quant_type == scalar_types.float4_e2m1f
+    )
+
+
+def _choose_marlin_block_size_m(
+    *,
+    num_tokens: int,
+    num_experts: int,
+    topk: int,
+    hidden_size: int,
+    quant_type: ScalarType,
+    input_dtype: torch.dtype | None,
+    device_capability: DeviceCapability | None,
+) -> tuple[int, str]:
+    # GPT-OSS on SM89/L40S benefits from a larger block during tiny-M
+    # decode-like calls and a smaller block during prefill-like calls. Keep
+    # this narrow to the observed GPT-OSS MXFP4 MoE problem shape.
+    if _use_gpt_oss_sm89_marlin_block_size_policy(
+        num_experts=num_experts,
+        topk=topk,
+        hidden_size=hidden_size,
+        quant_type=quant_type,
+        device_capability=device_capability,
+    ):
+        if num_tokens <= GPT_OSS_SM89_MOE_SMALL_M_THRESHOLD:
+            return (
+                GPT_OSS_SM89_MOE_BLOCK_SIZE_M_SMALL_M,
+                "gpt_oss_sm89_decode_like",
+            )
+        return (
+            GPT_OSS_SM89_MOE_BLOCK_SIZE_M_LARGE_M,
+            "gpt_oss_sm89_prefill_like",
+        )
+
+    for block_size_m in [8, 16, 32, 48, 64]:
+        if num_tokens * topk / num_experts / block_size_m < 0.9:
+            break
+
+    if input_dtype is not None and input_dtype.itemsize == 1:
+        block_size_m = max(block_size_m, 16)
+
+    return block_size_m, "auto"
 
 
 def _fused_marlin_moe(
@@ -304,14 +366,19 @@ def fused_marlin_moe(
     assert num_bits in [4, 8]
     assert topk_weights.dtype == torch.float32
 
-    # M block size selection logic
-    # TODO: tune this further for specific models
-    for block_size_m in [8, 16, 32, 48, 64]:
-        if M * topk / E / block_size_m < 0.9:
-            break
-
-    if input_dtype is not None and input_dtype.itemsize == 1:
-        block_size_m = max(block_size_m, 16)
+    block_size_m, _ = _choose_marlin_block_size_m(
+        num_tokens=M,
+        num_experts=E,
+        topk=topk,
+        hidden_size=K,
+        quant_type=quant_type,
+        input_dtype=input_dtype,
+        device_capability=(
+            current_platform.get_device_capability()
+            if current_platform.is_cuda()
+            else None
+        ),
+    )
 
     if global_num_experts == -1:
         global_num_experts = E
