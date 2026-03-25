@@ -567,6 +567,13 @@ class FusedMoE(CustomOp):
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
+        # Quant methods (e.g. Mxfp4MoEMethod) may round up hidden_dim
+        # and intermediate_size in moe_config during __init__. Sync
+        # self.hidden_size so downstream consumers (e.g. LoRA) see the
+        # padded value.
+        if self.moe_config.hidden_dim != self.hidden_size:
+            self.hidden_size = self.moe_config.hidden_dim
+
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(
                 "is_act_and_mul=False is supported only for CUDA and ROCm for now"
@@ -586,7 +593,7 @@ class FusedMoE(CustomOp):
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
-            "hidden_size": hidden_size,
+            "hidden_size": self.hidden_size,
             "unpadded_hidden_size": unpadded_hidden_size,
             "intermediate_size_per_partition": self.intermediate_size_per_partition,
             "params_dtype": params_dtype,

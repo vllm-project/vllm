@@ -292,6 +292,8 @@ def rocm_aiter_fused_experts(
             doweight_stage1=apply_router_weight_on_input,
             num_local_tokens=num_local_tokens,
             output_dtype=output_dtype,
+            hidden_pad=quant_config.hidden_pad,
+            intermediate_pad=quant_config.intermediate_pad,
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
         )
@@ -332,7 +334,15 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             (kFp8StaticChannelSym, kFp8DynamicTokenSym),
             (kMxfp4Static, None),
         ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
+        if (weight_key, activation_key) not in SUPPORTED_W_A:
+            return False
+        # CK MXFP4 MoE kernels are only supported on gfx950.
+        if weight_key == kMxfp4Static:
+            from vllm.platforms.rocm import on_gfx950
+
+            if not on_gfx950():
+                return False
+        return True
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
