@@ -33,7 +33,7 @@ from vllm.v1.attention.ops.vit_attn_wrappers import (
 
 logger = init_logger(__name__)
 
-_, _FP8_MAX = get_fp8_min_max()  # Platform-aware: 448.0 (e4m3fn) or 240.0 (e4m3fnuz)
+_, _FP8_MAX = get_fp8_min_max()
 _FP8_AMAX_HISTORY_LEN = 16
 
 
@@ -41,11 +41,11 @@ _FP8_AMAX_HISTORY_LEN = 16
 def _load_fp8_scales_file(path: str | None) -> dict[str, dict[str, float]]:
     """Load per-layer FP8 Q/K/V scales from a JSON file. Results are cached.
 
-    Expected format (flat):
-        {"visual.blocks.0.attn": {"q": 0.012, "k": 0.045, "v": 0.078}, ...}
+    Expected format:
+        {"visual.blocks.0.attn": {"q": 224.0, "k": 198.0, "v": 210.0}, ...}
 
     Also accepts a nested "layers" wrapper:
-        {"layers": {"visual.blocks.0.attn": {"q": 0.012, ...}, ...}}
+        {"layers": {"visual.blocks.0.attn": {"q": 224.0, ...}, ...}}
 
     Keys "q_scale"/"k_scale"/"v_scale" are accepted as aliases.
     All scale values must be positive floats.
@@ -81,6 +81,32 @@ def _load_fp8_scales_file(path: str | None) -> dict[str, dict[str, float]]:
         "Loaded FP8 attention scales from %s (%d layers)", path, len(scales)
     )
     return scales
+
+
+_MIN_CUDNN_FP8 = 91701  # cuDNN >= 9.17.1 required for FP8 attention
+
+
+def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
+    """Check if FP8 ViT attention is supported on this platform.
+
+    Requires FlashInfer cuDNN backend and cuDNN >= 9.17.1.
+    """
+    try:
+        supported = current_platform.get_supported_vit_attn_backends()
+        if AttentionBackendEnum.FLASHINFER not in supported:
+            return False
+    except (ImportError, AttributeError):
+        return False
+
+    try:
+        import torch.backends.cudnn as cudnn
+
+        if cudnn.is_available() and cudnn.version() < _MIN_CUDNN_FP8:
+            return False
+    except (ImportError, AttributeError):
+        pass
+
+    return True
 
 
 # Batch buckets for cuDNN graph caching.
@@ -321,44 +347,17 @@ class MMEncoderAttention(CustomOp):
         self.fp8_quant: QuantFP8 | None = None
 
         if envs.VLLM_MM_ENCODER_FP8_ATTN:
-            if self.attn_backend != AttentionBackendEnum.FLASHINFER:
+            if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
                 raise ValueError(
                     "VLLM_MM_ENCODER_FP8_ATTN requires the FlashInfer "
-                    "cuDNN backend (FLASHINFER), but the current ViT "
-                    f"attention backend is {self.attn_backend}."
+                    "cuDNN backend with cuDNN >= 9.17.1. "
+                    "Try upgrading cuDNN (nvidia-cudnn-cu1x) via pip, "
+                    "e.g.: pip install -U nvidia-cudnn-cu13==9.18.1"
                 )
-            # cuDNN FP8 attention requires backend version >= 9.17.1
-            # (e.g., nvidia-cudnn-cu13 >= 9.18.1.3)
-            _min_cudnn = (9, 17, 1)
-            try:
-                import torch.backends.cudnn as cudnn
-
-                if cudnn.is_available():
-                    ver = cudnn.version()
-                    major = ver // 10000
-                    minor = (ver % 10000) // 100
-                    patch = ver % 100
-                    if (major, minor, patch) < _min_cudnn:
-                        raise ValueError(
-                            "VLLM_MM_ENCODER_FP8_ATTN requires cuDNN >= "
-                            f"{'.'.join(map(str, _min_cudnn))}, but the "
-                            f"current version is {major}.{minor}.{patch}."
-                        )
-            except ImportError:
-                pass
             self._init_fp8_attention(prefix)
 
     def _init_fp8_attention(self, layer_name: str) -> None:
-        """Initialize FP8 attention for this layer.
-
-        Scaling mode is determined by env vars:
-        - Scale file provided (VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH):
-          static (fixed) per-layer scales loaded from JSON.
-        - No scale file + VLLM_MM_ENCODER_FP8_DYNAMIC_SCALING=1:
-          dynamic scaling via circular amax history buffer.
-        - No scale file + dynamic scaling off (default):
-          static scale=1.0 (cast-only, no scaling).
-        """
+        """Initialize FP8 quantization state for this layer."""
         scale_path = envs.VLLM_MM_ENCODER_FP8_ATTN_SCALE_PATH
         all_scales = _load_fp8_scales_file(scale_path)
 
@@ -391,8 +390,7 @@ class MMEncoderAttention(CustomOp):
                 )
             init_scales = layer_scales
 
-        # Scale buffers: shape (1, 1, 1, 1) as required by cuDNN.
-        # With dynamic scaling these are updated every forward pass.
+        # Shape (1, 1, 1, 1) as required by cuDNN.
         for attr, key in (
             ("_fp8_q_scale", "q"),
             ("_fp8_k_scale", "k"),
@@ -404,7 +402,6 @@ class MMEncoderAttention(CustomOp):
             )
 
         # Circular amax history buffers for dynamic scaling.
-        # Non-persistent so they are not saved in state_dict / checkpoints.
         if self._fp8_dynamic_scale:
             for attr in ("_fp8_q_amax", "_fp8_k_amax", "_fp8_v_amax"):
                 self.register_buffer(
@@ -417,7 +414,6 @@ class MMEncoderAttention(CustomOp):
         self.fp8_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
         self.fp8_enabled = True
 
-        # With dynamic scaling the scale will change, so never skip scaling.
         self.skip_scale_q = not self._fp8_dynamic_scale and init_scales["q"] == 1.0
         self.skip_scale_k = not self._fp8_dynamic_scale and init_scales["k"] == 1.0
         self.skip_scale_v = not self._fp8_dynamic_scale and init_scales["v"] == 1.0
@@ -575,14 +571,13 @@ class MMEncoderAttention(CustomOp):
             if skip_scale:
                 return tensor.to(current_platform.fp8_dtype())
 
-            # QuantFP8 expects 2D: (total_tokens, num_heads * head_dim)
-            # Flatten all dims except the last two (H, D) into one.
-            total_tokens = tensor[..., 0, 0].numel()
+            # QuantFP8 expects 2D: flatten all dims except (H, D).
+            total_tokens = tensor.numel() // (tensor.shape[-1] * tensor.shape[-2])
             tensor_2d = tensor.reshape(total_tokens, -1)
             fp8_tensor, _ = self.fp8_quant(tensor_2d, scale=scale)
             return fp8_tensor.reshape(orig_shape)
 
-        # Fall back to Triton kernel for padding head_dim to a multiple of 16
+        # Triton kernel pads head_dim to a multiple of 16
         return quantize_fp8_pad_head_dim_triton(tensor, scale, skip_scale=skip_scale)
 
     @torch.no_grad()
@@ -656,7 +651,6 @@ class MMEncoderAttention(CustomOp):
             o_data_type=self.dtype if self.fp8_enabled else None,
         )
 
-        # Un-pad head dimension if it was padded during FP8 quantization
         if self.fp8_enabled and output.shape[-1] != self.head_size:
             output = output[..., : self.head_size].contiguous()
 

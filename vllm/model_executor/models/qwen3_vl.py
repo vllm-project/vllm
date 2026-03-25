@@ -367,15 +367,13 @@ class Qwen3_VisionTransformer(nn.Module):
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
 
-        # When FP8 attention is enabled, Q/K/V become independent contiguous
-        # tensors after quantization, so cu_seqlens must use the same stride
-        # for all three (no 3x V multiplier from the interleaved BF16 layout).
-        # If head_dim is not a multiple of 16, the padded size is larger.
-        self.fp8_vit_attn = envs.VLLM_MM_ENCODER_FP8_ATTN
-        if self.fp8_vit_attn:
-            self.fp8_padded_hidden_size = self.num_heads * round_up(head_dim, 16)
-        else:
-            self.fp8_padded_hidden_size = None
+        # FP8 attention: Q/K/V become independent contiguous tensors
+        # after quantization, so cu_seqlens uses uniform stride (no 3x V).
+        self.fp8_padded_hidden_size = (
+            self.num_heads * round_up(head_dim, 16)
+            if envs.VLLM_MM_ENCODER_FP8_ATTN
+            else None
+        )
 
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,

@@ -10,33 +10,8 @@ import torch
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     _FP8_AMAX_HISTORY_LEN,
     _FP8_MAX,
+    is_flashinfer_cudnn_fp8_prefill_attn_supported,
 )
-
-
-def _flashinfer_fp8_supported() -> bool:
-    """Check if FlashInfer cuDNN FP8 is supported on this platform."""
-    try:
-        from vllm.platforms import current_platform
-        from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
-        supported = current_platform.get_supported_vit_attn_backends()
-        if AttentionBackendEnum.FLASHINFER not in supported:
-            return False
-    except (ImportError, AttributeError):
-        return False
-
-    # cuDNN FP8 requires >= 9.17.1
-    try:
-        import torch.backends.cudnn as cudnn
-
-        if cudnn.is_available():
-            ver = cudnn.version()
-            if ver < 91701:
-                return False
-    except (ImportError, AttributeError):
-        pass
-
-    return True
 
 
 @pytest.fixture
@@ -47,7 +22,7 @@ def _make_attention(monkeypatch, default_vllm_config):
     from vllm.envs import disable_envs_cache
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-    if not _flashinfer_fp8_supported():
+    if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
         yield None
         return
 

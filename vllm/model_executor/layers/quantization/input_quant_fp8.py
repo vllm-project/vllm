@@ -20,6 +20,7 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
 )
+from vllm.utils.math_utils import round_up
 
 _FP8_DTYPE = current_platform.fp8_dtype()
 _FP8_MIN, _FP8_MAX = get_fp8_min_max()
@@ -119,7 +120,7 @@ def quantize_fp8_pad_head_dim_triton(
         tensor = tensor.view(-1, tensor.shape[-2], tensor.shape[-1])
     assert tensor.dim() == 3, f"Expected 3D input (S, H, D), got {tensor.dim()}D"
     S, H, D = tensor.shape
-    padded_head_dim = (D + 15) // 16 * 16
+    padded_head_dim = round_up(D, 16)
     out_dtype = current_platform.fp8_dtype()
     output = torch.empty(
         (S, H, padded_head_dim),
