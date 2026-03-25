@@ -369,7 +369,6 @@ def initialize_ray_cluster(
 
     # Prevalidate GPU requirements before Ray processing
     if current_platform.is_cuda() and parallel_config.world_size > 1:
-
         available_gpus = current_platform.device_count()
         if parallel_config.world_size > available_gpus:
             logger.warning(
