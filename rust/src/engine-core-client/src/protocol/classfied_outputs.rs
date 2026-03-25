@@ -55,16 +55,15 @@ pub enum ClassifiedEngineCoreOutputs {
 impl EngineCoreOutputs {
     /// Classify the raw wire message into a more semantic Rust enum.
     pub fn classify(self) -> ClassifiedEngineCoreOutputs {
-        let raw = self.clone();
         let has_request_payload = !self.outputs.is_empty()
             || self.scheduler_stats.is_some()
             || self.finished_requests.is_some();
 
         match (
             has_request_payload,
-            self.utility_output,
-            self.wave_complete,
-            self.start_wave,
+            &self.utility_output,
+            &self.wave_complete,
+            &self.start_wave,
         ) {
             (true, None, None, None) => {
                 ClassifiedEngineCoreOutputs::RequestBatch(RequestBatchOutputs {
@@ -75,28 +74,28 @@ impl EngineCoreOutputs {
                     finished_requests: self.finished_requests,
                 })
             }
-            (false, Some(utility_output), None, None) => {
+            (false, Some(_), None, None) => {
                 ClassifiedEngineCoreOutputs::Utility(UtilityCallOutput {
                     engine_index: self.engine_index,
                     timestamp: self.timestamp,
-                    output: utility_output,
+                    output: self.utility_output.unwrap(),
                 })
             }
-            (false, None, Some(wave), None) => {
+            (false, None, Some(_), None) => {
                 ClassifiedEngineCoreOutputs::Other(OtherEngineCoreOutputs::DpControl {
                     engine_index: self.engine_index,
                     timestamp: self.timestamp,
-                    control: DpControlMessage::WaveComplete(wave),
+                    control: DpControlMessage::WaveComplete(self.wave_complete.unwrap()),
                 })
             }
-            (false, None, None, Some(wave)) => {
+            (false, None, None, Some(_)) => {
                 ClassifiedEngineCoreOutputs::Other(OtherEngineCoreOutputs::DpControl {
                     engine_index: self.engine_index,
                     timestamp: self.timestamp,
-                    control: DpControlMessage::StartWave(wave),
+                    control: DpControlMessage::StartWave(self.start_wave.unwrap()),
                 })
             }
-            _ => ClassifiedEngineCoreOutputs::Other(OtherEngineCoreOutputs::Raw(raw)),
+            _ => ClassifiedEngineCoreOutputs::Other(OtherEngineCoreOutputs::Raw(self)),
         }
     }
 }

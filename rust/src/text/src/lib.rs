@@ -7,6 +7,8 @@
 //! prompt text handling, tokenizer/model loading, incremental detokenization,
 //! and the thin generate-facing backend interface live here.
 
+use std::mem::take;
+
 pub use backend::{DynTextBackend, SamplingHints, TextBackend};
 pub use error::{Error, Result};
 use futures::Stream;
@@ -68,14 +70,14 @@ impl TextLlm {
     }
 
     /// Tokenize if needed, lower to a generate request, and stream incrementally decoded text.
-    pub async fn generate(&self, request: TextRequest) -> Result<impl TextOutputStream> {
+    pub async fn generate(&self, mut request: TextRequest) -> Result<impl TextOutputStream> {
         request.validate()?;
 
-        let prompt_token_ids = match &request.prompt {
-            Prompt::Text(text) => self.backend.encode(text)?,
+        let prompt_token_ids = match take(&mut request.prompt) {
+            Prompt::Text(text) => self.backend.encode(&text)?,
             // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
             // and infra workloads bypass chat rendering and tokenizer overhead entirely.
-            Prompt::TokenIds(token_ids) => token_ids.clone(),
+            Prompt::TokenIds(token_ids) => token_ids,
         };
 
         let mut sampling_hints = self.backend.sampling_hints()?;
@@ -85,10 +87,10 @@ impl TextLlm {
         let prepared = lower_text_request(request, prompt_token_ids, sampling_hints)?;
         let raw_stream = self.llm.generate(prepared.generate_request).await?;
         let decoded_stream = output::decoded_text_event_stream(
-            prepared.text_request.request_id.clone(),
+            prepared.text_request.request_id,
             self.backend.clone(),
             raw_stream,
-            prepared.text_request.decode_options.clone(),
+            prepared.text_request.decode_options,
         );
 
         Ok(decoded_stream)

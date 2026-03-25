@@ -16,6 +16,12 @@ pub enum Prompt {
     TokenIds(Vec<u32>),
 }
 
+impl Default for Prompt {
+    fn default() -> Self {
+        Self::Text(String::new()) // placeholder
+    }
+}
+
 /// User-facing sampling parameters accepted by `vllm-text`.
 ///
 /// This intentionally keeps only the subset that the current Rust text layer

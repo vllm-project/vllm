@@ -128,10 +128,9 @@ impl Drop for EngineCoreOutputStream {
             return;
         }
 
-        let request_id = self.request_id.clone();
-        if self.abort_tx.send(request_id.clone()).is_err() {
+        if self.abort_tx.send(self.request_id.clone()).is_err() {
             warn!(
-                request_id,
+                request_id = self.request_id,
                 "auto-abort worker already shut down; skip auto-abort"
             );
         }
