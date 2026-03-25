@@ -33,6 +33,7 @@ def to_bytes(y, sr):
     buffer.seek(0)
     return buffer
 
+# not all models have a normalizer so use the one from whisper as a standard option
 normalizer_model_info = HF_EXAMPLE_MODELS.find_hf_info("openai/whisper-large-v3")
 normalizer_tokenizer = get_tokenizer(
     "openai/whisper-large-v3",
