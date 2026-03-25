@@ -56,9 +56,7 @@ class Llama3JsonToolParser(ToolParser):
             str
         ] = []  # map what has been streamed for each tool so far to a list
         self.bot_token = "<|python_tag|>"
-        self.bot_token_id = tokenizer.encode(self.bot_token, add_special_tokens=False)[
-            0
-        ]
+        self.bot_token_id = self._cached_encode(self.bot_token)[0]
         # Simple regex to find opening braces - we'll use JSON decoder for parsing
         # This handles arbitrary nesting depth correctly
         self.tool_call_start_regex = re.compile(r"\{")
