@@ -1098,7 +1098,6 @@ def dflash_config():
         gpu_memory_utilization=0.85,
         enforce_eager=False,
         disable_log_stats=False,
-        attention_config={"backend": "FLASH_ATTN"},  # Required for non-causal attention
     )
 
 
