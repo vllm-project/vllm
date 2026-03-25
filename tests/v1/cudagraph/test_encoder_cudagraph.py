@@ -210,6 +210,12 @@ class SimpleMockViTModel(torch.nn.Module):
             out_hidden_size=_HIDDEN,
         )
 
+    def is_image_inputs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> bool:
+        return True
+
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config,
@@ -449,3 +455,322 @@ class TestEncoderCudaGraphCaptureReplay:
         assert len(result) == n_images
         for out in result:
             assert out.shape == (4, _HIDDEN)
+
+
+# ---------------------------------------------------------------------------
+# Video mock model and helpers
+# ---------------------------------------------------------------------------
+
+
+class SimpleMockVideoViTModel(torch.nn.Module):
+    """Minimal ViT model for video CUDA graph tests.
+
+    Mirrors SimpleMockViTModel but uses ``pixel_values_videos`` and
+    ``video_grid_thw`` (torch.Tensor) to exercise the video code path.
+    The same CUDA graphs are reused for videos since the patch format is
+    identical to images.
+    """
+
+    supports_encoder_cudagraph = True
+
+    def __init__(self):
+        super().__init__()
+        self.proj = torch.nn.Linear(_FLAT, _HIDDEN)
+        self.spatial_merge_size = _SPATIAL_MERGE
+        self.out_hidden_size = _HIDDEN
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["image", "video"],
+            input_key="pixel_values",
+            modality_input_keys={
+                "image": "pixel_values",
+                "video": "pixel_values_videos",
+            },
+            buffer_keys=["dummy_buf"],
+            out_hidden_size=_HIDDEN,
+        )
+
+    def is_image_inputs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> bool:
+        return "video_grid_thw" not in mm_kwargs
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config,
+    ) -> tuple[int, int]:
+        return (4, 128)
+
+    def get_encoder_cudagraph_num_items(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> int:
+        if "video_grid_thw" in mm_kwargs:
+            return len(mm_kwargs["video_grid_thw"])
+        return len(mm_kwargs["image_grid_thw"])
+
+    def get_encoder_cudagraph_per_item_output_tokens(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        m = _SPATIAL_MERGE
+        if "video_grid_thw" in mm_kwargs:
+            return [
+                int(t * (h // m) * (w // m))
+                for t, h, w in mm_kwargs["video_grid_thw"].tolist()
+            ]
+        return [t * (h // m) * (w // m) for t, h, w in mm_kwargs["image_grid_thw"]]
+
+    def get_encoder_cudagraph_per_item_input_sizes(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        if "video_grid_thw" in mm_kwargs:
+            return [int(t * h * w) for t, h, w in mm_kwargs["video_grid_thw"].tolist()]
+        return [t * h * w for t, h, w in mm_kwargs["image_grid_thw"]]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        if "video_grid_thw" in mm_kwargs:
+            grid_thw = mm_kwargs["video_grid_thw"]
+            pixel_values = mm_kwargs["pixel_values_videos"]
+            if len(indices) == 0:
+                return {
+                    "pixel_values_videos": pixel_values[:0],
+                    "video_grid_thw": grid_thw[:0],
+                }
+            patches_per_item = [int(t * h * w) for t, h, w in grid_thw.tolist()]
+            cum_patches = [0]
+            for p in patches_per_item:
+                cum_patches.append(cum_patches[-1] + p)
+            selected_pv = torch.cat(
+                [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+            )
+            return {
+                "pixel_values_videos": selected_pv,
+                "video_grid_thw": grid_thw[indices],
+            }
+
+        grid_thw = mm_kwargs["image_grid_thw"]
+        pixel_values = mm_kwargs["pixel_values"]
+        if len(indices) == 0:
+            return {"pixel_values": pixel_values[:0], "image_grid_thw": []}
+        patches_per_item = [t * h * w for t, h, w in grid_thw]
+        cum_patches = [0]
+        for p in patches_per_item:
+            cum_patches.append(cum_patches[-1] + p)
+        selected_pv = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        return {
+            "pixel_values": selected_pv,
+            "image_grid_thw": [grid_thw[i] for i in indices],
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> EncoderCudaGraphCaptureInputs:
+        # Capture uses image format (same graph reused for video replay)
+        per_image_output = token_budget // max_batch_size
+        grid_config = [
+            [1, _SPATIAL_MERGE, per_image_output * _SPATIAL_MERGE]
+            for _ in range(max_batch_size)
+        ]
+        total_patches = _count_input_patches(grid_config)
+        dummy_pixel_values = torch.randn(
+            total_patches, _FLAT, device=device, dtype=dtype
+        )
+        n_out = _count_output_tokens(grid_config, _SPATIAL_MERGE)
+        dummy_buf = torch.zeros(n_out, _HIDDEN, device=device, dtype=dtype)
+        return EncoderCudaGraphCaptureInputs(
+            mm_kwargs={
+                "pixel_values": dummy_pixel_values,
+                "image_grid_thw": grid_config,
+            },
+            buffers={"dummy_buf": dummy_buf},
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+    ) -> EncoderCudaGraphReplayBuffers:
+        if "video_grid_thw" in mm_kwargs:
+            grid_thw = mm_kwargs["video_grid_thw"].tolist()
+        else:
+            grid_thw = mm_kwargs["image_grid_thw"]
+        n_out = _count_output_tokens(grid_thw, _SPATIAL_MERGE)
+        p = next(self.parameters())
+        dummy_buf = torch.zeros(n_out, _HIDDEN, device=p.device, dtype=p.dtype)
+        return EncoderCudaGraphReplayBuffers(buffers={"dummy_buf": dummy_buf})
+
+    def encoder_cudagraph_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        buffers: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        if "video_grid_thw" in mm_kwargs:
+            return self._forward(mm_kwargs["pixel_values_videos"])
+        return self._forward(mm_kwargs["pixel_values"])
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        if "video_grid_thw" in mm_kwargs:
+            return self._forward(mm_kwargs["pixel_values_videos"])
+        return self._forward(mm_kwargs["pixel_values"])
+
+    def _forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        m2 = _SPATIAL_MERGE**2
+        out = self.proj(pixel_values)
+        n_out = out.shape[0] // m2
+        return out[: n_out * m2].view(n_out, m2, _HIDDEN).mean(dim=1)
+
+
+def _make_video_mm_kwargs(
+    grid_thw_list: list[list[int]],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict[str, Any]:
+    """Create mm_kwargs with video keys (pixel_values_videos + video_grid_thw)."""
+    n = _count_input_patches(grid_thw_list)
+    pixel_values_videos = torch.randn(n, _FLAT, device=device, dtype=dtype)
+    video_grid_thw = torch.tensor(grid_thw_list, dtype=torch.long, device=device)
+    return {
+        "pixel_values_videos": pixel_values_videos,
+        "video_grid_thw": video_grid_thw,
+    }
+
+
+# ---------------------------------------------------------------------------
+# GPU tests — video CUDA graph capture, replay, fallback, packing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+class TestVideoEncoderCudaGraphCaptureReplay:
+    def setup_method(self):
+        self.device = torch.device("cuda:0")
+        self.dtype = torch.float16
+        self.model = SimpleMockVideoViTModel().to(self.device).half()
+        self.mgr = _make_manager_for_gpu(
+            self.model, _BUDGETS, _MAX_BATCH, self.device, self.dtype
+        )
+        self.mgr.capture()
+
+    # --- capture ---
+
+    def test_capture_creates_one_graph_per_budget(self):
+        assert len(self.mgr.budget_graphs) == len(_BUDGETS)
+        assert set(self.mgr.budget_graphs.keys()) == set(_BUDGETS)
+
+    # --- output shape ---
+
+    def test_video_execute_returns_one_tensor_per_video(self):
+        # Single-frame videos behave like images from the ViT perspective
+        grid_thw = [[1, 4, 4], [1, 4, 4]]
+        mm_kwargs = _make_video_mm_kwargs(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert len(result) == 2
+
+    def test_video_execute_output_tokens_single_frame(self):
+        # [1,4,4] → 1*(4//2)*(4//2) = 4 tokens
+        grid_thw = [[1, 4, 4]]
+        mm_kwargs = _make_video_mm_kwargs(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert result[0].shape == (4, _HIDDEN)
+
+    def test_video_execute_output_tokens_multi_frame(self):
+        # [2,4,4] → 2*(4//2)*(4//2) = 8 output tokens
+        grid_thw = [[2, 4, 4]]
+        mm_kwargs = _make_video_mm_kwargs(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert result[0].shape == (8, _HIDDEN)
+
+    def test_video_execute_mixed_frame_counts(self):
+        # [1,4,4] → 4 tokens; [2,4,4] → 8 tokens; total=12 fits in budget 16
+        grid_thw = [[1, 4, 4], [2, 4, 4]]
+        mm_kwargs = _make_video_mm_kwargs(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert result[0].shape == (4, _HIDDEN)
+        assert result[1].shape == (8, _HIDDEN)
+
+    # --- budget fallback ---
+
+    def test_video_eager_fallback_when_tokens_exceed_all_budgets(self):
+        # [2,9,9] → 2*(9//2)*(9//2) = 2*4*4 = 32 tokens.
+        # Wait, 9//2 = 4, so 2*4*4 = 32 tokens → fits in budget 64.
+        # Use a bigger grid: [4,9,9] → 4*4*4 = 64 tokens → fits exactly budget 64.
+        # Use [5,9,9] → 5*4*4 = 80 tokens > max budget 64.
+        grid_thw = [[5, 9, 9]]
+        mm_kwargs = _make_video_mm_kwargs(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert len(result) == 1
+        expected_tokens = 5 * (9 // _SPATIAL_MERGE) * (9 // _SPATIAL_MERGE)
+        assert result[0].shape == (expected_tokens, _HIDDEN)
+        assert self.mgr.graph_misses == 1
+
+    # --- greedy packing ---
+
+    def test_video_greedy_packing_multiple_short_videos(self):
+        # 4 videos with [1,4,4] each → 4 tokens each → 16 total → fits budget 16
+        n_videos = _MAX_BATCH
+        grid_thw = [[1, 4, 4]] * n_videos
+        mm_kwargs = _make_video_mm_kwargs(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert len(result) == n_videos
+        for out in result:
+            assert out.shape == (4, _HIDDEN)
+
+    def test_video_chunking_when_exceeds_max_batch(self):
+        # 8 videos > max_batch_size=4 → 2 chunks
+        n_videos = _MAX_BATCH * 2
+        grid_thw = [[1, 4, 4]] * n_videos
+        mm_kwargs = _make_video_mm_kwargs(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert len(result) == n_videos
+        for out in result:
+            assert out.shape == (4, _HIDDEN)
+
+    # --- counters ---
+
+    def test_video_hit_counter_increments(self):
+        grid_thw = [[1, 4, 4], [1, 4, 4]]
+        mm_kwargs = _make_video_mm_kwargs(grid_thw, self.device, self.dtype)
+        self.mgr.execute(mm_kwargs)
+        assert self.mgr.graph_hits == 2
+
+    # --- modality routing ---
+
+    def test_image_and_video_routes_are_independent(self):
+        """Image and video mm_kwargs both work in the same manager."""
+        # image call
+        image_grid = [[1, 4, 4]]
+        image_mm = _make_mm_kwargs(image_grid, self.device, self.dtype)
+        image_result = self.mgr.execute(image_mm)
+        assert image_result is not None
+        assert image_result[0].shape == (4, _HIDDEN)
+
+        # video call
+        video_grid = [[2, 4, 4]]
+        video_mm = _make_video_mm_kwargs(video_grid, self.device, self.dtype)
+        video_result = self.mgr.execute(video_mm)
+        assert video_result is not None
+        assert video_result[0].shape == (8, _HIDDEN)

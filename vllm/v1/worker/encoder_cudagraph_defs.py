@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Data transfer objects for encoder CUDA graph management."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -31,6 +31,11 @@ class EncoderCudaGraphConfig:
     out_hidden_size: int
     """Output hidden dim of the vision encoder.
     Used for DP gather buffer allocation."""
+
+    modality_input_keys: dict[str, str] = field(default_factory=dict)
+    """Per-modality input tensor key mapping, e.g.
+    ``{"image": "pixel_values", "video": "pixel_values_videos"}``.
+    When a modality is absent, ``input_key`` is used as the fallback."""
 
 
 @dataclass

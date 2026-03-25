@@ -180,6 +180,17 @@ class EncoderCudaGraphManager:
                 return budget
         return None
 
+    def _get_input_key_by_modality(self, mm_kwargs: dict[str, Any]) -> str:
+        """Return the correct input tensor key for the current mm_kwargs modality.
+
+        Detects video modality by the presence of ``video_grid_thw`` and
+        looks up the per-modality key from ``config.modality_input_keys``,
+        falling back to ``config.input_key`` when not configured.
+        """
+        if self.model.is_image_inputs(mm_kwargs):
+            return self.config.modality_input_keys.get("image", self.config.input_key)
+        return self.config.modality_input_keys.get("video", self.config.input_key)
+
     def _get_per_item_out_tokens(self, mm_kwargs: dict[str, Any]) -> list[int]:
         """Get per-item output token counts as plain ints."""
         return [
@@ -230,7 +241,7 @@ class EncoderCudaGraphManager:
         # Copy the input tensor. Buffers are sized for the full budget;
         # actual inputs may be smaller. Zero then slice-copy so padded
         # positions are invisible to attention (cu_seqlens masks them out).
-        input_key = self.config.input_key
+        input_key = self._get_input_key_by_modality(mm_kwargs)
         src = mm_kwargs[input_key]
         n = src.shape[0]
         graph_meta.input_buffer.zero_()
