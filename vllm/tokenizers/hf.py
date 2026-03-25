@@ -7,9 +7,12 @@ from typing import TypeAlias
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
 from .protocol import TokenizerLike
+
+logger = init_logger(__name__)
 
 HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 
@@ -91,12 +94,30 @@ class CachedHfTokenizer(TokenizerLike):
                 **kwargs,
             )
         except ValueError as e:
+            error_msg = str(e)
+
+            # TokenizersBackendFast is a native transformers tokenizer class
+            # (introduced in transformers >=4.57) that some newer models
+            # (e.g. Qwen3.5-27B GPTQ) reference in tokenizer_config.json.
+            # AutoTokenizer may fail to resolve it, so fall back gracefully.
+            if (
+                "TokenizersBackendFast" in error_msg
+                and "does not exist or is not currently imported." in error_msg
+            ):
+                tokenizer = _load_tokenizers_backend_fast_fallback(
+                    path_or_repo_id,
+                    *args,
+                    trust_remote_code=trust_remote_code,
+                    revision=revision,
+                    cache_dir=download_dir,
+                    **kwargs,
+                )
             # If the error pertains to the tokenizer class not existing or not
             # currently being imported,
             # suggest using the --trust-remote-code flag.
-            if not trust_remote_code and (
-                "does not exist or is not currently imported." in str(e)
-                or "requires you to execute the tokenizer file" in str(e)
+            elif not trust_remote_code and (
+                "does not exist or is not currently imported." in error_msg
+                or "requires you to execute the tokenizer file" in error_msg
             ):
                 err_msg = (
                     "Failed to load the tokenizer. If the tokenizer "
@@ -123,3 +144,31 @@ class CachedHfTokenizer(TokenizerLike):
             tokenizer.add_special_tokens(special_tokens_map)
 
         return get_cached_tokenizer(tokenizer)
+
+
+def _load_tokenizers_backend_fast_fallback(
+    path_or_repo_id: str | Path,
+    *args,
+    **kwargs,
+) -> HfTokenizer:
+    """Fall back when AutoTokenizer cannot resolve TokenizersBackendFast.
+
+    First tries to import the real class from transformers, then falls
+    back to the generic PreTrainedTokenizerFast which can load any
+    tokenizer.json-based tokenizer.
+    """
+    try:
+        from transformers import TokenizersBackendFast
+
+        logger.info(
+            "Loading tokenizer with TokenizersBackendFast for %s", path_or_repo_id
+        )
+        return TokenizersBackendFast.from_pretrained(path_or_repo_id, *args, **kwargs)
+    except ImportError:
+        logger.warning(
+            "TokenizersBackendFast is not available in this version "
+            "of transformers. Falling back to PreTrainedTokenizerFast "
+            "for %s",
+            path_or_repo_id,
+        )
+        return PreTrainedTokenizerFast.from_pretrained(path_or_repo_id, *args, **kwargs)
