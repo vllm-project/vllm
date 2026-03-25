@@ -165,6 +165,12 @@ class SchedulerConfig:
     and starting configuration.
     """
 
+    scheduler_reserve_full_isl: bool = True
+    """If True, the scheduler checks whether the full input sequence length
+    fits in the KV cache before admitting a new request, rather than only
+    checking the first chunk. Prevents over-admission and KV cache thrashing
+    with chunked prefill."""
+
     async_scheduling: bool | None = Field(default=None)
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
