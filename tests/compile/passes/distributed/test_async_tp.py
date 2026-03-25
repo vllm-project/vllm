@@ -253,10 +253,10 @@ class TestFlashInferBMMFP8RSModel(_BaseFlashInferBMMFP8Model):
         return tensor_model_parallel_reduce_scatter(output, dim=0)
 
     def ops_in_model_before(self):
-        return [torch.ops.vllm.reduce_scatter.default]
+        return []
 
     def ops_in_model_after(self):
-        return [torch.ops.vllm.fused_flashinfer_scaled_matmul_reduce_scatter.default]
+        return []
 
 
 class TestAGFlashInferBMMFP8Model(_BaseFlashInferBMMFP8Model):
@@ -275,10 +275,10 @@ class TestAGFlashInferBMMFP8Model(_BaseFlashInferBMMFP8Model):
         return output
 
     def ops_in_model_before(self):
-        return [torch.ops.vllm.all_gather.default]
+        return []
 
     def ops_in_model_after(self):
-        return [torch.ops.vllm.fused_all_gather_flashinfer_scaled_matmul.default]
+        return []
 
 
 @multi_gpu_test(num_gpus=2)

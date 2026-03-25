@@ -10,9 +10,6 @@ from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group
-from vllm.distributed.flashinfer_async_tp_ops import (
-    _register_inductor_lowering_for_flashinfer_collective_fp8_ops,
-)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
@@ -380,13 +377,9 @@ class AsyncTPPass(VllmPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
 
-        _register_inductor_lowering_for_flashinfer_collective_fp8_ops()
-
         # Enable symmetric memory for the TP process group
         self.tp_device_group_name = get_tp_group().device_group.group_name
-        self.flashinfer_rewriter = FlashInferCollectiveGemmRewriter(
-            self.tp_device_group_name
-        )
+        self.flashinfer_rewriter = FlashInferCollectiveGemmRewriter()
         enable_symm_mem_for_group(self.tp_device_group_name)
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="async_tp_pass"

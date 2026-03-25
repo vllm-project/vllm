@@ -46,7 +46,6 @@ import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
-from vllm.distributed.flashinfer_async_tp_ops import register_flashinfer_async_tp_ops
 from vllm.distributed.utils import (
     StatelessProcessGroup,
     get_cached_tcp_store_client,
@@ -1831,12 +1830,6 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
 def get_tensor_model_parallel_world_size() -> int:
     """Return world size for the tensor model parallel group."""
     return get_tp_group().world_size
-
-
-register_flashinfer_async_tp_ops(
-    get_tp_group=get_tp_group,
-    get_tp_world_size=get_tensor_model_parallel_world_size,
-)
 
 
 def get_tensor_model_parallel_rank() -> int:

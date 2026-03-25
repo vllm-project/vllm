@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import operator
 from dataclasses import dataclass
 from typing import Literal
 
@@ -165,6 +164,8 @@ class _FlashInferCollectiveGemmMatch:
     a_scale: object
     b_scale: object
     out_dtype: torch.dtype
+    collective_dim: int
+    world_size: int
     group_name: str
     output_shape: list[object] | None = None
 
@@ -225,9 +226,6 @@ def _find_ag_bmm_replace_target(bmm_node: fx.Node) -> fx.Node | None:
 
 
 class FlashInferCollectiveGemmRewriter:
-    def __init__(self, tp_device_group_name: str) -> None:
-        self.tp_device_group_name = tp_device_group_name
-
     def _match_collective_gemm(
         self, bmm_node: fx.Node
     ) -> _FlashInferCollectiveGemmMatch | None:
@@ -259,6 +257,8 @@ class FlashInferCollectiveGemmRewriter:
                     a_scale=a_scale,
                     b_scale=b_scale,
                     out_dtype=out_dtype,
+                    collective_dim=0,
+                    world_size=world_size,
                     group_name=group_name,
                     output_shape=output_shape,
                 )
@@ -294,6 +294,8 @@ class FlashInferCollectiveGemmRewriter:
             a_scale=a_scale,
             b_scale=b_scale,
             out_dtype=out_dtype,
+            collective_dim=0,
+            world_size=world_size,
             group_name=group_name,
         )
 
@@ -302,49 +304,68 @@ class FlashInferCollectiveGemmRewriter:
     ) -> None:
         if match.kind == "ag_bmm":
             with graph.inserting_before(match.replace_node):
-                fused = graph.call_function(
-                    torch.ops.vllm.fused_all_gather_flashinfer_scaled_matmul.default,
+                gathered = graph.call_function(
+                    torch.ops.vllm.all_gather.default,
                     args=(
                         match.a_2d,
-                        match.b_2d,
-                        match.a_scale,
-                        match.b_scale,
-                        0,
-                        self.tp_device_group_name,
-                        match.out_dtype,
+                        match.collective_dim,
+                        match.world_size,
+                        match.group_name,
                     ),
                 )
-                mm_output = graph.call_function(operator.getitem, args=(fused, 1))
+                bmm_output = graph.call_function(
+                    torch.ops.vllm.bmm_fp8.default,
+                    args=(
+                        graph.call_function(
+                            torch.ops.aten.unsqueeze.default, args=(gathered, 0)
+                        ),
+                        graph.call_function(
+                            torch.ops.aten.unsqueeze.default, args=(match.b_2d, 0)
+                        ),
+                        match.a_scale,
+                        match.b_scale,
+                        match.out_dtype,
+                        "auto",
+                    ),
+                )
+                mm_output = graph.call_function(
+                    torch.ops.aten.squeeze.dim, args=(bmm_output, 0)
+                )
             mm_output.meta = dict(match.replace_node.meta)
             match.replace_node.replace_all_uses_with(mm_output)
             graph.erase_node(match.replace_node)
             return
 
-        output_shape = match.output_shape
-        if output_shape is None:
-            output_shape = [
-                match.a_2d.meta["val"].shape[0],
-                match.b_2d.meta["val"].shape[1],
-            ]
-
         with graph.inserting_before(match.replace_node):
-            fused = graph.call_function(
-                torch.ops.vllm.fused_flashinfer_scaled_matmul_reduce_scatter.default,
+            bmm_output = graph.call_function(
+                torch.ops.vllm.bmm_fp8.default,
                 args=(
-                    match.a_2d,
-                    match.b_2d,
+                    graph.call_function(
+                        torch.ops.aten.unsqueeze.default, args=(match.a_2d, 0)
+                    ),
+                    graph.call_function(
+                        torch.ops.aten.unsqueeze.default, args=(match.b_2d, 0)
+                    ),
                     match.a_scale,
                     match.b_scale,
-                    "sum",
-                    0,
-                    0,
-                    self.tp_device_group_name,
-                    output_shape,
                     match.out_dtype,
+                    "auto",
                 ),
             )
-        fused.meta = dict(match.replace_node.meta)
-        match.replace_node.replace_all_uses_with(fused)
+            mm_output = graph.call_function(
+                torch.ops.aten.squeeze.dim, args=(bmm_output, 0)
+            )
+            reduced = graph.call_function(
+                torch.ops.vllm.reduce_scatter.default,
+                args=(
+                    mm_output,
+                    match.collective_dim,
+                    match.world_size,
+                    match.group_name,
+                ),
+            )
+        reduced.meta = dict(match.replace_node.meta)
+        match.replace_node.replace_all_uses_with(reduced)
         graph.erase_node(match.replace_node)
 
     def rewrite(self, graph: fx.Graph) -> int:
