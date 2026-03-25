@@ -31,17 +31,24 @@ def test_commit_eplb_maps_shape_change():
     physical experts changes, the old map should be replaced entirely.
     """
     num_layers, num_logical, num_physical = 2, 4, 6
-    max_slots = 3  # pre-allocated third dim for logical_to_physical_map
+    max_replicas = 3
 
     # Build current state tensors
     model_state = _make_model_state(
         phy2log=torch.zeros(num_layers, num_physical, dtype=torch.long),
-        log2phy=torch.full((num_layers, num_logical, max_slots), -1, dtype=torch.long),
+        log2phy=torch.full(
+            (num_layers, num_logical, max_replicas), -1, dtype=torch.long
+        ),
         logcnt=torch.zeros(num_layers, num_logical, dtype=torch.long),
     )
 
-    # The new map has two more physical experts
-    new_phy2log_larger = torch.zeros(num_layers, num_physical + 2, dtype=torch.long)
+    # The new map has two more physical experts. These new physical experts will
+    # automatically map to the first two logical experts
+    new_phy2log_larger = (
+        (torch.arange(num_physical + 2, dtype=torch.long) % num_logical)
+        .unsqueeze(0)
+        .expand(num_layers, -1)
+    )
     _commit_eplb_maps(model_state, new_phy2log_larger)
 
     # Check that the number of physical experts has been updated
@@ -54,16 +61,18 @@ def test_commit_eplb_maps_for_layer_logical_padding():
     pre-allocated slots when the new map has fewer replicas than the max.
     """
     num_layers, num_logical, num_physical = 2, 4, 6
-    max_slots = 3
+    max_replicas = 3
 
     model_state = _make_model_state(
         phy2log=torch.zeros(num_layers, num_physical, dtype=torch.long),
-        log2phy=torch.full((num_layers, num_logical, max_slots), -1, dtype=torch.long),
+        log2phy=torch.full(
+            (num_layers, num_logical, max_replicas), -1, dtype=torch.long
+        ),
         logcnt=torch.zeros(num_layers, num_logical, dtype=torch.long),
     )
 
     new_phy2log = (
-        torch.arange(num_physical, dtype=torch.long)
+        (torch.arange(num_physical, dtype=torch.long) % num_logical)
         .unsqueeze(0)
         .expand(num_layers, -1)
         .contiguous()
@@ -90,11 +99,13 @@ def test_commit_eplb_maps_for_layer_shape_assert():
 
 def test_commit_eplb_maps():
     """Test that all values are copied correctly into model_state."""
-    num_layers, num_logical, num_physical, max_slots = 2, 3, 4, 2
+    num_layers, num_logical, num_physical, max_replicas = 2, 3, 4, 2
 
     model_state = _make_model_state(
         phy2log=torch.zeros(num_layers, num_physical, dtype=torch.long),
-        log2phy=torch.full((num_layers, num_logical, max_slots), -1, dtype=torch.long),
+        log2phy=torch.full(
+            (num_layers, num_logical, max_replicas), -1, dtype=torch.long
+        ),
         logcnt=torch.zeros(num_layers, num_logical, dtype=torch.long),
     )
 
@@ -113,12 +124,14 @@ def test_commit_eplb_maps():
 
 def test_commit_eplb_maps_for_layer():
     """Test that only the target layer is updated"""
-    num_layers, num_logical, max_slots = 2, 3, 2
+    num_layers, num_logical, max_replicas = 2, 3, 2
 
     original_phy2log = torch.tensor([[9, 9, 9, 9], [8, 8, 8, 8]], dtype=torch.long)
     model_state = _make_model_state(
         phy2log=original_phy2log.clone(),
-        log2phy=torch.full((num_layers, num_logical, max_slots), -1, dtype=torch.long),
+        log2phy=torch.full(
+            (num_layers, num_logical, max_replicas), -1, dtype=torch.long
+        ),
         logcnt=torch.zeros(num_layers, num_logical, dtype=torch.long),
     )
 
