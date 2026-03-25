@@ -891,15 +891,19 @@ class InputBatch:
     def get_pooling_metadata(self) -> PoolingMetadata:
         pooling_params = self.get_pooling_params()
         pooling_states = self.get_pooling_states()
+        prompt_token_ids_cpu = None
+        if any(p.requires_token_ids_cpu for p in pooling_params):
+            prompt_token_ids_cpu = self._make_prompt_token_ids_cpu_tensor()
 
         return PoolingMetadata(
             prompt_lens=self.num_prompt_tokens_cpu_tensor[: self.num_reqs].clone(),
             prompt_token_ids=self.sampling_metadata.prompt_token_ids,
+            prompt_token_ids_cpu=prompt_token_ids_cpu,
             pooling_params=pooling_params,
             pooling_states=pooling_states,
         )
 
-    def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
+    def _make_prompt_token_ids_cpu_tensor(self) -> torch.Tensor:
         num_reqs = self.num_reqs
         max_prompt_len = self.num_prompt_tokens[:num_reqs].max()
         prompt_token_ids_cpu_tensor = torch.empty(
@@ -914,7 +918,12 @@ class InputBatch:
         # token_id of this value.
         for i in range(num_reqs):
             prompt_token_ids[i, self.num_prompt_tokens[i] :] = self.vocab_size
-        return prompt_token_ids_cpu_tensor.to(device=self.device, non_blocking=True)
+        return prompt_token_ids_cpu_tensor
+
+    def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
+        return self._make_prompt_token_ids_cpu_tensor().to(
+            device=self.device, non_blocking=True
+        )
 
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray

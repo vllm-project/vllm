@@ -50,7 +50,8 @@ class PoolingMetadata:
     """Tensors for pooling."""
 
     prompt_lens: torch.Tensor  # CPU Tensor
-    prompt_token_ids: torch.Tensor | None
+    prompt_token_ids: torch.Tensor | None  # Model-device tensor
+    prompt_token_ids_cpu: torch.Tensor | None  # CPU tensor
     pooling_params: list[PoolingParams]
     pooling_states: list[PoolingStates]
     pooling_cursor: PoolingCursor | None = None
@@ -73,6 +74,9 @@ class PoolingMetadata:
             prompt_token_ids=None
             if self.prompt_token_ids is None
             else self.prompt_token_ids[indices],
+            prompt_token_ids_cpu=None
+            if self.prompt_token_ids_cpu is None
+            else self.prompt_token_ids_cpu[indices],
             pooling_params=self.pooling_params[indices],
             pooling_states=self.pooling_states[indices],
             pooling_cursor=None
@@ -85,7 +89,13 @@ class PoolingMetadata:
         assert prompt_token_ids is not None, (
             "Please set `requires_token_ids=True` in `get_pooling_updates`"
         )
+        return [prompt_token_ids[i, :num] for i, num in enumerate(self.prompt_lens)]
 
+    def get_prompt_token_ids_cpu(self) -> list[torch.Tensor]:
+        prompt_token_ids = self.prompt_token_ids_cpu
+        assert prompt_token_ids is not None, (
+            "Please set `requires_token_ids_cpu=True` in `get_pooling_updates`"
+        )
         return [prompt_token_ids[i, :num] for i, num in enumerate(self.prompt_lens)]
 
     def get_pooling_cursor(self) -> PoolingCursor:
