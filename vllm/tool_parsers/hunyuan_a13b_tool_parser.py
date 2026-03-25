@@ -44,7 +44,7 @@ class HunyuanA13BToolParser(ToolParser):
         self.current_tools_sent: list[bool] = []
 
         # For backward compatibility with serving code
-        self.prev_tool_call_arr = []
+        self.prev_tool_call_arr: list[dict[str, Any]] = []
 
         # Regex patterns for preprocessing
         self.answer_tool_calls_pattern = re.compile(
@@ -57,7 +57,9 @@ class HunyuanA13BToolParser(ToolParser):
             r'"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{\s*\}'
         )
 
-        # TODO: not support nested json object in fc arguments.
+        # Note: historically we used a regex for nested JSON. Streaming output
+        # is incremental, so regex brace matching can fail for deeply nested
+        # objects; we now use a brace-depth scanner instead.
         self.tool_non_empty_arg_reg = re.compile(
             r'"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*(\{(?:[^{}]|(?:\{[^{}]*\}))*\})'
         )
@@ -311,6 +313,65 @@ class HunyuanA13BToolParser(ToolParser):
                 return delta
         return None
 
+    def _scan_braced_json_object(self, text: str, start_brace: int) -> str | None:
+        """Extract a JSON object starting at `start_brace` (which must be '{').
+
+        In streaming mode the object may be incomplete; in that case we return
+        the partial text from `start_brace` to the end of `text`.
+        """
+        assert start_brace < len(text) and text[start_brace] == "{"
+
+        depth = 0
+        in_string = False
+        escape = False
+
+        for i in range(start_brace, len(text)):
+            ch = text[i]
+            if in_string:
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+                continue
+
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start_brace : i + 1]
+
+        # Streaming/incomplete JSON: return whatever we have so far.
+        return text[start_brace:] if depth > 0 else None
+
+    def _extract_tool_arguments_text(
+        self, current_text: str, tool_index: int
+    ) -> str | None:
+        """Extract the `arguments` JSON object for a given tool index."""
+        tool_calls_start = current_text.find(self.bot_string)
+        search_start = tool_calls_start if tool_calls_start != -1 else 0
+
+        arguments_keys = list(
+            re.finditer(r'"arguments"\s*:', current_text[search_start:])
+        )
+        if tool_index >= len(arguments_keys):
+            return None
+
+        match = arguments_keys[tool_index]
+        after_colon = search_start + match.end()
+        brace_pos = current_text.find("{", after_colon)
+        if brace_pos == -1:
+            return None
+        return self._scan_braced_json_object(current_text, brace_pos)
+
     def _handle_tool_args_streaming(
         self, current_text: str, current_idx: int, tool_count: int
     ):
@@ -348,75 +409,58 @@ class HunyuanA13BToolParser(ToolParser):
                                 ]
                             return delta
 
-            args_matches = list(self.tool_non_empty_arg_reg.finditer(current_text))
-            if current_idx < len(args_matches):
-                args_text = args_matches[current_idx].group(1)
-                is_last_tool = current_idx == tool_count - 1
-                if not is_last_tool:
-                    next_tool_pos = current_text.find(
-                        "},{", args_matches[current_idx].start()
-                    )
-                    if next_tool_pos != -1:
-                        args_end_pos = next_tool_pos + 1
-                        args_text = (
-                            current_text[
-                                args_matches[current_idx].start() : args_end_pos
-                            ]
-                            .split('"arguments":')[1]
-                            .strip()
-                        )
-                sent_args = self.streaming_state["sent_tools"][current_idx][
-                    "sent_arguments"
-                ]
-                if not self.streaming_state["sent_tools"][current_idx][
+            args_text = self._extract_tool_arguments_text(current_text, current_idx)
+            if args_text is None:
+                return None
+
+            sent_args = self.streaming_state["sent_tools"][current_idx][
+                "sent_arguments"
+            ]
+            if not self.streaming_state["sent_tools"][current_idx][
+                "sent_arguments_prefix"
+            ] and args_text.startswith("{"):
+                self.streaming_state["sent_tools"][current_idx][
                     "sent_arguments_prefix"
-                ] and args_text.startswith("{"):
-                    self.streaming_state["sent_tools"][current_idx][
-                        "sent_arguments_prefix"
-                    ] = True
+                ] = True
+                self.streaming_state["sent_tools"][current_idx]["sent_arguments"] = "{"
+                while len(self.streamed_args) <= current_idx:
+                    self.streamed_args.append("")
+                self.streamed_args[current_idx] += "{"
+                delta = DeltaMessage(
+                    tool_calls=[
+                        DeltaToolCall(
+                            index=current_idx,
+                            function=DeltaFunctionCall(arguments="{").model_dump(
+                                exclude_none=True
+                            ),
+                        )
+                    ]
+                )
+                return delta
+
+            if args_text.startswith(sent_args):
+                args_diff = args_text[len(sent_args) :]
+                if args_diff:
                     self.streaming_state["sent_tools"][current_idx][
                         "sent_arguments"
-                    ] = "{"
+                    ] = args_text
                     while len(self.streamed_args) <= current_idx:
                         self.streamed_args.append("")
-                    self.streamed_args[current_idx] += "{"
+                    self.streamed_args[current_idx] += args_diff
                     delta = DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(
                                 index=current_idx,
-                                function=DeltaFunctionCall(arguments="{").model_dump(
-                                    exclude_none=True
-                                ),
+                                function=DeltaFunctionCall(
+                                    arguments=args_diff
+                                ).model_dump(exclude_none=True),
                             )
                         ]
                     )
                     return delta
 
-                if args_text.startswith(sent_args):
-                    args_diff = args_text[len(sent_args) :]
-                    if args_diff:
-                        self.streaming_state["sent_tools"][current_idx][
-                            "sent_arguments"
-                        ] = args_text
-                        while len(self.streamed_args) <= current_idx:
-                            self.streamed_args.append("")
-                        self.streamed_args[current_idx] += args_diff
-                        delta = DeltaMessage(
-                            tool_calls=[
-                                DeltaToolCall(
-                                    index=current_idx,
-                                    function=DeltaFunctionCall(
-                                        arguments=args_diff
-                                    ).model_dump(exclude_none=True),
-                                )
-                            ]
-                        )
-                        return delta
-
-                if args_text.endswith("}") and args_text == sent_args:
-                    if current_idx < tool_count - 1:
-                        self.streaming_state["current_tool_index"] += 1
-                        self.current_tool_id = self.streaming_state[
-                            "current_tool_index"
-                        ]
+            if args_text.endswith("}") and args_text == sent_args:
+                if current_idx < tool_count - 1:
+                    self.streaming_state["current_tool_index"] += 1
+                    self.current_tool_id = self.streaming_state["current_tool_index"]
         return None
