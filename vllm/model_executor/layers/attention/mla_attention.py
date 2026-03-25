@@ -1059,6 +1059,10 @@ except ImportError:
                 "MLA models using TRITON_MLA will require flash_attn. "
                 "AITER_MLA backends use aiter kernels instead."
             )
+    elif current_platform.is_xpu():
+        from vllm._xpu_ops import xpu_ops as ops
+
+        flash_attn_varlen_func = ops.flash_attn_varlen_func  # type: ignore[no-redef]
 
 
 def dynamic_per_batched_tensor_quant(
