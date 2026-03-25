@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_MEDIA_FETCH_MAX_RETRIES: int = 3
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
@@ -73,6 +74,7 @@ if TYPE_CHECKING:
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "12.9"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
+    VLLM_BATCH_INVARIANT: bool = False
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -115,7 +117,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
-    VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -279,9 +280,6 @@ def disable_compile_cache() -> bool:
 
 
 def use_aot_compile() -> bool:
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_is_batch_invariant,
-    )
     from vllm.utils.torch_utils import is_torch_equal_or_newer
 
     default_value = (
@@ -291,9 +289,19 @@ def use_aot_compile() -> bool:
     )
 
     return (
-        not vllm_is_batch_invariant()
+        not bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0")))
         and os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
     )
+
+
+def use_mega_aot_artifact():
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    default_value = (
+        "1" if is_torch_equal_or_newer("2.12.0.dev") and use_aot_compile() else "0"
+    )
+
+    return os.environ.get("VLLM_USE_MEGA_AOT_ARTIFACT", default_value) == "1"
 
 
 def env_with_choices(
@@ -487,6 +495,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ["highest", "high", "medium"],
         case_sensitive=False,
     ),
+    # Enable batch-invariant mode: deterministic results regardless of
+    # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
+    "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
@@ -616,10 +627,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable loading compiled models directly from cached standalone compile artifacts
     # without re-splitting graph modules. This reduces overhead during model
     # loading by using reconstruct_serializable_fn_from_mega_artifact.
-    "VLLM_USE_MEGA_AOT_ARTIFACT": lambda: os.environ.get(
-        "VLLM_USE_MEGA_AOT_ARTIFACT", "0"
-    )
-    == "1",
+    "VLLM_USE_MEGA_AOT_ARTIFACT": use_mega_aot_artifact,
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
@@ -765,6 +773,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT": lambda: int(
         os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")
+    ),
+    # Maximum number of retries for fetching media (images, audio, video)
+    # from URLs. Each retry quadruples the timeout. Default is 3.
+    "VLLM_MEDIA_FETCH_MAX_RETRIES": lambda: int(
+        os.getenv("VLLM_MEDIA_FETCH_MAX_RETRIES", "3")
     ),
     # Whether to allow HTTP redirects when fetching from media URLs.
     # Default to True
@@ -987,10 +1000,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Pad the weights for the moe kernel
     "VLLM_ROCM_MOE_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
-    # custom paged attention kernel for MI3* cards
-    "VLLM_ROCM_CUSTOM_PAGED_ATTN": lambda: (
-        os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in ("true", "1")
-    ),
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
@@ -1761,6 +1770,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_IMAGE_FETCH_TIMEOUT",
         "VLLM_VIDEO_FETCH_TIMEOUT",
         "VLLM_AUDIO_FETCH_TIMEOUT",
+        "VLLM_MEDIA_FETCH_MAX_RETRIES",
         "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",

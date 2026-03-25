@@ -62,6 +62,7 @@ class FlashInferMLASparseBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
         "fp8",
         "fp8_e4m3",
@@ -112,17 +113,17 @@ class FlashInferMLASparseBackend(AttentionBackend):
         use_sparse: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        # FlashInfer MLA sparse kernel requires qk_nope_head_dim == 128
+        # FlashInfer MLA sparse kernel requires qk_nope_head_dim in [128, 192]
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
         if vllm_config.model_config is not None:
             hf_text_config = vllm_config.model_config.hf_text_config
             qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
-            if qk_nope_head_dim != 128:
+            if qk_nope_head_dim not in [128, 192]:
                 return (
-                    f"FlashInfer MLA Sparse kernel requires qk_nope_head_dim == 128, "
-                    f"but got {qk_nope_head_dim}"
+                    "FlashInfer MLA Sparse kernel requires qk_nope_head_dim "
+                    f"in [128, 192], but got {qk_nope_head_dim}"
                 )
             # Check for index_topk which indicates sparse model
             if not hasattr(hf_text_config, "index_topk"):
@@ -339,9 +340,13 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
             self._workspace_buffer = _get_workspace_buffer(q.device)
 
         if self.bmm1_scale is None:
-            self.bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
+            self.bmm1_scale = self.scale
+            if self.kv_cache_dtype.startswith("fp8"):
+                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
         if self.bmm2_scale is None:
-            self.bmm2_scale = layer._v_scale_float
+            self.bmm2_scale = 1.0
+            if self.kv_cache_dtype.startswith("fp8"):
+                self.bmm2_scale *= layer._k_scale_float
 
         o = trtllm_batch_decode_with_kv_cache_mla(
             query=q.unsqueeze(1),
