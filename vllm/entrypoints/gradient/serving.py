@@ -9,6 +9,8 @@ and formats the GradientOutput back into GradientResponse JSON.
 
 from typing import TYPE_CHECKING
 
+import numpy as np
+import pybase64 as base64
 from fastapi import Request
 
 from vllm.entrypoints.gradient.protocol import (
@@ -27,6 +29,28 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 
 logger = init_logger(__name__)
+
+
+def _encode_array(arr: np.ndarray, encoding: str) -> dict:
+    """Encode a numpy array as a serializable dict.
+
+    For "json": data is nested Python lists.
+    For "base64_numpy": data is a base64-encoded string of raw bytes,
+    with shape and dtype metadata for reconstruction.
+    """
+    if encoding == "base64_numpy":
+        return {
+            "data": base64.b64encode(arr.tobytes()).decode("ascii"),
+            "shape": list(arr.shape),
+            "dtype": str(arr.dtype),
+            "encoding": "base64_numpy",
+        }
+    # Default: json
+    return {
+        "data": arr.tolist(),
+        "shape": list(arr.shape),
+        "encoding": "json",
+    }
 
 
 class ServingGradient:
@@ -106,6 +130,7 @@ class ServingGradient:
 
         # Build response.
         gradient_output = result.outputs
+        encoding = request.encoding
 
         # Format token log-probs with decoded tokens.
         token_log_probs_response = None
@@ -125,34 +150,24 @@ class ServingGradient:
         # Format token attributions.
         token_attributions_response = None
         if gradient_output.token_attributions is not None:
-            token_attributions_response = {
-                "type": request.aggregation,
-                "shape": [
-                    len(gradient_output.token_attributions),
-                    len(gradient_output.token_attributions[0])
-                    if gradient_output.token_attributions
-                    else 0,
-                ],
-                "data": gradient_output.token_attributions,
-            }
+            arr = gradient_output.token_attributions
+            encoded = _encode_array(arr, encoding)
+            encoded["type"] = request.aggregation
+            token_attributions_response = encoded
 
         # Format loss gradients.
         loss_gradients_response = None
         if gradient_output.loss_gradients is not None:
             loss_gradients_response = {}
-            for name, grad_data in gradient_output.loss_gradients.items():
-                loss_gradients_response[name] = {
-                    "type": request.aggregation,
-                    "shape": [
-                        len(grad_data),
-                        len(grad_data[0]) if grad_data else 0,
-                    ],
-                    "data": grad_data,
-                }
+            for name, grad_arr in gradient_output.loss_gradients.items():
+                encoded = _encode_array(grad_arr, encoding)
+                encoded["type"] = request.aggregation
+                loss_gradients_response[name] = encoded
 
         return GradientResponse(
             id=request_id,
             model=request.model,
+            encoding=encoding,
             token_log_probs=token_log_probs_response,
             token_attributions=token_attributions_response,
             loss=gradient_output.loss,
