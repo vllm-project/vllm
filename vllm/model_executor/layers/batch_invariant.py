@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -986,21 +987,6 @@ def enable_batch_invariant_mode():
     torch.backends.cuda.preferred_blas_library(backend="cublaslt")
 
 
-def _read_vllm_batch_invariant() -> bool:
-    val = os.getenv("VLLM_BATCH_INVARIANT", "0")
-    try:
-        return int(val) != 0
-    except ValueError:
-        return False
-
-
-VLLM_BATCH_INVARIANT: bool = _read_vllm_batch_invariant()
-
-
-def vllm_is_batch_invariant() -> bool:
-    return VLLM_BATCH_INVARIANT
-
-
 def override_envs_for_invariance(
     attention_backend: AttentionBackendEnum | None,
 ):
@@ -1059,7 +1045,7 @@ def init_batch_invariance(
     attention_backend: AttentionBackendEnum | None,
 ):
     # this will hit all the csrc overrides as well
-    if vllm_is_batch_invariant():
+    if envs.VLLM_BATCH_INVARIANT:
         override_envs_for_invariance(attention_backend)
         enable_batch_invariant_mode()
 
