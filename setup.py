@@ -82,6 +82,10 @@ def is_freethreaded():
     return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
 
 
+def is_cmake_available() -> bool:
+    return which("cmake") is not None
+
+
 class CMakeExtension(Extension):
     def __init__(self, name: str, cmake_lists_dir: str = ".", **kwa) -> None:
         super().__init__(name, sources=[], py_limited_api=not is_freethreaded(), **kwa)
@@ -973,11 +977,18 @@ else:
         else cmake_build_ext,
     }
 
+setup_requires = []
+if not is_cmake_available():
+    setup_requires += ["cmake>=3.26.1"]
+if not is_ninja_available():
+    setup_requires += ["ninja"]
+
 setup(
     # static metadata should rather go in pyproject.toml
     version=get_vllm_version(),
     ext_modules=ext_modules,
     install_requires=get_requirements(),
+    setup_requires=setup_requires,
     extras_require={
         # AMD Zen CPU optimizations via zentorch
         "zen": ["zentorch"],
