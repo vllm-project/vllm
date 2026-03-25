@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Gradient computation serving handler.
+
+Translates HTTP GradientRequest (prompt + target text) into
+engine-level GradientParams (prompt_token_ids + target_token_ids)
+and formats the GradientOutput back into GradientResponse JSON.
+"""
 
 from typing import TYPE_CHECKING
 

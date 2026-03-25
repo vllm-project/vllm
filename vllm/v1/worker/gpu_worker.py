@@ -66,6 +66,7 @@ from .utils import request_memory
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.gradient_params import GradientParams
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -742,42 +743,32 @@ class Worker(WorkerBase):
     def compute_gradients(
         self,
         prompt_token_ids: list[int],
-        gradient_params_dict: dict,
+        gradient_params: "GradientParams",
     ) -> dict:
         """Compute gradients for a prompt + target pair.
 
-        This method is called via collective_rpc from the EngineCore.
-        It does NOT use @torch.inference_mode() because GradientRunner
-        needs gradient tracking enabled.
+        Called via collective_rpc from EngineCore. Not decorated with
+        @torch.inference_mode() because GradientRunner needs gradients.
 
-        Args:
-            prompt_token_ids: The prompt token IDs.
-            gradient_params_dict: Serialized GradientParams fields.
-
-        Returns:
-            A dict with gradient results (CPU tensors converted to lists).
+        Returns a plain dict so the result is serializable across
+        process boundaries (multiproc executor).
         """
-        from vllm.gradient_params import GradientParams
+        from vllm.gradient_params import GradientParams as _GradientParams
 
-        gradient_params = GradientParams(**gradient_params_dict)
+        assert isinstance(gradient_params, _GradientParams)
         input_ids = torch.tensor(prompt_token_ids, dtype=torch.long, device=self.device)
-        runner_output = self.model_runner.compute_gradients(
-            input_ids=input_ids,
-            gradient_params=gradient_params,
-        )
-        # Convert to serializable dict for RPC transport.
+        out = self.model_runner.compute_gradients(input_ids, gradient_params)
+
         result: dict = {}
-        if runner_output.token_log_probs is not None:
-            result["token_log_probs"] = runner_output.token_log_probs
-        if runner_output.token_attributions is not None:
-            result["token_attributions"] = (
-                runner_output.token_attributions.cpu().tolist()
-            )
-        if runner_output.loss is not None:
-            result["loss"] = runner_output.loss
-        if runner_output.loss_gradients:
+        if out.token_log_probs is not None:
+            result["token_log_probs"] = out.token_log_probs
+        if out.token_attributions is not None:
+            result["token_attributions"] = out.token_attributions.cpu().tolist()
+        if out.loss is not None:
+            result["loss"] = out.loss
+        if out.loss_gradients:
             result["loss_gradients"] = {
-                k: v.cpu().tolist() for k, v in runner_output.loss_gradients.items()
+                k: v.cpu().tolist() for k, v in out.loss_gradients.items()
             }
         return result
 

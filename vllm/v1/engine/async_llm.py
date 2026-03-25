@@ -877,8 +877,8 @@ class AsyncLLM(EngineClient):
     ) -> AsyncGenerator[GradientRequestOutput, None]:
         """Compute gradients for a prompt + target pair.
 
-        Follows the same async pattern as encode() — the request goes
-        through the engine core and results are yielded via an async queue.
+        Same async queue pattern as encode() — single-shot request
+        that yields one GradientRequestOutput with finished=True.
         """
         q: RequestOutputCollector | None = None
         try:

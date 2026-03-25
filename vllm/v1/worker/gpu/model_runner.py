@@ -21,7 +21,7 @@ import functools
 import gc
 import time
 from copy import deepcopy
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
@@ -63,7 +63,10 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.dp_utils import sync_cudagraph_and_dp_padding
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
-from vllm.v1.worker.gpu.gradient.gradient_runner import GradientRunner
+from vllm.v1.worker.gpu.gradient.gradient_runner import (
+    GradientRunner,
+    GradientRunnerOutput,
+)
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -97,6 +100,9 @@ from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+
+if TYPE_CHECKING:
+    from vllm.gradient_params import GradientParams
 
 logger = init_logger(__name__)
 
@@ -1296,27 +1302,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def compute_gradients(
         self,
         input_ids: torch.Tensor,
-        gradient_params: Any,
-    ) -> Any:
+        gradient_params: "GradientParams",
+    ) -> GradientRunnerOutput:
         """Compute gradients for a single prompt + target pair.
 
-        This runs outside the normal execute_model / sample_tokens path
-        because it needs torch.enable_grad() and operates on a single
-        request at a time (no batching with generation requests).
-
-        Args:
-            input_ids: Prompt token IDs (already on device).
-            gradient_params: Configuration specifying what to compute.
-
-        Returns:
-            GradientRunnerOutput with the requested gradient information.
+        Runs outside the normal execute_model path because it needs
+        torch.enable_grad() and processes one request at a time.
         """
-        from vllm.gradient_params import GradientParams as _GradientParams
-
-        assert isinstance(gradient_params, _GradientParams)
         assert self.gradient_runner is not None, (
-            "GradientRunner not initialized. This model may not support "
-            "gradient computation."
+            "GradientRunner not initialized — model may not support gradients"
         )
         target_ids = torch.tensor(
             gradient_params.target_token_ids,
@@ -1324,9 +1318,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
         )
         return self.gradient_runner.compute_gradients(
-            input_ids=input_ids,
-            target_ids=target_ids,
-            gradient_params=gradient_params,
+            input_ids, target_ids, gradient_params
         )
 
     def postprocess_pool(self, input_batch: InputBatch) -> None:

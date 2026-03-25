@@ -335,71 +335,43 @@ class EngineCore:
         self.scheduler.add_request(request)
 
     def _handle_gradient_request(self, request: Request) -> None:
-        """Handle gradient computation request via collective_rpc.
+        """Handle gradient computation via collective_rpc.
 
-        Gradient requests bypass the scheduler and execute directly
-        on the worker because they need torch.enable_grad() and cannot
-        be batched with normal inference.
+        Gradient requests bypass the scheduler because they need
+        torch.enable_grad() and cannot be batched with inference.
         """
         gradient_params = request.gradient_params
         assert gradient_params is not None
-
-        # Serialize GradientParams to dict for RPC transport.
-        gp_dict = {
-            "target_token_ids": gradient_params.target_token_ids,
-            "gradient_of": gradient_params.gradient_of,
-            "gradient_targets": gradient_params.gradient_targets,
-            "target_token_indices": gradient_params.target_token_indices,
-            "aggregation": gradient_params.aggregation,
-            "loss_function": gradient_params.loss_function,
-            "return_log_probs": gradient_params.return_log_probs,
-        }
-
-        prompt_token_ids = request.prompt_token_ids
-        assert prompt_token_ids is not None, (
+        assert request.prompt_token_ids is not None, (
             "Gradient requests require prompt_token_ids"
         )
 
+        gradient_result = None
+        finish_reason = FinishReason.STOP
         try:
-            # Call worker.compute_gradients via RPC.
-            result = self.model_executor.collective_rpc(
+            # collective_rpc returns [result_per_worker]; take first.
+            results = self.model_executor.collective_rpc(
                 "compute_gradients",
-                args=(prompt_token_ids, gp_dict),
+                args=(request.prompt_token_ids, gradient_params),
             )
-            # collective_rpc returns a list of results (one per worker).
-            # We only need the first one.
-            gradient_result = result[0] if isinstance(result, list) else result
+            gradient_result = results[0]
             gradient_result["target_token_ids"] = gradient_params.target_token_ids
-
-            # Build EngineCoreOutput with gradient_output.
-            output = EngineCoreOutput(
-                request_id=request.request_id,
-                new_token_ids=[],
-                gradient_output=gradient_result,
-                finish_reason=FinishReason.STOP,
-            )
-            engine_core_outputs = EngineCoreOutputs(
-                outputs=[output],
-            )
-            self._pending_gradient_outputs.append(
-                (request.client_index, engine_core_outputs)
-            )
         except Exception:
             logger.exception(
                 "Gradient computation failed for request %s",
                 request.request_id,
             )
-            output = EngineCoreOutput(
-                request_id=request.request_id,
-                new_token_ids=[],
-                finish_reason=FinishReason.ERROR,
-            )
-            engine_core_outputs = EngineCoreOutputs(
-                outputs=[output],
-            )
-            self._pending_gradient_outputs.append(
-                (request.client_index, engine_core_outputs)
-            )
+            finish_reason = FinishReason.ERROR
+
+        output = EngineCoreOutput(
+            request_id=request.request_id,
+            new_token_ids=[],
+            gradient_output=gradient_result,
+            finish_reason=finish_reason,
+        )
+        self._pending_gradient_outputs.append(
+            (request.client_index, EngineCoreOutputs(outputs=[output]))
+        )
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -1353,8 +1325,9 @@ class EngineCoreProc(EngineCore):
                 return
             output = UtilityOutput(call_id)
             # Lazily look-up utility method so that failure will be handled/returned.
-            get_result = lambda: (method := getattr(self, method_name)) and method(
-                *self._convert_msgspec_args(method, args)
+            get_result = lambda: (
+                (method := getattr(self, method_name))
+                and method(*self._convert_msgspec_args(method, args))
             )
             enqueue_output = lambda out: self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=out))
