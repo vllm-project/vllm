@@ -144,7 +144,10 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
     return (
         rocm_aiter_ops.is_enabled()
         and cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
-        and cfg.compilation_config.use_inductor_graph_partition
+        and (
+            cfg.compilation_config.use_inductor_graph_partition
+            or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
+        )
     )
 
 
@@ -190,7 +193,7 @@ OPTIMIZATION_LEVEL_01 = {
             "enable_sp": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
-            "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "fuse_rope_kvcache": False,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
