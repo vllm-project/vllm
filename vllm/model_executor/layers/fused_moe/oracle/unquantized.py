@@ -322,12 +322,13 @@ def make_unquantized_moe_kernel(
     shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize
+    is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
         quant_config=quant_config,
         routing_tables=routing_tables,
         allow_new_interface=True,
-        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        use_monolithic=is_monolithic,
     )
     assert prepare_finalize is not None
 
@@ -358,10 +359,7 @@ def make_unquantized_moe_kernel(
             else None
         ),
         moe_parallel_config=moe_config.moe_parallel_config,
-        inplace=(
-            not moe_config.disable_inplace
-            and backend != UnquantizedMoeBackend.FLASHINFER_CUTLASS
-        ),
+        inplace=(not moe_config.disable_inplace and not is_monolithic),
     )
 
     return kernel
