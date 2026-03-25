@@ -240,14 +240,11 @@ There are several levels of caches for multi-modal inputs:
 
 You can set the type of cache that is being used via `mm_processor_cache_type`. According to the selected cache type, the conditions and maximum memory usage of the multi-modal input caches are as follows:
 
-| Name | `mm_processor_cache_type` | Conditions | Max. Memory |
-| ---- | ------------------------- | ---------- | ----------- |
-| Key-Replicated LRU Cache | `"lru"` (default) | 1:1 relation between `P0` and `P1` processes | `mm_processor_cache_gb * api_server_count` |
-| Shared Memory Cache | `"shm"` | 1:1 relation between `P0` and `P1` processes | `mm_processor_cache_gb` |
-| Processor-Only Cache | N/A | (Fallback) | `mm_processor_cache_gb * data_parallel_size` |
-
-K: Stores the hashes of multi-modal items
-V: Stores the processed tensor data of multi-modal items
+| Name | `mm_processor_cache_type` | Conditions | Levels | Max. Memory |
+| ---- | ------------------------- | ---------- | ------ | ----------- |
+| Key-Replicated LRU Cache | `"lru"` (default) | 1:1 relation between `P0` and `P1` | Processor, IPC | `mm_processor_cache_gb * api_server_count` |
+| Shared Memory Cache | `"shm"` | 1:1 relation between `P0` and `P1` | Processor, IPC | `mm_processor_cache_gb` |
+| Processor-Only Cache | (Fallback) | None | Processor | `mm_processor_cache_gb * data_parallel_size` |
 
 More information about each cache type below:
 
