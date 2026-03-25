@@ -350,12 +350,18 @@ class BlockPool:
         while len(ret) < num_blocks and self.tel_safe_queue:
             block = self.tel_safe_queue.popleft()
             # The block may have been re-touched (ref_cnt > 0) since it was
-            # queued; skip it in that case and let get_new_blocks handle it.
+            # queued; skip it in that case.  We must still clear the TEL-safe
+            # tag and return it to the normal LRU queue so it is not lost.
+            block.is_tel_safe = False
             if block.ref_cnt == 0 and not block.is_null:
-                # Always clear the TEL-safe tag on re-allocation regardless of
-                # whether prefix caching is enabled.
-                block.is_tel_safe = False
                 ret.append(block)
+            elif not block.is_null:
+                # Block was touched (cache hit) while sitting in tel_safe_queue.
+                # It now has ref_cnt > 0, so it is in-use; do nothing — the
+                # caller that called touch() already incremented ref_cnt.
+                # When the caller eventually frees the block it will land back in
+                # one of the two free queues through the normal free_blocks* path.
+                pass
         # Fall back to normal LRU queue for the remaining blocks.
         remaining = num_blocks - len(ret)
         if remaining > 0:
@@ -545,6 +551,16 @@ class BlockPool:
                 num_used_blocks - 1,
             )
             return False
+
+        # T-LRU: move all TEL-safe blocks back to the normal LRU queue and
+        # clear their tags.  After a cache reset the TEL-safe distinction is
+        # meaningless, and leaving blocks in tel_safe_queue with stale
+        # is_tel_safe=True flags would confuse touch() and get_new_blocks().
+        while self.tel_safe_queue:
+            block = self.tel_safe_queue.popleft()
+            block.is_tel_safe = False
+            if not block.is_null:
+                self.free_block_queue.append(block)
 
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()

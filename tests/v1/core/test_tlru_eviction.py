@@ -295,6 +295,90 @@ class TestTouchTelSafeBlock:
 
 
 # ---------------------------------------------------------------------------
+# Regression: re-touched TEL-safe block must not be silently discarded from
+# get_new_blocks() — it should remain tracked until freed normally.
+# ---------------------------------------------------------------------------
+
+class TestGetNewBlocksRetouchedTelSafe:
+    """
+    When a TEL-safe block gets a cache hit (touch()) while it is sitting in
+    tel_safe_queue, its ref_cnt > 0.  If get_new_blocks() later iterates
+    over tel_safe_queue and encounters that block, the old code silently
+    discarded it, shrinking the effective free-block count and eventually
+    causing an under-count.  The fix clears is_tel_safe and leaves the block
+    in-use (ref_cnt > 0); it will re-enter a free queue when freed normally.
+    """
+
+    def test_retouched_block_not_lost(self):
+        """
+        After touching a TEL-safe block, get_new_blocks() must not count
+        it as a newly allocated block and should not reduce free-block count
+        by more than the number of blocks actually handed out.
+        """
+        # 7 total: 1 null + 6 usable.
+        # xi=3, qhat=0  =>  B = max(0, 6+0-3) = 3, num_tel_safe = 3
+        pool = _make_pool(num_blocks=7, tlru_xi_blocks=3, tlru_qhat_blocks=0)
+        blocks = pool.get_new_blocks(6)
+        pool.free_blocks_tlru(blocks, req_total_blocks=6)
+
+        tel_safe = [b for b in blocks if b.is_tel_safe]
+        assert len(tel_safe) == 3
+
+        # Simulate a cache hit on one TEL-safe block.
+        pool.touch(tel_safe[:1])
+        touched_block = tel_safe[0]
+        assert touched_block.ref_cnt == 1
+        assert touched_block.is_tel_safe is False  # cleared by touch()
+        assert touched_block not in pool.tel_safe_queue
+
+        # Now ask for 2 blocks. tel_safe_queue has 2 remaining free blocks.
+        # The re-touched block was already removed by touch(), so this is safe.
+        free_before = pool.get_num_free_blocks()
+        new_blocks = pool.get_new_blocks(2)
+        assert len(new_blocks) == 2
+        assert pool.get_num_free_blocks() == free_before - 2
+
+
+# ---------------------------------------------------------------------------
+# Regression: reset_prefix_cache() must drain tel_safe_queue.
+# ---------------------------------------------------------------------------
+
+class TestResetPrefixCacheWithTelSafe:
+    """reset_prefix_cache() must clear tel_safe_queue and restore is_tel_safe=False."""
+
+    def test_reset_drains_tel_safe_queue(self):
+        """After a cache reset, tel_safe_queue must be empty."""
+        pool = _make_pool(num_blocks=7, tlru_xi_blocks=3, tlru_qhat_blocks=0,
+                          enable_caching=False)
+        blocks = pool.get_new_blocks(6)
+        pool.free_blocks_tlru(blocks, req_total_blocks=6)
+
+        assert len(pool.tel_safe_queue) > 0
+
+        ok = pool.reset_prefix_cache()
+        assert ok
+        assert len(pool.tel_safe_queue) == 0
+        # All blocks should have is_tel_safe cleared.
+        for b in blocks:
+            assert b.is_tel_safe is False
+
+    def test_free_block_count_correct_after_reset(self):
+        """After reset, get_num_free_blocks() must equal all usable blocks."""
+        pool = _make_pool(num_blocks=7, tlru_xi_blocks=3, tlru_qhat_blocks=0,
+                          enable_caching=False)
+        blocks = pool.get_new_blocks(6)
+        pool.free_blocks_tlru(blocks, req_total_blocks=6)
+
+        # Before reset: 6 free (2 in free_block_queue + 3 in tel_safe_queue +
+        # 1 was mistakenly labelled null at init, but actually 6 usable).
+        assert pool.get_num_free_blocks() == 6
+
+        pool.reset_prefix_cache()
+        # After reset all 6 usable blocks should be free in one queue.
+        assert pool.get_num_free_blocks() == 6
+
+
+# ---------------------------------------------------------------------------
 # Tests for CacheConfig T-LRU fields
 # ---------------------------------------------------------------------------
 
