@@ -306,7 +306,6 @@ ChatCompletionMessageParam: TypeAlias = (
 )
 
 
-# TODO: Make fields ReadOnly once mypy supports it
 class ConversationMessage(TypedDict, total=False):
     role: Required[str]
     """The role of the message's author."""
