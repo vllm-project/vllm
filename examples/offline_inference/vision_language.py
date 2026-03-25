@@ -1875,7 +1875,7 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
 
 # Qwen3-VL-Dense
 def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "/home/sss/.cache/modelscope/hub/models/Qwen/Qwen3-VL-4B-Instruct"
+    model_name = "Qwen/Qwen3-VL-4B-Instruct"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -1887,21 +1887,6 @@ def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
             "fps": 1,
         },
         limit_mm_per_prompt={modality: 1},
-        compilation_config={
-            "cudagraph_mm_encoder": True,
-            "encoder_cudagraph_token_budgets": [
-                512,
-                1024,
-                1536,
-                2048,
-                2560,
-                3072,
-                3584,
-                4096,
-                4864,
-            ],
-            "encoder_cudagraph_max_images_per_batch": 8,
-        },
     )
 
     if modality == "image":
