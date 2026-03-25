@@ -65,6 +65,7 @@ from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.workspace import current_workspace_manager
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 
@@ -73,19 +74,31 @@ FP4_DTYPE = torch.uint8
 
 logger = init_logger(__name__)
 
-trtllm_gen_workspace_buffer = None
+
+_trtllm_workspace_buffer = None
 
 
+# Must be zero-initialized and only used for the trtllm kernels as they properly reset
+# the workspace to zero after use; see: https://github.com/vllm-project/vllm/pull/25520
 def _get_trtllm_gen_workspace_buffer():
-    global trtllm_gen_workspace_buffer
-    if trtllm_gen_workspace_buffer is None:
-        trtllm_gen_workspace_buffer = torch.zeros(
-            envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device="cuda"
+    global _trtllm_workspace_buffer
+    if _trtllm_workspace_buffer is None:
+        _trtllm_workspace_buffer = torch.zeros(
+            envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+            dtype=torch.uint8,
+            device="cuda",
         )
-    return trtllm_gen_workspace_buffer
+    return _trtllm_workspace_buffer
 
 
-_flashinfer_workspace_buffer = None
+def _get_workspace_buffer():
+    buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+    if envs.VLLM_BATCH_INVARIANT:
+        buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
+    (workspace,) = current_workspace_manager().get_simultaneous(
+        ((buffer_size,), torch.uint8),
+    )
+    return workspace
 
 
 @triton.jit
@@ -715,29 +728,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
-    def _get_workspace_buffer(self):
-        global _flashinfer_workspace_buffer
-        if _flashinfer_workspace_buffer is None:
-            buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
-            if envs.VLLM_BATCH_INVARIANT:
-                buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
-            _flashinfer_workspace_buffer = torch.zeros(
-                buffer_size, dtype=torch.uint8, device=self.device
-            )
-        return _flashinfer_workspace_buffer
-
     def _get_prefill_wrapper(
         self,
     ) -> BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper:
         if self._prefill_wrapper is None:
             if self.use_dcp:
                 self._prefill_wrapper = BatchDCPPrefillWrapper(
-                    workspace_buffer=self._get_workspace_buffer(),
+                    workspace_buffer=_get_workspace_buffer(),
                     dcp_a2a=self.dcp_a2a,
                 )
             else:
                 self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                    self._get_workspace_buffer(), get_kv_cache_layout()
+                    _get_workspace_buffer(), get_kv_cache_layout()
                 )
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
