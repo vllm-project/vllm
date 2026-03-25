@@ -6143,6 +6143,11 @@ class GPUModelRunner(
             layers = get_layers_from_vllm_config(
                 self.vllm_config, layer_type, kv_cache_group_spec.layer_names
             )
+            if not layers:
+                layer_type = cast(type[Any], nn.Module)
+                layers = get_all_layers_from_vllm_config(
+                    self.vllm_config, layer_type
+                )
             attn_backends = {}
             attn_backend_layers = defaultdict(list)
             # Dedupe based on full class name; this is a bit safer than

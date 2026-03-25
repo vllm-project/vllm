@@ -1817,7 +1817,6 @@ def get_layers_from_vllm_config(
 
     if layer_names is None:
         layer_names = list(vllm_config.compilation_config.static_forward_context.keys())
-
     forward_context = vllm_config.compilation_config.static_forward_context
 
     return {
@@ -1825,4 +1824,26 @@ def get_layers_from_vllm_config(
         for layer_name in layer_names
         if layer_name in forward_context
         and isinstance(forward_context[layer_name], layer_type)
+    }
+
+def get_all_layers_from_vllm_config(
+    vllm_config: VllmConfig,
+    layer_type: type[T],
+) -> dict[str, T]:
+    """
+    Get all layers from the vLLM config, including multimodal submodules.
+
+    Args:
+        vllm_config: The vLLM config.
+        layer_type: The type of the layer to get.
+
+    Returns:
+        A dictionary mapping layer names to their corresponding layer instances.
+    """
+    forward_context = vllm_config.compilation_config.static_forward_context
+
+    return {
+        layer_name: forward_context[layer_name]
+        for layer_name in forward_context
+        if isinstance(forward_context[layer_name], layer_type)
     }

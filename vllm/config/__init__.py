@@ -129,5 +129,6 @@ __all__ = [
     "get_current_vllm_config_or_none",
     "set_current_vllm_config",
     "get_layers_from_vllm_config",
+    "get_all_layers_from_vllm_config",
     "WeightTransferConfig",
 ]
