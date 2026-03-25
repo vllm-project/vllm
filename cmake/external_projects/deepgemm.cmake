@@ -139,12 +139,8 @@ if(DEEPGEMM_ARCHS)
     COMPONENT _deep_gemm_C)
 
   # CUTLASS and CuTe headers (vendored for JIT, separate from vLLM's CUTLASS)
-  install(DIRECTORY "${deepgemm_SOURCE_DIR}/third-party/cutlass/include/cute/"
-    DESTINATION vllm/third_party/deep_gemm/include/cute
-    COMPONENT _deep_gemm_C)
-
-  install(DIRECTORY "${deepgemm_SOURCE_DIR}/third-party/cutlass/include/cutlass/"
-    DESTINATION vllm/third_party/deep_gemm/include/cutlass
+  install(DIRECTORY "${deepgemm_SOURCE_DIR}/third-party/cutlass/include/"
+    DESTINATION vllm/third_party/deep_gemm/include
     COMPONENT _deep_gemm_C)
 
 else()
