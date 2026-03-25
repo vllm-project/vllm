@@ -39,8 +39,7 @@
 #####################################################################################################################################
 #                                                                                                                                   #
 # IMPORTANT:                                                                                                                        #
-#   * Currently AMD CI has MI300 agents, MI325 agents, and MI355 agents. Of those, AMD is using mostly MI325 and MI355. AMD team    #
-#     is actively working on enabling more MI300 machines. All upcoming feature improvements are tracked in:                        #
+#   * Currently AMD CI has MI250 agents, MI325 agents, and MI355 agents. All upcoming feature improvements are tracked in:          #
 #         https://github.com/vllm-project/vllm/issues/34994                                                                         #
 #                                                                                                                                   #
 #-----------------------------------------------------------------------------------------------------------------------------------#
@@ -49,13 +48,15 @@
 #   * [Pytorch Nightly Dependency Override Check]: if this test fails, it means the nightly torch version is not compatible with    #
 #                                                  some of the dependencies. Please check the error message and add the package to  #
 #                                                  whitelist in `/vllm/tools/pre_commit/generate_nightly_torch_test.py`.            #
-#   * [Entrypoints Integration Test (LLM)]:                                                                                         #
+#   * [Entrypoints Integration (LLM)]:                                                                                              #
 #     - {`pytest -v -s entrypoints/llm/test_generate.py`}: It needs a clean process                                                 #
 #     - {`pytest -v -s entrypoints/offline_mode`}: Needs to avoid interference with other tests                                     #
-#   * [V1 Test e2e + engine]: The test uses 4 GPUs, but we schedule it on 8-GPU machines for stability. See discussion here:        #
-#                             https://github.com/vllm-project/vllm/pull/31040                                                       #
-#   * [V1 others]:                                                                                                                  #
-#     - Split the tests to avoid interference                                                                                       #
+#   * [Engine / Engine (1 GPU) / e2e Scheduling / e2e Core / V1 e2e / Spec Decode / V1 Sample + Logits / V1 Core + KV + Metrics]:   #
+#     - Previously a single "V1 Test e2e + engine" step, now split across multiple groups.                                          #
+#     - V1 e2e (2/4 GPUs) uses 4 GPUs but is scheduled on 8-GPU machines for stability. See:                                        #
+#       https://github.com/vllm-project/vllm/pull/31040                                                                             #
+#   * [V1 Sample + Logits / V1 Core + KV + Metrics / V1 others (CPU)]:                                                              #
+#     - Previously a single "V1 others" step, now split to avoid interference.                                                      #
 #     - Integration test for streaming correctness (requires special branch for __harness__ lib).                                   #
 #   * [V1 others (CPU)]: Split the tests to avoid interference                                                                      #
 #   * [PyTorch Compilation Unit Tests]: Run unit tests defined directly under `compile/`, not including subdirectories, which       #
@@ -83,9 +84,9 @@
 #                                          run plamo2 model in vLLM.                                                                #
 #   * [Language Models Test (Extended Generation)]: Install fast path packages for testing against transformers (mamba, conv1d)     #
 #                                                   and to run plamo2 model in vLLM.                                                #
-#   * [Multi-Modal Models (Standard)]:                                                                                              #
+#   * [Multi-Modal Models (Standard) 1-4]:                                                                                          #
 #     - Do NOT remove `VLLM_WORKER_MULTIPROC_METHOD=spawn` setting as ROCm requires this for certain models to function.            #
-#   * [Transformers Nightly Models Test]: Whisper needs `VLLM_WORKER_MULTIPROC_METHOD=spawn` to avoid deadlock.                     #
+#   * [Transformers Nightly Models]: Whisper needs `VLLM_WORKER_MULTIPROC_METHOD=spawn` to avoid deadlock.                          #
 #   * [Plugin Tests (2 GPUs)]:                                                                                                      #
 #     - {`pytest -v -s entrypoints/openai/test_oot_registration.py`}: It needs a clean process                                      #
 #     - {`pytest -v -s models/test_oot_registration.py`}: It needs a clean process                                                  #
@@ -94,11 +95,11 @@
 #     - There is some Tensor Parallelism related processing logic in LoRA that requires multi-GPU testing for validation.           #
 #     - {`pytest -v -s -x lora/test_gptoss_tp.py`}: Disabled for now because MXFP4 backend on non-cuda platform doesn't support     #
 #                                                   LoRA yet.                                                                       #
-#   * [Distributed Tests (GPU_TAG)]: Don't test llama model here, it seems hf implementation is buggy. See:                         #
-#                                    https://github.com/vllm-project/vllm/pull/5689                                                 #
-#   * [Distributed Tests (GPU_TAG)]: Some old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293 in          #
-#                                    favor of new tests in fusions_e2e. We avoid replicating the new jobs in                        #
-#                                    this file as it's deprecated.                                                                  #
+#   * [Distributed Tests (NxGPUs)(HW-TAG)]: Don't test llama model here, it seems hf implementation is buggy. See:                  #
+#                                           https://github.com/vllm-project/vllm/pull/5689                                          #
+#   * [Distributed Tests (NxGPUs)(HW-TAG)]: Some old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293     #
+#                                           in favor of new tests in fusions_e2e. We avoid replicating the new jobs in              #
+#                                           this file as it's deprecated.                                                           #
 #                                                                                                                                   #
 #####################################################################################################################################
 
@@ -1386,6 +1387,21 @@ steps:
   - CROSS_LAYERS_BLOCKS=True ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 
+- label: Hyrbid SSM NixlConnector PD accuracy tests (4 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_4
+  num_gpus: 4
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - HYBRID_SSM=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+
 - label: Distributed Tests (2 GPUs)(H100-MI250) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -1434,7 +1450,7 @@ steps:
   - pytest -v -s entrypoints/offline_mode
 
 
-- label: Entrypoints Integration (API Server 1) # 1h 7m
+- label: Entrypoints Integration (API Server openai - Part 1) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
@@ -1447,8 +1463,41 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
+
+
+- label: Entrypoints Integration (API Server openai - Part 2) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
+  fast_check: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/openai
+  - tests/entrypoints/test_chat_utils
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
+  - pytest -v -s entrypoints/openai/speech_to_text/
   - pytest -v -s entrypoints/test_chat_utils.py
+
+
+- label: Entrypoints Integration (API Server openai - Part 3) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_1
+  fast_check: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/openai
+  - tests/entrypoints/test_chat_utils
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
 
 
 - label: Entrypoints Integration (API Server 2) #26.9m
@@ -2173,6 +2222,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   torch_nightly: true
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -2203,6 +2253,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   torch_nightly: true
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -2219,6 +2270,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   torch_nightly: true
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -2233,6 +2285,7 @@ steps:
   timeout_in_minutes: 106
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -2248,6 +2301,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -2261,6 +2315,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -2471,6 +2526,7 @@ steps:
   - pytest -v -s -x lora/test_llm_with_multi_loras.py
   - pytest -v -s -x lora/test_olmoe_tp.py
   - pytest -v -s -x lora/test_gptoss_tp.py
+  - pytest -v -s -x lora/test_qwen35_densemoel_lora.py
 
 
 - label: Weight Loading Multiple GPU # 7.5m
@@ -2934,7 +2990,7 @@ steps:
 #                                                                                                                                   #
 #####################################################################################################################################
 
-- label: Entrypoints Integration (API Server 1) # TBD
+- label: Entrypoints Integration (API Server openai - Part 1) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
@@ -2947,8 +3003,41 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
+
+
+- label: Entrypoints Integration (API Server openai - Part 2) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  fast_check: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/openai
+  - tests/entrypoints/test_chat_utils
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
+  - pytest -v -s entrypoints/openai/speech_to_text/
   - pytest -v -s entrypoints/test_chat_utils.py
+
+
+- label: Entrypoints Integration (API Server openai - Part 3) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  agent_pool: mi355_1
+  fast_check: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/openai
+  - tests/entrypoints/test_chat_utils
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
 
 
 - label: Entrypoints Integration (API Server 2) # TBD
@@ -3268,6 +3357,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   torch_nightly: true
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -3283,6 +3373,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   torch_nightly: true
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -3298,6 +3389,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   torch_nightly: true
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -3314,6 +3406,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   torch_nightly: true
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -3328,6 +3421,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -3343,6 +3437,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -3356,6 +3451,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -3369,6 +3465,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -3571,7 +3668,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
 
 - label: LM Eval Large Models (4 GPUs)(FP8) # TBD

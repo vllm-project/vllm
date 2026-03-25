@@ -299,8 +299,10 @@ def _try_load_aot_compiled_fn(
             # is populated by _verify_source_unchanged.
             with maybe_use_cudagraph_partition_wrapper(model.vllm_config):
                 loaded_fn._artifacts.compiled_fn.finalize_loading(model.vllm_config)
-        compilation_counter.num_aot_artifacts_loaded += 1
-        logger.info("Directly load AOT compilation from path %s", aot_compilation_path)
+            compilation_counter.num_aot_artifacts_loaded += 1
+            logger.info(
+                "Directly load AOT compilation from path %s", aot_compilation_path
+            )
         return loaded_fn
     except Exception as e:
         if os.path.exists(aot_compilation_path):
@@ -379,11 +381,6 @@ def _support_torch_compile(
         self.was_aot_compile_fn_loaded_from_disk = False
         compilation_counter.num_models_seen += 1
         self.compiled = False
-
-        # Skip if a parent class's @support_torch_compile already
-        # initialized the compile wrapper
-        if hasattr(self, "_compiled_callable"):
-            return
 
         # Handled by monkeypatching `TorchCompileWithNoGuardsWrapper` into base class
         TorchCompileWithNoGuardsWrapper.__init__(
