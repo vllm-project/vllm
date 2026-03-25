@@ -241,9 +241,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.models.nan_check_helper import mark_attn as _nan_mark_mla
 from vllm.model_executor.models.nan_check_helper import (
-    mark_fp8_nan as _nan_mark_fp8,
-)
-from vllm.model_executor.models.nan_check_helper import (
     mark_fwd_mqa_real as _nan_mark_fwd_mqa_real,
 )
 from vllm.model_executor.models.nan_check_helper import (
@@ -584,9 +581,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
-            _nan_mark_fp8(
-                self_kv_cache, 18, self._nan_layer_idx
-            )  # KV cache FP8 NaN BEFORE any writes this step
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
                 kv_c_normed,
                 k_pe,
