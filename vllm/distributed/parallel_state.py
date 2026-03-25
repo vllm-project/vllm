@@ -502,7 +502,7 @@ class GroupCoordinator:
         # only cuda uses this function,
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
-        maybe_aiter_ca_context = nullcontext()
+        maybe_aiter_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
         )
@@ -512,12 +512,13 @@ class GroupCoordinator:
             ca_comm = self.device_communicator.ca_comm
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
-            aiter_ca_comm = self.device_communicator.aiter_ca_comm
-            if aiter_ca_comm is not None:
-                maybe_aiter_ca_context = aiter_ca_comm.capture()
 
-        # ensure all initialization operations complete before attempting to
-        # capture the graph on another stream
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+            if aiter_ar is not None:
+                maybe_aiter_context = aiter_ar.capture()  # type: ignore
+
         curr_stream = torch.cuda.current_stream()
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
@@ -525,7 +526,7 @@ class GroupCoordinator:
         with (
             torch.cuda.stream(stream),
             maybe_ca_context,
-            maybe_aiter_ca_context,
+            maybe_aiter_context,
         ):
             yield graph_capture_context
 
