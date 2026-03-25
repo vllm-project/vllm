@@ -32,7 +32,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
-from vllm.inputs import ProcessorInputs
+from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
 
 PoolingCompletionLikeRequest: TypeAlias = (
@@ -74,7 +74,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
 
-    engine_prompts: list[ProcessorInputs] | None = None
+    engine_inputs: list[EngineInput] | None = None
     prompt_request_ids: list[str] | None = None
     intermediates: Any | None = None
 
