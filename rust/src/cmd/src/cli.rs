@@ -104,6 +104,11 @@ pub struct ServeArgs {
     /// Python executable used to launch the managed headless vLLM engine.
     #[arg(long, env = "VLLM_RS_PYTHON", default_value = "python3")]
     pub python: String,
+    /// Optional loopback TCP port for the managed-engine handshake.
+    ///
+    /// When omitted, the CLI allocates an ephemeral port automatically.
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+    pub handshake_port: Option<u16>,
     /// Additional arguments forwarded to `python -m vllm.entrypoints.cli.main serve ...`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub python_args: Vec<String>,
@@ -172,6 +177,7 @@ mod tests {
                             ),
                         },
                         python: "../vllm/.venv/bin/python",
+                        handshake_port: None,
                         python_args: [
                             "--dtype",
                             "float16",

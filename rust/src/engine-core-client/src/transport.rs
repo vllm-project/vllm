@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use thiserror_ext::AsReport;
-use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{debug, error, info, trace, warn};
@@ -120,28 +119,19 @@ async fn bind_local_sockets(
     local_input_address: Option<&str>,
     local_output_address: Option<&str>,
 ) -> Result<(String, RouterSocket, String, PullSocket)> {
-    let input_address = local_input_address
-        .map(ToOwned::to_owned)
-        .unwrap_or(allocate_tcp_address(local_host).await?);
-    let output_address = local_output_address
-        .map(ToOwned::to_owned)
-        .unwrap_or(allocate_tcp_address(local_host).await?);
-
     let mut input_socket = RouterSocket::new();
-    input_socket.bind(&input_address).await?;
+    let input_bind_address = local_input_address
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("tcp://{local_host}:0"));
+    let input_address = input_socket.bind(&input_bind_address).await?.to_string();
 
     let mut output_socket = PullSocket::new();
-    output_socket.bind(&output_address).await?;
+    let output_bind_address = local_output_address
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("tcp://{local_host}:0"));
+    let output_address = output_socket.bind(&output_bind_address).await?.to_string();
 
     Ok((input_address, input_socket, output_address, output_socket))
-}
-
-/// Allocate a port on the local host and return the corresponding TCP address.
-async fn allocate_tcp_address(local_host: &str) -> Result<String> {
-    let listener = TcpListener::bind((local_host, 0)).await?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(format!("tcp://{local_host}:{port}"))
 }
 
 /// Decode a handshake message and validate its structure, identity, and status.
@@ -320,5 +310,22 @@ pub async fn run_output_loop(
             warn!("output loop rx dropped, shutting down output loop");
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bind_local_sockets;
+
+    #[tokio::test]
+    async fn bind_local_sockets_resolves_zero_port_bindings() {
+        let (input_address, _input_socket, output_address, _output_socket) =
+            bind_local_sockets("127.0.0.1", None, None)
+                .await
+                .expect("bind local sockets");
+
+        assert!(input_address.starts_with("tcp://127.0.0.1:"));
+        assert!(output_address.starts_with("tcp://127.0.0.1:"));
+        assert_ne!(input_address, output_address);
     }
 }
