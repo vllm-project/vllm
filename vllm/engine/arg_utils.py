@@ -388,7 +388,7 @@ class EngineArgs:
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
     download_dir: str | None = LoadConfig.download_dir
-    safetensors_load_strategy: str = LoadConfig.safetensors_load_strategy
+    safetensors_load_strategy: str | None = LoadConfig.safetensors_load_strategy
     load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
@@ -1530,6 +1530,7 @@ class EngineArgs:
                     revision=self.revision,
                     trust_remote_code=self.trust_remote_code,
                     vllm_speculative_config=self.speculative_config,
+                    hf_token=self.hf_token,
                 )
             )
 
