@@ -725,7 +725,8 @@ class Param2MoEForCausalLM(
                 self.moe_layers.append(layer.mlp.experts)
                 self.num_moe_layers += 1
 
-        self.extract_moe_parameters(example_moe)
+        if self.config.num_experts is not None:
+            self.extract_moe_parameters(example_moe)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
