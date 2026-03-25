@@ -18,6 +18,7 @@ import torch
 _nan_reported = False
 _inf_reported = False
 _log_fh = None
+_per_layer_checks_enabled = os.environ.get("VLLM_NAN_CHECK", "1") == "1"
 
 # Count tensors: shape (num_layers, 4)
 # column 0 = input (before layernorm), column 1 = pre_attn (after layernorm),
@@ -79,6 +80,8 @@ def mark(tensor: torch.Tensor, stage_col: int, layer_idx: int) -> None:
     All ops stay on GPU — no .item(), no sync, no graph break.
     """
     global _nan_counts, _inf_counts
+    if not _per_layer_checks_enabled:
+        return
     if _nan_counts is None:
         return
     if _is_fp8(tensor.dtype):
@@ -105,6 +108,8 @@ def mark_attn(
     - otherwise: auto-slices by _last_num_actual_toks for [N,...] tensors
     """
     global _attn_detail, _inf_attn_detail
+    if not _per_layer_checks_enabled:
+        return
     if _attn_detail is None:
         return
     if _is_fp8(tensor.dtype):
@@ -134,6 +139,8 @@ def mark_fp8_nan(tensor: torch.Tensor, stage_col: int, layer_idx: int) -> None:
     Only runs on FP8 tensors; no-op for other dtypes.
     All ops stay on GPU — no .item(), no sync, no graph break.
     """
+    if not _per_layer_checks_enabled:
+        return
     if _attn_detail is None:
         return
     if not _is_fp8(tensor.dtype):
@@ -214,6 +221,8 @@ def mark_fwd_mqa_real(
     Uses seq_lens > 0 to mask out padding tokens.
     All ops stay on GPU — no .item(), no sync, no graph break.
     """
+    if not _per_layer_checks_enabled:
+        return
     if _fwd_mqa_real_nan is None:
         return
     if _is_fp8(attn_out.dtype):
@@ -441,6 +450,8 @@ def stash_if_nan(
     Buffer is keyed by batch_size since each CUDA graph batch size
     is compiled separately (dynamic=False).
     """
+    if not _per_layer_checks_enabled:
+        return
     if _nan_reported:
         return
     B = q_input.shape[0]
