@@ -75,7 +75,7 @@ uv pip install -e . --torch-backend=auto
 # requirements/test.txt is pinned to x86_64; on other platforms, use the
 # unpinned source file instead:
 uv pip install -r requirements/test.in    # resolves for current platform
-# OR on x86_64:
+# Or on x86_64:
 uv pip install -r requirements/test.txt
 
 # Run a specific test file (use .venv/bin/python directly;
