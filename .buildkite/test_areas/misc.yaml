@@ -75,7 +75,7 @@ steps:
   source_file_dependencies:
     - vllm/
     - tests/v1
-  device: cpu
+  device: cpu-small
   commands:
     # split the test to avoid interference
     - pytest -v -s -m 'cpu_test' v1/core
@@ -177,7 +177,7 @@ steps:
   - tests/tool_parsers
   - tests/transformers_utils
   - tests/config
-  device: cpu
+  device: cpu-small
   commands:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_inputs.py
@@ -192,7 +192,7 @@ steps:
   - pytest -v -s config
 
 - label: Batch Invariance (H100)
-  timeout_in_minutes: 25
+  timeout_in_minutes: 30
   device: h100
   source_file_dependencies:
     - vllm/v1/attention
@@ -203,6 +203,8 @@ steps:
     - pip install pytest-timeout pytest-forked
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+    - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA]
+    - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[FLASH_ATTN]
   
 - label: Acceptance Length Test (Large Models) # optional
   timeout_in_minutes: 25
