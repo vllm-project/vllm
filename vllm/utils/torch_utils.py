@@ -7,7 +7,7 @@ import random
 import threading
 from collections.abc import Callable, Collection
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -21,6 +21,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+    from vllm.config.cache import CacheDType
     from vllm.sequence import IntermediateTensors
 else:
     ModelConfig = object
@@ -60,7 +61,7 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
     "fp8": "fp8_e4m3",
 }
 
-TORCH_DTYPE_TO_KV_CACHE_STR: dict[torch.dtype, str] = {
+TORCH_DTYPE_TO_KV_CACHE_STR: dict[torch.dtype, "CacheDType"] = {
     torch.float32: "float32",
     torch.float16: "float16",
     torch.bfloat16: "bfloat16",
@@ -333,12 +334,12 @@ def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | No
 
 def resolve_kv_cache_dtype_string(
     kv_cache_dtype: str, model_config: ModelConfig
-) -> str:
+) -> "CacheDType":
     """Resolve 'auto' kv_cache_dtype to the actual string value from model config.
     Returns the resolved cache_dtype string (never "auto").
     """
     if kv_cache_dtype != "auto":
-        return kv_cache_dtype
+        return cast("CacheDType", kv_cache_dtype)
 
     hf_cfg = getattr(model_config, "hf_config", None)
     if hf_cfg is not None:
@@ -346,7 +347,7 @@ def resolve_kv_cache_dtype_string(
         if quant_cfg is not None:
             kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
             if kv_algo_str is not None:
-                return kv_algo_str
+                return cast("CacheDType", kv_algo_str)
 
     return TORCH_DTYPE_TO_KV_CACHE_STR[model_config.dtype]
 
