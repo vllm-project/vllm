@@ -232,15 +232,13 @@ class SimpleCPUOffloadWorker:
                 metadata.store_event,
                 is_store=True,
             )
-            if metadata.store_gpu_blocks:
-                print(f"YIFAN: store blocks {len(metadata.store_gpu_blocks)}")
 
         # (2) Track completed transfer events
         finished_recving: set[str] = set()
         finished_sending: set[str] = set()
 
         if self._pending_load_event_indices:
-            load_wm = self._drain_stream_events(is_store=False)
+            load_wm = self._poll_stream_events(is_store=False)
             for j in [j for j in self._pending_load_event_indices if j <= load_wm]:
                 req_ids = (
                     metadata.load_event_to_reqs.get(j) if metadata is not None else None
@@ -250,7 +248,7 @@ class SimpleCPUOffloadWorker:
                     self._pending_load_event_indices.discard(j)
 
         if self._pending_store_event_indices:
-            store_wm = self._drain_stream_events(is_store=True)
+            store_wm = self._poll_stream_events(is_store=True)
             for j in [j for j in self._pending_store_event_indices if j <= store_wm]:
                 self._pending_store_event_indices.discard(j)
                 finished_sending.add(f"__store_done_{j}")
@@ -276,18 +274,6 @@ class SimpleCPUOffloadWorker:
         self._pending_store_event_indices -= pending
         return {f"__store_done_{idx}" for idx in pending}
 
-    def _flush_and_sync_all(self) -> None:
-        """Synchronize all in-flight transfer events."""
-        for event_idx, event in self._load_events:
-            event.synchronize()
-            self._load_hwm = event_idx
-        self._load_events.clear()
-
-        for event_idx, event in self._store_events:
-            event.synchronize()
-            self._store_hwm = event_idx
-        self._store_events.clear()
-
     def _launch_copy_kernel(
         self,
         src_blocks: list[int],
@@ -307,8 +293,20 @@ class SimpleCPUOffloadWorker:
             events,
         )
 
-    def _drain_stream_events(self, is_store: bool) -> int:
-        """Drain completed events and return the high-water mark."""
+    def _flush_and_sync_all(self) -> None:
+        """Synchronize all in-flight transfer events."""
+        for event_idx, event in self._load_events:
+            event.synchronize()
+            self._load_hwm = event_idx
+        self._load_events.clear()
+
+        for event_idx, event in self._store_events:
+            event.synchronize()
+            self._store_hwm = event_idx
+        self._store_events.clear()
+
+    def _poll_stream_events(self, is_store: bool) -> int:
+        """Non-blocking poll for completed events and return the high-water mark."""
         events = self._store_events if is_store else self._load_events
         hwm = self._store_hwm if is_store else self._load_hwm
         while events:
