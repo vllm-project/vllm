@@ -108,7 +108,6 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
         super().__init__()
 
     def _load_pickled_torch(self, data: bytes) -> torch.Tensor:
-        # Path for torch tensor
         # Enable sparse tensor integrity checks to prevent out-of-bounds
         # writes from maliciously crafted tensors.
         with (
@@ -119,8 +118,6 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
             return tensor.to_dense()
 
     def _load_numpy(self, data: bytes) -> torch.Tensor:
-        # Path for numpy arrays
-
         with BytesIO(data) as buffer:
             return torch.from_numpy(np.load(buffer))
 
