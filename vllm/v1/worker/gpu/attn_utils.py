@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -16,6 +16,9 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -216,7 +219,7 @@ def build_attn_metadata(
             causal=True,
             dcp_local_seq_lens=dcp_local_seq_lens,
         )
-        if encoder_seq_lens and i in encoder_seq_lens:
+        if encoder_seq_lens is not None and i in encoder_seq_lens:
             encoder_seq_lens_gpu, encoder_seq_lens_cpu = encoder_seq_lens[i]
             common_attn_metadata.encoder_seq_lens = encoder_seq_lens_gpu
             common_attn_metadata.encoder_seq_lens_cpu = encoder_seq_lens_cpu
@@ -229,3 +232,40 @@ def build_attn_metadata(
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata
+
+
+def build_attn_metadata_for_batch(
+    input_batch: "InputBatch",
+    include_padding: bool,
+    attn_groups: list[list[AttentionGroup]],
+    max_seq_len: int,
+    block_tables: Sequence[torch.Tensor],
+    slot_mappings: torch.Tensor,
+    kv_cache_config: KVCacheConfig,
+    encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]] | None = None,
+) -> dict[str, Any]:
+    """Build attention metadata from InputBatch.
+
+    Wrapper around build_attn_metadata that extracts fields from InputBatch.
+    """
+    if include_padding:
+        num_reqs = input_batch.num_reqs_after_padding
+        num_tokens = input_batch.num_tokens_after_padding
+    else:
+        num_reqs = input_batch.num_reqs
+        num_tokens = input_batch.num_tokens
+    return build_attn_metadata(
+        attn_groups=attn_groups,
+        num_reqs=num_reqs,
+        num_tokens=num_tokens,
+        query_start_loc_gpu=input_batch.query_start_loc,
+        query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
+        max_query_len=int(input_batch.num_scheduled_tokens[:num_reqs].max()),
+        seq_lens=input_batch.seq_lens,
+        max_seq_len=max_seq_len,
+        block_tables=block_tables,
+        slot_mappings=slot_mappings,
+        kv_cache_config=kv_cache_config,
+        dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+        encoder_seq_lens=encoder_seq_lens,
+    )
