@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, cast
+from typing import Literal
 
 import numpy as np
 import torch
@@ -14,7 +14,7 @@ from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs.data import PromptType
+from vllm.inputs import MultiModalDataDict, PromptType, TextPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
@@ -32,7 +32,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -2047,14 +2046,11 @@ class CohereASRForConditionalGeneration(
             f"<|noitn|><|notimestamp|><|nodiarize|>"
         )
         prompt_text = request_prompt if request_prompt else default_prompt
-        prompt = {
-            "prompt": prompt_text,
-            "multi_modal_data": {
-                "audio": (audio, stt_config.sample_rate),
-            },
-        }
 
-        return cast(PromptType, prompt)
+        return TextPrompt(
+            prompt=prompt_text,
+            multi_modal_data={"audio": (audio, stt_config.sample_rate)},
+        )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
