@@ -758,7 +758,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 paged_kv_indices = None
                 paged_kv_last_page_len = None
             decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(),
+                _get_workspace_buffer(),
                 get_kv_cache_layout(),
                 use_cuda_graph=use_cudagraph,
                 paged_kv_indptr_buffer=paged_kv_indptr,
@@ -781,7 +781,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_cascade_wrapper(self):
         if self._cascade_wrapper is None:
             self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
-                2, self._get_workspace_buffer(), get_kv_cache_layout()
+                2, _get_workspace_buffer(), get_kv_cache_layout()
             )
         return self._cascade_wrapper
 
