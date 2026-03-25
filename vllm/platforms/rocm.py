@@ -737,7 +737,14 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95", "gfx12"])
+        # String-based check works when amdsmi returns a valid arch.
+        if any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95", "gfx12"]):
+            return True
+        # Fallback for containers where amdsmi silently returns a sentinel
+        # value (gfxffffffffffffffff). torch.cuda.get_device_capability()
+        # correctly identifies the GPU in that case.
+        cap = torch.cuda.get_device_capability(0)
+        return (cap[0] == 9 and cap[1] in (4, 5)) or cap[0] >= 12
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
