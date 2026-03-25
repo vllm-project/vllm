@@ -103,7 +103,10 @@ class CachedHfTokenizer(TokenizerLike):
                     "is a custom tokenizer not yet available in the "
                     "HuggingFace transformers library, consider "
                     "setting `trust_remote_code=True` in LLM or using "
-                    "the `--trust-remote-code` flag in the CLI."
+                    "the `--trust-remote-code` flag in the CLI. If the "
+                    "model was created with a newer version of "
+                    "transformers, consider upgrading: "
+                    "`pip install --upgrade transformers`"
                 )
                 raise RuntimeError(err_msg) from e
             else:
