@@ -102,7 +102,14 @@ class RealtimeConnection:
         event_type = event.get("type")
         if event_type == "session.update":
             logger.debug("Session updated: %s", event)
-            self._check_model(event["model"])
+            model = event.get("model")
+            error = self._check_model(model)
+            if error is not None:
+                await self.send_error(
+                    error.error.message,
+                    "invalid_model",
+                )
+                return
             self._is_model_validated = True
         elif event_type == "input_audio_buffer.append":
             append_event = InputAudioBufferAppend(**event)
