@@ -236,13 +236,15 @@ def log_non_default_args(args: Namespace | EngineArgs):
 def should_include_usage(
     stream_options: "StreamOptions | None", enable_force_include_usage: bool
 ) -> tuple[bool, bool]:
+    if enable_force_include_usage:
+        return True, True
     if stream_options:
-        include_usage = stream_options.include_usage or enable_force_include_usage
+        include_usage = bool(stream_options.include_usage)
         include_continuous_usage = include_usage and bool(
             stream_options.continuous_usage_stats
         )
     else:
-        include_usage, include_continuous_usage = enable_force_include_usage, False
+        include_usage, include_continuous_usage = False, False
     return include_usage, include_continuous_usage
 
 
@@ -307,6 +309,9 @@ def create_error_response(
 
     if isinstance(message, Exception):
         exc = message
+        logger.debug(
+            "create_error_response called with %s: %s", type(exc).__name__, exc
+        )
 
         from vllm.exceptions import VLLMNotFoundError, VLLMValidationError
 
@@ -331,8 +336,8 @@ def create_error_response(
             err_type = "InternalServerError"
             status_code = exc.status_code
             param = None
-        elif exc.__class__.__name__ == "TemplateError":
-            # jinja2.TemplateError (avoid importing jinja2)
+        elif any(cls.__name__ == "TemplateError" for cls in type(exc).__mro__):
+            # jinja2.TemplateError and its subclasses (avoid importing jinja2)
             err_type = "BadRequestError"
             status_code = HTTPStatus.BAD_REQUEST
             param = None

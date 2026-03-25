@@ -109,8 +109,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         else:  # fall back to the default config
             get_config_func = functools.partial(
                 try_get_optimal_moe_lora_config,
-                w1_shape=layer.w13_weight.size(),
-                w2_shape=layer.w2_weight.size(),
+                w1_shape=layer.w13_weight.shape,
+                w2_shape=layer.w2_weight.shape,
                 rank=rank,
                 top_k=top_k,
                 dtype=config_dtype,
@@ -190,9 +190,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     use_int8_w8a16=False,
                     use_int4_w4a16=False,
                 )
-                CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
                 num_tokens = hidden_states.size(0)
-                M = min(num_tokens, CHUNK_SIZE)
+                M = num_tokens
                 max_lora_rank = self.w13_lora_a_stacked[0].shape[-2]
                 shrink_config, expand_config = self._get_lora_moe_configs(
                     op_prefix="w13",
@@ -281,9 +280,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     use_int8_w8a16=False,
                     use_int4_w4a16=False,
                 )
-                CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
                 num_tokens = hidden_states.size(0)
-                M = min(num_tokens, CHUNK_SIZE)
+                M = num_tokens
                 max_lora_rank = self.w2_lora_a_stacked[0].shape[-2]
                 shrink_config, expand_config = self._get_lora_moe_configs(
                     op_prefix="w2",

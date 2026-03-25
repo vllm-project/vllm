@@ -50,9 +50,9 @@ def is_aiter_found_and_supported() -> bool:
     VLLM_ROCM_USE_AITER=0, while preventing unwanted JIT warnings for auto-discovery.
     """
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        from vllm.platforms.rocm import on_gfx9
+        from vllm.platforms.rocm import on_mi3xx
 
-        return on_gfx9()
+        return on_mi3xx()
     return False
 
 
@@ -137,6 +137,10 @@ def _rocm_aiter_fused_moe_fake(
     a2_scale: torch.Tensor | None = None,
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
+    hidden_pad: int = 0,
+    intermediate_pad: int = 0,
+    bias1: torch.Tensor | None = None,
+    bias2: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -861,6 +865,39 @@ def _rocm_aiter_triton_add_rmsnorm_pad_fake(
     return out, residual_out
 
 
+def _rocm_aiter_gemm_a8wfp4_impl(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    x_scales: torch.Tensor,
+    w_scales: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    from aiter.ops.triton.gemm_a8wfp4 import gemm_a8wfp4
+
+    M, N = x.shape[0], w.shape[0]
+    y = torch.empty(M, N, dtype=out_dtype, device=x.device)
+    gemm_a8wfp4(
+        x=x,
+        w=w,
+        y=y,
+        x_scales=x_scales,
+        w_scales=w_scales,
+        dtype=out_dtype,
+        config=None,
+    )
+    return y
+
+
+def _rocm_aiter_gemm_a8wfp4_fake(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    x_scales: torch.Tensor,
+    w_scales: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty(x.shape[0], w.shape[0], dtype=out_dtype, device=x.device)
+
+
 def _triton_rotary_embedding_impl(
     positions: torch.Tensor,
     query: torch.Tensor,
@@ -1337,6 +1374,14 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_gemm_a8wfp4",
+                op_func=_rocm_aiter_gemm_a8wfp4_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_gemm_a8wfp4_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
             # Register rocm aiter rotary embedding custom op
             direct_register_custom_op(
                 op_name="rocm_aiter_triton_rotary_embedding",
@@ -1647,7 +1692,19 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_per_token_quant(x, quant_dtype, scale)
 
     @staticmethod
-    def triton_fp4_gemm_dynamic_qaunt(
+    def gemm_a8wfp4(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        x_scales: torch.Tensor,
+        w_scales: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_gemm_a8wfp4(
+            x, w, x_scales, w_scales, out_dtype
+        )
+
+    @staticmethod
+    def triton_fp4_gemm_dynamic_quant(
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
