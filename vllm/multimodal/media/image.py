@@ -3,6 +3,7 @@
 
 from io import BytesIO
 from pathlib import Path
+import numpy as np
 
 import pybase64
 import torch
@@ -117,7 +118,7 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
     def _load_numpy(self, data: bytes) -> torch.Tensor:
         # Path for numpy arrays
-        import numpy as np
+        
         with BytesIO(data) as buffer:
             return torch.from_numpy(np.load(buffer))  
     
@@ -134,7 +135,6 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
     def load_file(self, filepath: Path) -> torch.Tensor:
         if filepath.suffix == ".npy":
-            import numpy as np
             return torch.from_numpy(np.load(filepath))
         else:
             return torch.load(filepath, weights_only=True).to_dense()
