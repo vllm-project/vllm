@@ -23,7 +23,7 @@ VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
 MAX_PROMPT_SIZE = 100
 DEVICE_TYPE = current_platform.device_type
-CUDA_DEVICES = [
+DEVICES = [
     f"{DEVICE_TYPE}:{i}" for i in range(min(current_platform.device_count(), 2))
 ]
 MAX_NUM_PROMPT_TOKENS = 64
@@ -219,7 +219,7 @@ def _construct_cached_request_state(req_id_suffix: int):
     )
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32, 64])
 def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     """
@@ -313,7 +313,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     )
 
 
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("batch_size", [32])
 @pytest.mark.parametrize("swap_list", [((0, 1),)])
 def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: list):

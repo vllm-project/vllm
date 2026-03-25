@@ -40,7 +40,7 @@ MAX_NUM_REQS = 256
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
 DEVICE_TYPE = current_platform.device_type
-CUDA_DEVICES = [
+DEVICES = [
     f"{DEVICE_TYPE}:{i}"
     for i in range(1 if current_platform.device_count() == 1 else 2)
 ]
@@ -802,7 +802,7 @@ def _assert_valid(
 
 
 @create_new_process_for_each_test()
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("reqs_per_logitproc", [REQS_PER_LOGITPROC])
 @pytest.mark.parametrize("logitsprocs_under_test", _get_test_cases())
 def test_logitsprocs(

@@ -8,7 +8,7 @@ from vllm.platforms import current_platform
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 
 DEVICE_TYPE = current_platform.device_type
-CUDA_DEVICE = "cuda" if current_platform.is_cuda() else None
+DEVICE = DEVICE_TYPE if not current_platform.is_cpu() else "CPU"
 
 BATCH_SIZE = 1024
 VOCAB_SIZE = 128 * 1024
@@ -128,15 +128,15 @@ def test_flashinfer_sampler():
 # =============================================================================
 
 
-@pytest.mark.skipif(CUDA_DEVICE is None, reason="CUDA not available")
+@pytest.mark.skipif("CPU" in DEVICE, reason="CUDA/XPU not available")
 class TestTritonTopkTopp:
     """Tests for the Triton top-k/top-p kernel."""
 
     @pytest.fixture(autouse=True)
     def setup(self):
         """Set up test fixtures."""
-        torch.set_default_device(CUDA_DEVICE)
-        self.generator = Generator(device=CUDA_DEVICE).manual_seed(42)
+        torch.set_default_device(DEVICE)
+        self.generator = Generator(device=DEVICE).manual_seed(42)
 
     def _compare_results(
         self,
