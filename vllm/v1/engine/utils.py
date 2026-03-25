@@ -181,27 +181,24 @@ class CoreEngineProcManager:
         sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
         sentinels = set(sentinel_to_proc.keys())
         enable_ft = self.vllm_config.fault_tolerance_config.enable_fault_tolerance
-        try:
-            while sentinels and not self.manager_stopped.is_set():
-                died_sentinels = connection.wait(sentinels, timeout=1)
+        while sentinels and not self.manager_stopped.is_set():
+            died_sentinels = connection.wait(sentinels, timeout=1)
 
-                for sentinel in died_sentinels:
-                    proc = sentinel_to_proc.pop(cast(int, sentinel))
-                    exitcode = proc.exitcode
-                    if exitcode != 0 and not self.manager_stopped.is_set():
-                        self.failed_proc_name = proc.name
-                    if enable_ft:
-                        engine_rank = self.processes.index(proc)
-                        notify_engine_down(
-                            self.engine_down_socket,
-                            engine_id=str(engine_rank + self.start_index),
-                        )
-                        sentinels.remove(cast(int, sentinel))
+            for sentinel in died_sentinels:
+                proc = sentinel_to_proc.pop(cast(int, sentinel))
+                exitcode = proc.exitcode
+                if exitcode != 0 and not self.manager_stopped.is_set():
+                    self.failed_proc_name = proc.name
+                if enable_ft:
+                    engine_rank = self.processes.index(proc)
+                    notify_engine_down(
+                        self.engine_down_socket,
+                        engine_id=str(engine_rank + self.start_index),
+                    )
+                    sentinels.remove(cast(int, sentinel))
 
-                if died_sentinels and not enable_ft:
-                    break
-        except zmq.ZMQError:
-            pass
+            if died_sentinels and not enable_ft:
+                break
 
         self.shutdown()
 
@@ -885,41 +882,37 @@ class CoreEngineActorManager:
 
         enable_ft = self.vllm_config.fault_tolerance_config.enable_fault_tolerance
         failed_ref = set()
-        try:
-            while not self.manager_stopped.is_set():
-                actor_run_refs = [r for r in self.get_run_refs() if r not in failed_ref]
-                if not actor_run_refs:
-                    logger.info(
-                        "There are no actors to monitor currently. "
-                        "The monitoring function is about to terminate."
-                    )
+        while not self.manager_stopped.is_set():
+            actor_run_refs = [r for r in self.get_run_refs() if r not in failed_ref]
+            if not actor_run_refs:
+                logger.info(
+                    "There are no actors to monitor currently. "
+                    "The monitoring function is about to terminate."
+                )
+                break
+            actor_done_refs, _ = ray.wait(actor_run_refs, timeout=5)
+            unexpected_failure = False
+            for actor_ref in actor_done_refs:
+                if self.manager_stopped.is_set():
                     break
-                actor_done_refs, _ = ray.wait(actor_run_refs, timeout=5)
-                unexpected_failure = False
-                for actor_ref in actor_done_refs:
-                    if self.manager_stopped.is_set():
-                        break
-                    if actor_ref not in self.get_run_refs():
-                        # The run refs may have been updated by elastic scale-down.
-                        continue
-                    try:
-                        ray.get(actor_ref)
-                    except ray.exceptions.RayActorError:
-                        self.failed_proc_name = f"Actor {actor_ref}"
-                        unexpected_failure = True
-                        if enable_ft:
-                            engine_rank = self.get_run_refs().index(actor_ref)
-                            notify_engine_down(
-                                self.engine_down_socket,
-                                str(engine_rank + self.start_rank),
-                            )
-                            failed_ref.add(actor_ref)
+                if actor_ref not in self.get_run_refs():
+                    # The run refs may have been updated by elastic scale-down.
+                    continue
+                try:
+                    ray.get(actor_ref)
+                except ray.exceptions.RayActorError:
+                    self.failed_proc_name = f"Actor {actor_ref}"
+                    unexpected_failure = True
+                    if enable_ft:
+                        engine_rank = self.get_run_refs().index(actor_ref)
+                        notify_engine_down(
+                            self.engine_down_socket,
+                            str(engine_rank + self.start_rank),
+                        )
+                        failed_ref.add(actor_ref)
 
-                if unexpected_failure and not enable_ft:
-                    break
-        except zmq.ZMQError:
-            pass
-
+            if unexpected_failure and not enable_ft:
+                break
         self.shutdown()
 
     def shutdown(self, timeout: float | None = None) -> None:
