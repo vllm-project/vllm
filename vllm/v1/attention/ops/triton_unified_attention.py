@@ -9,14 +9,14 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import KVQuantMode
 
 logger = init_logger(__name__)
-is_batch_invariant = vllm_is_batch_invariant()
+is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
