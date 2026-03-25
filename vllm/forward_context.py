@@ -236,6 +236,15 @@ class ForwardContext:
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
 
+    num_unpadded_tokens: int | None = None
+    """
+    Number of actual (non-padding) tokens in the batch. When CUDA graphs
+    or DP padding inflate the batch, padded tokens sit at the tail
+    (positions [num_unpadded_tokens, num_tokens)).  Used by the EPLB router
+    to avoid recording expert-load statistics for padding tokens.
+    None means every token is real (no padding).
+    """
+
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -270,6 +279,7 @@ def create_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
+    num_unpadded_tokens: int | None = None,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
@@ -286,6 +296,7 @@ def create_forward_context(
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
         skip_compiled=skip_compiled,
+        num_unpadded_tokens=num_unpadded_tokens,
         additional_kwargs=additional_kwargs or {},
     )
 
@@ -316,6 +327,7 @@ def set_forward_context(
     ubatch_slices: UBatchSlices | None = None,
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
+    num_unpadded_tokens: int | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -375,6 +387,7 @@ def set_forward_context(
         slot_mapping,
         additional_kwargs,
         skip_compiled,
+        num_unpadded_tokens,
     )
 
     try:

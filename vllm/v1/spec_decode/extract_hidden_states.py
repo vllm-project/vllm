@@ -138,6 +138,7 @@ class ExtractHiddenStatesProposer:
             slot_mapping=self._get_slot_mapping(
                 num_input_tokens, common_attn_metadata.slot_mapping
             ),
+            num_unpadded_tokens=num_tokens,
         ):
             self.model(
                 hidden_states=self.hidden_states[:num_input_tokens],

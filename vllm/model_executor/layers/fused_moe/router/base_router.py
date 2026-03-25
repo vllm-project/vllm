@@ -6,6 +6,7 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -19,6 +20,7 @@ if current_platform.is_cuda_alike():
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
+        num_unpadded_tokens: int = -1,
     ) -> torch.Tensor:
         """
         Map the logical expert ids to physical expert ids
@@ -32,6 +34,10 @@ if current_platform.is_cuda_alike():
             expert_load_view: The expert load view.
             logical_to_physical_map: The logical to physical map.
             logical_replica_count: The logical replica count.
+            num_unpadded_tokens: Number of actual (non-padding) tokens.
+                When >= 0, only the first ``num_unpadded_tokens`` rows of
+                ``topk_ids`` are used in expert load statistics.
+                -1 means all tokens are valid.
 
         Returns:
             The physical expert ids.
@@ -58,8 +64,6 @@ if current_platform.is_cuda_alike():
             .squeeze(-1)
         )
 
-        topk_ids = physical_ids
-
         # 2. Record expert load metrics.
 
         # TODO(bowen): When using `FusedMoEModularKernel`, this
@@ -76,8 +80,14 @@ if current_platform.is_cuda_alike():
 
         # `expert_load_view`: (num_physical_experts,)
 
+        topk_ids = physical_ids
+
+        topk_ids_for_count = topk_ids
+        if num_unpadded_tokens >= 0:
+            topk_ids_for_count = topk_ids[:num_unpadded_tokens, :]
+
         # `torch.bincount` is not compilable, so use `scatter_add_` instead.
-        topk_ids_flatten = topk_ids.flatten()
+        topk_ids_flatten = topk_ids_for_count.flatten()
         expert_load_view.scatter_add_(
             dim=0,
             index=topk_ids_flatten.long(),
@@ -91,6 +101,7 @@ else:
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
+        num_unpadded_tokens: int = -1,
     ) -> torch.Tensor:
         # CPU fallback: no EPLB so just return as is
         return topk_ids
@@ -159,11 +170,19 @@ class BaseRouter(FusedMoERouter):
             assert self.eplb_state.expert_load_view is not None
             assert self.eplb_state.logical_to_physical_map is not None
             assert self.eplb_state.logical_replica_count is not None
+
+            num_unpadded_tokens = -1
+            if is_forward_context_available():
+                ctx_val = get_forward_context().num_unpadded_tokens
+                if ctx_val is not None:
+                    num_unpadded_tokens = ctx_val
+
             return eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
                 expert_load_view=self.eplb_state.expert_load_view,
                 logical_to_physical_map=self.eplb_state.logical_to_physical_map,
                 logical_replica_count=self.eplb_state.logical_replica_count,
+                num_unpadded_tokens=num_unpadded_tokens,
             )
         return topk_ids
 
