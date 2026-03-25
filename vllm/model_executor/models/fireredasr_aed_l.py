@@ -775,16 +775,6 @@ class FireRedAsrAedLForConditionalGeneration(
         input_features = input_features.transpose(1, 2)
         return FireRedASRAudioInputs(input_features=input_features)
 
-    def embed_input_ids(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: MultiModalEmbeddings | None = None,
-        *,
-        is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
-    ) -> torch.Tensor:
-        return multimodal_embeddings
-
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
         Compute output logits from hidden states.
