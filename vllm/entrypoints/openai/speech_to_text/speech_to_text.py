@@ -171,7 +171,7 @@ class OpenAISpeechToText(OpenAIServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[ProcessorInputs], float]:
+    ) -> tuple[list[ProcessorInputs], float, list[float]]:
         # Validate request
         language = self.model_cls.validate_language(request.language)
         # Skip to_language validation to avoid extra logging for Whisper.
@@ -252,7 +252,15 @@ class OpenAISpeechToText(OpenAIServing):
 
         engine_prompts = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_prompts, duration
+        # Compute the actual duration of each chunk so that segment
+        # timestamps are based on real chunk boundaries rather than the
+        # nominal ``max_audio_clip_s``.  Using the nominal value causes
+        # timestamps to drift by ~0.5 s per chunk because ``split_audio``
+        # searches for a low-energy split point within the overlap window,
+        # making each chunk slightly shorter than ``max_audio_clip_s``.
+        chunk_durations = [float(chunk.shape[-1]) / sr for chunk in chunks]
+
+        return engine_prompts, duration, chunk_durations
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -409,7 +417,11 @@ class OpenAISpeechToText(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        engine_prompts, duration_s = await self._preprocess_speech_to_text(
+        (
+            engine_prompts,
+            duration_s,
+            chunk_durations,
+        ) = await self._preprocess_speech_to_text(
             request=request,
             audio_data=audio_data,
             request_id=request_id,
@@ -505,10 +517,11 @@ class OpenAISpeechToText(OpenAIServing):
                 assert len(list_result_generator) == 1, (
                     "`max_audio_clip_s` is set to None, audio cannot be chunked"
                 )
+            # Track cumulative offset from actual chunk durations so that
+            # segment timestamps reflect real split points (fixes #32588).
+            cumulative_offset = 0.0
             for idx, result_generator in enumerate(list_result_generator):
-                start_time = (
-                    float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
-                )
+                start_time = cumulative_offset
                 async for op in result_generator:
                     if request.response_format == "verbose_json":
                         assert op.outputs[0].logprobs
@@ -527,6 +540,7 @@ class OpenAISpeechToText(OpenAIServing):
                     else:
                         raw_text = op.outputs[0].text
                         text_parts.append(self.model_cls.post_process_output(raw_text))
+                cumulative_offset += chunk_durations[idx]
             text = "".join(text_parts)
             if self.task_type == "transcribe":
                 final_response: ResponseType
