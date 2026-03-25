@@ -134,12 +134,14 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
 
-        if getattr(self.base_layer.quant_method, "supports_internal_mk", False):
+        if getattr(
+            self.base_layer.quant_method, "supports_internal_mk", False
+        ):  # XXXXXXXXXXX
             # Use the existing modular kernel from the quant method
             m_fused_moe_fn = self.base_layer.quant_method.moe_kernel
             # Don't let the kernel own shared experts so the runner can
             # overlap them with routed experts via a separate CUDA stream.
-            m_fused_moe_fn.shared_experts = None
+            m_fused_moe_fn.shared_experts = None  # XXXXXXXXXXXXXXXXXXXXXXXXXXXX
         else:
             # Create a new modular kernel via select_gemm_impl.
             # Don't pass shared_experts to the kernel so the runner can

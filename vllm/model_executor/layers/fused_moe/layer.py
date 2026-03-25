@@ -576,9 +576,9 @@ class FusedMoE(CustomOp):
             quant_config,
             self.moe_config,
         )
-        self.quant_method = (
-            quant_method  # only for weight loading. how to get around this?
-        )
+
+        # TODO(bnell): only for weight loading. how to get around this?
+        self.quant_method = quant_method
 
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(

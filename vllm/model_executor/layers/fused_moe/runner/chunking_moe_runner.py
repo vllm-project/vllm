@@ -7,6 +7,9 @@ from vllm.forward_context import (
     get_forward_context,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
 from vllm.model_executor.layers.fused_moe.runner.moe_runner_base import MoERunnerBase
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -37,6 +40,9 @@ class ChunkingMoERunner(MoERunnerBase):
     def __init__(self, inner: MoERunnerBase, **kwargs):
         super().__init__(**kwargs)  # this is not ideal
 
+        # TODO(bnell): fix this
+        self._shared_experts = inner._shared_experts
+
         # Assert that _maybe_dispatch/_maybe_combine will be nops.
         assert inner.moe_config.pcp_size == 1
 
@@ -55,6 +61,11 @@ class ChunkingMoERunner(MoERunnerBase):
     #    # called when normal lookup (instance __dict__, class MRO) fails,
     #    # so ChunkingMoERunner's own attributes and methods take priority.
     #    return getattr(self._inner, name)
+
+    def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
+        self._quant_method = quant_method
+        self._inner._replace_quant_method(quant_method)
+        assert self._shared_experts == self._inner._shared_experts
 
     def _init_dp_chunking(self) -> list[torch.Tensor]:
         states_shape: tuple[int, ...]
