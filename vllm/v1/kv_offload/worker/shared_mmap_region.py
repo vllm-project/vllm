@@ -87,19 +87,27 @@ class SharedMmapRegion:
         atexit.register(self.cleanup)
 
     def alloc_tensor(self, tensor_size: int) -> torch.Tensor:
-        """Allocate a strided int8 view for this worker, one layer.
+        """Allocate a strided int8 view for this worker, one canonical tensor.
 
-        The mmap layout per block row is:
-            [ w0_data (tensor_size bytes) | w1_data | ... | w{N-1}_data ]
-        Consecutive block rows are separated by row_stride = cpu_page_size * N.
+        Must be called once per canonical tensor. The full mmap layout is:
+
+            worker0_block0 | worker1_block0 | ... | worker{M-1}_block0
+            worker0_block1 | worker1_block1 | ... | worker{M-1}_block1
+            ...
+
+        Each worker_block cell is cpu_page_size bytes and holds all canonical
+        tensors for that worker and block concatenated:
+            [ tensor0_data | tensor1_data | ... | tensor{L-1}_data ]
+
+        Consecutive rows are separated by row_stride = cpu_page_size * M.
 
         Returns an int8 tensor of shape (num_blocks, tensor_size) with stride
         (row_stride, 1).  Using int8 keeps stride == bytes, so swap_blocks
         address arithmetic works without any dtype conversion.
 
         Args:
-            tensor_size: Bytes per block for this layer
-                         (= gpu_tensor.stride(0) * gpu_tensor.element_size()).
+            tensor_size: Bytes per block for this canonical tensor
+                         (= CanonicalKVCacheTensor.page_size_bytes * block_size_factor).
         """
         worker_layer_view = torch.as_strided(
             self._base,

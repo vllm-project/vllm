@@ -2,18 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
 
-import torch
-
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.platforms import current_platform
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import LoadStoreSpec, OffloadingManager
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
-from vllm.v1.kv_offload.spec import OffloadingSpec
+from vllm.v1.kv_offload.spec import CanonicalKVCaches, OffloadingSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.worker.shared_mmap_region import SharedMmapRegion
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
@@ -28,6 +25,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             raise Exception(
                 "cpu_bytes_to_use must be specified in kv_connector_extra_config"
             )
+
         # calculate kv_bytes_per_offloaded_block
         assert kv_cache_config is not None
         page_sizes = {
@@ -41,7 +39,11 @@ class CPUOffloadingSpec(OffloadingSpec):
             * len(kv_cache_config.kv_cache_tensors)
             * vllm_config.parallel_config.world_size
         )
-
+        self.mmap_page_size = (
+            page_size_bytes
+            * self.block_size_factor
+            * len(kv_cache_config.kv_cache_tensors)
+        )
         kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factor
         self.num_blocks = (
             int(cpu_bytes_to_use) // kv_bytes_per_offloaded_block
@@ -91,9 +93,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         return self._manager
 
     def get_handlers(
-        self,
-        kv_caches: dict[str, torch.Tensor],
-        attn_backends: dict[str, type[AttentionBackend]],
+        self, kv_caches: CanonicalKVCaches
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         if not self._handlers:
             if not current_platform.is_cuda_alike():
@@ -101,29 +101,22 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "CPU Offloading is currently only supported on CUDA-alike GPUs"
                 )
 
-            assert len(self.gpu_block_size) == 1
-            gpu_block_size = self.gpu_block_size[0]
-
             num_workers = self.vllm_config.parallel_config.world_size
-            cpu_page_size = sum(
-                t.stride(0) * t.element_size() for t in kv_caches.values()
-            )
             mmap_region = SharedMmapRegion(
                 instance_id=self.vllm_config.instance_id,
                 total_size_bytes=int(self.extra_config["cpu_bytes_to_use"]),
                 num_blocks=self.num_blocks,
                 rank=get_tensor_model_parallel_rank(),
                 num_workers=num_workers,
-                cpu_page_size=cpu_page_size,
+                cpu_page_size=self.mmap_page_size,
             )
+
             self._handlers = CpuGpuOffloadingHandlers(
-                attn_backends=attn_backends,
-                gpu_block_size=gpu_block_size,
-                cpu_block_size=gpu_block_size * self.block_size_factor,
+                kv_caches=kv_caches,
+                block_size_factor=self.block_size_factor,
                 num_cpu_blocks=self.num_blocks,
-                gpu_caches=kv_caches,
                 mmap_region=mmap_region,
-                num_workers=self.vllm_config.parallel_config.world_size,
+                num_workers=num_workers,
             )
 
         assert self._handlers is not None
