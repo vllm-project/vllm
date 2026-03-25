@@ -158,3 +158,43 @@ def test_gpu_model_runner_binding_stage(monkeypatch):
     assert callable(dummy_module.router.capture_fn)
     dummy_module.router.capture_fn(torch.tensor([[9, 10]]))
     assert len(capturer.calls) == 1
+
+
+def test_gpu_model_runner_v2_binds_router_capture(monkeypatch):
+    from vllm.v1.worker.gpu.routed_experts_utils import RoutedExpertsCaptureHelper
+
+    class DummyFusedMoE:
+        def __init__(self):
+            self.layer_id = 13
+            self.router = _make_router()
+
+    class DummyCapturer:
+        def __init__(self):
+            self.calls = []
+
+        def capture(self, layer_id, topk_ids):
+            self.calls.append((layer_id, topk_ids))
+
+    dummy_module = DummyFusedMoE()
+
+    import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
+
+    monkeypatch.setattr(fused_moe_layer, "FusedMoE", DummyFusedMoE)
+
+    dummy_self = types.SimpleNamespace(
+        compilation_config=types.SimpleNamespace(
+            static_forward_context={"dummy": dummy_module}
+        ),
+        routed_experts=RoutedExpertsCaptureHelper(),
+    )
+
+    capturer = DummyCapturer()
+    dummy_self.routed_experts.bind(dummy_self, capturer)
+
+    assert dummy_module.router.capture_fn is not None
+    dummy_module.router.capture_fn(torch.tensor([[7, 8]]))
+
+    assert len(capturer.calls) == 1
+    layer_id, topk_ids = capturer.calls[0]
+    assert layer_id == 13
+    assert torch.equal(topk_ids, torch.tensor([[7, 8]]))
