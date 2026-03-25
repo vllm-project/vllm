@@ -1838,8 +1838,8 @@ def get_layers_from_vllm_config(
         # Try variants to tolerate common prefix differences such as
         # 'language_model.model.layers...' vs 'language_model.layers...'
         tried = False
-        # Variant 1: remove a redundant '.model.' segment
-        alt = req_name.replace(".model.", ".")
+        # Variant 1: remove a redundant '.model.' segment (only first occurrence)
+        alt = req_name.replace(".model.", ".", 1)
         if alt != req_name and alt in forward_context and isinstance(
             forward_context[alt], layer_type
         ):

@@ -22,17 +22,29 @@ def test_get_layers_from_vllm_config_normalizes_model_prefix():
         def __init__(self, mapping):
             self.compilation_config = FakeCompilationConfig(mapping)
 
-    # The forward context key (runtime) is missing the extra '.model.' segment
-    forward_key = "language_model.layers.0.self_attn.attn"
-    layer_obj = DummyLayer()
+    # Variant 1: Remove a redundant '.model.' segment (only first occurrence)
+    forward_key1 = "language_model.layers.0.self_attn.attn"
+    layer_obj1 = DummyLayer()
+    fake_cfg1 = FakeVllmConfig({forward_key1: layer_obj1})
+    requested1 = ["language_model.model.layers.0.self_attn.attn"]
+    result1 = get_layers_from_vllm_config(fake_cfg1, DummyLayer, requested1)
+    assert requested1[0] in result1
+    assert result1[requested1[0]] is layer_obj1
 
-    fake_cfg = FakeVllmConfig({forward_key: layer_obj})
+    # Variant 2: Insert '.model.' after 'language_model.'
+    forward_key2 = "language_model.model.layers.1.self_attn.attn"
+    layer_obj2 = DummyLayer()
+    fake_cfg2 = FakeVllmConfig({forward_key2: layer_obj2})
+    requested2 = ["language_model.layers.1.self_attn.attn"]
+    result2 = get_layers_from_vllm_config(fake_cfg2, DummyLayer, requested2)
+    assert requested2[0] in result2
+    assert result2[requested2[0]] is layer_obj2
 
-    # Request the name with the extra '.model.' segment (as seen in some
-    # checkpoint mappings). The function should resolve it to the object
-    # present in static_forward_context.
-    requested = ["language_model.model.layers.0.self_attn.attn"]
-    result = get_layers_from_vllm_config(fake_cfg, DummyLayer, requested)
-
-    assert requested[0] in result
-    assert result[requested[0]] is layer_obj
+    # Variant 3: Collapse duplicate 'model.model.' to single 'model.'
+    forward_key3 = "language_model.model.layers.2.self_attn.attn"
+    layer_obj3 = DummyLayer()
+    fake_cfg3 = FakeVllmConfig({forward_key3: layer_obj3})
+    requested3 = ["language_model.model.model.layers.2.self_attn.attn"]
+    result3 = get_layers_from_vllm_config(fake_cfg3, DummyLayer, requested3)
+    assert requested3[0] in result3
+    assert result3[requested3[0]] is layer_obj3
