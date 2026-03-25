@@ -9,7 +9,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 logger = logging.getLogger(__name__)
@@ -209,9 +209,34 @@ async def stream_service_response(
             yield chunk
 
 
+def _raise_if_unsupported_batched_prompt(api: str, req_data: dict) -> None:
+    if api != "/completions":
+        return
+
+    prompt = req_data.get("prompt")
+    if not isinstance(prompt, list):
+        return
+
+    if all(isinstance(token_id, int) for token_id in prompt):
+        return
+
+    if len(prompt) <= 1:
+        return
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "toy_proxy_server does not support batched completions requests. "
+            "Send exactly one prompt per request. This also means tools like "
+            "lm_eval must use batch_size=1 when routing through this proxy."
+        ),
+    )
+
+
 async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
+        _raise_if_unsupported_batched_prompt(api, req_data)
         request_id = str(uuid.uuid4())
 
         # Get the next prefill client in round-robin fashion
@@ -243,6 +268,8 @@ async def _handle_completions(api: str, request: Request):
 
         return StreamingResponse(generate_stream(), media_type="application/json")
 
+    except HTTPException:
+        raise
     except Exception as e:
         import sys
         import traceback
