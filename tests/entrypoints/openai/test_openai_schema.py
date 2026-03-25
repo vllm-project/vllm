@@ -14,14 +14,17 @@ from schemathesis.internal.checks import CheckContext
 from schemathesis.models import Case
 from schemathesis.transports.responses import GenericResponse
 
+from vllm.platforms import current_platform
+
 from ...utils import RemoteOpenAIServer
 
 schemathesis.experimental.OPEN_API_3_1.enable()
 
 MODEL_NAME = "HuggingFaceTB/SmolVLM-256M-Instruct"
 MAXIMUM_IMAGES = 2
-DEFAULT_TIMEOUT_SECONDS: Final[int] = 10
-LONG_TIMEOUT_SECONDS: Final[int] = 60
+_ROCM_TIMEOUT_MULTIPLIER = 3 if current_platform.is_rocm() else 1
+DEFAULT_TIMEOUT_SECONDS: Final[int] = 10 * _ROCM_TIMEOUT_MULTIPLIER
+LONG_TIMEOUT_SECONDS: Final[int] = 60 * _ROCM_TIMEOUT_MULTIPLIER
 
 
 @pytest.fixture(scope="module")
