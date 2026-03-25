@@ -48,9 +48,6 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner_factory import (
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
 )
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -657,7 +654,6 @@ class FusedMoE(CustomOp):
                 # called, i.e. by a MK or by the MoERunner.
                 # Once the MK can be created upfront, we can just pass in the proper
                 # flags derived from the quant_method's MK.
-                reduce_results=self.reduce_results,
                 quant_method=self.quant_method,
             )
             return
