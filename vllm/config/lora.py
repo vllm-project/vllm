@@ -25,8 +25,8 @@ MaxLoRARanks = Literal[1, 8, 16, 32, 64, 128, 256, 320, 512]
 LoRAExtraVocabSize = Literal[256, 512]
 
 
-@config(config=ConfigDict(arbitrary_types_allowed=True))
-class LoRAConfig:
+@config(config=ConfigDict(arbitrary_types_allowed=True))  # type: ignore[arg-type,misc]
+class LoRAConfig:  # type: ignore[misc]
     """Configuration for LoRA."""
 
     max_lora_rank: MaxLoRARanks = 16
@@ -43,6 +43,10 @@ class LoRAConfig:
     `max_loras`."""
     lora_dtype: torch.dtype | LoRADType = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
+    target_modules: list[str] | None = None
+    """Restrict LoRA to specific module suffixes (e.g., ["o_proj", "qkv_proj"]).
+    If None, all supported LoRA modules are used. This allows deployment-time
+    control over which modules have LoRA applied, useful for performance tuning."""
     default_mm_loras: dict[str, str] | None = None
     """Dictionary mapping specific modalities to LoRA model paths; this field
     is only applicable to multimodal models and should be leveraged when a
@@ -84,6 +88,10 @@ class LoRAConfig:
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
         factors.append(self.enable_tower_connector_lora)
+        # target_modules affects which modules get LoRA applied
+        factors.append(
+            tuple(sorted(self.target_modules)) if self.target_modules else None
+        )
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str

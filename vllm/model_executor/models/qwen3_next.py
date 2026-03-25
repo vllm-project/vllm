@@ -15,7 +15,6 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
     ModelConfig,
-    SpeculativeConfig,
     VllmConfig,
     get_current_vllm_config,
 )
@@ -80,9 +79,13 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import Qwen3NextConfig
+from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
+from vllm.utils.torch_utils import (
+    aux_stream,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
@@ -116,7 +119,7 @@ def fi_chunk_gated_delta_rule(
     beta: torch.Tensor,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = True,
 ):
     from flashinfer.gdn_prefill import (
@@ -161,13 +164,46 @@ def fi_chunk_gated_delta_rule(
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
         super().__init__()
-        if current_platform.is_cuda() and current_platform.is_device_capability(90):
-            logger.info_once(
-                "Using FlashInfer GDN prefill kernel on CUDA compute capability 90"
+        backend = (
+            str(
+                get_current_vllm_config().additional_config.get(
+                    "gdn_prefill_backend", "auto"
+                )
             )
-            self._forward_method = self.forward_cuda
+            .strip()
+            .lower()
+        )
+        supports_flashinfer = (
+            current_platform.is_cuda() and current_platform.is_device_capability(90)
+        )
+
+        if backend == "flashinfer":
+            use_flashinfer = supports_flashinfer
+            if not use_flashinfer:
+                logger.warning_once(
+                    "GDN prefill backend 'flashinfer' is selected but "
+                    "cannot use this kernel on the current platform. "
+                    "Falling back to Triton/FLA."
+                )
+        elif backend == "triton":
+            use_flashinfer = False
         else:
-            self._forward_method = self.forward_native
+            use_flashinfer = supports_flashinfer
+
+        if use_flashinfer:
+            logger.info_once("Using FlashInfer GDN prefill kernel", scope="local")
+            logger.info_once(
+                "FlashInfer GDN prefill kernel is JIT-compiled; first run may "
+                "take a while to compile. Set `--gdn-prefill-backend triton` to "
+                "avoid JIT compile time.",
+                scope="local",
+            )
+        else:
+            logger.info_once("Using Triton/FLA GDN prefill kernel", scope="local")
+
+        self._forward_method = (
+            self.forward_cuda if use_flashinfer else self.forward_native
+        )
 
     def forward_cuda(
         self,
@@ -178,7 +214,7 @@ class ChunkGatedDeltaRule(CustomOp):
         beta: torch.Tensor,
         initial_state: torch.Tensor,
         output_final_state: bool,
-        cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
     ):
         return fi_chunk_gated_delta_rule(
@@ -202,7 +238,7 @@ class ChunkGatedDeltaRule(CustomOp):
         beta: torch.Tensor,
         initial_state: torch.Tensor,
         output_final_state: bool,
-        cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
     ):
         return fla_chunk_gated_delta_rule(
@@ -364,11 +400,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
     def __init__(
         self,
         config: Qwen3NextConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        speculative_config: SpeculativeConfig | None = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
+        create_in_proj_qkvz: bool = True,
     ) -> None:
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -387,12 +421,18 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.act = ACT2FN[config.hidden_act]
         self.layer_norm_epsilon = config.rms_norm_eps
         self.prefix = prefix
+        self.aux_stream = aux_stream()
+        self.events = (
+            [torch.cuda.Event(), torch.cuda.Event()]
+            if current_platform.is_cuda_alike()
+            else [None, None]
+        )
 
         self.config = config
-        self.model_config = model_config
-        self.cache_config = cache_config
-        self.quant_config = quant_config
-        self.speculative_config = speculative_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        self.speculative_config = vllm_config.speculative_config
         self.num_spec = (
             self.speculative_config.num_speculative_tokens
             if self.speculative_config
@@ -412,13 +452,16 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # projection of the input hidden states
         # Qwen3-Next and Qwen3.5 has a different qkv_proj layout,
         # we need to create qkvz_proj adaptively here.
-        self.in_proj_qkvz = self.create_qkvz_proj(
-            hidden_size=self.hidden_size,
-            key_dim=self.key_dim,
-            value_dim=self.value_dim,
-            quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_qkvz",
-        )
+        # When create_in_proj_qkvz is False (e.g. LoRA enabled in Qwen3.5),
+        # the subclass creates in_proj_qkv and in_proj_z separately.
+        if create_in_proj_qkvz:
+            self.in_proj_qkvz = self.create_qkvz_proj(
+                hidden_size=self.hidden_size,
+                key_dim=self.key_dim,
+                value_dim=self.value_dim,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj_qkvz",
+            )
         # ba_proj doesn't support blockwise fp8 quantization.
         # Qwen3-Next and Qwen3.5 have different in_proj_ba checkpoint
         # layouts, so we use a factory method to create the projection.
@@ -458,6 +501,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.A_log = nn.Parameter(
             torch.empty(
                 divide(self.num_v_heads, self.tp_size),
+                dtype=torch.float32,
             )
         )
 
@@ -615,8 +659,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        projected_states_qkvz, projected_states_ba = torch.ops.vllm.gdn_in_proj(
+            hidden_states,
+            sum(self.in_proj_qkvz.output_sizes) // self.tp_size,
+            sum(self.in_proj_ba.output_sizes) // self.tp_size,
+            self.prefix,
+        )
         query, key, value, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
@@ -707,8 +755,13 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             v = torch.randn(
                 1, T, num_v_heads, self.head_v_dim, device=device, dtype=dtype
             )
-            g = torch.randn(1, T, num_v_heads, device=device, dtype=dtype)
-            beta = torch.randn(1, T, num_v_heads, device=device, dtype=dtype)
+            # NOTE: g and beta must have the same dtypes as during
+            # inference, so we construct them with the same function
+            # (fused_gdn_gating). dummy_a and dummy_b are throwaway
+            # inputs required by that function.
+            dummy_a = torch.randn(T, num_v_heads, device=device, dtype=dtype)
+            dummy_b = torch.randn(T, num_v_heads, device=device, dtype=dtype)
+            g, beta = fused_gdn_gating(self.A_log, dummy_a, dummy_b, self.dt_bias)
             state = torch.zeros(
                 1,
                 num_v_heads,
@@ -717,7 +770,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 device=device,
                 dtype=state_dtype,
             )
-            cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.long)
+            cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
 
             try:
                 self.chunk_gated_delta_rule(
@@ -727,7 +780,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     g=g,
                     beta=beta,
                     initial_state=state,
-                    output_final_state=False,
+                    output_final_state=True,
                     cu_seqlens=cu_seqlens,
                     use_qk_l2norm_in_kernel=True,
                 )
@@ -747,9 +800,21 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     self.prefix,
                 )
             finally:
-                del q, k, v, g, beta, state, cu_seqlens
+                del q, k, v, dummy_a, dummy_b, g, beta, state, cu_seqlens
 
         torch.accelerator.empty_cache()
+
+    def _forward_in_proj(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        projected_states_qkvz, projected_states_ba = maybe_execute_in_parallel(
+            lambda: self.in_proj_qkvz(hidden_states)[0],
+            lambda: self.in_proj_ba(hidden_states)[0],
+            self.events[0],
+            self.events[1],
+            self.aux_stream,
+        )
+        return projected_states_qkvz, projected_states_ba
 
     def _forward_core(
         self,
@@ -783,7 +848,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 a=a,
                 core_attn_out=core_attn_out,
                 attn_metadata=attn_metadata,
-                virtual_engine=forward_context.virtual_engine,
             )
 
         has_initial_state = attn_metadata.has_initial_state
@@ -794,7 +858,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+        self_kv_cache = self.kv_cache
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -977,13 +1041,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
         attn_metadata: GDNAttentionMetadata,
-        virtual_engine: int,
     ):
         """
         Core attention computation with a packed non-spec decode fast path.
         """
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        self_kv_cache = self.kv_cache[virtual_engine]
+        self_kv_cache = self.kv_cache
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -1150,7 +1213,6 @@ class Qwen3NextDecoderLayer(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        speculative_config = vllm_config.speculative_config
 
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
@@ -1158,10 +1220,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         if self.layer_type == "linear_attention":
             self.linear_attn = Qwen3NextGatedDeltaNet(
                 config,
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                speculative_config=speculative_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
             )
         elif self.layer_type == "full_attention":
@@ -1638,6 +1697,32 @@ class Qwen3NextForCausalLM(
         return self.model.get_expert_mapping()
 
 
+def gdn_in_proj(
+    hidden_states: torch.Tensor,
+    qkvz_output_size: int,
+    ba_output_size: int,
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Custom op for the input projection.
+    """
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    return self._forward_in_proj(hidden_states)
+
+
+def gdn_in_proj_fake(
+    hidden_states: torch.Tensor,
+    qkvz_output_size: int,
+    ba_output_size: int,
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fake implementation for torch.compile."""
+    return hidden_states.new_empty(
+        hidden_states.shape[0], qkvz_output_size
+    ), hidden_states.new_empty(hidden_states.shape[0], ba_output_size)
+
+
 def gdn_attention_core(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
@@ -1670,6 +1755,12 @@ def gdn_attention_core_fake(
     """Fake implementation for torch.compile."""
     return
 
+
+direct_register_custom_op(
+    op_name="gdn_in_proj",
+    op_func=gdn_in_proj,
+    fake_impl=gdn_in_proj_fake,
+)
 
 direct_register_custom_op(
     op_name="gdn_attention_core",

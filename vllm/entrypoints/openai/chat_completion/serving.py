@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Final
 
 import partial_json_parser
@@ -18,6 +19,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
     get_history_tool_calls_cnt,
+    get_tool_call_id_type,
     make_tool_call_id,
 )
 from vllm.entrypoints.logger import RequestLogger
@@ -151,15 +153,7 @@ class OpenAIServingChat(OpenAIServing):
                 get_stop_tokens_for_assistant_actions()
             )
 
-        # Handle tool call ID type for Kimi K2 (supporting test mocking via overrides)
-        hf_overrides = getattr(self.model_config, "hf_overrides", None)
-        if self.model_config.hf_text_config.model_type == "kimi_k2" or (
-            isinstance(hf_overrides, dict)
-            and hf_overrides.get("model_type") == "kimi_k2"
-        ):
-            self.tool_call_id_type = "kimi_k2"
-        else:
-            self.tool_call_id_type = "random"
+        self.tool_call_id_type = get_tool_call_id_type(self.model_config)
 
         # NOTE(woosuk): While OpenAI's chat completion API supports browsing
         # for some models, currently vLLM doesn't support it. Please use the
@@ -309,11 +303,14 @@ class OpenAIServingChat(OpenAIServing):
                     trace_headers=trace_headers,
                 )
             else:
-                reasoning_ended = (
-                    reasoning_parser.is_reasoning_end(prompt_token_ids or [])
-                    if reasoning_parser
-                    else None
-                )
+                if not request.include_reasoning:
+                    reasoning_ended = True
+                elif reasoning_parser:
+                    reasoning_ended = reasoning_parser.is_reasoning_end(
+                        prompt_token_ids or []
+                    )
+                else:
+                    reasoning_ended = None
 
                 generator = self.engine_client.generate(
                     engine_prompt,
@@ -1092,6 +1089,7 @@ class OpenAIServingChat(OpenAIServing):
                         #   any tokens that were generated but previously
                         #   matched by partial json parsing
                         # only happens if we are NOT using structured outputs
+                        index = 0
                         auto_tools_called = False
                         if tool_parser:
                             auto_tools_called = len(tool_parser.prev_tool_call_arr) > 0
@@ -1100,15 +1098,14 @@ class OpenAIServingChat(OpenAIServing):
                                 if auto_tools_called
                                 else 0
                             )
-                        else:
-                            index = 0
-
-                        if (
+                        should_check = (
                             self._should_check_for_unstreamed_tool_arg_tokens(
                                 delta_message, output
                             )
-                            and tool_parser
-                        ):
+                        )
+                        # only check if there are any tool calls
+                        # detected by partial parsing
+                        if should_check and tool_parser and auto_tools_called:
                             latest_delta_len = 0
                             if (
                                 isinstance(
@@ -1289,7 +1286,12 @@ class OpenAIServingChat(OpenAIServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
 
-        assert final_res is not None
+        if final_res is None:
+            return self.create_error_response(
+                "No output received from the engine.",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":

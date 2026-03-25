@@ -54,14 +54,21 @@ class LoadConfig:
     download_dir: str | None = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
-    safetensors_load_strategy: str = "lazy"
+    safetensors_load_strategy: str | None = None
     """Specifies the loading strategy for safetensors weights.
-    - "lazy" (default): Weights are memory-mapped from the file. This enables
+    - None (default): Uses memory-mapped (lazy) loading. When an NFS
+      filesystem is detected and the total checkpoint size fits within 90%%
+      of available RAM, prefetching is enabled automatically.
+    - "lazy": Weights are memory-mapped from the file. This enables
       on-demand loading and is highly efficient for models on local storage.
+      Unlike the default (None), auto-prefetch on NFS is not performed.
     - "eager": The entire file is read into CPU memory upfront before loading.
       This is recommended for models on network filesystems (e.g., Lustre, NFS)
       as it avoids inefficient random reads, significantly speeding up model
       initialization. However, it uses more CPU RAM.
+    - "prefetch": Checkpoint files are read into the OS page cache before
+      workers load them, speeding up the model loading phase. Useful on
+      network or high-latency storage.
     - "torchao": Weights are loaded in upfront and then reconstructed
       into torchao tensor subclasses. This is used when the checkpoint
       was quantized using torchao and saved using safetensors.

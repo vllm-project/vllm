@@ -283,7 +283,7 @@ class CpuGpuOffloadingHandlers:
             gpu_shape = gpu_tensor.shape
             attn_backend = attn_backends[layer_name]
             test_shape = attn_backend.get_kv_cache_shape(
-                num_blocks=1234, block_size=16, num_kv_heads=8, head_size=256
+                num_blocks=1234, block_size=16, num_kv_heads=1, head_size=256
             )
 
             has_layers_dim = False
