@@ -56,7 +56,9 @@ async def init_generate_state(
         MCPToolServer,
         ToolServer,
     )
-    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+    from vllm.entrypoints.openai.chat_completion.batch_serving import (
+        OpenAIServingChatBatch,
+    )
     from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
     from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
     from vllm.entrypoints.serve.disagg.serving import ServingTokens
@@ -97,7 +99,7 @@ async def init_generate_state(
         else None
     )
     state.openai_serving_chat = (
-        OpenAIServingChat(
+        OpenAIServingChatBatch(
             engine_client,
             state.openai_serving_models,
             args.response_role,
