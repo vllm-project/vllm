@@ -680,6 +680,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "            int block_size_in_bytes, Tensor block_mapping) -> ()");
   cache_ops.impl("swap_blocks", torch::kCUDA, &swap_blocks);
 
+  // Batch swap: submit all block copies in a single driver call.
+  cache_ops.def(
+      "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
+      "                  Tensor sizes) -> ()");
+  cache_ops.impl("swap_blocks_batch", torch::kCPU, &swap_blocks_batch);
+
   // Reshape the key and value tensors and cache them.
   cache_ops.def(
       "reshape_and_cache(Tensor key, Tensor value,"

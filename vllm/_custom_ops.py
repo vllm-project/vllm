@@ -2595,6 +2595,22 @@ def swap_blocks(
     torch.ops._C_cache_ops.swap_blocks(src, dst, block_size_in_bytes, block_mapping)
 
 
+def swap_blocks_batch(
+    src_ptrs: torch.Tensor,
+    dst_ptrs: torch.Tensor,
+    sizes: torch.Tensor,
+) -> None:
+    """
+    Batch version of swap_blocks: submit all copies in a single driver call.
+
+    Each entry specifies a raw pointer copy: src_ptrs[i] -> dst_ptrs[i]
+    of sizes[i] bytes. All three tensors must be int64 CPU tensors.
+    On CUDA 12.8+ this uses cuMemcpyBatchAsync for minimal submission
+    overhead; on older CUDA it falls back to a loop of cudaMemcpyAsync.
+    """
+    torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
+
+
 def convert_fp8(
     output: torch.Tensor, input: torch.Tensor, scale: float = 1.0, kv_dtype: str = "fp8"
 ) -> None:
