@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -20,7 +20,7 @@ from vllm import LLM, SamplingParams
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.assets.image import VLM_IMAGES_DIR
 from vllm.benchmarks.datasets import InstructCoderDataset
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, replace
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform

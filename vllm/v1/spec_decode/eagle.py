@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
-from dataclasses import replace
 from importlib.util import find_spec
 from typing import cast
 
@@ -13,6 +12,7 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
+    replace,
 )
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
