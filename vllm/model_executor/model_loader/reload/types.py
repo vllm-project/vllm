@@ -16,7 +16,7 @@ class LayerReloadingInfo:
     # model format (meta), populated by `record_metadata_for_reloading`
     restore_metadata: LayerTensors = field(default_factory=lambda: ({}, {}))
 
-    # kernel format (device)
+    # kernel format (device), used to copy into when reloading only
     kernel_tensors: LayerTensors | None = None
 
     # track how many restored elements are ready for loading

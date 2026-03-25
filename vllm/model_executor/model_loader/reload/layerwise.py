@@ -6,7 +6,6 @@ from functools import wraps
 from weakref import WeakKeyDictionary
 
 import torch
-from compressed_tensors import deprecated
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -230,7 +229,6 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         info.reset()
 
 
-@deprecated("finalize_layerwise_processing")
 def finalize_layerwise_reload(*args, **kwargs):
     finalize_layerwise_processing(*args, **kwargs)
 
