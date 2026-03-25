@@ -57,9 +57,9 @@ from vllm.entrypoints.pooling.score.utils import (
     validate_score_input,
 )
 from vllm.entrypoints.utils import log_non_default_args
-from vllm.inputs.data import (
+from vllm.inputs import (
     DataPrompt,
-    ProcessorInputs,
+    EngineInput,
     PromptType,
     SingletonPrompt,
     TextPrompt,
@@ -589,7 +589,7 @@ class LLM:
 
     def _resolve_mm_lora(
         self,
-        prompt: ProcessorInputs,
+        prompt: EngineInput,
         lora_request: LoRARequest | None,
     ) -> LoRARequest | None:
         if prompt["type"] != "multimodal":
@@ -716,8 +716,8 @@ class LLM:
         eos_token_id = tokenizer.eos_token_id
         sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
 
-        engine_prompts = self._preprocess_cmpl(prompts)
-        lora_requests = self._lora_request_to_seq(lora_request, len(engine_prompts))
+        engine_inputs = self._preprocess_cmpl(prompts)
+        lora_requests = self._lora_request_to_seq(lora_request, len(engine_inputs))
 
         if use_tqdm and concurrency_limit is not None:
             logger.warning(
@@ -727,7 +727,7 @@ class LLM:
             use_tqdm = False
 
         if concurrency_limit is None:
-            concurrency_limit = len(engine_prompts)
+            concurrency_limit = len(engine_inputs)
 
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
@@ -740,7 +740,7 @@ class LLM:
         )
         instances: list[BeamSearchInstance] = []
 
-        for lora_req, prompt in zip(lora_requests, engine_prompts):
+        for lora_req, prompt in zip(lora_requests, engine_inputs):
             if prompt["type"] == "embeds":
                 raise NotImplementedError(
                     "Embedding prompt not supported for beam search"
@@ -845,7 +845,7 @@ class LLM:
         self,
         prompts: Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> Sequence[ProcessorInputs]:
+    ) -> Sequence[EngineInput]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
         a format that can be passed to `_add_request`.
@@ -853,7 +853,7 @@ class LLM:
         Refer to [LLM.generate][] for a complete description of the arguments.
 
         Returns:
-            A list of `ProcessorInputs` objects ready to be passed into LLMEngine.
+            A list of `EngineInput` objects ready to be passed into LLMEngine.
         """
         renderer = self.renderer
         model_config = self.model_config
@@ -871,9 +871,9 @@ class LLM:
         self,
         prompt: PromptType,
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> ProcessorInputs:
-        (engine_prompt,) = self._preprocess_cmpl([prompt], tokenization_kwargs)
-        return engine_prompt
+    ) -> EngineInput:
+        (engine_input,) = self._preprocess_cmpl([prompt], tokenization_kwargs)
+        return engine_input
 
     def _preprocess_chat(
         self,
@@ -886,7 +886,7 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> Sequence[ProcessorInputs]:
+    ) -> Sequence[EngineInput]:
         """
         Convert a list of conversations into prompts so that they can then
         be used as input for other LLM APIs.
@@ -894,7 +894,7 @@ class LLM:
         Refer to [LLM.chat][] for a complete description of the arguments.
 
         Returns:
-            A list of `ProcessorInputs` objects ready to be passed into LLMEngine.
+            A list of `EngineInput` objects ready to be passed into LLMEngine.
         """
         renderer = self.renderer
 
@@ -915,14 +915,14 @@ class LLM:
             **(tokenization_kwargs or {})
         )
 
-        _, engine_prompts = renderer.render_chat(
+        _, engine_inputs = renderer.render_chat(
             conversations,
             chat_params,
             tok_params,
             prompt_extras={"mm_processor_kwargs": mm_processor_kwargs},
         )
 
-        return engine_prompts
+        return engine_inputs
 
     def _preprocess_chat_one(
         self,
@@ -935,8 +935,8 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> ProcessorInputs:
-        (engine_prompt,) = self._preprocess_chat(
+    ) -> EngineInput:
+        (engine_input,) = self._preprocess_chat(
             [conversation],
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
@@ -948,7 +948,7 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
         )
 
-        return engine_prompt
+        return engine_input
 
     def chat(
         self,
@@ -1909,7 +1909,7 @@ class LLM:
 
     def _render_and_run_requests(
         self,
-        prompts: Iterable[ProcessorInputs],
+        prompts: Iterable[EngineInput],
         params: Sequence[SamplingParams | PoolingParams],
         output_type: type[_O],
         *,
@@ -1938,7 +1938,7 @@ class LLM:
 
     def _render_and_add_requests(
         self,
-        prompts: Iterable[ProcessorInputs],
+        prompts: Iterable[EngineInput],
         params: Sequence[SamplingParams | PoolingParams],
         *,
         lora_requests: Sequence[LoRARequest | None] | None = None,
@@ -1967,7 +1967,7 @@ class LLM:
 
     def _add_request(
         self,
-        prompt: ProcessorInputs,
+        prompt: EngineInput,
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
