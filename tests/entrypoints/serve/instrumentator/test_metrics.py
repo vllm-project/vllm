@@ -50,7 +50,6 @@ def default_server_args():
     params=[
         "",
         "--enable-chunked-prefill",
-        "--disable-frontend-multiprocessing",
         f"--show-hidden-metrics-for-version={PREV_MINOR_VERSION}",
     ],
 )
