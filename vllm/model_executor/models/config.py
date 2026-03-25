@@ -80,6 +80,10 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
             )
 
 
+class GptOssPuzzleForCausalLMConfig(GptOssForCausalLMConfig):
+    pass
+
+
 class GteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -692,4 +696,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
+    "GptOssPuzzleForCausalLM": GptOssPuzzleForCausalLMConfig,
 }

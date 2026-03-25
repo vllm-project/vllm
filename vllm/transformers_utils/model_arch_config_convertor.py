@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
 from typing import final
 
 import torch
@@ -93,16 +94,15 @@ class ModelArchConfigConvertorBase:
         """
         max_experts = 0
         block_configs = getattr(self.hf_text_config, "block_configs", None)
-        if block_configs:
-            for block in block_configs:
-                if isinstance(block, dict):
-                    if block.get("block_type", "") == "moe":
-                        max_experts = max(max_experts, block.get("n_routed_experts", 0))
-                else:
-                    if getattr(block, "block_type", "") == "moe":
-                        max_experts = max(
-                            max_experts, getattr(block, "n_routed_experts", 0)
-                        )
+        if not block_configs:
+            return 0
+        for block in block_configs:
+            if dataclasses.is_dataclass(block) and not isinstance(block, type):
+                block = dataclasses.asdict(block)
+            for key in ("n_routed_experts", "num_local_experts", "num_experts"):
+                if block.get(key):
+                    max_experts = max(max_experts, block[key])
+                    break
         return max_experts
 
     def get_num_experts(self) -> int:
