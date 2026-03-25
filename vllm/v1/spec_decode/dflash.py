@@ -38,28 +38,30 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # Positions covers both context states + query states
         self.max_positions = self.max_num_tokens + self.max_query_tokens
 
-        # Expand data structures related to positions, since they must hold enough
-        # slots for the query tokens and a full set of context tokens
+        # Separate context buffers to keep query buffer addresses stable for CUDA graphs
+        self._context_slot_mapping_buffer = torch.zeros(
+            self.max_num_tokens,
+            dtype=torch.int64,
+            device=device,
+        )
         self._slot_mapping_buffer = torch.zeros(
-            self.max_positions,
+            self.max_query_tokens,
+            dtype=torch.int64,
+            device=device,
+        )
+        self._context_positions_buffer = torch.zeros(
+            self.max_num_tokens,
             dtype=torch.int64,
             device=device,
         )
         self.positions = torch.zeros(
-            self.max_positions,
+            self.max_query_tokens,
             dtype=torch.int64,
             device=device,
-        )
-        self.arange = torch.arange(
-            self.max_positions + 1, device=device, dtype=torch.int32
         )
 
-        # Dedicated buffer for query positions so the slice always starts at
-        # offset 0 — required for CUDA graph address stability.
-        self.query_positions = torch.zeros(
-            self.max_positions,
-            dtype=torch.int64,
-            device=device,
+        self.arange = torch.arange(
+            self.max_positions + 1, device=device, dtype=torch.int32
         )
 
         # For DFlash we use the input embeddings to embed the mask token
@@ -88,12 +90,13 @@ class DFlashProposer(SpecDecodeBaseProposer):
         num_context = target_token_ids.shape[0]
         num_query_per_req = 1 + self.num_speculative_tokens
         num_query_total = batch_size * num_query_per_req
-        num_all_positions = num_context + num_query_total
 
         # Store for build_model_inputs_first_pass to use
         self._dflash_num_context = num_context
 
-        self.hidden_states[:num_context] = target_hidden_states
+        # We don't need to copy into a buffer here since the context preprocessing
+        # does not run in a CUDA graph
+        self._dflash_hidden_states = target_hidden_states
 
         token_indices_to_sample = torch.empty(
             batch_size * self.num_speculative_tokens,
@@ -116,8 +119,10 @@ class DFlashProposer(SpecDecodeBaseProposer):
             target_positions_ptr=target_positions,
             # Outputs
             out_input_ids_ptr=self.input_ids,
-            out_positions_ptr=self.positions,
-            out_slot_mapping_ptr=self._slot_mapping_buffer,
+            out_context_positions_ptr=self._context_positions_buffer,
+            out_query_positions_ptr=self.positions,
+            out_context_slot_mapping_ptr=self._context_slot_mapping_buffer,
+            out_query_slot_mapping_ptr=self._slot_mapping_buffer,
             out_token_indices_ptr=token_indices_to_sample,
             # Block table
             block_table_ptr=cad.block_table_tensor,
@@ -132,24 +137,12 @@ class DFlashProposer(SpecDecodeBaseProposer):
             block_size=self.block_size,
             num_query_per_req=num_query_per_req,
             num_speculative_tokens=self.num_speculative_tokens,
-            num_context=num_context,
             total_input_tokens=num_context,
             BLOCK_SIZE=BLOCK_SIZE,
             HAS_NUM_REJECTED=has_num_rejected,
         )
 
-        # Save context slot_mapping for pre-insertion (clone because buffer
-        # will be reused by _get_slot_mapping)
-        self._dflash_context_slot_mapping = self._slot_mapping_buffer[
-            :num_context
-        ].clone()
-
-        # Only query slot_mapping for the model forward pass — context KVs
-        # are pre-inserted into cache before the forward.  Clone to avoid
-        # aliasing with the buffer that _get_slot_mapping writes into.
-        query_slot_mapping = self._slot_mapping_buffer[
-            num_context:num_all_positions
-        ].clone()
+        query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
         new_query_start_loc = self.arange[: batch_size + 1] * num_query_per_req
 
         # In padded mode, cad.seq_lens includes rejected tokens. Subtract
@@ -214,17 +207,12 @@ class DFlashProposer(SpecDecodeBaseProposer):
         else:
             slot_mapping_dict = slot_mappings or {}
 
-        # Positions must cover context (unpadded) + query (padded to
-        # num_input_tokens) so that query_positions matches the model input.
-        num_pos_padded = num_tokens + num_input_tokens
-        all_positions = self._get_positions(num_pos_padded)
+        # Context and query positions use separate buffers; no copy needed.
+        context_positions = self._context_positions_buffer[:num_tokens]
+        # Context states will be passed directly to the precomputation without
+        # going through the buffer, since no CUDA graph is used for the precomputation.
+        # For the dummy run, we use the dummy buffer.
         context_states = self.hidden_states[:num_tokens]
-        if all_positions.dim() == 1:
-            context_positions = all_positions[:num_tokens]
-            self.query_positions[:num_input_tokens] = all_positions[num_tokens:]
-        else:
-            context_positions = all_positions[:, :num_tokens]
-            self.query_positions[:num_input_tokens] = all_positions[:, num_tokens:]
 
         # Run the KV projection (GEMM + norms + RoPE) for memory profiling,
         self.model.precompute_and_store_context_kv(context_states, context_positions)
@@ -238,7 +226,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         ):
             self.model(
                 input_ids=self.input_ids[:num_input_tokens],
-                positions=self.query_positions[:num_input_tokens],
+                positions=self._get_positions(num_input_tokens),
                 inputs_embeds=None,
             )
 
@@ -249,30 +237,20 @@ class DFlashProposer(SpecDecodeBaseProposer):
         num_input_tokens: int,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
     ) -> tuple[dict[str, Any], int]:
-        # Input ids: (padded) query tokens
-        # Positions: (unpadded) context tokens + (padded) query tokens
-        # Hidden states: (unpadded) context tokens
-        # Slot mapping size: unpadded number of positions
+        # Context and query positions/slots were written to separate
+        # buffers by the kernel — no copy needed.
         num_context = self._dflash_num_context
-        num_positions = num_context + num_input_tokens
-        all_positions = self._get_positions(num_positions)
-        if all_positions.dim() == 1:
-            context_positions = all_positions[:num_context]
-            self.query_positions[:num_input_tokens] = all_positions[num_context:]
-        else:
-            context_positions = all_positions[:, :num_context]
-            self.query_positions[:num_input_tokens] = all_positions[:, num_context:]
 
         # Pre-insert context KVs directly into cache
         self.model.precompute_and_store_context_kv(
-            self.hidden_states[:num_context],
-            context_positions,
-            self._dflash_context_slot_mapping,
+            self._dflash_hidden_states,  # Shape is already [num_context, hidden_size]
+            self._context_positions_buffer[:num_context],
+            self._context_slot_mapping_buffer[:num_context],
         )
         return (
             dict(
                 input_ids=self.input_ids[:num_input_tokens],
-                positions=self.query_positions[:num_input_tokens],
+                positions=self._get_positions(num_input_tokens),
                 inputs_embeds=None,
             ),
             num_input_tokens,
