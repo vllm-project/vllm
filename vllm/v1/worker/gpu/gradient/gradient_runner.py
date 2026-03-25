@@ -13,6 +13,8 @@ Key design decisions:
     that accumulate .grad without affecting the model's own parameters.
   - Per-token gradients require one backward pass per selected target
     token; retain_graph is used only when more passes follow.
+  - Uses torch.autograd.grad instead of .backward() to avoid manual
+    gradient zeroing and cloning overhead.
 """
 
 from dataclasses import dataclass, field
@@ -120,6 +122,16 @@ class GradientRunner:
 
         inputs_embeds = torch.cat([input_embeds, output_embeds], dim=0)
 
+        # Build list of tensors we need gradients for.
+        grad_targets = []
+        grad_target_names = []
+        if want_input_grad:
+            grad_targets.append(input_embeds)
+            grad_target_names.append("input_embeddings")
+        if want_output_grad:
+            grad_targets.append(output_embeds)
+            grad_target_names.append("output_embeddings")
+
         # --- Forward pass (builds computation graph) ---
         hidden_states = self.model.forward(
             input_ids=None,
@@ -170,19 +182,18 @@ class GradientRunner:
                 # (more token indices, or a loss backward to follow).
                 need_graph = not is_last or (gradient_params.gradient_of == "both")
 
-                # Zero existing gradients
-                if input_embeds.grad is not None:
-                    input_embeds.grad.zero_()
-                if output_embeds.grad is not None:
-                    output_embeds.grad.zero_()
+                # torch.autograd.grad returns gradients directly, avoiding
+                # the overhead of .backward() + manual .grad zeroing/cloning.
+                grads = torch.autograd.grad(
+                    token_log_probs[t],
+                    grad_targets,
+                    retain_graph=need_graph,
+                )
 
-                token_log_probs[t].backward(retain_graph=need_graph)
-
-                # Collect gradients from requested targets
-                token_grad = self._collect_and_aggregate(
-                    input_embeds,
-                    output_embeds,
-                    gradient_params,
+                # Collect and aggregate gradients from all targets.
+                token_grad = self._aggregate_grad_targets(
+                    grads,
+                    gradient_params.aggregation,
                 )
                 per_token_grads.append(token_grad)
 
@@ -191,59 +202,30 @@ class GradientRunner:
 
         # --- Loss gradients (single backward) ---
         if gradient_params.gradient_of in ("loss", "both"):
-            # Zero existing gradients
-            if input_embeds.grad is not None:
-                input_embeds.grad.zero_()
-            if output_embeds.grad is not None:
-                output_embeds.grad.zero_()
-
             if gradient_params.loss_function == "cross_entropy":
                 loss = F.cross_entropy(target_logits, target_ids)
             else:
                 # log_prob_sum: negative log-likelihood
                 loss = -token_log_probs.sum()
 
-            loss.backward()
+            grads = torch.autograd.grad(loss, grad_targets)
             result.loss = loss.item()
 
-            if want_input_grad:
-                assert input_embeds.grad is not None
-                grad = input_embeds.grad.clone()
-                result.loss_gradients["input_embeddings"] = self._aggregate(
-                    grad, gradient_params.aggregation
-                )
-            if want_output_grad:
-                assert output_embeds.grad is not None
-                grad = output_embeds.grad.clone()
-                result.loss_gradients["output_embeddings"] = self._aggregate(
+            for name, grad in zip(grad_target_names, grads):
+                result.loss_gradients[name] = self._aggregate(
                     grad, gradient_params.aggregation
                 )
 
         return result
 
-    def _collect_and_aggregate(
-        self,
-        input_embeds: torch.Tensor,
-        output_embeds: torch.Tensor,
-        gradient_params: GradientParams,
+    @staticmethod
+    def _aggregate_grad_targets(
+        grads: tuple[torch.Tensor, ...],
+        aggregation: str,
     ) -> torch.Tensor:
-        """Collect gradients from the requested targets and aggregate."""
-        parts = []
-        if "input_embeddings" in gradient_params.gradient_targets:
-            assert input_embeds.grad is not None
-            parts.append(input_embeds.grad.clone())
-        if "output_embeddings" in gradient_params.gradient_targets:
-            assert output_embeds.grad is not None
-            parts.append(output_embeds.grad.clone())
-
-        if not parts:
-            raise RuntimeError(
-                "No gradient targets produced gradients. "
-                "Ensure gradient_targets is non-empty."
-            )
-
-        grad = torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
-        return self._aggregate(grad, gradient_params.aggregation)
+        """Concatenate gradients from multiple targets and aggregate."""
+        grad = torch.cat(grads, dim=0) if len(grads) > 1 else grads[0]
+        return GradientRunner._aggregate(grad, aggregation)
 
     @staticmethod
     def _aggregate(

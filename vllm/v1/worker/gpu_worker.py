@@ -763,13 +763,21 @@ class Worker(WorkerBase):
         if out.token_log_probs is not None:
             result["token_log_probs"] = out.token_log_probs
         if out.token_attributions is not None:
-            result["token_attributions"] = out.token_attributions.cpu().tolist()
+            arr = out.token_attributions.cpu().numpy()
+            result["token_attributions_bytes"] = arr.tobytes()
+            result["token_attributions_shape"] = list(arr.shape)
+            result["token_attributions_dtype"] = str(arr.dtype)
         if out.loss is not None:
             result["loss"] = out.loss
         if out.loss_gradients:
-            result["loss_gradients"] = {
-                k: v.cpu().tolist() for k, v in out.loss_gradients.items()
-            }
+            result["loss_gradients_packed"] = {}
+            for k, v in out.loss_gradients.items():
+                arr = v.cpu().numpy()
+                result["loss_gradients_packed"][k] = {
+                    "bytes": arr.tobytes(),
+                    "shape": list(arr.shape),
+                    "dtype": str(arr.dtype),
+                }
         return result
 
     @torch.inference_mode()

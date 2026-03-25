@@ -56,6 +56,7 @@ class GradientResponse(BaseModel):
     id: str
     object: str = "gradient"
     model: str
+    encoding: Literal["json", "base64_numpy"] = "json"
 
     token_log_probs: list[GradientTokenLogProb] | None = None
 

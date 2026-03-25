@@ -150,8 +150,10 @@ class EngineCore:
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
 
-        # Gradient results bypass the scheduler and are collected here
-        # for delivery during the next step() call.
+        # Gradient requests are queued here during add_request() and
+        # executed during step() so that request processing is not blocked.
+        self._queued_gradient_requests: deque[Request] = deque()
+        # Completed gradient outputs awaiting delivery in the next step().
         self._pending_gradient_outputs: list[tuple[int, EngineCoreOutputs]] = []
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
@@ -306,11 +308,10 @@ class EngineCore:
                 f"request_id must be a string, got {type(request.request_id)}"
             )
 
-        # Gradient requests are handled separately via collective_rpc
-        # because they need torch.enable_grad() and can't be batched
-        # with normal inference requests.
+        # Gradient requests are queued and executed during step() so
+        # that request processing is not blocked by GPU computation.
         if request.gradient_params is not None:
-            self._handle_gradient_request(request)
+            self._queued_gradient_requests.append(request)
             return
 
         if pooling_params := request.pooling_params:
@@ -446,6 +447,11 @@ class EngineCore:
         was executed.
         """
 
+        # Process any queued gradient requests. These are executed here
+        # rather than in add_request() so the request processing loop
+        # is not blocked by GPU computation.
+        self._process_gradient_queue()
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -478,6 +484,12 @@ class EngineCore:
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
+    def _process_gradient_queue(self) -> None:
+        """Execute all queued gradient requests."""
+        while self._queued_gradient_requests:
+            request = self._queued_gradient_requests.popleft()
+            self._handle_gradient_request(request)
+
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
         # so we update draft token ids in the worker process and don't
@@ -504,6 +516,9 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
+
+        # Process any queued gradient requests.
+        self._process_gradient_queue()
 
         batch_queue = self.batch_queue
         assert batch_queue is not None
@@ -603,6 +618,9 @@ class EngineCore:
             )
             future = self.model_executor.sample_tokens(grammar_output, non_block=True)
             batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
+
+        # Flush any pending gradient outputs into the result.
+        self._flush_gradient_outputs(engine_core_outputs)
 
         return engine_core_outputs, model_executed
 

@@ -370,17 +370,14 @@ class GradientOutput:
     """
 
     token_log_probs: list[float] | None = None
-    token_attributions: list[list[float]] | None = None
+    token_attributions: np.ndarray | None = None
     loss: float | None = None
-    loss_gradients: dict[str, list[list[float]]] | None = None
+    loss_gradients: dict[str, np.ndarray] | None = None
 
     def __repr__(self) -> str:
         attr_shape = None
         if self.token_attributions is not None:
-            attr_shape = (
-                len(self.token_attributions),
-                len(self.token_attributions[0]) if self.token_attributions else 0,
-            )
+            attr_shape = self.token_attributions.shape
         return (
             f"GradientOutput(loss={self.loss}, "
             f"token_log_probs_len="

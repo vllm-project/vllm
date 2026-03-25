@@ -455,13 +455,31 @@ class RequestState:
         prompt_token_ids = self.prompt_token_ids
         if prompt_token_ids is None:
             prompt_token_ids = list(range(self.prompt_len))
+
+        # Reconstruct numpy arrays from packed bytes format.
+        token_attributions = None
+        if "token_attributions_bytes" in gradient_output:
+            token_attributions = np.frombuffer(
+                gradient_output["token_attributions_bytes"],
+                dtype=np.dtype(gradient_output["token_attributions_dtype"]),
+            ).reshape(gradient_output["token_attributions_shape"])
+
+        loss_gradients = None
+        if "loss_gradients_packed" in gradient_output:
+            loss_gradients = {}
+            for k, packed in gradient_output["loss_gradients_packed"].items():
+                loss_gradients[k] = np.frombuffer(
+                    packed["bytes"],
+                    dtype=np.dtype(packed["dtype"]),
+                ).reshape(packed["shape"])
+
         return GradientRequestOutput(
             request_id=external_req_id,
             outputs=GradientOutput(
                 token_log_probs=gradient_output.get("token_log_probs"),
-                token_attributions=gradient_output.get("token_attributions"),
+                token_attributions=token_attributions,
                 loss=gradient_output.get("loss"),
-                loss_gradients=gradient_output.get("loss_gradients"),
+                loss_gradients=loss_gradients,
             ),
             prompt_token_ids=prompt_token_ids,
             target_token_ids=gradient_output.get("target_token_ids", []),
