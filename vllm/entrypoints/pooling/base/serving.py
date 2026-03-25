@@ -118,6 +118,7 @@ class PoolingServing:
         )
 
         pooling_params = self.io_processor.create_pooling_params(ctx.request)
+        pooling_params.verify(self.model_config)
 
         for i, engine_prompt in enumerate(ctx.engine_prompts):
             prompt_request_id = (
