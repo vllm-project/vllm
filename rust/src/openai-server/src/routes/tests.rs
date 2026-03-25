@@ -450,15 +450,11 @@ async fn health_status(app: &axum::Router) -> (StatusCode, Bytes) {
 
 fn metric_value(rendered: &str, metric: &str, labels: Option<&str>) -> Option<f64> {
     rendered.lines().find_map(|line| {
-        let Some(rest) = line.strip_prefix(metric) else {
-            return None;
-        };
+        let rest = line.strip_prefix(metric)?;
 
         match labels {
             Some(labels) => {
-                let Some((encoded_labels, value)) = rest.split_once("} ") else {
-                    return None;
-                };
+                let (encoded_labels, value) = rest.split_once("} ")?;
                 if !encoded_labels.starts_with('{') {
                     return None;
                 }

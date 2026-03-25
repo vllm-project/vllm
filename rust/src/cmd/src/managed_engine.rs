@@ -233,31 +233,29 @@ mod tests {
                 "512".to_string(),
             ],
         };
+        let command = config.to_command();
+        let args = command.get_args().collect::<Vec<_>>();
 
         expect![[r#"
-            Command {
-                program: "python3",
-                args: [
-                    "python3",
-                    "-m",
-                    "vllm.entrypoints.cli.main",
-                    "serve",
-                    "Qwen/Qwen3-0.6B",
-                    "--headless",
-                    "--data-parallel-address",
-                    "127.0.0.1",
-                    "--data-parallel-rpc-port",
-                    "62100",
-                    "--data-parallel-size-local",
-                    "1",
-                    "--dtype",
-                    "float16",
-                    "--max-model-len",
-                    "512",
-                ],
-            }
+            [
+                "-m",
+                "vllm.entrypoints.cli.main",
+                "serve",
+                "Qwen/Qwen3-0.6B",
+                "--headless",
+                "--data-parallel-address",
+                "127.0.0.1",
+                "--data-parallel-rpc-port",
+                "62100",
+                "--data-parallel-size-local",
+                "1",
+                "--dtype",
+                "float16",
+                "--max-model-len",
+                "512",
+            ]
         "#]]
-        .assert_debug_eq(&config.to_command());
+        .assert_debug_eq(&args);
     }
 
     #[test]

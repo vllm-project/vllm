@@ -354,8 +354,10 @@ mod tests {
 
     #[test]
     fn lower_sampling_params_preserves_explicit_stop_token_ids_in_all_stop_set() {
-        let mut sampling_params = SamplingParams::default();
-        sampling_params.stop_token_ids = Some(vec![11, 77]);
+        let sampling_params = SamplingParams {
+            stop_token_ids: Some(vec![11, 77]),
+            ..SamplingParams::default()
+        };
 
         let params = lower_sampling_params(
             sampling_params,
