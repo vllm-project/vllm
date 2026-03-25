@@ -9,7 +9,6 @@ on HuggingFace model repository.
 """
 
 import os
-from dataclasses import asdict
 from typing import Any, NamedTuple
 
 from huggingface_hub import snapshot_download
@@ -104,12 +103,22 @@ def run_musicflamingo(question: str, audio_count: int) -> ModelRequestData:
         enforce_eager=True,
     )
 
-    # MusicFlamingo uses <sound> token for audio
+    # MusicFlamingo prompt placeholders use <sound>; vLLM's MusicFlamingo
+    # multimodal processor expands each one into <|sound_bos|> + audio tokens +
+    # <|sound_eos|> based on extracted audio feature lengths.
     audio_placeholder = "<sound>" * audio_count
+    system_prompt = (
+        "You are Music Flamingo, a multimodal assistant for language and music. "
+        "On each turn you receive an audio clip which contains music and optional "
+        "text, you will receive at least one or both; use your world knowledge and "
+        "reasoning to help the user with any task. Interpret the entirety of the "
+        "content any input music--regardlenss of whether the user calls it audio, "
+        "music, or sound."
+    )
 
     prompt = (
         "<|im_start|>system\n"
-        "You are a helpful assistant.<|im_end|>\n"
+        f"{system_prompt}<|im_end|>\n"
         "<|im_start|>user\n"
         f"{audio_placeholder}{question}<|im_end|>\n"
         "<|im_start|>assistant\n"
@@ -623,7 +632,7 @@ def main(args):
         req_data.engine_args.limit_mm_per_prompt or {}
     )
 
-    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+    engine_args = vars(req_data.engine_args) | {"seed": args.seed}
     if args.tensor_parallel_size is not None:
         engine_args["tensor_parallel_size"] = args.tensor_parallel_size
     llm = LLM(**engine_args)

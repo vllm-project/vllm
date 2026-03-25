@@ -14,7 +14,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import (
     rms_norm_batch_invariant,
-    vllm_is_batch_invariant,
 )
 from vllm.platforms import current_platform
 
@@ -62,7 +61,7 @@ def fused_add_rms_norm(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
 
-    if vllm_is_batch_invariant():
+    if envs.VLLM_BATCH_INVARIANT:
         return rms_norm_batch_invariant(
             x + residual, weight, variance_epsilon
         ), x + residual
@@ -261,7 +260,7 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if residual is None and not vllm_is_batch_invariant():
+        if residual is None and not envs.VLLM_BATCH_INVARIANT:
             return ir.ops.rms_norm(
                 x, self.weight, self.variance_epsilon, self.variance_size_override
             )
@@ -281,7 +280,7 @@ class RMSNorm(CustomOp):
             and x.dtype == residual.dtype
             and x.dim() >= 2
             and self.has_weight
-            and not vllm_is_batch_invariant()
+            and not envs.VLLM_BATCH_INVARIANT
             and self.weight.data.dtype == x.dtype
             and self.weight.data.is_contiguous()
         ):
@@ -315,7 +314,7 @@ class RMSNorm(CustomOp):
                 x, residual, self.weight.data, self.variance_epsilon
             )
         else:
-            assert vllm_is_batch_invariant()
+            assert envs.VLLM_BATCH_INVARIANT
             return rms_norm_batch_invariant(x, self.weight.data, self.variance_epsilon)
 
     def forward_hip(
@@ -323,7 +322,7 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if residual is None and not vllm_is_batch_invariant():
+        if residual is None and not envs.VLLM_BATCH_INVARIANT:
             return ir.ops.rms_norm(
                 x, self.weight, self.variance_epsilon, self.variance_size_override
             )
@@ -336,7 +335,7 @@ class RMSNorm(CustomOp):
                 x, residual, self.weight.data, self.variance_epsilon
             )
         else:
-            assert vllm_is_batch_invariant()
+            assert envs.VLLM_BATCH_INVARIANT
             return rms_norm_batch_invariant(x, self.weight.data, self.variance_epsilon)
 
     def forward_xpu(

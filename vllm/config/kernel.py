@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import asdict, fields
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import field_validator
 
 from vllm.config.utils import config, get_hash_factors, hash_factors
 from vllm.logger import init_logger
@@ -125,7 +125,7 @@ class KernelConfig:
     Platform defaults appended automatically during VllmConfig.__post_init__.
     """
 
-    enable_flashinfer_autotune: bool = Field(default=None)
+    enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
     moe_backend: MoEBackend = "auto"

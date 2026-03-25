@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
     from vllm.config import VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
-    from vllm.inputs import ProcessorInputs
+    from vllm.inputs import EngineInput
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -636,7 +636,7 @@ class Platform:
     @classmethod
     def validate_request(
         cls,
-        processed_inputs: "ProcessorInputs",
+        processed_inputs: "EngineInput",
         params: "SamplingParams | PoolingParams",
     ) -> None:
         """Raises if this request is unsupported on this platform"""
@@ -710,6 +710,13 @@ class Platform:
     def support_static_graph_mode(cls) -> bool:
         """
         Returns if the graph mode is supported by the current platform.
+        """
+        return False
+
+    @classmethod
+    def support_deep_gemm(cls) -> bool:
+        """
+        Returns if DeepGEMM is supported by the current platform.
         """
         return False
 
