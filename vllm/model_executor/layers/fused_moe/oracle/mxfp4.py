@@ -141,7 +141,10 @@ def backend_to_kernel_cls(
         return [AiterExperts]
 
     elif backend == Mxfp4MoeBackend.XPU:
-        raise NotImplementedError("XPU backend uses XpuMxfp4MoEMethod directly.")
+        from vllm.model_executor.layers.fused_moe.xpu_fused_moe import XPUExpertsMXFp4
+
+        return [XPUExpertsMXFp4]
+
     else:
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
@@ -156,6 +159,7 @@ def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
         "triton": Mxfp4MoeBackend.TRITON,
         "marlin": Mxfp4MoeBackend.MARLIN,
         "ck": Mxfp4MoeBackend.CK,
+        "xpu": Mxfp4MoeBackend.XPU,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -178,6 +182,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.TRITON_UNFUSED,
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
+        Mxfp4MoeBackend.XPU,
     ]
     return _AVAILABLE_BACKENDS
 
@@ -207,7 +212,11 @@ def select_mxfp4_moe_backend(
     # LoRA: separate experts backend path
     if config.is_lora_enabled:
         if not current_platform.is_cuda():
-            raise NotImplementedError("Mxfp4 LoRA only supported on CUDA Platform.")
+            # ROCm: Triton mxfp4 LoRA hits GPU memory faults due to
+            # triton_kernels.tensor.Tensor / HIP read-only page issues
+            # during weight swizzle and LoRA forward. Needs work from
+            # the triton_kernels/aiter side.
+            raise NotImplementedError("Mxfp4 LoRA is currently only supported on CUDA.")
         if envs.VLLM_MXFP4_USE_MARLIN is False and triton_kernels_supported:
             logger.info_once("Using Triton backend for mxfp4 lora")
             return Mxfp4MoeBackend.TRITON_UNFUSED, backend_to_kernel_cls(
@@ -351,7 +360,13 @@ def select_mxfp4_moe_backend(
     if current_platform.is_xpu():
         backend = Mxfp4MoeBackend.XPU
         logger.info_once(_make_log_backend(backend))
-        return backend, None
+        return _return_or_raise(
+            Mxfp4MoeBackend.XPU,
+            config,
+            kMxfp4Static,
+            None,
+            activation_format,
+        )
 
     if current_platform.is_cuda() or current_platform.is_rocm():
         raise NotImplementedError(
@@ -741,6 +756,16 @@ def convert_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.XPU:
+        # No additional transformation needed for XPU backend
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
     else:
         raise ValueError(
             f"Unsupported mxfp4_backend: {mxfp4_backend}: "
@@ -754,6 +779,8 @@ def make_mxfp4_moe_quant_config(
     w2_scale: Union[torch.Tensor, "PrecisionConfig"],
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    hidden_pad: int = 0,
+    intermediate_pad: int = 0,
 ) -> FusedMoEQuantConfig | None:
     """Create a FusedMoEQuantConfig for the given MXFP4 backend."""
     if mxfp4_backend in (
@@ -775,12 +802,16 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.CK,
     ):
-        return mxfp4_w4a16_moe_quant_config(
+        config = mxfp4_w4a16_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
         )
+        if mxfp4_backend == Mxfp4MoeBackend.CK:
+            config.hidden_pad = hidden_pad
+            config.intermediate_pad = intermediate_pad
+        return config
     else:
         return ocp_mx_moe_quant_config(
             quant_dtype="mxfp4",

@@ -282,7 +282,7 @@ apply_rocm_test_overrides() {
 
   # --- LoRA: disable custom paged attention ---
   if [[ $cmds == *"pytest -v -s lora"* ]]; then
-    cmds=${cmds//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
+    cmds=${cmds//"pytest -v -s lora"/"pytest -v -s lora"}
   fi
 
   # --- Kernel ignores ---
@@ -326,8 +326,7 @@ apply_rocm_test_overrides() {
   if [[ $cmds == *" kernels/moe"* ]]; then
     cmds="${cmds} \
     --ignore=kernels/moe/test_moe.py \
-    --ignore=kernels/moe/test_cutlass_moe.py \
-    --ignore=kernels/moe/test_triton_moe_ptpc_fp8.py"
+    --ignore=kernels/moe/test_cutlass_moe.py"
   fi
 
   # --- Entrypoint ignores ---
