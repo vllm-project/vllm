@@ -101,8 +101,8 @@ logger = init_logger(__name__)
 os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
 
 # see https://github.com/vllm-project/vllm/issues/10480
-os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 # see https://github.com/vllm-project/vllm/issues/10619
+os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 torch._inductor.config.compile_threads = 1
 
 # Enable Triton autotuning result caching to disk by default.
