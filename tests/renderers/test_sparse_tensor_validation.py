@@ -7,6 +7,7 @@ out-of-bounds memory writes during to_dense() operations.
 
 import io
 
+import numpy as np
 import pybase64 as base64
 import pytest
 import torch
@@ -191,9 +192,6 @@ class TestImageEmbedsValidation:
             io_handler.load_bytes(buffer.read())
 
     def test_valid_numpy_tensor_accepted(self):
-        """numpy .npy format should load and return correct tensor."""
-        import numpy as np
-
         io_handler = ImageEmbeddingMediaIO()
 
         arr = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
@@ -209,7 +207,6 @@ class TestImageEmbedsValidation:
 
     def test_numpy_int32_tensor_accepted(self):
         """numpy int32 arrays should round-trip correctly."""
-        import numpy as np
 
         io_handler = ImageEmbeddingMediaIO()
 
@@ -225,7 +222,6 @@ class TestImageEmbedsValidation:
 
     def test_load_file_numpy_tensor_accepted(self, tmp_path):
         """numpy .npy files should load correctly via load_file."""
-        import numpy as np
 
         io_handler = ImageEmbeddingMediaIO()
 
