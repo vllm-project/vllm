@@ -858,6 +858,25 @@ class CompilationConfig:
         if KEY not in self.inductor_compile_config:
             self.inductor_compile_config[KEY] = False
 
+        # Tie inductor runtime assertions to debug logging mode.
+        # These assertions add ~2ms overhead per forward pass on large
+        # models (e.g., DeepSeek-R1 671B: ~340 assert_size_stride + ~60
+        # assert_alignment calls per forward). PyTorch >= 2.12 has a
+        # native fix (assert-once), so we only apply this workaround on
+        # older versions. On torch < 2.12, enable asserts only when
+        # VLLM_LOGGING_LEVEL=DEBUG. Users can still override explicitly
+        # via --compilation-config '{"inductor_compile_config":
+        # {"size_asserts": true, ...}}'.
+        # See: https://github.com/pytorch/pytorch/issues/177719
+        if not is_torch_equal_or_newer("2.12.0.dev"):
+            enable_asserts = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+            for key in (
+                "size_asserts",
+                "alignment_asserts",
+                "scalar_asserts",
+            ):
+                self.inductor_compile_config.setdefault(key, enable_asserts)
+
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
                 assert callable(v), f"pass {k} should be callable or a qualified name"
