@@ -425,6 +425,7 @@ def cpu_fused_moe_torch(
 
     # Ref code from https://github.com/sgl-project/sglang/blob/716e682721397df103f347d22da8bd46c6016dab/python/sglang/srt/layers/moe/fused_moe_native.py#L53
     len_experts = global_num_experts
+    local_num_experts = len(layer.gate_up_linear)
 
     cnts = topk_ids.new_zeros((topk_ids.shape[0], len_experts))
     cnts.scatter_(1, topk_ids.to(torch.int64), 1)
@@ -437,7 +438,7 @@ def cpu_fused_moe_torch(
     outputs = []
     start_idx = 0
 
-    for i, num_tokens in enumerate(tokens_per_expert):
+    for i, num_tokens in enumerate(tokens_per_expert[:local_num_experts]):
         end_idx = start_idx + num_tokens
         if num_tokens == 0:
             continue
