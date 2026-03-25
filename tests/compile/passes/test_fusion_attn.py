@@ -53,6 +53,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         kv_cache_dtype: torch.dtype,
         device: torch.device,
         vllm_config: VllmConfig,
+        block_size: int,
         **kwargs,
     ):
         super().__init__()
@@ -74,7 +75,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         self.attn._k_scale = self.attn._k_scale.to(device)
         self.attn._v_scale = self.attn._v_scale.to(device)
 
-        self.block_size = kwargs.get("block_size", 16)
+        self.block_size = block_size
 
         # Initialize attn MetadataBuilder
         self.builder = self.attn.attn_backend.get_builder_cls()(
