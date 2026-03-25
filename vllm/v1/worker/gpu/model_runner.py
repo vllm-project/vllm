@@ -247,10 +247,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
-        self.eplb = EPLBController(
-            parallel_config=self.parallel_config,
-            device=self.device,
-        )
+
+        # Expert parallelism load balancer.
+        self.eplb = EPLBController(self.parallel_config, self.device)
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
