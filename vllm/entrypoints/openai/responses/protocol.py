@@ -289,17 +289,26 @@ class ResponsesRequest(OpenAIBaseModel):
         continue_final = should_continue_final_message(self.input)
 
         reasoning = self.reasoning
+        reasoning_effort = None if reasoning is None else reasoning.effort
+
+        extra_kwargs: dict[str, Any] = dict(
+            add_generation_prompt=not continue_final,
+            continue_final_message=continue_final,
+            reasoning_effort=reasoning_effort,
+        )
+        # Map reasoning_effort to enable_thinking for models that use it
+        # (e.g., Qwen3/Qwen3.5 chat templates check enable_thinking).
+        # For templates that don't use enable_thinking, it is
+        # automatically filtered out by resolve_chat_template_kwargs.
+        if reasoning_effort == "none":
+            extra_kwargs["enable_thinking"] = False
 
         return ChatParams(
             chat_template=default_template,
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=merge_kwargs(  # To remove unset values
                 {},
-                dict(
-                    add_generation_prompt=not continue_final,
-                    continue_final_message=continue_final,
-                    reasoning_effort=None if reasoning is None else reasoning.effort,
-                ),
+                extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
         )
