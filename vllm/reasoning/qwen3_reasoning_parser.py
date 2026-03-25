@@ -37,9 +37,11 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         super().__init__(tokenizer, *args, **kwargs)
 
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        # Qwen3 defaults to thinking enabled; only treat output as
-        # pure content when the user explicitly disables it.
-        self.thinking_enabled = chat_kwargs.get("enable_thinking", True)
+        # Match the Qwen3 chat template default: enable_thinking defaults
+        # to false. The serving layer checks prompt_is_reasoning_end to
+        # decide whether to call extract_reasoning at all, so this flag
+        # is only a safety net for direct parser usage.
+        self.thinking_enabled = chat_kwargs.get("enable_thinking", False)
 
     @property
     def start_token(self) -> str:
@@ -62,11 +64,15 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         If <think> is present (e.g. from a different template), it is
         stripped before extraction.
 
-        When thinking is explicitly disabled and no </think> appears,
-        returns (None, model_output) — all output is content.
-        Otherwise (thinking enabled, default), a missing </think> means
-        the output was truncated and everything is reasoning:
-        returns (model_output, None).
+        When no </think> appears in the output:
+        - thinking_enabled=True: output was truncated mid-reasoning,
+          returns (model_output, None).
+        - thinking_enabled=False: thinking was not active, returns
+          (None, model_output) — all output is content.
+
+        Note: The serving layer gates calls to this method via
+        prompt_is_reasoning_end, so this is only reached when the
+        prompt indicates thinking is active.
 
         Returns:
             tuple[Optional[str], Optional[str]]: reasoning content and content

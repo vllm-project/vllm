@@ -59,14 +59,15 @@ WITH_THINK_STREAM = {
     "content": "This is the rest",
 }
 
-# --- No think tokens at all (thinking enabled, truncated) ---
+# --- No think tokens at all ---
 
-# With thinking enabled (default), no think tokens means the output was
-# truncated before </think> could be generated. All output is reasoning.
+# Without explicit enable_thinking=True, the parser defaults to
+# thinking_enabled=False (matching the Qwen3 template default).
+# No </think> in output → all content.
 WITHOUT_THINK = {
     "output": "This is the rest",
-    "reasoning": "This is the rest",
-    "content": None,
+    "reasoning": None,
+    "content": "This is the rest",
 }
 # In streaming, the parser cannot distinguish "thinking disabled" from
 # "reasoning in progress" when no think tokens have appeared yet.
@@ -90,12 +91,14 @@ MULTILINE_REASONING = {
     "reasoning": "This is a reasoning\nsection",
     "content": "This is the rest\nThat",
 }
-# Truncated output: <think> present but no </think> (thinking enabled).
-# Everything is reasoning because the output was cut off mid-thought.
+# Truncated output: <think> present but no </think>.
+# With default thinking_enabled=False, no </think> means all content.
+# (The serving layer would only call this with thinking_enabled=True
+# when the prompt indicates thinking is active.)
 ONLY_OPEN_TAG = {
     "output": "<think>This is a reasoning section",
-    "reasoning": "This is a reasoning section",
-    "content": None,
+    "reasoning": None,
+    "content": "This is a reasoning section",
 }
 
 ONLY_OPEN_TAG_STREAM = {
@@ -104,12 +107,12 @@ ONLY_OPEN_TAG_STREAM = {
     "content": None,
 }
 
-# Truncated output without <think> prefix (Qwen3.5 style where <think>
-# is in the prompt). No </think> means truncation — all is reasoning.
+# Output without <think> prefix (Qwen3.5 style where <think> is in the
+# prompt). No </think> with default thinking_enabled=False → all content.
 TRUNCATED_NO_START_TOKEN = {
     "output": "This is a reasoning section",
-    "reasoning": "This is a reasoning section",
-    "content": None,
+    "reasoning": None,
+    "content": "This is a reasoning section",
 }
 
 TRUNCATED_NO_START_TOKEN_STREAM = {
@@ -278,6 +281,57 @@ def test_reasoning_streaming_multi_token_deltas(
 
     assert reconstructor.reasoning == expected_reasoning
     assert (reconstructor.other_content or None) == expected_content
+
+
+# --- Tests for enable_thinking=True (truncated reasoning) ---
+
+# When thinking is explicitly enabled and output has no </think>,
+# the output was truncated mid-reasoning. All output is reasoning.
+THINKING_ENABLED_TRUNCATED_CASES = [
+    pytest.param(
+        "This is the rest",
+        "This is the rest",
+        None,
+        id="thinking_enabled_truncated_no_tokens",
+    ),
+    pytest.param(
+        "<think>This is a reasoning section",
+        "This is a reasoning section",
+        None,
+        id="thinking_enabled_truncated_with_open_tag",
+    ),
+    pytest.param(
+        "This is a reasoning section",
+        "This is a reasoning section",
+        None,
+        id="thinking_enabled_truncated_no_start_token",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "output, expected_reasoning, expected_content",
+    THINKING_ENABLED_TRUNCATED_CASES,
+)
+def test_reasoning_thinking_enabled_truncated(
+    output: str,
+    expected_reasoning: str | None,
+    expected_content: str | None,
+    qwen3_tokenizer,
+):
+    """When enable_thinking=True and no </think>, output is truncated reasoning."""
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer,
+        chat_template_kwargs={"enable_thinking": True},
+    )
+
+    reasoning, content = parser.extract_reasoning(
+        model_output=output,
+        request=ChatCompletionRequest(messages=[], model="test-model"),
+    )
+
+    assert reasoning == expected_reasoning
+    assert content == expected_content
 
 
 # --- Tests for enable_thinking=False (thinking explicitly disabled) ---
