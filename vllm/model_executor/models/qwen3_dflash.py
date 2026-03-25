@@ -63,7 +63,7 @@ class DFlashQwen3Attention(nn.Module):
         max_position: int = 4096 * 32,
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-06,
-        qkv_bias: bool = False,
+        attention_bias: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -92,14 +92,14 @@ class DFlashQwen3Attention(nn.Module):
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=qkv_bias,
+            bias=attention_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
-            bias=False,
+            bias=attention_bias,  # DFlash has o_proj bias when using attention bias
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
@@ -171,7 +171,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             rms_norm_eps=config.rms_norm_eps,
-            qkv_bias=getattr(config, "attention_bias", False),
+            attention_bias=getattr(config, "attention_bias", False),
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
