@@ -142,7 +142,8 @@ class ApplyRotaryEmb(CustomOp):
             except (ImportError, ModuleNotFoundError):
                 # flash_attn exists but flash_attn.ops.triton may not be available
                 logger.debug(
-                    "flash_attn.ops.triton.rotary not available when version is less than v2.1.2, "
+                    "flash_attn.ops.triton.rotary not available when "
+                    "version is less than v2.1.2, "
                     "falling back to native implementation"
                 )
                 self.apply_rotary_emb_flash_attn = None
