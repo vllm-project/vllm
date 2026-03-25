@@ -4140,3 +4140,99 @@ def test_eagle3_mm_encoder_cache_with_shift():
         f"shifted_end={scheduled_end_with_shift}) overlapping MM at "
         f"{start_pos}. The fix must schedule encoder inputs."
     )
+
+
+def test_priority_scheduling_preemption_avoids_waste():
+    """Test that preemption prefers requests with fewer computed_tokens
+    when priorities are equal, to avoid wasting computation.
+
+    When multiple running requests have the same priority, the scheduler
+    should preempt the one with the smallest num_computed_tokens to minimize
+    wasted computation.
+    """
+    # Create scheduler with VERY limited memory to force preemption
+    # 6 blocks: 2 requests * 2 blocks = 4 blocks, need 2 more for 3rd request
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=3,
+        max_num_batched_tokens=256,
+        num_blocks=6,
+        block_size=16,
+    )
+
+    # Create two running requests with SAME priority but DIFFERENT computed tokens
+    # Request A: computed_tokens = 30 (more computed, should NOT be preempted)
+    # Request B: computed_tokens = 5  (less computed, SHOULD be preempted)
+    request_a = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],  # Same priority as B
+        arrival_times=[1.0],
+        num_tokens=32,  # 32 tokens = 2 blocks
+        req_ids=["req_a"],
+    )[0]
+    request_a.num_computed_tokens = 30  # Almost done
+
+    request_b = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],  # Same priority as A
+        arrival_times=[2.0],
+        num_tokens=32,  # Same length
+        req_ids=["req_b"],
+    )[0]
+    request_b.num_computed_tokens = 5  # Just started
+
+    # Add and schedule both requests
+    scheduler.add_request(request_a)
+    scheduler.add_request(request_b)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 2
+
+    # Simulate model execution - process some tokens
+    # This advances computed_tokens for each request
+    model_output = ModelRunnerOutput(
+        req_ids=[request_a.request_id, request_b.request_id],
+        req_id_to_index={
+            request_a.request_id: 0,
+            request_b.request_id: 1,
+        },
+        sampled_token_ids=[[100], [200]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # Verify both requests are running
+    assert len(scheduler.running) == 2
+
+    # Add a new high-priority request that needs memory
+    high_priority_request = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],  # Higher priority
+        arrival_times=[3.0],
+        num_tokens=32,  # Same size
+        req_ids=["req_high"],
+    )[0]
+
+    scheduler.add_request(high_priority_request)
+
+    # Schedule again - should trigger preemption
+    output = scheduler.schedule()
+
+    # One of the running requests should be preempted
+    # The one with fewer computed_tokens should be preempted
+    preempted_reqs = [req for req in scheduler.waiting
+                      if req.request_id in ["req_a", "req_b"]]
+
+    assert len(preempted_reqs) == 1, (
+        f"Expected exactly 1 request to be preempted, "
+        f"got {[r.request_id for r in preempted_reqs]}"
+    )
+
+    preempted_req = preempted_reqs[0]
+    # Should preempt req_b (fewer computed tokens)
+    assert preempted_req.request_id == "req_b", (
+        f"Expected req_b (fewer computed_tokens=10) to be preempted, "
+        f"but got {preempted_req.request_id} "
+        f"(computed_tokens={preempted_req.num_computed_tokens})"
+    )
