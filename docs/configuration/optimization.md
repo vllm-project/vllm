@@ -296,7 +296,13 @@ This supplements prefix caching since there are some situations where prefix cac
 - The user places different text instructions before passes multi-modal inputs.
 - The multi-modal inputs come in a different order compared to previous requests.
 
-The size of the multi-modal encoder cache is expressed in terms of number of embedding tokens. In order to facilitate chunked prefill, the minimum size is the maximum number of embeddings per multi-modal item. This is also the default cache size. If your workload involves many repeating multi-modal inputs that cannot be optimized via prefix caching, you can further increase the cache size by setting `encoder_cache_size`.
+The size of the multi-modal encoder cache is expressed in terms of number of embedding tokens. In order to facilitate chunked prefill, the minimum size is the maximum number of embeddings per multi-modal item. This is also the default cache size.
+
+### Configuration
+
+#### Cache Size
+
+If your workload involves many repeating multi-modal inputs that cannot be optimized via prefix caching, you can further increase the cache size by setting `encoder_cache_size`.
 
 For [encoder disaggregation](../examples/online_serving/disaggregated_encoder.md), you can allocate more memory to increasing the encoder cache size since the memory taken up by the modality encoders is typically much smaller than the language backbone.
 
