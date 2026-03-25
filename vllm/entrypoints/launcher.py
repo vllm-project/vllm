@@ -27,6 +27,8 @@ async def serve_http(
     app: FastAPI,
     sock: socket.socket | None,
     enable_ssl_refresh: bool = False,
+    health_port: int | None = None,
+    engine_dead_shared=None,
     **uvicorn_kwargs: Any,
 ):
     """
@@ -76,6 +78,19 @@ async def serve_http(
     server = uvicorn.Server(config)
     app.state.server = server
 
+    # Start the out-of-band health process if configured.
+    from vllm.entrypoints.serve.instrumentator.health import (
+        start_health_process,
+        stop_health_process,
+    )
+    health_proc = None
+    if health_port is not None and engine_dead_shared is not None:
+        host = uvicorn_kwargs.get("host") or "0.0.0.0"
+        health_proc = start_health_process(host, health_port, engine_dead_shared)
+        logger.info(
+            "Started out-of-band health check server on %s:%d", host, health_port
+        )
+
     loop = asyncio.get_running_loop()
 
     watchdog_task = loop.create_task(watchdog_loop(server, app.state.engine_client))
@@ -118,6 +133,8 @@ async def serve_http(
         watchdog_task.cancel()
         if ssl_cert_refresher:
             ssl_cert_refresher.stop()
+        if health_proc is not None:
+            stop_health_process(health_proc)
 
     shutdown_task = loop.create_task(handle_shutdown())
 
@@ -139,6 +156,8 @@ async def serve_http(
     finally:
         shutdown_task.cancel()
         watchdog_task.cancel()
+        if health_proc is not None:
+            stop_health_process(health_proc)
 
 
 async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
