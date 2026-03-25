@@ -22,7 +22,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.utils import get_max_tokens
-from vllm.inputs import ProcessorInputs
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.reasoning import ReasoningParser
@@ -43,7 +43,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
     async def render_batch_chat_request(
         self,
         request: BatchChatCompletionRequest,
-    ) -> tuple[list[list[ConversationMessage]], list[ProcessorInputs]] | ErrorResponse:
+    ) -> tuple[list[list[ConversationMessage]], list[EngineInput]] | ErrorResponse:
         """Validate the model and preprocess a batched chat completion request.
 
         Performs engine-aware checks then delegates per-conversation
@@ -78,7 +78,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         tool_dicts: list[dict] | None = None
 
         all_conversations: list[list[ConversationMessage]] = []
-        all_engine_prompts: list[ProcessorInputs] = []
+        all_engine_prompts: list[EngineInput] = []
 
         for messages in request.messages:
             single_request = request.to_chat_completion_request(messages)
