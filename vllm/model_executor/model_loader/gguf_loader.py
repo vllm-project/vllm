@@ -102,6 +102,11 @@ class GGUFModelLoader(BaseModelLoader):
             # Gemma3 models use "gemma3_text" in HuggingFace but
             # "gemma3" in GGUF architecture naming
             model_type = "gemma3"
+        # FIX #1: Add Qwen3.5 model type mapping
+        if model_type == "qwen3_5":
+            # Qwen3.5 models use "qwen3_5" in HuggingFace but
+            # "qwen35" in GGUF architecture naming
+            model_type = "qwen35"
         if model_type in ("deepseek_v3", "deepseek_v2"):
             model_type = "deepseek2"
             # GGUF layer map assumes that we will have a merged expert weights
@@ -156,9 +161,21 @@ class GGUFModelLoader(BaseModelLoader):
         text_num_layers = text_config.num_hidden_layers
         text_name_map = gguf.get_tensor_name_map(arch, text_num_layers)
 
+        # FIX #2: Handle vision configs that use 'depth' instead of 'num_hidden_layers'
         if is_multimodal:
             mm_proj_arch = gguf.MODEL_ARCH.MMPROJ
-            vision_num_layers = config.vision_config.num_hidden_layers
+            # Some vision configs use 'depth' instead of 'num_hidden_layers'
+            # (e.g., Qwen3_5VisionConfig)
+            vision_num_layers = getattr(
+                config.vision_config,
+                'num_hidden_layers',
+                getattr(config.vision_config, 'depth', None)
+            )
+            if vision_num_layers is None:
+                raise ValueError(
+                    f"Vision config for {model_type} must have either "
+                    "'num_hidden_layers' or 'depth' attribute"
+                )
             vision_name_map = gguf.get_tensor_name_map(mm_proj_arch, vision_num_layers)
         else:
             vision_name_map = None
