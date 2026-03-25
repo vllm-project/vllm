@@ -13,6 +13,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.orca_metrics import metrics_header
 from vllm.entrypoints.openai.utils import validate_json_request
@@ -28,8 +29,12 @@ router = APIRouter()
 ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL = "endpoint-load-metrics-format"
 
 
-def chat(request: Request) -> OpenAIServingChatBatch | None:
+def chat(request: Request) -> OpenAIServingChat | None:
     return request.app.state.openai_serving_chat
+
+
+def batch_chat(request: Request) -> OpenAIServingChatBatch | None:
+    return request.app.state.openai_serving_chat_batch
 
 
 @router.post(
@@ -85,7 +90,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 async def create_batch_chat_completion(
     request: BatchChatCompletionRequest, raw_request: Request
 ):
-    handler = chat(raw_request)
+    handler = batch_chat(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Chat Completions API")
 
