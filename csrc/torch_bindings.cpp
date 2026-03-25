@@ -681,6 +681,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("per_token_group_quant_int8", torch::kCUDA,
            &per_token_group_quant_int8);
 
+  // Concat q_pe and q_nope, and FP8 quantization.
+  ops.def(
+      "indexer_concat_quant_fp8(Tensor! q_out, Tensor! scale_out, Tensor pe, "
+      "Tensor nope, int group_size, float eps, float fp8_min, float fp8_max, "
+      "bool use_ue8m0) -> ()");
+  ops.impl("indexer_concat_quant_fp8", torch::kCUDA, &indexer_concat_quant_fp8);
+
   // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel
   ops.def(
       "rearrange_kn_weight_as_n32k16_order(Tensor b_qweight, Tensor b_scales, "
