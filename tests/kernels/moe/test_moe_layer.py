@@ -145,7 +145,7 @@ def maybe_roundup_layer_hidden_size(
         Original hidden size otherwise.
     """
     if backend == "deepep_high_throughput":
-        from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
             DeepEPHTPrepareAndFinalize,
         )
 
@@ -154,7 +154,7 @@ def maybe_roundup_layer_hidden_size(
         )
 
     if backend == "deepep_low_latency":
-        from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
             DeepEPLLPrepareAndFinalize,
         )
 
@@ -397,7 +397,7 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
             )
 
         if config.backend == "deepep_low_latency":
-            from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
+            from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (  # noqa: E501
                 DeepEPLLPrepareAndFinalize,
             )
 
