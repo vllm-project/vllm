@@ -39,6 +39,8 @@ If work is duplicate/trivial busywork, **do not proceed**. Return a short explan
 
 ## 2. Development Workflow
 
+- **Never use system `python3` or bare `pip`/`pip install`.** All Python commands must go through `uv` and `.venv/bin/python`.
+
 ### Environment setup
 
 ```bash
@@ -58,32 +60,32 @@ pre-commit install
 
 ```bash
 # If you are only making Python changes:
-VLLM_USE_PRECOMPILED=1 uv pip install -e .
+VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto
 
 # If you are also making C/C++ changes:
-uv pip install -e .
+uv pip install -e . --torch-backend=auto
 ```
 
 ### Running tests
 
-Tests require extra dependencies.
-All versions for test dependencies should be read from `requirements/test.txt`
+> Requires [Environment setup](#environment-setup) and [Installing dependencies](#installing-dependencies).
 
 ```bash
-# Install bare minimum test dependencies:
-uv pip install pytest pytest-asyncio tblib
-
-# Install additional test dependencies as needed, or install them all as follows:
+# Install test dependencies.
+# requirements/test.txt is pinned to x86_64; on other platforms, use the
+# unpinned source file instead:
+uv pip install -r requirements/test.in    # resolves for current platform
+# Or on x86_64:
 uv pip install -r requirements/test.txt
 
-# Run specific test from specific test file
-pytest tests/path/to/test.py -v -s -k test_name
-
-# Run all tests in directory
-pytest tests/path/to/dir -v -s
+# Run a specific test file (use .venv/bin/python directly;
+# `source activate` does not persist in non-interactive shells):
+.venv/bin/python -m pytest tests/path/to/test_file.py -v
 ```
 
 ### Running linters
+
+> Requires [Environment setup](#environment-setup).
 
 ```bash
 # Run all pre-commit hooks on staged files:
