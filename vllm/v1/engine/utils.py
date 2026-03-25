@@ -4,6 +4,7 @@
 import contextlib
 import os
 import threading
+import platform
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.network_utils import get_open_ports_list, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
@@ -832,16 +833,34 @@ def get_engine_zmq_addresses(
     if parallel_config.enable_elastic_ep:
         client_local_only = False
 
-    return EngineZmqAddresses(
-        inputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
-        outputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
-    )
+    # Windows uses TCP for local engine-client traffic, so we must allocate
+    # unique ports per deployment instead of reusing a fixed pair of ports.
+    if platform.system() == "Windows":
+        ports = sorted(get_open_ports_list(num_api_servers * 2))
+        input_ports = ports[:num_api_servers]
+        output_ports = ports[num_api_servers:]
+        addresses = EngineZmqAddresses(
+            inputs=[
+                get_engine_client_zmq_addr(client_local_only, host, port)
+                for port in input_ports
+            ],
+            outputs=[
+                get_engine_client_zmq_addr(client_local_only, host, port)
+                for port in output_ports
+            ],
+        )
+    else:
+        addresses = EngineZmqAddresses(
+            inputs=[
+                get_engine_client_zmq_addr(client_local_only, host)
+                for _ in range(num_api_servers)
+            ],
+            outputs=[
+                get_engine_client_zmq_addr(client_local_only, host)
+                for _ in range(num_api_servers)
+            ],
+        )
+    return addresses
 
 
 @contextlib.contextmanager
@@ -946,7 +965,7 @@ def launch_core_engines(
 
     if local_engines_only and dp_rank > 0:
         assert not handshake_local_only
-        local_handshake_address = get_open_zmq_ipc_path()
+        local_handshake_address = get_engine_client_zmq_addr(True, host)
         client_handshake_address = local_handshake_address
     else:
         local_handshake_address = handshake_address
@@ -1012,7 +1031,7 @@ def wait_for_engine_startup(
         and not parallel_config.data_parallel_external_lb
     )
 
-    if proc_manager is not None:
+    if proc_manager is not None and platform.system() != "Windows":
         for sentinel in proc_manager.sentinels():
             poller.register(sentinel, zmq.POLLIN)
     if coord_process is not None:

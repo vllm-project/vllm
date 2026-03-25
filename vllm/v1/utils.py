@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import multiprocessing
+import platform
 import time
 import weakref
 from collections.abc import Callable, Sequence
@@ -148,6 +149,15 @@ def get_engine_client_zmq_addr(local_only: bool, host: str, port: int = 0) -> st
 
     Otherwise, the provided host and port will be used to construct a TCP
     address (port == 0 means assign an available port)."""
+
+    if platform.system() == "Windows":
+        host = (
+            host
+            if not local_only and host is not None and len(host) > 0
+            else "127.0.0.1"
+        )
+        port = port if port >= 1024 else get_open_port()
+        return get_tcp_uri(host, port)
 
     return (
         get_open_zmq_ipc_path()
