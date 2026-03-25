@@ -15,9 +15,12 @@ PoolingTask = Literal[
 ]
 POOLING_TASKS: tuple[PoolingTask, ...] = get_args(PoolingTask)
 
+GradientTask = Literal["gradient"]
+GRADIENT_TASKS: tuple[GradientTask, ...] = get_args(GradientTask)
+
 ScoreType = Literal["bi-encoder", "cross-encoder", "late-interaction"]
 
 FrontendTask = Literal["render"]
 FRONTEND_TASKS: tuple[FrontendTask, ...] = get_args(FrontendTask)
 
-SupportedTask = Literal[GenerationTask, PoolingTask, FrontendTask]
+SupportedTask = Literal[GenerationTask, PoolingTask, GradientTask, FrontendTask]

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from vllm.gradient_params import GradientParams
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -62,6 +63,7 @@ class Request:
         prompt_token_ids: list[int] | None,
         sampling_params: SamplingParams | None,
         pooling_params: PoolingParams | None,
+        gradient_params: GradientParams | None = None,
         client_index: int = 0,
         arrival_time: float | None = None,
         prompt_embeds: torch.Tensor | None = None,
@@ -79,6 +81,7 @@ class Request:
         self.priority = priority
         self.sampling_params = sampling_params
         self.pooling_params = pooling_params
+        self.gradient_params = gradient_params
         self.lora_request = lora_request
         self.structured_output_request = StructuredOutputRequest.from_sampling_params(
             sampling_params
@@ -94,7 +97,10 @@ class Request:
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
 
-        if pooling_params is not None:
+        if gradient_params is not None:
+            # Gradient computation: single-shot like pooling.
+            self.max_tokens = 1
+        elif pooling_params is not None:
             # Pooling models.
             self.max_tokens = 1
         elif sampling_params is not None:
@@ -109,7 +115,10 @@ class Request:
                     "kv_transfer_params"
                 )
         else:
-            raise ValueError("sampling_params and pooling_params can't both be unset")
+            raise ValueError(
+                "sampling_params, pooling_params, and gradient_params "
+                "can't all be unset"
+            )
 
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
@@ -190,6 +199,7 @@ class Request:
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
+            gradient_params=request.gradient_params,
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
             cache_salt=request.cache_salt,

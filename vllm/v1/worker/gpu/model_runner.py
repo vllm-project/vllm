@@ -63,6 +63,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.dp_utils import sync_cudagraph_and_dp_padding
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
+from vllm.v1.worker.gpu.gradient.gradient_runner import GradientRunner
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -186,6 +187,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.is_pooling_model = self.model_config.runner_type == "pooling"
         self.pooling_runner: PoolingRunner | None = None
 
+        # Gradient computation (available for generative models).
+        self.gradient_runner: GradientRunner | None = None
+
         # General request states.
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
@@ -253,9 +257,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.req_states.max_model_len = max_model_len
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        from vllm.model_executor.models.interfaces_base import (
+            is_text_generation_model,
+        )
+
         tasks: list[SupportedTask] = []
         if self.model_config.runner_type == "generate":
             tasks.extend(self.model_state.get_supported_generation_tasks())
+            # Gradient computation is available for all text generation models.
+            if is_text_generation_model(self.model):
+                tasks.append("gradient")
         if self.is_pooling_model:
             # Do not rely on pooling_runner here, since this information is needed
             # on the first PP rank, while pooling_runner is only initialized
@@ -315,6 +326,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             load_dummy_weights,
         )
         self.eplb.maybe_start_async_loop(eplb_models_added)
+
+        # Initialize gradient runner for text generation models.
+        if not self.is_pooling_model and self.is_last_pp_rank:
+            from vllm.model_executor.models.interfaces_base import (
+                is_text_generation_model,
+            )
+
+            if is_text_generation_model(self.model):
+                self.gradient_runner = GradientRunner(self.model)
 
         if not self.is_first_pp_rank:
             # For non-first PP ranks, create intermediate tensors sized
@@ -1272,6 +1292,42 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.use_async_scheduling:
             return async_output
         return async_output.get_output()
+
+    def compute_gradients(
+        self,
+        input_ids: torch.Tensor,
+        gradient_params: Any,
+    ) -> Any:
+        """Compute gradients for a single prompt + target pair.
+
+        This runs outside the normal execute_model / sample_tokens path
+        because it needs torch.enable_grad() and operates on a single
+        request at a time (no batching with generation requests).
+
+        Args:
+            input_ids: Prompt token IDs (already on device).
+            gradient_params: Configuration specifying what to compute.
+
+        Returns:
+            GradientRunnerOutput with the requested gradient information.
+        """
+        from vllm.gradient_params import GradientParams as _GradientParams
+
+        assert isinstance(gradient_params, _GradientParams)
+        assert self.gradient_runner is not None, (
+            "GradientRunner not initialized. This model may not support "
+            "gradient computation."
+        )
+        target_ids = torch.tensor(
+            gradient_params.target_token_ids,
+            dtype=torch.long,
+            device=self.device,
+        )
+        return self.gradient_runner.compute_gradients(
+            input_ids=input_ids,
+            target_ids=target_ids,
+            gradient_params=gradient_params,
+        )
 
     def postprocess_pool(self, input_batch: InputBatch) -> None:
         # Update the number of computed tokens.

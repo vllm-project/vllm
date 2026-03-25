@@ -351,3 +351,74 @@ class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
         )
+
+
+@dataclass
+class GradientOutput:
+    """The output data of a gradient computation request.
+
+    Args:
+        token_log_probs: Per-target-token log-probabilities
+            log p(y_t | x, y_{<t}) for each target token.
+        token_attributions: Attribution matrix. Shape depends on aggregation:
+            - aggregated (l2_norm/abs_sum): [num_selected_targets, num_tokens]
+            - full (none): [num_selected_targets, num_tokens, hidden_dim]
+            where num_tokens depends on gradient_targets.
+        loss: Scalar loss value (when gradient_of is "loss" or "both").
+        loss_gradients: Gradient of loss w.r.t. each gradient target.
+            Keys are gradient target names, values are tensors.
+    """
+
+    token_log_probs: list[float] | None = None
+    token_attributions: list[list[float]] | None = None
+    loss: float | None = None
+    loss_gradients: dict[str, list[list[float]]] | None = None
+
+    def __repr__(self) -> str:
+        attr_shape = None
+        if self.token_attributions is not None:
+            attr_shape = (
+                len(self.token_attributions),
+                len(self.token_attributions[0]) if self.token_attributions else 0,
+            )
+        return (
+            f"GradientOutput(loss={self.loss}, "
+            f"token_log_probs_len="
+            f"{len(self.token_log_probs) if self.token_log_probs else None}, "
+            f"token_attributions_shape={attr_shape})"
+        )
+
+
+class GradientRequestOutput:
+    """The output data of a gradient computation request to the LLM.
+
+    Args:
+        request_id: A unique identifier for the gradient request.
+        outputs: The gradient computation results.
+        prompt_token_ids: The token IDs of the prompt.
+        target_token_ids: The target token IDs for gradient computation.
+        finished: Whether the gradient computation is completed.
+    """
+
+    def __init__(
+        self,
+        request_id: str,
+        outputs: GradientOutput,
+        prompt_token_ids: list[int],
+        target_token_ids: list[int],
+        finished: bool,
+    ):
+        self.request_id = request_id
+        self.outputs = outputs
+        self.prompt_token_ids = prompt_token_ids
+        self.target_token_ids = target_token_ids
+        self.finished = finished
+
+    def __repr__(self) -> str:
+        return (
+            f"GradientRequestOutput(request_id={self.request_id!r}, "
+            f"outputs={self.outputs!r}, "
+            f"prompt_token_ids=[{len(self.prompt_token_ids)} tokens], "
+            f"target_token_ids=[{len(self.target_token_ids)} tokens], "
+            f"finished={self.finished})"
+        )

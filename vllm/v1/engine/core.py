@@ -149,6 +149,10 @@ class EngineCore:
             block_size=scheduler_block_size,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
+
+        # Gradient results bypass the scheduler and are collected here
+        # for delivery during the next step() call.
+        self._pending_gradient_outputs: list[tuple[int, EngineCoreOutputs]] = []
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
@@ -302,6 +306,13 @@ class EngineCore:
                 f"request_id must be a string, got {type(request.request_id)}"
             )
 
+        # Gradient requests are handled separately via collective_rpc
+        # because they need torch.enable_grad() and can't be batched
+        # with normal inference requests.
+        if request.gradient_params is not None:
+            self._handle_gradient_request(request)
+            return
+
         if pooling_params := request.pooling_params:
             supported_pooling_tasks = [
                 task for task in self.get_supported_tasks() if task in POOLING_TASKS
@@ -322,6 +333,73 @@ class EngineCore:
             )
 
         self.scheduler.add_request(request)
+
+    def _handle_gradient_request(self, request: Request) -> None:
+        """Handle gradient computation request via collective_rpc.
+
+        Gradient requests bypass the scheduler and execute directly
+        on the worker because they need torch.enable_grad() and cannot
+        be batched with normal inference.
+        """
+        gradient_params = request.gradient_params
+        assert gradient_params is not None
+
+        # Serialize GradientParams to dict for RPC transport.
+        gp_dict = {
+            "target_token_ids": gradient_params.target_token_ids,
+            "gradient_of": gradient_params.gradient_of,
+            "gradient_targets": gradient_params.gradient_targets,
+            "target_token_indices": gradient_params.target_token_indices,
+            "aggregation": gradient_params.aggregation,
+            "loss_function": gradient_params.loss_function,
+            "return_log_probs": gradient_params.return_log_probs,
+        }
+
+        prompt_token_ids = request.prompt_token_ids
+        assert prompt_token_ids is not None, (
+            "Gradient requests require prompt_token_ids"
+        )
+
+        try:
+            # Call worker.compute_gradients via RPC.
+            result = self.model_executor.collective_rpc(
+                "compute_gradients",
+                args=(prompt_token_ids, gp_dict),
+            )
+            # collective_rpc returns a list of results (one per worker).
+            # We only need the first one.
+            gradient_result = result[0] if isinstance(result, list) else result
+            gradient_result["target_token_ids"] = gradient_params.target_token_ids
+
+            # Build EngineCoreOutput with gradient_output.
+            output = EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[],
+                gradient_output=gradient_result,
+                finish_reason=FinishReason.STOP,
+            )
+            engine_core_outputs = EngineCoreOutputs(
+                outputs=[output],
+            )
+            self._pending_gradient_outputs.append(
+                (request.client_index, engine_core_outputs)
+            )
+        except Exception:
+            logger.exception(
+                "Gradient computation failed for request %s",
+                request.request_id,
+            )
+            output = EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+            )
+            engine_core_outputs = EngineCoreOutputs(
+                outputs=[output],
+            )
+            self._pending_gradient_outputs.append(
+                (request.client_index, engine_core_outputs)
+            )
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -377,6 +455,18 @@ class EngineCore:
         )
         self._iteration_index += 1
 
+    def _flush_gradient_outputs(
+        self,
+        engine_core_outputs: dict[int, EngineCoreOutputs],
+    ) -> None:
+        """Merge pending gradient outputs into the step's output dict."""
+        for client_index, grad_outputs in self._pending_gradient_outputs:
+            if client_index in engine_core_outputs:
+                engine_core_outputs[client_index].outputs.extend(grad_outputs.outputs)
+            else:
+                engine_core_outputs[client_index] = grad_outputs
+        self._pending_gradient_outputs.clear()
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -387,6 +477,11 @@ class EngineCore:
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
+            # Even if scheduler is idle, flush pending gradient outputs.
+            if self._pending_gradient_outputs:
+                outputs: dict[int, EngineCoreOutputs] = {}
+                self._flush_gradient_outputs(outputs)
+                return outputs, False
             return {}, False
         scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
@@ -405,6 +500,9 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+
+        # Flush any pending gradient outputs into the result.
+        self._flush_gradient_outputs(engine_core_outputs)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 

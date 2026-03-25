@@ -739,6 +739,48 @@ class Worker(WorkerBase):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
+    def compute_gradients(
+        self,
+        prompt_token_ids: list[int],
+        gradient_params_dict: dict,
+    ) -> dict:
+        """Compute gradients for a prompt + target pair.
+
+        This method is called via collective_rpc from the EngineCore.
+        It does NOT use @torch.inference_mode() because GradientRunner
+        needs gradient tracking enabled.
+
+        Args:
+            prompt_token_ids: The prompt token IDs.
+            gradient_params_dict: Serialized GradientParams fields.
+
+        Returns:
+            A dict with gradient results (CPU tensors converted to lists).
+        """
+        from vllm.gradient_params import GradientParams
+
+        gradient_params = GradientParams(**gradient_params_dict)
+        input_ids = torch.tensor(prompt_token_ids, dtype=torch.long, device=self.device)
+        runner_output = self.model_runner.compute_gradients(
+            input_ids=input_ids,
+            gradient_params=gradient_params,
+        )
+        # Convert to serializable dict for RPC transport.
+        result: dict = {}
+        if runner_output.token_log_probs is not None:
+            result["token_log_probs"] = runner_output.token_log_probs
+        if runner_output.token_attributions is not None:
+            result["token_attributions"] = (
+                runner_output.token_attributions.cpu().tolist()
+            )
+        if runner_output.loss is not None:
+            result["loss"] = runner_output.loss
+        if runner_output.loss_gradients:
+            result["loss_gradients"] = {
+                k: v.cpu().tolist() for k, v in runner_output.loss_gradients.items()
+            }
+        return result
+
     @torch.inference_mode()
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
