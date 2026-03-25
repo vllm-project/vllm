@@ -58,14 +58,16 @@ class MambaConvSplitInfo:
         self, local_rank_offset: int, tp_ratio: int
     ) -> list[tuple[int, int]]:
         """(byte_offset, byte_size) of this D rank's x, B, C slice within
-        one P page whose conv dim is ``tp_ratio`` times larger.
+        one P page.
 
         Used by D side only, during remote descriptor registration.
 
         Args:
-            local_rank_offset: which slice this D rank reads (tp_rank %
-                tp_ratio).  E.g. with tp_ratio=4, ranks 0-3 read slices 0-3.
-            tp_ratio: D_TP / P_TP (>= 1).
+            local_rank_offset: which slice this D rank reads.
+                tp_ratio > 0: tp_rank % tp_ratio (selects slice of P's page).
+                tp_ratio < 0: always 0 (read P's full page).
+            tp_ratio: effective ratio (>= 1 when D_TP > P_TP, 1 when
+                P_TP > D_TP since each P rank is read in full).
         """
         xb = self.x_bytes()
         bb = self.b_bytes()

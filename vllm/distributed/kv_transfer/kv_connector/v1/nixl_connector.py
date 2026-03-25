@@ -1837,11 +1837,23 @@ class NixlConnectorWorker:
         # Mamba conv state is always TP-sharded, even when attention KV
         # is replicated (num_kv_heads < tp_size).
         local_offset = self.tp_rank % effective_ratio
-        conv_offsets = self._conv_decomp.remote_conv_offsets(
-            local_offset, effective_ratio
-        )
         conv_size_remote = nixl_agent_meta.ssm_sizes[0]
-        ssm_local = self._mamba_ssm_size[1]
+
+        if tp_ratio >= 1:
+            # D_TP >= P_TP: P page is larger, D reads its slice.
+            conv_offsets = self._conv_decomp.remote_conv_offsets(
+                local_offset, effective_ratio
+            )
+            ssm_read_size = self._mamba_ssm_size[1]
+        else:
+            # NOTE (ZhanqiuHu): tp_ratio < 0 means P_TP > D_TP, so P pages
+            # are smaller than D's.  self._conv_decomp has D-sized dimensions,
+            # but we need P-sized offsets.  Scale down by |tp_ratio|.
+            abs_ratio = -tp_ratio
+            xb_p = self._conv_decomp.x_bytes() // abs_ratio
+            bb_p = self._conv_decomp.b_bytes() // abs_ratio
+            conv_offsets = [(0, xb_p), (xb_p, bb_p), (xb_p + bb_p, bb_p)]
+            ssm_read_size = nixl_agent_meta.ssm_sizes[1]
 
         remote_ratio = self._mamba_phys_ratio.get(
             nixl_agent_meta.engine_id,
@@ -1865,9 +1877,9 @@ class NixlConnectorWorker:
                     base_addr
                     + blk * page_stride
                     + conv_size_remote
-                    + local_offset * ssm_local
+                    + local_offset * ssm_read_size
                 )
-                blocks_data.append((ssm_addr, ssm_local, device_id))
+                blocks_data.append((ssm_addr, ssm_read_size, device_id))
 
     def register_local_xfer_handler(
         self,
@@ -2216,19 +2228,39 @@ class NixlConnectorWorker:
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
             remote_engine_id
         )
-        # Num kv_heads > tp_size and P TP > D TP case, not supported
-        assert not (tp_ratio < 0 and self.kv_topo.is_kv_replicated(remote_engine_id))
+        # NOTE (ZhanqiuHu): this assertion guards against tp_ratio < 0 with
+        # replicated KV.  For mamba models, conv state is always TP-sharded
+        # even when attention KV is replicated, so skip the check.
+        if not self._has_mamba:
+            assert not (
+                tp_ratio < 0 and self.kv_topo.is_kv_replicated(remote_engine_id)
+            )
+
+        # NOTE (ZhanqiuHu): when D_TP > num_kv_heads > P_TP, D's attention KV
+        # is replicated but P's is not.  The upstream FA descriptor logic
+        # (indexes_into_remote) tries to split P's KV into tp_ratio slices,
+        # but P only has num_kv_heads worth of unique data — ranks beyond
+        # that read out-of-bounds addresses.  Fixing this requires changing
+        # indexes_into_remote to account for local KV replication.
+        # TODO (ZhanqiuHu): fix indexes_into_remote so all D ranks read full
+        # KV when local KV is replicated, then remove this guard.
+        local_kv_replicated = self.world_size // self.kv_topo.total_num_kv_heads >= 1
+        if tp_ratio > 1 and local_kv_replicated:
+            raise NotImplementedError(
+                f"Hetero-TP with D_TP ({self.world_size}) > num_kv_heads "
+                f"({self.kv_topo.total_num_kv_heads}) > P_TP "
+                f"({remote_tp_size}) is not yet supported.  The FA "
+                f"descriptor offset logic assumes D can split P's KV into "
+                f"tp_ratio={tp_ratio} slices, but P only has "
+                f"{self.kv_topo.total_num_kv_heads} KV heads."
+            )
 
         if self._is_hma_required:
             assert block_size_ratio == 1, (
                 "HMA does not support different remote block size yet"
             )
-        # Mamba hetero-TP constraints (3-read approach)
-        if self._has_mamba and tp_ratio < 0:
-            raise NotImplementedError(
-                "Mamba hetero-TP with P_TP > D_TP (tp_ratio < 0) is not yet "
-                "supported by the 3-read transfer."
-            )
+        # Mamba hetero-TP: both tp_ratio > 0 (D_TP > P_TP) and
+        # tp_ratio < 0 (P_TP > D_TP) are supported by the 3-read transfer.
         kv_cache_layout = (
             self.kv_cache_layout
             if not self.use_host_buffer
@@ -2273,11 +2305,14 @@ class NixlConnectorWorker:
         remote_block_len = nixl_agent_meta.block_lens[0]
         if self.use_mla or self.kv_topo.is_kv_replicated(remote_engine_id):
             # With replicated KV cache, only the number of blocks can differ.
-            for i in range(len(self.block_len_per_layer)):
-                assert (
-                    self.block_len_per_layer[i] // block_size_ratio
-                    == nixl_agent_meta.block_lens[i]
-                ), "KV cache sizes must match between P and D when replicated"
+            # NOTE (ZhanqiuHu): HMA hybrid models have TP-dependent block
+            # padding, so this check doesn't hold for mamba models.
+            if not self._has_mamba:
+                for i in range(len(self.block_len_per_layer)):
+                    assert (
+                        self.block_len_per_layer[i] // block_size_ratio
+                        == nixl_agent_meta.block_lens[i]
+                    ), "KV cache sizes must match between P and D when replicated"
         else:
             # When MLA is not used, this is a list of the same block length
             for block_len in nixl_agent_meta.block_lens:
