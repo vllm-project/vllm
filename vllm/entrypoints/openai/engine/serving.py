@@ -38,7 +38,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     FunctionCall,
     FunctionDefinition,
-    GenerationError,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import (
@@ -71,7 +70,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
 )
 from vllm.entrypoints.utils import create_error_response
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import GenerationError, RequestRejectedError, VLLMValidationError
 from vllm.inputs.data import (
     ProcessorInputs,
     PromptType,
@@ -575,23 +574,32 @@ class OpenAIServing:
         return json_str
 
     def _raise_if_error(self, finish_reason: str | None, request_id: str) -> None:
-        """Raise GenerationError if finish_reason indicates an error."""
+        """
+        Raise appropriate exception if finish_reason indicates an error or rejection.
+        """
         if finish_reason == "error":
             logger.error(
                 "Request %s failed with an internal error during generation",
                 request_id,
             )
             raise GenerationError("Internal server error")
+        if finish_reason == "rejected":
+            logger.warning_every_n(
+                "Request %s was rejected due to "
+                "a full waiting queue (log every 100 requests)",
+                request_id,
+            )
+            raise RequestRejectedError()
 
-    def _convert_generation_error_to_streaming_response(
-        self, e: GenerationError
-    ) -> str:
-        """Convert GenerationError to streaming error response."""
-        return self.create_streaming_error_response(
-            str(e),
-            err_type="InternalServerError",
-            status_code=e.status_code,
-        )
+    def _convert_generation_error_to_streaming_response(self, e: Exception) -> str:
+        """
+        Convert GenerationError or RequestRejectedError to streaming error response.
+        """
+        if isinstance(e, GenerationError):
+            return self.create_streaming_error_response(
+                str(e), err_type=e.err_type, status_code=e.status_code
+            )
+        return self.create_streaming_error_response(str(e))
 
     async def _check_model(
         self,

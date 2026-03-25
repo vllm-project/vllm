@@ -3,6 +3,7 @@
 
 """Custom exceptions for vLLM."""
 
+from http import HTTPStatus
 from typing import Any
 
 
@@ -64,3 +65,29 @@ class LoRAAdapterNotFoundError(VLLMNotFoundError):
 
     def __str__(self):
         return self.message
+
+
+class GenerationError(Exception):
+    """Raised when finish_reason indicates internal server error (500)"""
+
+    def __init__(
+        self,
+        message: str = "Internal server error",
+        err_type: str = "InternalServerError",
+        status_code: HTTPStatus = HTTPStatus.INTERNAL_SERVER_ERROR,
+    ):
+        super().__init__(message)
+        self.err_type = err_type
+        self.status_code = status_code
+
+
+class RequestRejectedError(GenerationError):
+    """Raised when finish_reason indicates the request was rejected
+    (e.g., queue full, rate-limited, etc)."""
+
+    def __init__(self):
+        super().__init__(
+            message="Request was rejected",
+            err_type="ServiceUnavailableError",
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+        )

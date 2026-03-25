@@ -10,10 +10,10 @@ import pytest
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.exceptions import GenerationError
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import tokenizer_args_from_config

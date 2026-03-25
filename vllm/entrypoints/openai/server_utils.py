@@ -24,10 +24,9 @@ from vllm.entrypoints.launcher import terminate_if_errored
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
-    GenerationError,
 )
 from vllm.entrypoints.utils import create_error_response, sanitize_message
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError

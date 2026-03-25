@@ -4145,3 +4145,45 @@ def test_eagle3_mm_encoder_cache_with_shift():
         f"shifted_end={scheduled_end_with_shift}) overlapping MM at "
         f"{start_pos}. The fix must schedule encoder inputs."
     )
+
+
+def test_max_waiting_queue_length():
+    """Test that requests are rejected when waiting queue is full."""
+    # Create scheduler with max_waiting_queue_length=5
+    scheduler = create_scheduler(max_waiting_queue_length=5)
+
+    # Add 5 requests (should succeed)
+    requests = create_requests(num_requests=5)
+    for request in requests:
+        scheduler.add_request(request)
+
+    assert len(scheduler.waiting) == 5
+    assert len(scheduler.rejected) == 0
+
+    # Add 1 more request (should be rejected)
+    extra_request = create_requests(num_requests=1, req_ids=["extra"])
+    scheduler.add_request(extra_request[0])
+
+    # The extra request should be rejected
+    assert len(scheduler.waiting) == 5
+    assert len(scheduler.rejected) == 1
+    assert scheduler.rejected[0].request_id == "extra"
+    assert scheduler.rejected[0].status == RequestStatus.FINISHED_REJECTED
+
+    # Schedule: the 5 waiting requests are scheduled
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 5
+    # rejected request not in finished_req_ids yet (handled in update_from_output)
+    assert "extra" not in output.finished_req_ids
+
+
+def test_max_waiting_queue_length_default():
+    """Test that default max_waiting_queue_length works."""
+    # Default is 4096, should handle large number of requests
+    scheduler = create_scheduler(max_waiting_queue_length=4096)
+    requests = create_requests(num_requests=100)
+    for request in requests:
+        scheduler.add_request(request)
+
+    assert len(scheduler.waiting) == 100
+    assert len(scheduler.rejected) == 0

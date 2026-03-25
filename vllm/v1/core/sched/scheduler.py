@@ -113,7 +113,7 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
         )
-
+        self.max_waiting_queue_length = self.scheduler_config.max_waiting_queue_length
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
@@ -173,6 +173,9 @@ class Scheduler(SchedulerInterface):
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
+
+        # Requests that are rejected due to a full waiting queue.
+        self.rejected: list[Request] = []
 
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
@@ -1480,21 +1483,17 @@ class Scheduler(SchedulerInterface):
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
             for request in requests:
-                outputs[request.client_index].append(
-                    EngineCoreOutput(
-                        request_id=request.request_id,
-                        new_token_ids=[],
-                        finish_reason=request.get_finished_reason(),
-                        events=request.take_events(),
-                        trace_headers=request.trace_headers,
-                        num_cached_tokens=request.num_cached_tokens,
-                    )
-                )
+                self._append_failed_or_rejected_output(outputs, request)
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
-
+        # Handle rejected requests.
+        if rejected_reqs := self.rejected:
+            # Create EngineCoreOutputs for all rejected requests.
+            for request in rejected_reqs:
+                self._append_failed_or_rejected_output(outputs, request)
+            rejected_reqs.clear()
         # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
 
@@ -1572,6 +1571,25 @@ class Scheduler(SchedulerInterface):
             return self.waiting if waiting_req < skipped_req else self.skipped_waiting
 
         return self.waiting or self.skipped_waiting or None
+
+    def _append_failed_or_rejected_output(
+        self,
+        outputs: dict[int, list[EngineCoreOutput]],
+        request: "Request",
+    ) -> None:
+        """
+        Appends an EngineCoreOutput for a failed KV load or rejected request.
+        """
+        output = EngineCoreOutput(
+            request_id=request.request_id,
+            new_token_ids=[],
+            finish_reason=request.get_finished_reason(),
+            events=request.take_events(),
+            trace_headers=request.trace_headers,
+            stop_reason=request.stop_reason,
+            num_cached_tokens=max(0, request.num_cached_tokens),
+        )
+        outputs[request.client_index].append(output)
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
@@ -1737,6 +1755,12 @@ class Scheduler(SchedulerInterface):
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
+            if len(self.waiting) >= self.max_waiting_queue_length:
+                request.status = RequestStatus.FINISHED_REJECTED
+                self.rejected.append(request)
+                if self.log_stats:
+                    request.record_event(EngineCoreEventType.REJECTED)
+                return
             if request.resumable:
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
