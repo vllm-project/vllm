@@ -547,6 +547,8 @@ def copy_and_expand_dflash_inputs_kernel(
 
     # --- Slot mapping (block_table lookup for all positions) ---
     block_num = positions // block_size
+    # # Clamp block_number to avoid OOB when position is at max
+    block_num = tl.minimum(block_num, block_table_stride - 1)
     block_id = tl.load(
         block_table_ptr + req_idx * block_table_stride + block_num,
         mask=in_bounds,
