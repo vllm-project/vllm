@@ -365,11 +365,24 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
 
             # Avoid padding since we need the output for each audio to be
             # independent of other audios for the cache to work correctly
+            # Flatten audio_feature_lens (list of 1D tensors, one per
+            # audio, each containing per-chunk lengths) into a flat list
+            # of integer lengths so there is one length per chunk,
+            # matching the first dimension of audio_features.
+            flat_feature_lens: list[int] = []
+            for lens in audio_inputs["audio_feature_lens"]:
+                if isinstance(lens, torch.Tensor):
+                    if lens.dim() == 0:
+                        flat_feature_lens.append(lens.item())
+                    else:
+                        flat_feature_lens.extend(lens.tolist())
+                else:
+                    flat_feature_lens.append(int(lens))
             unpadded_audio_features = [
-                feat[:, :feature_len]
-                for feat, feature_len in zip(
+                feat[:, :length]
+                for feat, length in zip(
                     audio_inputs["audio_features"],
-                    audio_inputs["audio_feature_lens"],
+                    flat_feature_lens,
                 )
             ]
             audio_inputs["audio_features"] = unpadded_audio_features
