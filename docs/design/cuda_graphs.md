@@ -12,6 +12,7 @@ In this document we will discuss the:
 * [CUDA Graphs modes](#cudagraphmodes)
 * [Detailed design](#detailed-design)
 * [Example usage of the different CUDA Graphs modes](#usage-guide)
+* [Vision Encoder (ViT) CUDA Graphs](cuda_graphs_multimodal.md)
 
 !!! note
     In this document, we refer to pure decode (`max_query_len=1`) or speculative decode (`max_query_len =1+num_spec_tokens`) as **uniform decode** batches, and the opposite would be **non-uniform** batches (i.e., prefill or mixed prefill-decode batches).
