@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import os
 import threading
 import weakref
@@ -15,6 +16,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_open_port,
@@ -25,6 +27,7 @@ from vllm.v1.executor.multiproc_executor import (
     WorkerProc,
 )
 from vllm.v1.executor.ray_utils import (
+    WORKER_SPECIFIC_ENV_VARS,
     build_actor_name,
     get_bundles_for_indices,
     get_bundles_sorted_by_node,
@@ -247,6 +250,17 @@ class RayExecutorV2(MultiprocExecutor):
         self.ray_worker_handles: list[RayWorkerHandle] = []
         instance_id = self.vllm_config.instance_id
 
+        # Collect env vars to propagate from driver to workers (NCCL,
+        # HF, vLLM flags, etc.) — same mechanism as RayDistributedExecutor.
+        env_vars_to_copy = get_env_vars_to_copy(
+            exclude_vars=WORKER_SPECIFIC_ENV_VARS,
+            additional_vars=set(current_platform.additional_env_vars),
+            destination="RayWorkerProc actors",
+        )
+        self._worker_env_vars = {
+            name: os.environ[name] for name in env_vars_to_copy if name in os.environ
+        }
+
         for bundle_idx in range(self.world_size):
             bundle = bundle_assignments[bundle_idx]
             is_driver_worker = self._is_driver_worker(bundle["rank"])
@@ -257,12 +271,23 @@ class RayExecutorV2(MultiprocExecutor):
                 placement_group_bundle_index=bundle["bundle_id_idx"],
             )
 
-            # Prevent Ray from setting CUDA_VISIBLE_DEVICES; we set it
-            # in initialize_worker after discovering GPU IDs.
-            env_vars = {
-                env_var: "1" for env_var in current_platform.ray_noset_device_env_vars
-            }
-            runtime_env = {"env_vars": env_vars}
+            # Build runtime_env for the worker actor:
+            # 1. Start from parallel_config.ray_runtime_env (pip, working_dir,
+            #    etc.) so that packages installed at the job level are
+            #    available inside RayWorkerProc actors.
+            # 2. Merge in driver env vars (NCCL, HF, vLLM flags) collected
+            #    by get_env_vars_to_copy.
+            # 3. Prevent Ray from setting CUDA_VISIBLE_DEVICES; we set it
+            #    ourselves in initialize_worker after discovering GPU IDs.
+            base_runtime_env = self.parallel_config.ray_runtime_env
+            runtime_env: dict = (
+                copy.deepcopy(dict(base_runtime_env)) if base_runtime_env else {}
+            )
+            env_vars = runtime_env.setdefault("env_vars", {})
+            env_vars.update(self._worker_env_vars)
+            env_vars.update(
+                {v: "1" for v in current_platform.ray_noset_device_env_vars}
+            )
 
             actor_name = build_actor_name(
                 instance_id, bundle["rank"], tp_size, pp_size, pcp_size

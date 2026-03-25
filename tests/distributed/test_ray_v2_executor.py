@@ -8,70 +8,19 @@ and distributed execution with various TP/PP configurations.
 """
 
 import gc
-import os
 import threading
-import time
 from unittest.mock import patch
 
 import pytest
 import ray
-from ray.util.state import list_actors
 
+from tests.distributed.ray_v2_utils import enable_ray_v2_backend  # noqa: F401
 from vllm import LLM
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.v1.executor.ray_executor_v2 import RayExecutorV2
 
 MODEL = "facebook/opt-125m"
-
-
-@pytest.fixture(autouse=True)
-def enable_ray_v2_backend():
-    """Enable the RayExecutorV2 backend via feature flag for all tests."""
-    saved = {
-        "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": os.environ.get(
-            "VLLM_USE_RAY_V2_EXECUTOR_BACKEND"
-        ),
-        "VLLM_ENABLE_V1_MULTIPROCESSING": os.environ.get(
-            "VLLM_ENABLE_V1_MULTIPROCESSING"
-        ),
-    }
-    os.environ["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] = "1"
-    # The multiprocess engine forks a subprocess that inherits the Ray
-    # driver connection, causing hangs. RayExecutorV2 already distributes
-    # work via Ray actors, so the EngineCore can run safely in-process.
-    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-    try:
-        yield
-    finally:
-        _cleanup_ray_resources()
-        os.environ.update({k: v for k, v in saved.items() if v is not None})
-        for key in (k for k, v in saved.items() if v is None):
-            os.environ.pop(key, None)
-
-
-def _cleanup_ray_resources():
-    if not ray.is_initialized():
-        return
-
-    # Ray actor shutdown is async -- wait until all actors are dead.
-    dangling_actors = []
-    try:
-        for _ in range(10):
-            dangling_actors = [
-                actor
-                for actor in list_actors(filters=[("state", "=", "ALIVE")])
-                if actor.class_name == "RayWorkerProc"
-            ]
-            if not dangling_actors:
-                break
-            time.sleep(1)
-    except Exception:
-        # Tolerate connection errors to the Ray dashboard
-        pass
-
-    assert not dangling_actors
-    ray.shutdown()
 
 
 def create_vllm_config(

@@ -26,6 +26,17 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 PG_WAIT_TIMEOUT = 1800
 
+# Env vars that are worker-specific and must NOT be copied from the
+# driver to Ray workers — they are set per-worker after GPU discovery.
+WORKER_SPECIFIC_ENV_VARS: set[str] = {
+    "VLLM_HOST_IP",
+    "VLLM_HOST_PORT",
+    "LOCAL_RANK",
+    "CUDA_VISIBLE_DEVICES",
+    "HIP_VISIBLE_DEVICES",
+    "ROCR_VISIBLE_DEVICES",
+}
+
 try:
     import ray
     from ray.util import placement_group_table
