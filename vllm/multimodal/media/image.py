@@ -133,9 +133,9 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
     def load_file(self, filepath: Path) -> torch.Tensor:
         if filepath.suffix == ".npy":
             return torch.from_numpy(np.load(filepath))
-        else:
-            with torch.sparse.check_sparse_tensor_invariants():
-                return torch.load(filepath, weights_only=True).to_dense()
+
+        with torch.sparse.check_sparse_tensor_invariants():
+            return torch.load(filepath, weights_only=True).to_dense()
 
     def encode_base64(self, media: torch.Tensor) -> str:
         return tensor2base64(media)
