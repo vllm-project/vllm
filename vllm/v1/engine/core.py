@@ -366,7 +366,7 @@ class EngineCore:
         output = EngineCoreOutput(
             request_id=request.request_id,
             new_token_ids=[],
-            gradient_output=gradient_result,
+            gradient_output=gradient_result or {},
             finish_reason=finish_reason,
         )
         self._pending_gradient_outputs.append(
