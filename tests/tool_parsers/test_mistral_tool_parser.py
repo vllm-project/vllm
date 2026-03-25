@@ -3,15 +3,35 @@
 
 import json
 from collections.abc import Generator
+from unittest.mock import MagicMock, patch
 
 import partial_json_parser
 import pytest
 from mistral_common.protocol.instruct.messages import AssistantMessage
 from mistral_common.protocol.instruct.request import InstructRequest
-from mistral_common.protocol.instruct.tool_calls import FunctionCall, ToolCall
+from mistral_common.protocol.instruct.tool_calls import (
+    FunctionCall,
+    ToolCall,
+)
+from mistral_common.protocol.instruct.tool_calls import (
+    NamedToolChoice as MistralNamedToolChoice,
+)
+from mistral_common.protocol.instruct.tool_calls import (
+    ToolChoice as MistralToolChoice,
+)
+from mistral_common.protocol.instruct.tool_calls import (
+    ToolChoiceEnum as MistralToolChoiceEnum,
+)
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
+    DeltaToolCall,
+)
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -38,6 +58,13 @@ def mistral_pre_v11_tool_parser(mistral_pre_v11_tokenizer):
 @pytest.fixture
 def mistral_tool_parser(mistral_tokenizer):
     return MistralToolParser(mistral_tokenizer)
+
+
+@pytest.fixture
+def non_mistral_parser() -> MistralToolParser:
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.get_vocab.return_value = {"[TOOL_CALLS]": 1}
+    return MistralToolParser(mock_tokenizer)
 
 
 def assert_tool_calls(
@@ -951,3 +978,163 @@ def test_fast_detokenization_text_detection_pre_v11(
     assert len(delta_message.tool_calls) > 0
     assert delta_message.tool_calls[0].function is not None
     assert delta_message.tool_calls[0].function.name == "add"
+
+
+SAMPLE_TOOLS_DICTS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add",
+            "description": "Add two numbers",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number"},
+                    "b": {"type": "number"},
+                },
+                "required": ["a", "b"],
+            },
+        },
+    },
+]
+
+
+def _make_request(**kwargs) -> ChatCompletionRequest:
+    defaults: dict = {
+        "messages": [],
+        "model": "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+        "tools": SAMPLE_TOOLS_DICTS,
+        "tool_choice": "auto",
+    }
+    defaults.update(kwargs)
+    return ChatCompletionRequest(**defaults)
+
+
+@pytest.mark.parametrize(
+    "request_kwargs,expected_mode,expected_parallel",
+    [
+        ({"tool_choice": "auto"}, MistralToolChoiceEnum.auto, True),
+        ({"tool_choice": "none"}, MistralToolChoiceEnum.none, True),
+        ({"tool_choice": "required"}, MistralToolChoiceEnum.required, True),
+        ({"tool_choice": None, "tools": None}, MistralToolChoiceEnum.auto, True),
+        (
+            {
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                }
+            },
+            MistralNamedToolChoice.model_validate(
+                {"type": "function", "function": {"name": "get_weather"}}
+            ),
+            True,
+        ),
+        (
+            {"tool_choice": "auto", "parallel_tool_calls": False},
+            MistralToolChoiceEnum.auto,
+            False,
+        ),
+        (
+            {"tool_choice": "auto", "response_format": {"type": "text"}},
+            MistralToolChoiceEnum.auto,
+            True,
+        ),
+    ],
+    ids=[
+        "auto",
+        "none",
+        "required",
+        "null_tool_choice",
+        "named_tool_choice",
+        "parallel_false",
+        "response_format_text",
+    ],
+)
+def test_adjust_request_grammar_factory(
+    mistral_tool_parser: MistralToolParser,
+    request_kwargs: dict,
+    expected_mode: MistralToolChoice,
+    expected_parallel: bool,
+) -> None:
+    request = _make_request(**request_kwargs)
+    factory = mistral_tool_parser.model_tokenizer.grammar_factory
+
+    with patch.object(
+        factory,
+        "get_lark_from_jinja",
+        wraps=factory.get_lark_from_jinja,
+    ) as mock_get_lark:
+        result = mistral_tool_parser.adjust_request(request)
+
+        mock_get_lark.assert_called_once()
+        call_kwargs = mock_get_lark.call_args
+
+        assert call_kwargs.kwargs["mode"] == expected_mode
+        assert call_kwargs.kwargs["json_schema"] is None
+        assert call_kwargs.kwargs["parallel_tool_calls"] == expected_parallel
+
+    assert result.structured_outputs is not None
+    assert isinstance(result.structured_outputs.grammar, str)
+    assert len(result.structured_outputs.grammar) > 0
+
+
+@pytest.mark.parametrize(
+    "request_kwargs",
+    [
+        {"structured_outputs": StructuredOutputsParams(json='{"type": "object"}')},
+        {"response_format": {"type": "json_object"}},
+    ],
+    ids=["existing_structured_outputs", "response_format_json_object"],
+)
+def test_user_grammar(
+    mistral_tool_parser: MistralToolParser, request_kwargs: dict
+) -> None:
+    original_so = request_kwargs.get("structured_outputs")
+    request = _make_request(**request_kwargs)
+    result = mistral_tool_parser.adjust_request(request)
+
+    if original_so is not None:
+        assert result.structured_outputs is original_so
+    else:
+        assert result.structured_outputs is None
+
+
+def test_unsupported_grammar_for_tokenizer(mistral_tokenizer) -> None:
+    with patch.object(
+        type(mistral_tokenizer),
+        "supports_grammar",
+        new_callable=lambda: property(lambda self: False),
+    ):
+        parser = MistralToolParser(mistral_tokenizer)
+        request = _make_request()
+        result = parser.adjust_request(request)
+
+        assert result.structured_outputs is None
+
+
+@pytest.mark.parametrize(
+    "tool_choice,expected_skip",
+    [("auto", False), ("none", True)],
+    ids=["auto_skip_false", "none_skip_true"],
+)
+def test_non_mistral_tokenizer(
+    non_mistral_parser: MistralToolParser,
+    tool_choice: str,
+    expected_skip: bool,
+) -> None:
+    request = _make_request(tool_choice=tool_choice)
+    result = non_mistral_parser.adjust_request(request)
+
+    assert result.skip_special_tokens is expected_skip

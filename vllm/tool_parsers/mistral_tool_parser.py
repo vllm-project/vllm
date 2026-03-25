@@ -10,6 +10,18 @@ from typing import Any
 
 import ijson
 import regex as re
+from mistral_common.protocol.instruct.tool_calls import (
+    NamedToolChoice as MistralNamedToolChoice,
+)
+from mistral_common.protocol.instruct.tool_calls import (
+    Tool as MistralTool,
+)
+from mistral_common.protocol.instruct.tool_calls import (
+    ToolChoice as MistralToolChoice,
+)
+from mistral_common.protocol.instruct.tool_calls import (
+    ToolChoiceEnum as MistralToolChoiceEnum,
+)
 from pydantic import Field
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -25,6 +37,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
@@ -80,6 +93,9 @@ class MistralToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser mistral are all set
     """
 
+    # Used to generate correct grammar in `adjust_request`
+    model_can_reason: bool = False
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
@@ -115,18 +131,71 @@ class MistralToolParser(ToolParser):
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        request = super().adjust_request(request)
+        if not is_mistral_tokenizer(self.model_tokenizer):
+            request = super().adjust_request(request)
+            if request.tools and request.tool_choice != "none":
+                # Do not skip special tokens when using chat template
+                # with Mistral parser as TOOL_CALL token is needed
+                # for tool detection.
+                # Note: we don't want skip_special_tokens=False
+                # with MistralTokenizer as it is incompatible
+                request.skip_special_tokens = False
+            return request
+
         if (
-            not is_mistral_tokenizer(self.model_tokenizer)
-            and request.tools
-            and request.tool_choice != "none"
+            not self.model_tokenizer.supports_grammar
+            or request.structured_outputs is not None
+            or (
+                request.response_format is not None
+                and request.response_format.type != "text"
+            )
         ):
-            # Do not skip special tokens when using chat template
-            # with Mistral parser as TOOL_CALL token is needed
-            # for tool detection.
-            # Note: we don't want skip_special_tokens=False
-            # with MistralTokenizer as it is incompatible
-            request.skip_special_tokens = False
+            return request
+
+        grammar_factory = self.model_tokenizer.grammar_factory
+
+        # TODO: Once unified parser, improve this.
+        # The issue is figuring out when a model is a reasoning one or not.
+        template = grammar_factory.select_jinja_template(
+            reasoning=request.include_reasoning
+            and request.reasoning_effort != "none"
+            and self.model_can_reason
+        )
+
+        tools = (
+            [
+                MistralTool.from_openai(openai_tool=tool.model_dump())
+                for tool in request.tools
+            ]
+            if request.tools is not None
+            else None
+        )
+
+        tool_choice: MistralToolChoice
+        match request.tool_choice:
+            case "none" | "auto" | "required":
+                tool_choice = MistralToolChoiceEnum(request.tool_choice)
+            case None:
+                tool_choice = MistralToolChoiceEnum.auto
+            # _ == Named tool choice
+            case _:
+                tool_choice = MistralNamedToolChoice.model_validate(
+                    {
+                        "type": "function",
+                        "function": {"name": request.tool_choice.function.name},
+                    }
+                )
+
+        # Rendering grammar is cached in mistral-common given tools, template and mode.
+        lark_grammar = grammar_factory.get_lark_from_jinja(
+            template=template,
+            mode=tool_choice,
+            tools=tools,
+            json_schema=None,
+            parallel_tool_calls=request.parallel_tool_calls,
+        )
+
+        request.structured_outputs = StructuredOutputsParams(grammar=lark_grammar)
         return request
 
     def extract_tool_calls(
