@@ -110,7 +110,11 @@ def prepare_nvfp4_moe_layer_for_cutedsl_wrapper(
     a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)
     a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)
 
-    # Interleave gate/linear rows for w13 weights and scales.
+    half = w13.shape[1] // 2
+    w13 = torch.cat([w13[:, half:], w13[:, :half]], dim=1)
+    w13_scale = torch.cat([w13_scale[:, half:], w13_scale[:, :half]], dim=1)
+
+    # Interleave up/gate rows for w13 weights and scales.
     w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
     w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
 
