@@ -187,7 +187,7 @@ def test_prepare_next_token_ids_padded():
     )
 
     next_token_ids, valid_sampled_tokens_count = proposer.prepare_next_token_ids_padded(
-        common_attn_metadata.seq_lens_cpu,
+        common_attn_metadata,
         sampled_token_ids,
         mock_requests,
         mock_input_batch,
