@@ -291,6 +291,7 @@ class ResponsesRequest(OpenAIBaseModel):
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=self.max_output_tokens or 0,
             truncate_prompt_tokens=-1 if self.truncation != "disabled" else None,
+            add_special_tokens=False,
             max_total_tokens_param="max_model_len",
             max_output_tokens_param="max_output_tokens",
         )
