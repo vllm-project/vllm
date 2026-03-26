@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=registry-sc-harbor.amd.com/rocm-ci-images/compute-rocm-rel-7.2:81-ubuntu-22.04
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.1-complete
 ARG TRITON_BRANCH="ba5c1517"
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG PYTORCH_BRANCH="8514f051" # release/2.10 as of 3/17
