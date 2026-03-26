@@ -12,7 +12,7 @@ from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE, RoutedExperts
 from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,

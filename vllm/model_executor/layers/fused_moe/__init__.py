@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoeWeightScaleSupported,
+    RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
@@ -63,6 +64,7 @@ __all__ = [
     "FusedMoEActivationFormat",
     "FusedMoEPrepareAndFinalizeModular",
     "GateLinear",
+    "RoutedExperts",
     "RoutingMethodType",
     "SharedFusedMoE",
     "activation_without_mul",

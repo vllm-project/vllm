@@ -884,11 +884,11 @@ def make_fused_moe_layer(
         ("w2_input_scale", qw.w2_input_scale),
     ]:
         if value is not None:
-            layer.register_parameter(
+            layer.routed_experts.register_parameter(
                 name, torch.nn.Parameter(value, requires_grad=False)
             )
 
-    layer.quant_method.process_weights_after_loading(layer)
+    layer.quant_method.process_weights_after_loading(layer.routed_experts)
 
     # Temporary hack until #36286 or #36732 lands
     if quantization is None:

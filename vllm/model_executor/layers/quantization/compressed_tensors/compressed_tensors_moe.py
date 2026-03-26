@@ -17,11 +17,11 @@ from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
     FusedMoEActivationFormat,
     FusedMoEExpertsModular,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
+    RoutedExperts,
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -123,7 +123,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
         layer_name: str,
     ) -> FusedMoEMethodBase:
-        # FusedMoE was made by combining multiple Linears so need to
+        # RoutedExperts was made by combining multiple Linears so need to
         # make sure quantization config for Linear can target it
         quant_config._add_fused_moe_to_target_scheme_map()
         unfused_names = [
@@ -318,7 +318,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             w2_scale=layer.w2_weight_scale,
         )
 
-    def process_weights_after_loading(self, layer: FusedMoE) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         layer.w13_weight = torch.nn.Parameter(
             layer.w13_weight_packed.data, requires_grad=False
         )
@@ -350,7 +350,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -505,7 +505,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
 
-    def process_weights_after_loading(self, layer: FusedMoE) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
@@ -600,7 +600,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
@@ -623,7 +623,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -789,7 +789,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 torch.ones(num_experts, dtype=torch.float32), requires_grad=False
             )
             layer.register_parameter("w2_weight_scale", w2_weight_scale)
-            # Add PER-TENSOR quantization for FusedMoE.weight_loader.
+            # Add PER-TENSOR quantization for RoutedExperts.weight_loader.
             extra_weight_attrs.update(
                 {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
             )
@@ -812,7 +812,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 requires_grad=False,
             )
             layer.register_parameter("w2_weight_scale", w2_weight_scale)
-            # Add PER-CHANNEL quantization for FusedMoE.weight_loader.
+            # Add PER-CHANNEL quantization for RoutedExperts.weight_loader.
             extra_weight_attrs.update(
                 {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
             )
@@ -841,7 +841,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 requires_grad=False,
             )
             layer.register_parameter("w2_weight_scale", w2_weight_scale)
-            # Add PER-CHANNEL quantization for FusedMoE.weight_loader.
+            # Add PER-CHANNEL quantization for RoutedExperts.weight_loader.
             extra_weight_attrs.update(
                 {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
             )
@@ -865,7 +865,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-    def process_weights_after_loading(self, layer: FusedMoE) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         # Allow for accessing weights and scales in standard way.
         w13 = layer.w13_weight
         w2 = layer.w2_weight
@@ -962,7 +962,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
@@ -984,7 +984,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -1096,7 +1096,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             requires_grad=False,
         )
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
-        # Add PER-CHANNEL quantization for FusedMoE.weight_loader.
+        # Add PER-CHANNEL quantization for RoutedExperts.weight_loader.
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
         )
@@ -1124,7 +1124,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: torch.nn.Module,  # RoutedExperts
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -1610,7 +1610,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
@@ -1635,7 +1635,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -1884,7 +1884,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -2186,7 +2186,7 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
@@ -2338,7 +2338,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             requires_grad=False,
         )
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
-        # Add PER-GROUP quantization for FusedMoE.weight_loader.
+        # Add PER-GROUP quantization for RoutedExperts.weight_loader.
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.GROUP.value}
         )
@@ -2501,7 +2501,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,

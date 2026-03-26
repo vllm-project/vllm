@@ -99,12 +99,13 @@ def _extract_data_from_linear_base_module(
 
 
 def _extract_data_from_fused_moe_module(
-    m: torch.nn.Module,
+    m_: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """
     Extract weights, weight scales and num_topk from FusedMoE module.
     """
-    assert isinstance(m, FusedMoE)
+    assert isinstance(m_, FusedMoE)
+    m = m_.routed_experts
     w13 = m.w13_weight
     w13_s = (
         m.w13_weight_scale_inv

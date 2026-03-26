@@ -6621,13 +6621,12 @@ class GPUModelRunner(
         self.routed_experts_initialized = True
 
     def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-        from vllm.model_executor.layers.fused_moe.router.base_router import (
-            BaseRouter,
-        )
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoERouter
 
         for module in self.compilation_config.static_forward_context.values():
-            if isinstance(module, FusedMoE) and isinstance(module.router, BaseRouter):
+            if isinstance(module, FusedMoE) and isinstance(
+                module.router, FusedMoERouter
+            ):
                 layer_id = module.layer_id
 
                 def _capture_fn(topk_ids, _layer_id=layer_id, _capturer=capturer):

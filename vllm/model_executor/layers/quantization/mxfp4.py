@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
+    RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
@@ -233,7 +234,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def _setup_kernel(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         w13: torch.Tensor,
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
@@ -376,7 +377,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -399,7 +400,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:

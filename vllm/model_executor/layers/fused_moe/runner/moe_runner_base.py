@@ -88,7 +88,7 @@ def _moe_forward(
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer._runner._forward_dispatch(
-        layer,
+        layer.routed_experts,
         hidden_states,
         router_logits,
         shared_experts_input,
@@ -112,7 +112,7 @@ def _moe_forward_shared(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer._runner._forward_dispatch(
-        layer,
+        layer.routed_experts,
         hidden_states,
         router_logits,
         shared_experts_input,
@@ -464,19 +464,19 @@ class MoERunnerBase(MoERunner):
         )
 
         if self.quant_method.is_monolithic:
-            fused_out = self.quant_method.apply_monolithic(
-                layer=layer,
+            # Monolithic kernels: pass router_logits to routed_experts
+            fused_out = layer.forward(
                 x=hidden_states,
                 router_logits=router_logits,
             )
         else:
+            # Modular kernels: select experts first, then call routed_experts
             topk_weights, topk_ids = self.router.select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
             )
 
-            fused_out = self.quant_method.apply(
-                layer=layer,
+            fused_out = layer.forward(
                 x=hidden_states,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,

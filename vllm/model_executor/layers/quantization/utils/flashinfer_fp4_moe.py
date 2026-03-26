@@ -20,7 +20,7 @@ from vllm.utils.flashinfer import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    from vllm.model_executor.layers.fused_moe.layer import RoutedExperts
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
         NvFp4MoeBackend,
     )
@@ -191,7 +191,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
 
 def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     backend: "NvFp4MoeBackend",
-    layer: "FusedMoE",
+    layer: "RoutedExperts",
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,

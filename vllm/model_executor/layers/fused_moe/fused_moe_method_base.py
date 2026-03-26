@@ -123,18 +123,42 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     def apply(
         self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        layer: "RoutedExperts",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        """
+        Apply the MoE operation using modular kernels.
+
+        Args:
+            layer: RoutedExperts instance containing weight parameters
+            x: Input tensor
+            topk_weights: Expert weights from router
+            topk_ids: Selected expert IDs from router
+            shared_experts_input: Input for shared experts (if any)
+
+        Returns:
+            Output tensor from routed experts
+        """
         raise NotImplementedError
 
     def apply_monolithic(
         self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        layer: "RoutedExperts",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
+        """
+        Apply the MoE operation using monolithic kernels.
+
+        Args:
+            layer: RoutedExperts instance containing weight parameters
+            x: Input tensor
+            router_logits: Router logits (routing done internally)
+
+        Returns:
+            Output tensor from routed experts
+        """
         raise NotImplementedError

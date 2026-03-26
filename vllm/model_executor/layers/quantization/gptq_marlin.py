@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
+    RoutedExperts,
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
@@ -896,7 +897,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
