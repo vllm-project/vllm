@@ -39,6 +39,14 @@ class BaseThinkingReasoningParser(ReasoningParser):
         """The token that ends reasoning content."""
         raise NotImplementedError
 
+    @property
+    def think_start_str(self) -> str:
+        return self.start_token
+
+    @property
+    def think_end_str(self) -> str:
+        return self.end_token
+
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 

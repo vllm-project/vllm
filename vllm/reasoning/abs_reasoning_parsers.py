@@ -39,6 +39,14 @@ class ReasoningParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
+    @property
+    def think_start_str(self) -> str | None:
+        return None
+
+    @property
+    def think_end_str(self) -> str | None:
+        return None
+
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """
