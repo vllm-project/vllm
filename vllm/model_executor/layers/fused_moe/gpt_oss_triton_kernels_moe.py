@@ -490,12 +490,6 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         unpadded_K=unpadded_K_w2,
     )
 
-    # When hidden_size was padded for alignment (e.g. GFX950 swizzle),
-    # the kernel output has the padded dimension. Slice back to the
-    # original hidden_size so downstream layers see the expected shape.
-    if unpadded_N_w2 is not None and intermediate_cache3.shape[-1] != unpadded_N_w2:
-        intermediate_cache3 = intermediate_cache3[..., :unpadded_N_w2].contiguous()
-
     return intermediate_cache3
 
 
