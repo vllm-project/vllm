@@ -53,11 +53,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
-from vllm.utils.torch_utils import (
-    aux_stream,
-    direct_register_custom_op,
-)
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
@@ -252,13 +248,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         self.act = ACT2FN[config.hidden_act]
         self.layer_norm_epsilon = config.rms_norm_eps
         self.prefix = prefix
-        self.aux_stream = aux_stream()
-        self.events = (
-            [torch.cuda.Event(), torch.cuda.Event()]
-            if current_platform.is_cuda_alike()
-            else [None, None]
-        )
-
         self.config = config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -522,12 +511,8 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             b = b.contiguous()
             a = a.contiguous()
         else:
-            mixed_qkvz, ba = torch.ops.vllm.gdn_in_proj(
-                hidden_states,
-                sum(self.in_proj_qkvz.output_sizes) // self.tp_size,
-                sum(self.in_proj_ba.output_sizes) // self.tp_size,
-                self.prefix,
-            )
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
 
             if self.gqa_interleaved_layout:
                 # Qwen3-Next: unpack the interleaved GQA layout
@@ -688,25 +673,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         that may not be present on LoRA wrapper classes.
         """
         return (self.key_dim * 2 + self.value_dim * 2) // self.tp_size
-
-    def _forward_in_proj(
-        self, hidden_states: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if hasattr(self, "in_proj_qkvz"):
-            projected_states_qkvz, projected_states_ba = maybe_execute_in_parallel(
-                lambda: self.in_proj_qkvz(hidden_states)[0],
-                lambda: self.in_proj_ba(hidden_states)[0],
-                self.events[0],
-                self.events[1],
-                self.aux_stream,
-            )
-        else:
-            # LoRA case: fuse q/k/v and z projections manually
-            mixed_qkv = self.in_proj_qkv(hidden_states)[0]
-            z = self.in_proj_z(hidden_states)[0]
-            projected_states_qkvz = torch.cat([mixed_qkv, z], dim=-1)
-            projected_states_ba = self.in_proj_ba(hidden_states)[0]
-        return projected_states_qkvz, projected_states_ba
 
     def _forward_core(
         self,
@@ -989,18 +955,6 @@ def gdn_in_proj(
     return self._forward_in_proj(hidden_states)
 
 
-def gdn_in_proj_fake(
-    hidden_states: torch.Tensor,
-    qkvz_output_size: int,
-    ba_output_size: int,
-    layer_name: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fake implementation for torch.compile."""
-    return hidden_states.new_empty(
-        hidden_states.shape[0], qkvz_output_size
-    ), hidden_states.new_empty(hidden_states.shape[0], ba_output_size)
-
-
 def gdn_attention_core(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
@@ -1033,12 +987,6 @@ def gdn_attention_core_fake(
     """Fake implementation for torch.compile."""
     return
 
-
-direct_register_custom_op(
-    op_name="gdn_in_proj",
-    op_func=gdn_in_proj,
-    fake_impl=gdn_in_proj_fake,
-)
 
 direct_register_custom_op(
     op_name="gdn_attention_core",
