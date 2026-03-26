@@ -484,7 +484,7 @@ Example template file: [examples/pooling/score/template/nemotron-rerank.jinja](.
 
 #### CausalLM Models (Generative Scoring)
 
-When using a CausalLM model (e.g., Llama, Qwen, Mistral) with the Score API, the `/generative_score` endpoint computes the probability of specified token IDs appearing as the next token. Each item (document) is concatenated with the query to form a prompt, and the model predicts how likely each label token is as the next token after that prompt. This lets you score items against a query — for example, asking "Is this the capital of France?" and scoring each city by how likely the model is to answer "Yes".
+When using a CausalLM model (e.g., Llama, Qwen, Mistral) with the Score API, the `/generative_scoring` endpoint computes the probability of specified token IDs appearing as the next token. Each item (document) is concatenated with the query to form a prompt, and the model predicts how likely each label token is as the next token after that prompt. This lets you score items against a query — for example, asking "Is this the capital of France?" and scoring each city by how likely the model is to answer "Yes".
 
 **Requirements for CausalLM models:**
 
@@ -495,7 +495,7 @@ When using a CausalLM model (e.g., Llama, Qwen, Mistral) with the Score API, the
 ##### Example: Score with CausalLM
 
 ```bash
-curl -X POST http://localhost:8000/generative_score \
+curl -X POST http://localhost:8000/generative_scoring \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Qwen/Qwen3-0.6B",
@@ -511,7 +511,7 @@ Here, each item is appended to the query to form prompts like `"Is this city the
 
     ```json
     {
-      "id": "generative-score-abc123",
+      "id": "generative-scoring-abc123",
       "object": "list",
       "created": 1234567890,
       "model": "Qwen/Qwen3-0.6B",

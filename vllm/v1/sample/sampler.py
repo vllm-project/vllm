@@ -104,7 +104,7 @@ class Sampler(nn.Module):
         sampled = sampled.long()
 
         # Handle logprob_token_ids if specified (more efficient than full vocab)
-        # This is used by generative_score API to get logprobs for specific tokens
+        # This is used by generative_scoring API to get logprobs for specific tokens
         logprob_token_ids_tensors = None
         if sampling_metadata.logprob_token_ids:
             logprob_token_ids_tensors = self.gather_specific_token_logprobs(

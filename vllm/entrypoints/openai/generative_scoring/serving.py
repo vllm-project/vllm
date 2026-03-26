@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Generative Scores implementation for generative models.
+"""Generative Scoring implementation for generative models.
 
 This module implements generative scoring functionality that computes the
 probability of specified token IDs appearing as the next token after a
@@ -47,8 +47,8 @@ logger = init_logger(__name__)
 # ============================================================================
 
 
-class GenerativeScoreRequest(OpenAIBaseModel):
-    """Request for computing generative scores.
+class GenerativeScoringRequest(OpenAIBaseModel):
+    """Request for computing generative scoring.
 
     Attributes:
         model: The model to use for scoring. Optional, follows existing patterns.
@@ -104,8 +104,8 @@ class GenerativeScoreRequest(OpenAIBaseModel):
     )
 
 
-class GenerativeScoreItemResult(OpenAIBaseModel):
-    """Result for a single item in the generative scores response.
+class GenerativeScoringItemResult(OpenAIBaseModel):
+    """Result for a single item in the generative scoring response.
 
     Attributes:
         index: The index of this item in the input items list.
@@ -118,8 +118,8 @@ class GenerativeScoreItemResult(OpenAIBaseModel):
     score: float
 
 
-class GenerativeScoreResponse(OpenAIBaseModel):
-    """Response from the generative scores computation.
+class GenerativeScoringResponse(OpenAIBaseModel):
+    """Response from the generative scoring computation.
 
     Attributes:
         id: Unique identifier for this response.
@@ -134,7 +134,7 @@ class GenerativeScoreResponse(OpenAIBaseModel):
     object: Literal["list"] = "list"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
-    data: list[GenerativeScoreItemResult]
+    data: list[GenerativeScoringItemResult]
     usage: UsageInfo
 
 
@@ -143,8 +143,8 @@ class GenerativeScoreResponse(OpenAIBaseModel):
 # ============================================================================
 
 
-class OpenAIServingGenerativeScores(OpenAIServing):
-    """Serving class for generative scores computation.
+class OpenAIServingGenerativeScoring(OpenAIServing):
+    """Serving class for generative scoring computation.
 
     This class handles computing the probability of specified token IDs
     appearing as the next token after concatenating query and item prompts.
@@ -170,20 +170,20 @@ class OpenAIServingGenerativeScores(OpenAIServing):
             request_logger=request_logger,
         )
 
-    async def create_generative_score(
+    async def create_generative_scoring(
         self,
-        request: GenerativeScoreRequest,
+        request: GenerativeScoringRequest,
         raw_request: Request | None = None,
-    ) -> GenerativeScoreResponse | ErrorResponse:
-        """Create generative scores for the given request.
+    ) -> GenerativeScoringResponse | ErrorResponse:
+        """Create generative scoring for the given request.
 
         Args:
-            request: The GenerativeScoreRequest containing query, items, and
+            request: The GenerativeScoringRequest containing query, items, and
                 label_token_ids.
             raw_request: The raw FastAPI request object.
 
         Returns:
-            GenerativeScoreResponse with probabilities for each item, or
+            GenerativeScoringResponse with probabilities for each item, or
             ErrorResponse if an error occurred.
         """
         # Check model
@@ -199,7 +199,7 @@ class OpenAIServingGenerativeScores(OpenAIServing):
         tokenizer = self.renderer.tokenizer
         if tokenizer is None:
             return self.create_error_response(
-                "Tokenizer not available. Cannot process generative score request."
+                "Tokenizer not available. Cannot process generative scoring request."
             )
 
         # Validate label_token_ids
@@ -231,7 +231,7 @@ class OpenAIServingGenerativeScores(OpenAIServing):
             logger.exception("Error preparing request components")
             return self.create_error_response(e)
 
-        request_id = f"generative-score-{self._base_request_id(raw_request, request.request_id)}"
+        request_id = f"generative-scoring-{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
 
         # Build prompts for each item
@@ -299,7 +299,7 @@ class OpenAIServingGenerativeScores(OpenAIServing):
             return self.create_error_response(e)
 
         # Process results to extract label token probabilities
-        item_results: list[GenerativeScoreItemResult] = []
+        item_results: list[GenerativeScoringItemResult] = []
         total_prompt_tokens = 0
         total_completion_tokens = 0
 
@@ -358,7 +358,7 @@ class OpenAIServingGenerativeScores(OpenAIServing):
             score = token_probs[first_label_id]
 
             item_results.append(
-                GenerativeScoreItemResult(
+                GenerativeScoringItemResult(
                     index=i,
                     score=score,
                 )
@@ -370,7 +370,7 @@ class OpenAIServingGenerativeScores(OpenAIServing):
 
         # Build response
         model_name = self.models.model_name(lora_request)
-        response = GenerativeScoreResponse(
+        response = GenerativeScoringResponse(
             id=request_id,
             created=created_time,
             model=model_name,
@@ -386,7 +386,7 @@ class OpenAIServingGenerativeScores(OpenAIServing):
 
     async def _build_prompts(
         self,
-        request: GenerativeScoreRequest,
+        request: GenerativeScoringRequest,
         tokenizer,
         max_model_len: int,
     ) -> tuple[list[TokensPrompt], list[int]]:

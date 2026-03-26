@@ -247,11 +247,11 @@ def build_app(
         register_pooling_api_routers(app, supported_tasks, model_config)
 
     if "generate" in supported_tasks:
-        from vllm.entrypoints.openai.generative_scores.api_router import (
-            register_generative_scores_api_router,
+        from vllm.entrypoints.openai.generative_scoring.api_router import (
+            register_generative_scoring_api_router,
         )
 
-        register_generative_scores_api_router(app)
+        register_generative_scoring_api_router(app)
 
     app.root_path = args.root_path
     app.add_middleware(
@@ -421,11 +421,11 @@ async def init_app_state(
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
 
     if "generate" in supported_tasks:
-        from vllm.entrypoints.openai.generative_scores.api_router import (
-            init_generative_scores_state,
+        from vllm.entrypoints.openai.generative_scoring.api_router import (
+            init_generative_scoring_state,
         )
 
-        await init_generative_scores_state(
+        await init_generative_scoring_state(
             engine_client, state, args, request_logger
         )
 

@@ -7,9 +7,9 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.generative_scores.serving import (
-    GenerativeScoreResponse,
-    OpenAIServingGenerativeScores,
+from vllm.entrypoints.openai.generative_scoring.serving import (
+    GenerativeScoringResponse,
+    OpenAIServingGenerativeScoring,
 )
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.utils import load_aware_call, with_cancellation
@@ -28,12 +28,12 @@ router = APIRouter()
 logger = init_logger(__name__)
 
 
-def generative_scores(request: Request) -> OpenAIServingGenerativeScores | None:
-    return request.app.state.serving_generative_scores
+def generative_scoring(request: Request) -> OpenAIServingGenerativeScoring | None:
+    return request.app.state.serving_generative_scoring
 
 
 @router.post(
-    "/generative_score",
+    "/generative_scoring",
     dependencies=[Depends(validate_json_request)],
     responses={
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
@@ -42,47 +42,47 @@ def generative_scores(request: Request) -> OpenAIServingGenerativeScores | None:
 )
 @with_cancellation
 @load_aware_call
-async def create_generative_score(raw_request: Request):
-    handler = generative_scores(raw_request)
+async def create_generative_scoring(raw_request: Request):
+    handler = generative_scoring(raw_request)
     if handler is None:
         raise NotImplementedError(
-            "The model does not support the Generative Scores API"
+            "The model does not support the Generative Scoring API"
         )
 
     raw_body = await raw_request.json()
 
-    from vllm.entrypoints.openai.generative_scores.serving import (
-        GenerativeScoreRequest,
+    from vllm.entrypoints.openai.generative_scoring.serving import (
+        GenerativeScoringRequest,
     )
 
-    gen_request = GenerativeScoreRequest(**raw_body)
-    result = await handler.create_generative_score(gen_request, raw_request)
+    gen_request = GenerativeScoringRequest(**raw_body)
+    result = await handler.create_generative_scoring(gen_request, raw_request)
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(
             content=result.model_dump(), status_code=result.error.code
         )
-    elif isinstance(result, GenerativeScoreResponse):
+    elif isinstance(result, GenerativeScoringResponse):
         return JSONResponse(content=result.model_dump())
 
     raise ValueError(f"Unexpected response type: {type(result)}")
 
 
-def register_generative_scores_api_router(app: FastAPI):
+def register_generative_scoring_api_router(app: FastAPI):
     app.include_router(router)
 
 
-async def init_generative_scores_state(
+async def init_generative_scoring_state(
     engine_client: "EngineClient",
     state: "State",
     args: "Namespace",
     request_logger: "RequestLogger | None",
 ):
-    from vllm.entrypoints.openai.generative_scores.serving import (
-        OpenAIServingGenerativeScores,
+    from vllm.entrypoints.openai.generative_scoring.serving import (
+        OpenAIServingGenerativeScoring,
     )
 
-    state.serving_generative_scores = OpenAIServingGenerativeScores(
+    state.serving_generative_scoring = OpenAIServingGenerativeScoring(
         engine_client,
         state.openai_serving_models,
         request_logger=request_logger,

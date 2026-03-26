@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the Generative Scores API.
+"""Tests for the Generative Scoring API.
 
 Tests cover:
 1. Protocol models (request/response construction)
@@ -19,11 +19,11 @@ import pytest
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.generative_scores.serving import (
-    GenerativeScoreItemResult,
-    GenerativeScoreRequest,
-    GenerativeScoreResponse,
-    OpenAIServingGenerativeScores,
+from vllm.entrypoints.openai.generative_scoring.serving import (
+    GenerativeScoringItemResult,
+    GenerativeScoringRequest,
+    GenerativeScoringResponse,
+    OpenAIServingGenerativeScoring,
 )
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -81,13 +81,13 @@ def _create_mock_engine():
     return mock_engine
 
 
-def _create_serving(mock_engine) -> OpenAIServingGenerativeScores:
-    """Create an OpenAIServingGenerativeScores instance with mocks."""
+def _create_serving(mock_engine) -> OpenAIServingGenerativeScoring:
+    """Create an OpenAIServingGenerativeScoring instance with mocks."""
     models = OpenAIServingModels(
         engine_client=mock_engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    return OpenAIServingGenerativeScores(mock_engine, models, request_logger=None)
+    return OpenAIServingGenerativeScoring(mock_engine, models, request_logger=None)
 
 
 def _create_mock_request_output(logprobs_dict: dict[int, float]) -> RequestOutput:
@@ -115,12 +115,12 @@ def _create_mock_request_output(logprobs_dict: dict[int, float]) -> RequestOutpu
 
 
 class TestProtocolModels:
-    """Tests for GenerativeScoreRequest and GenerativeScoreResponse."""
+    """Tests for GenerativeScoringRequest and GenerativeScoringResponse."""
 
     def test_request_and_response_all_fields(self):
         """Test request construction with all field types and response structure."""
         # Test request with string inputs
-        req_str = GenerativeScoreRequest(
+        req_str = GenerativeScoringRequest(
             query="Is this the capital?",
             items=["Paris", "London"],
             label_token_ids=[9454, 2753],
@@ -133,7 +133,7 @@ class TestProtocolModels:
         assert req_str.add_special_tokens is True  # default
 
         # Test request with pre-tokenized inputs and custom options
-        req_tok = GenerativeScoreRequest(
+        req_tok = GenerativeScoringRequest(
             query=[100, 200, 300],
             items=[[400, 500], [600, 700]],
             label_token_ids=[1234, 5678],
@@ -148,11 +148,11 @@ class TestProtocolModels:
         assert req_tok.add_special_tokens is False
 
         # Test response structure
-        response = GenerativeScoreResponse(
+        response = GenerativeScoringResponse(
             model="test-model",
             data=[
-                GenerativeScoreItemResult(index=0, score=0.7),
-                GenerativeScoreItemResult(index=1, score=0.4),
+                GenerativeScoringItemResult(index=0, score=0.7),
+                GenerativeScoringItemResult(index=1, score=0.4),
             ],
             usage={"prompt_tokens": 10, "total_tokens": 12, "completion_tokens": 2},
         )
@@ -179,7 +179,7 @@ class TestProbabilityComputation:
     )
     def test_compute_probabilities(self, label_logprobs, apply_softmax, should_sum_to_one):
         """Test probability computation for softmax and true probability modes."""
-        serving = OpenAIServingGenerativeScores.__new__(OpenAIServingGenerativeScores)
+        serving = OpenAIServingGenerativeScoring.__new__(OpenAIServingGenerativeScoring)
         probs = serving._compute_probabilities(label_logprobs, apply_softmax=apply_softmax)
 
         # Verify sum behavior
@@ -202,7 +202,7 @@ class TestProbabilityComputation:
 
     def test_score_formula(self):
         """Test the score formula: P(token[0]) / (P(token[0]) + P(token[1]))."""
-        serving = OpenAIServingGenerativeScores.__new__(OpenAIServingGenerativeScores)
+        serving = OpenAIServingGenerativeScoring.__new__(OpenAIServingGenerativeScoring)
 
         # With logprobs -0.5 and -2.0, softmax gives higher prob to first token
         logprobs = {9454: -0.5, 2753: -2.0}
@@ -236,8 +236,8 @@ class TestValidation:
         """Test that invalid inputs return appropriate errors."""
         mock_engine = _create_mock_engine()
         serving = _create_serving(mock_engine)
-        request = GenerativeScoreRequest(model=MODEL_NAME, **request_kwargs)
-        result = await serving.create_generative_score(request, None)
+        request = GenerativeScoringRequest(model=MODEL_NAME, **request_kwargs)
+        result = await serving.create_generative_scoring(request, None)
 
         assert isinstance(result, ErrorResponse)
         assert expected_error in result.error.message.lower()
@@ -260,7 +260,7 @@ class TestPromptBuilding:
         mock_engine = _create_mock_engine()
         serving = _create_serving(mock_engine)
 
-        request = GenerativeScoreRequest(
+        request = GenerativeScoringRequest(
             query=[100, 101],
             items=[[200, 201], [300, 301]],
             label_token_ids=[500, 501],
@@ -289,15 +289,15 @@ class TestGeneration:
 
         mock_engine.generate = mock_generate
 
-        request = GenerativeScoreRequest(
+        request = GenerativeScoringRequest(
             model=MODEL_NAME,
             query="Is Paris the capital?",
             items=["Yes", "No"],
             label_token_ids=[1234, 5678],
         )
-        result = await serving.create_generative_score(request, None)
+        result = await serving.create_generative_scoring(request, None)
 
-        assert isinstance(result, GenerativeScoreResponse)
+        assert isinstance(result, GenerativeScoringResponse)
         assert len(result.data) == 2
         for item_result in result.data:
             assert 0.0 <= item_result.score <= 1.0

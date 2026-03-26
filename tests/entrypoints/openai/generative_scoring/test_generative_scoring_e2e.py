@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""End-to-end tests for the Generative Scores API.
+"""End-to-end tests for the Generative Scoring API.
 
 Tests verify the full HTTP request/response flow using RemoteOpenAIServer.
 """
@@ -25,14 +25,14 @@ def server():
         yield remote_server
 
 
-class TestGenerativeScoresAPI:
-    """End-to-end tests for the Generative Scores API."""
+class TestGenerativeScoringAPI:
+    """End-to-end tests for the Generative Scoring API."""
 
     @pytest.mark.asyncio
     async def test_basic_score_and_response_structure(self, server: RemoteOpenAIServer):
-        """Test basic generative score request and verify response structure."""
+        """Test basic generative scoring request and verify response structure."""
         response = requests.post(
-            server.url_for("generative_score"),
+            server.url_for("generative_scoring"),
             json={
                 "model": MODEL_NAME,
                 "query": "Is Paris the capital of France? Answer Yes or No: ",
@@ -44,7 +44,7 @@ class TestGenerativeScoresAPI:
         data = response.json()
 
         # Verify response structure
-        assert data["id"].startswith("generative-score-")
+        assert data["id"].startswith("generative-scoring-")
         assert data["object"] == "list"
         assert "model" in data
         assert "usage" in data
@@ -64,9 +64,9 @@ class TestGenerativeScoresAPI:
 
     @pytest.mark.asyncio
     async def test_multiple_items(self, server: RemoteOpenAIServer):
-        """Test generative score request with multiple items."""
+        """Test generative scoring request with multiple items."""
         response = requests.post(
-            server.url_for("generative_score"),
+            server.url_for("generative_scoring"),
             json={
                 "model": MODEL_NAME,
                 "query": "Is this city a capital? ",
@@ -82,7 +82,7 @@ class TestGenerativeScoresAPI:
     async def test_validation_missing_label_token_ids(self, server: RemoteOpenAIServer):
         """Test that missing label_token_ids returns a validation error."""
         response = requests.post(
-            server.url_for("generative_score"),
+            server.url_for("generative_scoring"),
             json={
                 "model": MODEL_NAME,
                 "query": "Test query",
@@ -96,7 +96,7 @@ class TestGenerativeScoresAPI:
     async def test_validation_empty_items(self, server: RemoteOpenAIServer):
         """Test that empty items returns an error."""
         response = requests.post(
-            server.url_for("generative_score"),
+            server.url_for("generative_scoring"),
             json={
                 "model": MODEL_NAME,
                 "query": "Test query",
@@ -117,7 +117,7 @@ class TestGenerativeScoresAPI:
     async def test_validation_errors(self, server: RemoteOpenAIServer, label_token_ids, expected_status):
         """Test validation errors for various invalid inputs."""
         response = requests.post(
-            server.url_for("generative_score"),
+            server.url_for("generative_scoring"),
             json={
                 "model": MODEL_NAME,
                 "query": "Test query",
@@ -137,8 +137,8 @@ class TestGenerativeScoresAPI:
             "label_token_ids": [100, 200],
         }
 
-        r1 = requests.post(server.url_for("generative_score"), json=request_body)
-        r2 = requests.post(server.url_for("generative_score"), json=request_body)
+        r1 = requests.post(server.url_for("generative_scoring"), json=request_body)
+        r2 = requests.post(server.url_for("generative_scoring"), json=request_body)
 
         assert r1.status_code == 200 and r2.status_code == 200
         r1_score = r1.json()["data"][0]["score"]
