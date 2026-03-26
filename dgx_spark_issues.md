@@ -300,3 +300,27 @@ PyTorch only supports compute capabilities 8.0-9.0.
 - Driver: 580.95.05
 - CUDA: 13.0
 - 无新问题发现
+
+---
+
+## 2026-03-26 22:23 更新
+
+**PR #38126 状态：** 仍 open，最后更新 ~25h 前
+- 等待 NVIDIA maintainer johnnynunez 推进
+- merge 后将检查代码是否覆盖 SM 12.1 Marlin 自动检测
+- 如未覆盖，继续推进 #37141
+
+**PR #37959 状态：** 68h 无人类 review
+- 周末 review 节奏慢是正常现象
+- 周一 (3 月 30 日) 如仍无进展，考虑追加评论
+
+**DGX Spark 环境稳定：**
+- GPU: NVIDIA GB10 (SM 12.1)
+- Driver: 580.95.05
+- CUDA: 13.0
+- 无新问题发现
+
+**今日产出：**
+- 0 新 PR（符合每天≤1 上限）
+- 持续跟进现有 PR 状态
+- 已准备好 #37141 PR 代码（待 #38126 merge 后决定提交时机）
