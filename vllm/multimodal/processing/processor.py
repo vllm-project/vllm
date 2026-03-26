@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache, partial
@@ -58,6 +59,13 @@ else:
     BaseMultiModalProcessorCache = object
 
 logger = init_logger(__name__)
+
+# When set to ``True`` inside a tokenize request, ``apply()`` bypasses the
+# multimodal processor cache entirely so that the SenderCache is never
+# polluted by entries that will not be transmitted to the engine core.
+skip_mm_processor_cache: ContextVar[bool] = ContextVar(
+    "skip_mm_processor_cache", default=False
+)
 
 _S = TypeVar("_S", str, list[int])
 
@@ -1678,11 +1686,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        (
-            prompt_ids,
-            mm_info,
-            is_update_applied,
-        ) = self._cached_apply_hf_processor(inputs, timing_ctx)
+        if skip_mm_processor_cache.get():
+            (
+                prompt_ids,
+                mm_info,
+                is_update_applied,
+            ) = self._apply_hf_processor(inputs, timing_ctx)
+        else:
+            (
+                prompt_ids,
+                mm_info,
+                is_update_applied,
+            ) = self._cached_apply_hf_processor(inputs, timing_ctx)
 
         # NOTE: tokenization_kwargs are not required to init processor
         with timing_ctx.record("apply_prompt_updates"):

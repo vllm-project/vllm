@@ -312,23 +312,6 @@ class BaseMultiModalProcessorCache(
         """
         raise NotImplementedError
 
-    def evict_item(self, mm_hash: str) -> None:
-        """
-        Remove a multi-modal item from the sender cache.
-
-        This is needed when the caller processes multimodal data through
-        the renderer pipeline but does not send the result to the engine
-        (e.g. the ``/tokenize`` endpoint).  Without eviction the sender
-        cache would believe the data had already been transmitted via IPC,
-        and a subsequent ``/chat/completions`` request for the same item
-        would receive ``None`` instead of the real tensor data.
-
-        The default implementation is a no-op, which is correct for
-        :class:`MultiModalProcessorOnlyCache` (it returns full data on
-        cache hits).  Subclasses that strip tensor data on hits **must**
-        override this.
-        """
-
     @abstractmethod
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         """
@@ -441,10 +424,6 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
     @override
     def touch_sender_cache_item(self, mm_hash: str) -> None:
         self._cache.touch(mm_hash)
-
-    @override
-    def evict_item(self, mm_hash: str) -> None:
-        self._cache.pop(mm_hash, None)
 
     @override
     def clear_cache(self) -> None:

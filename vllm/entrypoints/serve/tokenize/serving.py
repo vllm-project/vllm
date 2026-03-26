@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -22,8 +21,8 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizerInfoResponse,
 )
 from vllm.inputs import TokensPrompt, tokens_input
-from vllm.inputs.engine import EngineInput
 from vllm.logger import init_logger
+from vllm.multimodal.processing.processor import skip_mm_processor_cache
 from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
@@ -67,34 +66,41 @@ class OpenAIServingTokenization(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        if isinstance(request, TokenizeChatRequest):
-            tool_dicts = (
-                None
-                if request.tools is None
-                else [tool.model_dump() for tool in request.tools]
-            )
-            error_check_ret = self.openai_serving_render.validate_chat_template(
-                request_chat_template=request.chat_template,
-                chat_template_kwargs=request.chat_template_kwargs,
-                trust_request_chat_template=self.trust_request_chat_template,
-            )
-            if error_check_ret is not None:
-                return error_check_ret
+        # Bypass the multimodal processor cache so that the tokenize
+        # endpoint does not pollute the SenderCache with entries that
+        # will never be transmitted to the engine core via IPC.
+        token = skip_mm_processor_cache.set(True)
+        try:
+            if isinstance(request, TokenizeChatRequest):
+                tool_dicts = (
+                    None
+                    if request.tools is None
+                    else [tool.model_dump() for tool in request.tools]
+                )
+                error_check_ret = self.openai_serving_render.validate_chat_template(
+                    request_chat_template=request.chat_template,
+                    chat_template_kwargs=request.chat_template_kwargs,
+                    trust_request_chat_template=self.trust_request_chat_template,
+                )
+                if error_check_ret is not None:
+                    return error_check_ret
 
-            _, engine_inputs = await self.openai_serving_render.preprocess_chat(
-                request,
-                request.messages,
-                default_template=self.chat_template,
-                default_template_content_format=self.chat_template_content_format,
-                default_template_kwargs=self.default_chat_template_kwargs,
-                tool_dicts=tool_dicts,
-            )
-        else:
-            engine_inputs = await self.openai_serving_render.preprocess_completion(
-                request,
-                prompt_input=request.prompt,
-                prompt_embeds=None,
-            )
+                _, engine_inputs = await self.openai_serving_render.preprocess_chat(
+                    request,
+                    request.messages,
+                    default_template=self.chat_template,
+                    default_template_content_format=self.chat_template_content_format,
+                    default_template_kwargs=self.default_chat_template_kwargs,
+                    tool_dicts=tool_dicts,
+                )
+            else:
+                engine_inputs = await self.openai_serving_render.preprocess_completion(
+                    request,
+                    prompt_input=request.prompt,
+                    prompt_embeds=None,
+                )
+        finally:
+            skip_mm_processor_cache.reset(token)
 
         input_ids: list[int] = []
         for engine_input in engine_inputs:
@@ -109,14 +115,6 @@ class OpenAIServingTokenization(OpenAIServing):
             if prompt_components.token_ids is not None:
                 input_ids.extend(prompt_components.token_ids)
 
-        # The tokenize endpoint never sends multimodal data to the engine
-        # via IPC, but the SenderCache already recorded these items as
-        # "transmitted".  Evict newly-added entries so that a subsequent
-        # generate request will re-process and actually transmit them.
-        # Skip items where mm_kwargs is None — those were already sent
-        # by a prior generate call and are valid in the receiver cache.
-        self._evict_unsent_mm_cache_entries(engine_inputs)
-
         token_strs = None
         if request.return_token_strs:
             tokenizer = self.renderer.get_tokenizer()
@@ -128,38 +126,6 @@ class OpenAIServingTokenization(OpenAIServing):
             count=len(input_ids),
             max_model_len=self.model_config.max_model_len,
         )
-
-    def _evict_unsent_mm_cache_entries(
-        self, engine_inputs: Sequence[EngineInput]
-    ) -> None:
-        """Remove sender-cache entries that were added but never sent via IPC.
-
-        The tokenize endpoint fully processes multimodal inputs through the
-        renderer, which populates the SenderCache.  Because the results are
-        never forwarded to the engine, those entries would cause the next
-        real generate call to receive ``None`` instead of tensor data.
-
-        Only *newly added* items (``mm_kwargs[modality][idx] is not None``)
-        are evicted; items that were already cached before this request
-        (``None``) have been transmitted by a prior generate call and are
-        still valid in the receiver cache.
-        """
-        mm_cache = self.openai_serving_render.renderer.mm_processor_cache
-        if mm_cache is None:
-            return
-
-        for engine_input in engine_inputs:
-            if engine_input.get("type") != "multimodal":
-                continue
-
-            mm_kwargs = engine_input.get("mm_kwargs", {})
-            mm_hashes = engine_input.get("mm_hashes", {})
-
-            for modality, hashes in mm_hashes.items():
-                items = mm_kwargs.get(modality, ())
-                for idx, h in enumerate(hashes):
-                    if idx < len(items) and items[idx] is not None:
-                        mm_cache.evict_item(h)
 
     async def create_detokenize(
         self,
