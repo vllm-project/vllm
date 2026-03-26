@@ -149,6 +149,8 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
         finally:
             self._ops.clear()
 
+        # Wait for all D2H copies to finish
+        # before issuing gloo batch_isend_irecv operations.
         if self._cuda_stream is not None:
             self._cuda_stream.synchronize()
         else:

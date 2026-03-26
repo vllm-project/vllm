@@ -98,6 +98,8 @@ async def transfer_run_periodically(
 
         assert state.is_async
         for model_state in state.model_states.values():
+            # Set the async worker's CUDA stream on the communicator
+            model_state.communicator.set_stream(cuda_stream)
             rebalancing_algorithm_executed = False
             physical_to_logical_map_cpu = None
             current_num_layers = model_state.model.num_moe_layers
@@ -105,8 +107,6 @@ async def transfer_run_periodically(
                 model_state.rebalanced
                 and model_state.layer_to_transfer < current_num_layers
             ):
-                # Set the async worker's CUDA stream on the communicator
-                model_state.communicator.set_stream(cuda_stream)
                 if not model_state.ep_buffer_ready and model_state.rebalanced:
                     # Polling the lock directly in the async thread avoids
                     # the thread switch overhead of asyncio.to_thread.
