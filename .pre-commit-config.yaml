@@ -170,6 +170,13 @@ repos:
     language: python
     types: [python]
     additional_dependencies: [regex]
+  # limit usage of cuda_device_count_stateless
+  - id: check-cuda-device-count-stateless
+    name: "Limit new 'cuda_device_count_stateless' usage"
+    entry: python tools/pre_commit/check_device_count.py
+    language: python
+    types: [python]
+    additional_dependencies: [regex]
   - id: validate-config
     name: Validate configuration has default values and that each field has a docstring
     entry: python tools/pre_commit/validate_config.py
