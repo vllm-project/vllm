@@ -41,6 +41,7 @@ from vllm import envs
 from vllm.config.utils import replace
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     get_tool_call_id_type,
 )
@@ -203,7 +204,7 @@ class OpenAIServingResponses(OpenAIServing):
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove messages from the store.
-        self.msg_store: dict[str, list] = {}
+        self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
 
         # HACK(wuhang): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
