@@ -196,20 +196,19 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
 
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.secondary_weight_prefixes = ["sparse_linear.", "colbert_linear."]
-        self.secondary_weight_files = [
-            prefix + "pt" for prefix in self.secondary_weight_prefixes
-        ]
 
         self.secondary_weights = [
             DefaultModelLoader.Source(
                 model_or_path=vllm_config.model_config.model,
                 revision=None,
                 prefix=prefix,
-                allow_patterns_overrides=[filename],
+                allow_patterns_overrides=[
+                    prefix[:-1] + "*.safetensors",
+                    prefix[:-1] + ".pt",
+                ],
+                optional=True,
             )
-            for filename, prefix in zip(
-                self.secondary_weight_files, self.secondary_weight_prefixes
-            )
+            for prefix in self.secondary_weight_prefixes
         ]
 
     def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
