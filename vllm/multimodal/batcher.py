@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from itertools import groupby
 from typing import Protocol
 
@@ -65,22 +65,27 @@ class MultiModalBatcher(Protocol):
 
 
 class MultiModalFieldBatcher(MultiModalBatcher):
-    def __init__(self, config_by_key: Mapping[str, MultiModalFieldConfig]) -> None:
+    def __init__(
+        self,
+        get_config_by_key: Callable[
+            [dict[str, NestedTensors]],
+            Mapping[str, MultiModalFieldConfig],
+        ],
+    ) -> None:
         super().__init__()
 
-        self.config_by_key = config_by_key
+        self.get_config_by_key = get_config_by_key
 
     def group_batches(
         self,
         items: Iterable[dict[str, NestedTensors]],
     ) -> Iterable[tuple[str, int, dict[str, NestedTensors]]]:
-        config_by_key = self.config_by_key
-
         it = (
             (modality, parsed_item)
             for item in items
             for modality, parsed_items in MultiModalKwargsItems.from_hf_inputs(
-                item, config_by_key
+                item,
+                self.get_config_by_key(item),
             ).items()
             for parsed_item in parsed_items
         )
@@ -94,8 +99,10 @@ class MultiModalFieldBatcher(MultiModalBatcher):
         self,
         batch: dict[str, NestedTensors],
     ) -> list[dict[str, NestedTensors]]:
-        config_by_key = self.config_by_key
-        mm_parsed_items = MultiModalKwargsItems.from_hf_inputs(batch, config_by_key)
+        mm_parsed_items = MultiModalKwargsItems.from_hf_inputs(
+            batch,
+            self.get_config_by_key(batch),
+        )
 
         return [
             parsed_item.get_data()
