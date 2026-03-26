@@ -508,10 +508,10 @@ class EngineArgs:
         MultiModalConfig.mm_encoder_attn_backend
     )
     io_processor_plugin: str | None = None
+    preprocessing_thread_pool_workers: int = 1
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
-    async_mm_input_processing: bool = MultiModalConfig.async_mm_input_processing
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -767,6 +767,10 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--io-processor-plugin", **model_kwargs["io_processor_plugin"]
+        )
+        model_group.add_argument(
+            "--preprocessing-thread-pool-workers",
+            **model_kwargs["preprocessing_thread_pool_workers"],
         )
 
         # Model loading arguments
@@ -1106,10 +1110,6 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
         )
-        multimodal_group.add_argument(
-            "--async-mm-input-processing",
-            **multimodal_kwargs["async_mm_input_processing"],
-        )
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -1442,8 +1442,8 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             mm_tensor_ipc=self.mm_tensor_ipc,
-            async_mm_input_processing=self.async_mm_input_processing,
             io_processor_plugin=self.io_processor_plugin,
+            preprocessing_thread_pool_workers=self.preprocessing_thread_pool_workers,
         )
 
     def validate_tensorizer_args(self):

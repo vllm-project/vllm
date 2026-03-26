@@ -41,7 +41,6 @@ from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import (
     AsyncMicrobatchTokenizer,
-    InlineExecutor,
     make_async,
 )
 from vllm.utils.counter import AtomicCounter
@@ -96,16 +95,12 @@ class BaseRenderer(ABC, Generic[_T]):
         # multimodal preprocessing operations.  The multimodal processor
         # receives a deep-copied tokenizer (see #36557) so it is safe to
         # run tokenization and MM preprocessing concurrently.
-        self._executor = ThreadPoolExecutor(max_workers=4)
+        pool_workers = config.model_config.preprocessing_thread_pool_workers
+        self._executor = ThreadPoolExecutor(max_workers=pool_workers)
 
-        # When --async-mm-input-processing is enabled, multimodal
-        # preprocessing is offloaded to the shared thread pool executor.
-        # Otherwise, a dummy inline executor is used (runs synchronously).
-        mm_config = config.model_config.multimodal_config
-        if mm_config and mm_config.async_mm_input_processing:
-            self._mm_executor: Executor = self._executor
-        else:
-            self._mm_executor = InlineExecutor()
+        # Multimodal preprocessing is always offloaded to the thread pool
+        # to keep the asyncio event loop responsive under concurrent load.
+        self._mm_executor: Executor = self._executor
 
         # Lazy initialization since offline LLM doesn't use async
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
