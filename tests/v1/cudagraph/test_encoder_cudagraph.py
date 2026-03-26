@@ -274,6 +274,7 @@ class SimpleMockViTModel(torch.nn.Module):
         self,
         token_budget: int,
         max_batch_size: int,
+        max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
     ) -> EncoderCudaGraphCaptureInputs:
@@ -576,6 +577,7 @@ class SimpleMockVideoViTModel(torch.nn.Module):
         self,
         token_budget: int,
         max_batch_size: int,
+        max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
     ) -> EncoderCudaGraphCaptureInputs:
