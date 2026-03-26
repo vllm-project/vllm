@@ -757,6 +757,14 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         :return: is fusion supported for this type of quantization
         """
         return False
+    
+    def fused_qk_norm_rope_kvcache_supported(self):
+        """
+        Does this attention implementation support fused QKNorm+RoPE+KVCache fusion.
+        This is used by the QkNormRopeKvCachePattern to only fuse the QKNorm ops
+        with the RoPE ops and the KV cache update for implementations that support it.
+        """
+        return False
 
     def fused_rope_kvcache_supported(self):
         """
@@ -765,6 +773,25 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         with the KV cache update for implementations that support it.
         """
         return False
+    
+    def do_qk_norm_rope_kvcache_update(self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        """
+        If `fused_qk_norm_rope_kvcache_supported` returns True, this method will be called
+        by torch.ops.vllm.fused_qk_norm_rope_and_unified_kv_cache_update
+        to perform the inplace QKNorm+RoPE and KV cache update.
+        """
+        raise NotImplementedError
 
     def do_rope_and_kv_cache_update(
         self,

@@ -10,6 +10,7 @@ from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -57,6 +58,7 @@ class QkNormRopePattern:
         eps: float,
         is_neox: bool,
         rope_flashinfer: bool = False,
+        match_rocm_aiter: bool = False,
     ) -> None:
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -64,15 +66,19 @@ class QkNormRopePattern:
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.eps = eps
-        self.rmsnorm_matcher = MatcherRMSNorm(eps)
+        self.rmsnorm_matcher = MatcherRMSNorm(
+            eps, match_rocm_aiter=match_rocm_aiter
+        )
         self.is_neox = is_neox
         self.rope_flashinfer = rope_flashinfer
+        self.match_rocm_aiter = match_rocm_aiter
         self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=is_neox,
             head_size=self.head_dim,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             use_flashinfer=self.rope_flashinfer,
+            match_rocm_aiter=match_rocm_aiter if match_rocm_aiter else None,
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -185,7 +191,12 @@ class QkNormRopePattern:
 
 
 class QKNormRoPEFusionPass(VllmPatternMatcherPass):
-    """Fuse Q/K RMSNorm + RoPE into fused_qk_norm_rope when the custom op exists."""
+    """Fuse Q/K RMSNorm + RoPE into fused_qk_norm_rope when the custom op exists.
+
+    Registers patterns for both standard vLLM ops and ROCm AITER ops
+    (when AITER is enabled), so the fusion fires regardless of which
+    RMSNorm/RoPE implementation the graph uses.
+    """
 
     @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
@@ -201,7 +212,6 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
             )
             return
 
-        # use one attn layer to get meta (such as head_dim) for QkNormRopePattern
         attn_layers: dict[str, Attention] = get_layers_from_vllm_config(
             config, Attention
         )
@@ -212,26 +222,34 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
             return
         layer = next(iter(attn_layers.values()))
 
-        for epsilon in [1e-5, 1e-6]:
-            for neox in [True, False]:
-                if RotaryEmbedding.enabled():
-                    for rope_flashinfer in [False, True]:
+        aiter_enabled = rocm_aiter_ops.is_rmsnorm_enabled()
+        aiter_variants = [False]
+        if aiter_enabled:
+            aiter_variants.append(True)
+
+        for match_aiter in aiter_variants:
+            for epsilon in [1e-5, 1e-6]:
+                for neox in [True, False]:
+                    if RotaryEmbedding.enabled():
+                        for rope_flashinfer in [False, True]:
+                            QkNormRopePattern(
+                                head_dim=layer.head_size,
+                                num_heads=layer.num_heads,
+                                num_kv_heads=layer.num_kv_heads,
+                                eps=epsilon,
+                                is_neox=neox,
+                                rope_flashinfer=rope_flashinfer,
+                                match_rocm_aiter=match_aiter,
+                            ).register(self.patterns)
+                    else:
                         QkNormRopePattern(
                             head_dim=layer.head_size,
                             num_heads=layer.num_heads,
                             num_kv_heads=layer.num_kv_heads,
                             eps=epsilon,
                             is_neox=neox,
-                            rope_flashinfer=rope_flashinfer,
+                            match_rocm_aiter=match_aiter,
                         ).register(self.patterns)
-                else:
-                    QkNormRopePattern(
-                        head_dim=layer.head_size,
-                        num_heads=layer.num_heads,
-                        num_kv_heads=layer.num_kv_heads,
-                        eps=epsilon,
-                        is_neox=neox,
-                    ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
