@@ -173,8 +173,14 @@ def test_env_var_and_runtime_env_propagation():
         pg = ray.util.placement_group([{"GPU": 1, "CPU": 1}] * 2, strategy="PACK")
         ray.get(pg.ready())
 
+        # Include the project root so that RayWorkerProc actors can
+        # unpickle _get_env_var.
+        project_root = str(pathlib.Path(__file__).resolve().parents[2])
         ray_runtime_env = {
-            "env_vars": {"RAY_RUNTIME_ENV_TEST": "ray_runtime_env"},
+            "env_vars": {
+                "RAY_RUNTIME_ENV_TEST": "ray_runtime_env",
+                "PYTHONPATH": project_root,
+            },
         }
 
         actor = AsyncLLMActor.remote()
