@@ -6382,21 +6382,29 @@ class GPUModelRunner(
                 self.uniform_decode_query_len, self.parallel_config.tensor_parallel_size
             )
 
-        # If the model has Mamba layers and cudagraph mode includes FULL
-        # decode, cap cudagraph capture sizes to the number of available
-        # Mamba cache blocks. Each decode request needs one conv_state
-        # cache line, so capture batch sizes cannot exceed num_blocks.
-        # Only FULL decode graphs are affected because PIECEWISE captures
-        # run GDN/Mamba ops eagerly (prefill path, no causal_conv1d_update).
+        # For Mamba models with FULL decode cudagraphs, each decode
+        # sequence needs one Mamba cache block. The decode cudagraph
+        # dispatcher already caps batch sizes at max_num_seqs, so we just
+        # need to verify that enough blocks exist. Raising here instead
+        # of silently capping cudagraph_capture_sizes avoids unintended
+        # restrictions on PIECEWISE (prefill) cudagraphs.
         # See: https://github.com/vllm-project/vllm/issues/34094
         if cudagraph_mode.has_full_cudagraphs():
             has_mamba = any(
                 isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_groups
             )
             if has_mamba and self.kv_cache_config is not None:
-                self.compilation_config.adjust_cudagraph_sizes_for_mamba_cache(
-                    self.kv_cache_config.num_blocks
-                )
+                num_blocks = self.kv_cache_config.num_blocks
+                if self.max_num_reqs > num_blocks:
+                    raise ValueError(
+                        f"max_num_seqs ({self.max_num_reqs}) exceeds "
+                        f"available Mamba cache blocks ({num_blocks}). "
+                        f"Each decode sequence requires one Mamba cache "
+                        f"block, so CUDA graph capture cannot proceed. "
+                        f"Please lower max_num_seqs to at most "
+                        f"{num_blocks} or increase "
+                        f"gpu_memory_utilization."
+                    )
 
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
