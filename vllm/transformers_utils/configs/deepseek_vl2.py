@@ -87,6 +87,18 @@ class MlpProjectorConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
 
+class DeepseekVLV2TextConfig(DeepseekV2Config):
+    kv_lora_rank: None
+
+    def __init__(self, **kwargs):
+        # DeepseekV2Config enforces kv_lora_rank is int, so we use this workaround
+        kv_lora_rank = kwargs.pop("kv_lora_rank", None)
+        if hasattr(self, "__validators__"):
+            self.__validators__.pop("kv_lora_rank", None)
+        super().__init__(**kwargs)
+        self.kv_lora_rank = kv_lora_rank
+
+
 class DeepseekVLV2Config(PretrainedConfig):
     model_type = "deepseek_vl_v2"
     architectures: list[str] | None = None
@@ -112,7 +124,7 @@ class DeepseekVLV2Config(PretrainedConfig):
         self.projector_config = MlpProjectorConfig(**projector_config)
 
         language_config = kwargs.pop("language_config", {})
-        self.text_config = DeepseekV2Config(**language_config)
+        self.text_config = DeepseekVLV2TextConfig(**language_config)
 
         self.tile_tag = tile_tag
         self.global_view_pos = global_view_pos
