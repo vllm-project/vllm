@@ -119,6 +119,7 @@ def _parse_delta_message(
                 state.previous_token_ids = []
                 delta_text = current_text
                 delta_token_ids = current_token_ids
+            potential_reasoning_delta = delta_message
             delta_message = tool_parser.extract_tool_calls_streaming(
                 previous_text=state.previous_text,
                 current_text=current_text,
@@ -128,6 +129,9 @@ def _parse_delta_message(
                 delta_token_ids=delta_token_ids,
                 request=request,  # type: ignore[arg-type]
             )
+            if delta_message is None:
+                delta_message = potential_reasoning_delta
+
             # parser/model quirk: remove any spurious output text after the
             # first tool call has started streaming
             if delta_message and state.first_tool_call_started:
