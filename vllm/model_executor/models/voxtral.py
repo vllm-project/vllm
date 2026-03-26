@@ -56,6 +56,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.transformers_utils.processors.voxtral import MistralCommonVoxtralProcessor
+from vllm.utils.collection_utils import is_list_of
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsTranscription
 from .utils import init_vllm_registered_model, maybe_prefix
@@ -208,7 +209,7 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
     ) -> None:
         # mistral_common's tokenizer's does not follow HF's placeholder norms
         # skip validation here
-        ...
+        pass
 
     def _call_hf_processor(
         self,
@@ -224,12 +225,19 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
             # MistralCommonVoxtralProcessor accepts "audio"
             mm_data["audio"] = audios
 
-        return super()._call_hf_processor(
+        outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            # Avoid padding issue
+            tok_kwargs={**tok_kwargs, "return_tensors": None},
         )
+
+        # Missing batch dimension
+        if is_list_of(outputs["input_ids"], int):
+            outputs["input_ids"] = [outputs["input_ids"]]
+
+        return outputs
 
     def _get_prompt_updates(
         self,
