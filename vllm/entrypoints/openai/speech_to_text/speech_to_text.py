@@ -38,7 +38,7 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import EncoderDecoderInputs, ProcessorInputs
+from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
@@ -171,7 +171,7 @@ class OpenAISpeechToText(OpenAIServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[ProcessorInputs], float]:
+    ) -> tuple[list[EngineInput], float]:
         # Validate request
         language = self.model_cls.validate_language(request.language)
         # Skip to_language validation to avoid extra logging for Whisper.
@@ -250,9 +250,9 @@ class OpenAISpeechToText(OpenAIServing):
 
             parsed_prompts.append(parsed_prompt)
 
-        engine_prompts = await self.renderer.render_cmpl_async(parsed_prompts)
+        engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_prompts, duration
+        return engine_inputs, duration
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -271,7 +271,7 @@ class OpenAISpeechToText(OpenAIServing):
         return prompt
 
     @staticmethod
-    def _get_decoder_prompt_len(engine_prompts: list[ProcessorInputs]) -> int:
+    def _get_decoder_prompt_len(engine_inputs: list[EngineInput]) -> int:
         """Get the length of the decoder prompt. Currently we need to offset
         by the decoder prompt length when running beam search because the mm
         encoder is not currently cached and runs on decode calls; because of
@@ -282,12 +282,13 @@ class OpenAISpeechToText(OpenAIServing):
         encoder/decoder caching is implemented.
         """
         input_len = 0
-        assert len(engine_prompts) > 0
-        first_eng_prompt = engine_prompts[0]
+        assert len(engine_inputs) > 0
+        first_input = engine_inputs[0]
 
-        if first_eng_prompt.get("type") == "enc_dec":
-            first_eng_prompt = cast(EncoderDecoderInputs, first_eng_prompt)
-            input_len = len(first_eng_prompt["decoder_prompt"]["prompt_token_ids"])
+        if first_input.get("type") == "enc_dec":
+            first_input = cast(EncoderDecoderInput, first_input)
+            input_len = len(first_input["decoder_prompt"]["prompt_token_ids"])
+
         return input_len
 
     def _get_verbose_segments(
@@ -409,7 +410,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        engine_prompts, duration_s = await self._preprocess_speech_to_text(
+        engine_inputs, duration_s = await self._preprocess_speech_to_text(
             request=request,
             audio_data=audio_data,
             request_id=request_id,
@@ -420,7 +421,7 @@ class OpenAISpeechToText(OpenAIServing):
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
 
         input_len = (
-            OpenAISpeechToText._get_decoder_prompt_len(engine_prompts)
+            OpenAISpeechToText._get_decoder_prompt_len(engine_inputs)
             if request.use_beam_search
             else 0
         )
@@ -450,12 +451,12 @@ class OpenAISpeechToText(OpenAIServing):
             sampling_params.logprobs = 1
 
         list_result_generator = []
-        for i, engine_prompt in enumerate(engine_prompts):
+        for i, engine_input in enumerate(engine_inputs):
             request_id_item = f"{request_id}_{i}"
 
             self._log_inputs(
                 request_id_item,
-                engine_prompt,
+                engine_input,
                 params=sampling_params,
                 lora_request=lora_request,
             )
@@ -468,7 +469,7 @@ class OpenAISpeechToText(OpenAIServing):
 
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(
-                    prompt=engine_prompt,
+                    prompt=engine_input,
                     params=sampling_params,
                     request_id=request_id_item,
                     lora_request=lora_request,
@@ -476,7 +477,7 @@ class OpenAISpeechToText(OpenAIServing):
                 )
             else:
                 generator = self.engine_client.generate(
-                    engine_prompt,
+                    engine_input,
                     sampling_params,
                     request_id_item,
                     lora_request=lora_request,

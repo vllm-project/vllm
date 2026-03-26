@@ -741,11 +741,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # TP=4 yields intermediate_size_per_partition=384), AITER raises:
         # "device_gemm ... does not support this GEMM problem".
         # Fall back to emulation in that case.
+        # For gpt_oss models, create_weights rounds up the dimensions
+        # internally, so the alignment check is skipped.
         if (
             not self.emulate
             and self.use_rocm_aiter_moe
             and self.ocp_mx_scheme is not None
             and self.ocp_mx_scheme.startswith("w_mxfp4")
+            and self.model_type != "gpt_oss"
             and moe.intermediate_size_per_partition % CK_MXFP4_MOE_DIM_ALIGNMENT != 0
         ):
             logger.warning_once(
@@ -765,7 +768,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         if self.emulate:
             logger.warning_once(
                 f"The current mode (supports_mx={current_platform.supports_mx()}, "
-                f"use_mxfp4_aiter_moe={self.use_rocm_aiter_moe}, "
+                f"use_rocm_aiter_moe={self.use_rocm_aiter_moe}, "
                 f"ocp_mx_scheme={self.ocp_mx_scheme}) "
                 "does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
@@ -818,6 +821,18 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         self.unpadded_hidden_size = extra_weight_attrs.get(
             "unpadded_hidden_size", hidden_size
         )
+
+        # On GFX950, the GFX950MXScaleLayout swizzle requires
+        # hidden_size to be a multiple of 256 (SCALE_K = hidden_size / 32
+        # must be divisible by 8). Pad hidden_size for weight/scale
+        # allocation; the original value is preserved in unpadded_hidden_size.
+        # Only applies to the native (non-emulated) CK path on GFX950.
+        if (
+            self.model_type == "gpt_oss"
+            and current_platform.is_rocm()
+            and not self.emulate
+        ):
+            hidden_size = round_up(hidden_size, 256)
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
