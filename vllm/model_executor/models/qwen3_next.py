@@ -81,11 +81,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
-from vllm.utils.torch_utils import (
-    aux_stream,
-    direct_register_custom_op,
-)
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
@@ -421,12 +417,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.act = ACT2FN[config.hidden_act]
         self.layer_norm_epsilon = config.rms_norm_eps
         self.prefix = prefix
-        self.aux_stream = aux_stream()
-        self.events = (
-            [torch.cuda.Event(), torch.cuda.Event()]
-            if current_platform.is_cuda_alike()
-            else [None, None]
-        )
 
         self.config = config
         self.model_config = vllm_config.model_config
@@ -659,12 +649,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        projected_states_qkvz, projected_states_ba = torch.ops.vllm.gdn_in_proj(
-            hidden_states,
-            sum(self.in_proj_qkvz.output_sizes) // self.tp_size,
-            sum(self.in_proj_ba.output_sizes) // self.tp_size,
-            self.prefix,
-        )
+        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+        projected_states_ba, _ = self.in_proj_ba(hidden_states)
         query, key, value, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
@@ -803,18 +789,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 del q, k, v, dummy_a, dummy_b, g, beta, state, cu_seqlens
 
         torch.accelerator.empty_cache()
-
-    def _forward_in_proj(
-        self, hidden_states: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        projected_states_qkvz, projected_states_ba = maybe_execute_in_parallel(
-            lambda: self.in_proj_qkvz(hidden_states)[0],
-            lambda: self.in_proj_ba(hidden_states)[0],
-            self.events[0],
-            self.events[1],
-            self.aux_stream,
-        )
-        return projected_states_qkvz, projected_states_ba
 
     def _forward_core(
         self,
@@ -1697,32 +1671,6 @@ class Qwen3NextForCausalLM(
         return self.model.get_expert_mapping()
 
 
-def gdn_in_proj(
-    hidden_states: torch.Tensor,
-    qkvz_output_size: int,
-    ba_output_size: int,
-    layer_name: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Custom op for the input projection.
-    """
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
-    return self._forward_in_proj(hidden_states)
-
-
-def gdn_in_proj_fake(
-    hidden_states: torch.Tensor,
-    qkvz_output_size: int,
-    ba_output_size: int,
-    layer_name: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fake implementation for torch.compile."""
-    return hidden_states.new_empty(
-        hidden_states.shape[0], qkvz_output_size
-    ), hidden_states.new_empty(hidden_states.shape[0], ba_output_size)
-
-
 def gdn_attention_core(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
@@ -1755,12 +1703,6 @@ def gdn_attention_core_fake(
     """Fake implementation for torch.compile."""
     return
 
-
-direct_register_custom_op(
-    op_name="gdn_in_proj",
-    op_func=gdn_in_proj,
-    fake_impl=gdn_in_proj_fake,
-)
 
 direct_register_custom_op(
     op_name="gdn_attention_core",
