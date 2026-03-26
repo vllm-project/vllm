@@ -438,8 +438,9 @@ class Platform:
 
         model_config = vllm_config.model_config
         # model_config may be None during testing.
-        if not cache_config.user_specified_block_size and model_config is None:
-            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
+        if model_config is None:
+            if not cache_config.user_specified_block_size:
+                cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             return
 
         from vllm.config.vllm import (
@@ -454,8 +455,9 @@ class Platform:
             vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        if not cache_config.user_specified_block_size and not attn_layers:
-            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
+        if not attn_layers:
+            if not cache_config.user_specified_block_size:
+                cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             return
 
         backend_cls = None
@@ -465,8 +467,9 @@ class Platform:
                 backend_cls = b
                 break
 
-        if not cache_config.user_specified_block_size and backend_cls is None:
-            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
+        if backend_cls is None:
+            if not cache_config.user_specified_block_size:
+                cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             return
 
         assert backend_cls is not None
