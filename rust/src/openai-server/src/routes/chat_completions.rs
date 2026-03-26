@@ -124,7 +124,7 @@ async fn collect_chat_completion(
         })
         .collect::<Vec<_>>();
     let usage = Usage::from_counts(
-        collected.prompt_token_count,
+        collected.prompt_token_count as u32,
         collected.token_ids.len() as u32,
     );
 
@@ -241,7 +241,7 @@ async fn chat_completion_chunk_stream(
                         &response_id,
                         &response_model,
                         created,
-                        Usage::from_counts(prompt_token_count, completion_tokens),
+                        Usage::from_counts(prompt_token_count as u32, completion_tokens),
                     );
                 }
             }

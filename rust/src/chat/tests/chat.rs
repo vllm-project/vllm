@@ -850,7 +850,7 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
     assert_eq!(message.finish_reason, Some(FinishReason::Length));
     assert_eq!(
         message.prompt_token_count,
-        "system: You are terse.\nuser: Say hi\nassistant:".len() as u32
+        "system: You are terse.\nuser: Say hi\nassistant:".len()
     );
     assert_eq!(
         message.token_ids,

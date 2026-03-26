@@ -37,7 +37,7 @@ pub enum DecodedTextEvent {
     /// Terminal event carrying the full decoded text and final metadata.
     Done {
         text: String,
-        prompt_token_count: u32,
+        prompt_token_count: usize,
         /// Raw cumulative output token IDs, including a terminal stop token when
         /// the engine emitted one.
         token_ids: Vec<u32>,
@@ -57,6 +57,7 @@ pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
     yield DecodedTextEvent::Start;
 
     let mut decoder: Option<Box<dyn IncrementalDecoder>> = None;
+    let mut prompt_token_count: Option<usize> = None;
     let mut text = String::new();
     let mut token_ids = Vec::new();
 
@@ -64,9 +65,13 @@ pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
     for next in raw_stream {
         let output = next?;
         token_ids.extend_from_slice(&output.token_ids);
+
         let decoder = decoder.get_or_insert_with(|| {
-            backend
-                .create_decode_stream(&output.prompt_token_ids, decode_options.skip_special_tokens)
+            let prompt_token_ids = output
+                .prompt_token_ids()
+                .expect("first llm output must carry prompt token ids");
+            prompt_token_count = Some(prompt_token_ids.len());
+            backend.create_decode_stream(prompt_token_ids, decode_options.skip_special_tokens)
         });
 
         let suppress_terminal_stop_token = output.finished()
@@ -119,7 +124,8 @@ pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
 
             yield DecodedTextEvent::Done {
                 text,
-                prompt_token_count: output.prompt_token_ids.len() as u32,
+                prompt_token_count: prompt_token_count
+                    .expect("first llm output must carry prompt token ids"),
                 token_ids,
                 finish_reason: output.raw.finish_reason,
                 stop_reason: output.raw.stop_reason,

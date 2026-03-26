@@ -137,13 +137,17 @@ impl<'de> Deserialize<'de> for MaybeWireLogprobs {
 }
 
 impl Serialize for MaybeWireLogprobs {
-    fn serialize<S>(&self, _serializer: S) -> std::result::Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        Err(serde::ser::Error::custom(
-            "MaybeWireLogprobs is decode-only and cannot be serialized",
-        ))
+        // For testing purposes only. We don't actually serialize it into aux frames.
+        match self {
+            Self::Wire(value) => value.serialize(serializer),
+            Self::Direct(value) => WireLogprobs::from_direct(value)
+                .map_err(serde::ser::Error::custom)?
+                .serialize(serializer),
+        }
     }
 }
 
@@ -193,6 +197,60 @@ impl EngineCoreOutput {
 }
 
 impl WireLogprobs {
+    /// Convert semantic per-position logprobs into the Python wire tuple shape.
+    ///
+    /// This exists mainly so Rust-side tests can inject semantic logprobs into mocked engine-core
+    /// outputs without manually building ndarray raw-view tuples.
+    fn from_direct(value: &Logprobs) -> std::result::Result<Self, String> {
+        let rows = value.positions.len();
+        let cols = value
+            .positions
+            .first()
+            .map(|position| position.entries.len())
+            .unwrap_or(0);
+
+        let mut token_ids = Vec::with_capacity(rows.saturating_mul(cols).saturating_mul(8));
+        let mut logprobs = Vec::with_capacity(rows.saturating_mul(cols).saturating_mul(4));
+        let mut token_ranks = Vec::with_capacity(rows.saturating_mul(8));
+
+        for (row_index, position) in value.positions.iter().enumerate() {
+            if position.entries.len() != cols {
+                return Err(format!(
+                    "logprobs row {row_index} length mismatch: expected {cols}, got {}",
+                    position.entries.len()
+                ));
+            }
+            let Some((sampled, _)) = position.entries.split_first() else {
+                return Err(format!("logprobs row {row_index} is empty"));
+            };
+
+            token_ranks.extend_from_slice(&(sampled.rank as i64).to_le_bytes());
+            for entry in &position.entries {
+                token_ids.extend_from_slice(&(entry.token_id as i64).to_le_bytes());
+                logprobs.extend_from_slice(&entry.logprob.to_le_bytes());
+            }
+        }
+
+        Ok(Self {
+            logprob_token_ids: WireNdArray {
+                dtype: "<i8".to_string(),
+                shape: vec![rows, cols],
+                data: WireArrayData::RawView(token_ids),
+            },
+            logprobs: WireNdArray {
+                dtype: "<f4".to_string(),
+                shape: vec![rows, cols],
+                data: WireArrayData::RawView(logprobs),
+            },
+            token_ranks: WireNdArray {
+                dtype: "<i8".to_string(),
+                shape: vec![rows],
+                data: WireArrayData::RawView(token_ranks),
+            },
+            cu_num_generated_tokens: None,
+        })
+    }
+
     /// Resolve the wire-format logprobs into semantic [`Logprobs`] records by looking up aux
     /// frames, decoding raw views, and grouping each row into one [`PositionLogprobs`].
     fn resolve<Frame>(self, frames: &[Frame], field_prefix: &str) -> Result<Logprobs>

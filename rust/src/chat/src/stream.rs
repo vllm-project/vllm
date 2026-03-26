@@ -12,7 +12,7 @@ use crate::event::{AssistantContentBlock, AssistantMessage, ChatEvent};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CollectedAssistantMessage {
     pub message: AssistantMessage,
-    pub prompt_token_count: u32,
+    pub prompt_token_count: usize,
     pub token_ids: Vec<u32>,
     pub finish_reason: Option<FinishReason>,
     pub stop_reason: Option<StopReason>,

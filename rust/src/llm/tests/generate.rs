@@ -8,11 +8,12 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
-    EngineCoreSamplingParams, FinishReason, RequestOutputKind,
+    EngineCoreSamplingParams, FinishReason, Logprobs, MaybeWireLogprobs, PositionLogprobs,
+    RequestOutputKind, TokenLogprob,
 };
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
-use vllm_llm::{Error, GenerateRequest, Llm};
+use vllm_llm::{Error, GeneratePromptInfo, GenerateRequest, Llm};
 use vllm_metrics::METRICS;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -48,6 +49,91 @@ fn request_output_with_events(
         num_external_computed_tokens: 0,
         routed_experts: None,
         num_nans_in_logits: 0,
+    }
+}
+
+fn request_output_with_logprobs(
+    request_id: &str,
+    new_token_ids: Vec<u32>,
+    finish_reason: Option<FinishReason>,
+    new_logprobs: Option<Logprobs>,
+    prompt_logprobs: Option<Logprobs>,
+) -> EngineCoreOutput {
+    EngineCoreOutput {
+        request_id: request_id.to_string(),
+        new_token_ids,
+        new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
+        new_prompt_logprobs_tensors: prompt_logprobs.map(MaybeWireLogprobs::Direct),
+        pooling_output: None,
+        finish_reason,
+        stop_reason: None,
+        events: None,
+        kv_transfer_params: None,
+        trace_headers: None,
+        num_cached_tokens: 0,
+        num_external_computed_tokens: 0,
+        routed_experts: None,
+        num_nans_in_logits: 0,
+    }
+}
+
+fn logprobs_for_position(
+    sampled_token_id: u32,
+    sampled_logprob: f32,
+    sampled_rank: u32,
+    top_token_id: u32,
+    top_logprob: f32,
+) -> Logprobs {
+    Logprobs {
+        positions: vec![PositionLogprobs {
+            entries: vec![
+                TokenLogprob {
+                    token_id: sampled_token_id,
+                    logprob: sampled_logprob,
+                    rank: sampled_rank,
+                },
+                TokenLogprob {
+                    token_id: top_token_id,
+                    logprob: top_logprob,
+                    rank: 1,
+                },
+            ],
+        }],
+    }
+}
+
+fn prompt_logprobs() -> Logprobs {
+    Logprobs {
+        positions: vec![
+            PositionLogprobs {
+                entries: vec![
+                    TokenLogprob {
+                        token_id: 11,
+                        logprob: -0.1,
+                        rank: 2,
+                    },
+                    TokenLogprob {
+                        token_id: 7,
+                        logprob: -0.05,
+                        rank: 1,
+                    },
+                ],
+            },
+            PositionLogprobs {
+                entries: vec![
+                    TokenLogprob {
+                        token_id: 22,
+                        logprob: -0.2,
+                        rank: 3,
+                    },
+                    TokenLogprob {
+                        token_id: 8,
+                        logprob: -0.1,
+                        rank: 1,
+                    },
+                ],
+            },
+        ],
     }
 }
 
@@ -144,8 +230,20 @@ async fn generate_streams_delta_outputs() {
                     push,
                     EngineCoreOutputs {
                         outputs: vec![
-                            request_output("req-delta", vec![1, 2], None),
-                            request_output("req-delta", vec![3], Some(FinishReason::Length)),
+                            request_output_with_logprobs(
+                                "req-delta",
+                                vec![1, 2],
+                                None,
+                                Some(logprobs_for_position(1, -0.3, 4, 9, -0.1)),
+                                Some(prompt_logprobs()),
+                            ),
+                            request_output_with_logprobs(
+                                "req-delta",
+                                vec![3],
+                                Some(FinishReason::Length),
+                                Some(logprobs_for_position(3, -0.4, 5, 10, -0.2)),
+                                None,
+                            ),
                         ],
                         finished_requests: Some(BTreeSet::from(["req-delta".to_string()])),
                         ..Default::default()
@@ -168,12 +266,27 @@ async fn generate_streams_delta_outputs() {
 
     let first = stream.next().await.unwrap().unwrap();
     assert_eq!(first.request_id, "req-delta");
-    assert_eq!(first.prompt_token_ids.as_ref(), &[11, 22]);
+    assert_eq!(
+        first.prompt_info,
+        Some(GeneratePromptInfo {
+            prompt_token_ids: vec![11, 22].into(),
+            prompt_logprobs: Some(prompt_logprobs()),
+        })
+    );
     assert_eq!(first.token_ids, vec![1, 2]);
+    assert_eq!(
+        first.logprobs,
+        Some(logprobs_for_position(1, -0.3, 4, 9, -0.1))
+    );
     assert_eq!(first.raw.finish_reason, None);
 
     let second = stream.next().await.unwrap().unwrap();
+    assert_eq!(second.prompt_info, None);
     assert_eq!(second.token_ids, vec![3]);
+    assert_eq!(
+        second.logprobs,
+        Some(logprobs_for_position(3, -0.4, 5, 10, -0.2))
+    );
     assert_eq!(second.raw.finish_reason, Some(FinishReason::Length));
     assert!(stream.next().await.is_none());
 
@@ -200,8 +313,20 @@ async fn generate_streams_final_only_outputs() {
                     push,
                     EngineCoreOutputs {
                         outputs: vec![
-                            request_output("req-final", vec![4], None),
-                            request_output("req-final", vec![5, 6], Some(FinishReason::Length)),
+                            request_output_with_logprobs(
+                                "req-final",
+                                vec![4],
+                                None,
+                                Some(logprobs_for_position(4, -0.11, 2, 14, -0.09)),
+                                Some(prompt_logprobs()),
+                            ),
+                            request_output_with_logprobs(
+                                "req-final",
+                                vec![5, 6],
+                                Some(FinishReason::Length),
+                                Some(logprobs_for_position(5, -0.22, 3, 15, -0.12)),
+                                None,
+                            ),
                         ],
                         finished_requests: Some(BTreeSet::from(["req-final".to_string()])),
                         ..Default::default()
@@ -223,7 +348,31 @@ async fn generate_streams_final_only_outputs() {
         .unwrap();
 
     let final_output = stream.next().await.unwrap().unwrap();
+    assert_eq!(
+        final_output.prompt_info,
+        Some(GeneratePromptInfo {
+            prompt_token_ids: vec![11, 22].into(),
+            prompt_logprobs: Some(prompt_logprobs()),
+        })
+    );
     assert_eq!(final_output.token_ids, vec![4, 5, 6]);
+    assert_eq!(
+        final_output.logprobs,
+        Some(Logprobs {
+            positions: vec![
+                logprobs_for_position(4, -0.11, 2, 14, -0.09)
+                    .positions
+                    .into_iter()
+                    .next()
+                    .unwrap(),
+                logprobs_for_position(5, -0.22, 3, 15, -0.12)
+                    .positions
+                    .into_iter()
+                    .next()
+                    .unwrap(),
+            ],
+        })
+    );
     assert_eq!(final_output.raw.finish_reason, Some(FinishReason::Length));
     assert!(stream.next().await.is_none());
 

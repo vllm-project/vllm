@@ -121,7 +121,7 @@ impl StructuredEventState {
     /// Close any open block and emit the terminal `Done` event.
     fn finish(
         &mut self,
-        prompt_token_count: u32,
+        prompt_token_count: usize,
         token_ids: Vec<u32>,
         finish_reason: Option<FinishReason>,
         stop_reason: Option<StopReason>,

@@ -1,6 +1,6 @@
 use rmpv::Value;
-use serde::{Deserialize, Deserializer};
-use serde_tuple::Deserialize_tuple;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 /// Tensors and ndarrays are encoded with this extension type in Python.
 ///
@@ -17,7 +17,7 @@ const CUSTOM_TYPE_RAW_VIEW: i8 = 3;
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/outputs.py#L23-L56>
-#[derive(Debug, Clone, PartialEq, Deserialize_tuple)]
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
 pub struct WireLogprobs {
     /// Wire array with shape `[num_positions, max_num_logprobs + 1]`.
     pub logprob_token_ids: WireNdArray,
@@ -40,7 +40,7 @@ pub struct WireLogprobs {
 ///
 /// This matches the custom msgpack representation built by Python `serial_utils.encode_ndarray`
 /// / `encode_tensor`.
-#[derive(Debug, Clone, PartialEq, Deserialize_tuple)]
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
 pub struct WireNdArray {
     pub dtype: String,
     pub shape: Vec<usize>,
@@ -79,6 +79,21 @@ impl<'de> Deserialize<'de> for WireArrayData {
             other => Err(serde::de::Error::custom(format!(
                 "expected raw-view ext or aux frame index, got {other:?}"
             ))),
+        }
+    }
+}
+
+impl Serialize for WireArrayData {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // For testing purposes only. We don't actually serialize it into aux frames.
+        match self {
+            Self::AuxIndex(index) => serializer.serialize_u64(*index as u64),
+            Self::RawView(bytes) => {
+                Value::Ext(CUSTOM_TYPE_RAW_VIEW, bytes.clone()).serialize(serializer)
+            }
         }
     }
 }

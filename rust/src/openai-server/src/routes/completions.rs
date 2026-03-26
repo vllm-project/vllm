@@ -119,7 +119,7 @@ async fn collect_completion(
             matched_stop: None,
         }],
         usage: Some(Usage::from_counts(
-            collected.prompt_token_count,
+            collected.prompt_token_count as u32,
             collected.token_ids.len() as u32,
         )),
         system_fingerprint: None,
@@ -202,7 +202,7 @@ async fn completion_chunk_stream(
                         &response_id,
                         &response_model,
                         created,
-                        Usage::from_counts(prompt_token_count, token_ids.len() as u32),
+                        Usage::from_counts(prompt_token_count as u32, token_ids.len() as u32),
                     ));
                 }
             }
