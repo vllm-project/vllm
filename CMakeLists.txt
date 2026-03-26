@@ -94,10 +94,10 @@ find_package(Torch REQUIRED)
 # This check must happen after find_package(Torch) because that's when CMAKE_CUDA_COMPILER_VERSION gets defined
 if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
    CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
-  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0")
+  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0;12.1")
 elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
    CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
-  set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0")
+  set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0;12.1")
 else()
   set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0")
 endif()
@@ -343,9 +343,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/w8a8/cutlass/scaled_mm_entry.cu"
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
     "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
-    "csrc/cutlass_extensions/common.cpp"
-    "csrc/quantization/w8a8/fp8/per_token_group_quant.cu"
-    "csrc/quantization/w8a8/int8/per_token_group_quant.cu")
+    "csrc/cutlass_extensions/common.cpp")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_EXT_SRC}"
@@ -969,7 +967,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/libtorch_stable/torch_bindings.cpp")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
-    list(APPEND VLLM_STABLE_EXT_SRC "csrc/libtorch_stable/permute_cols.cu")
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/libtorch_stable/permute_cols.cu"
+      "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
+      "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu")
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")

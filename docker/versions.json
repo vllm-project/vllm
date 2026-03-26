@@ -7,6 +7,9 @@
     "PYTHON_VERSION": {
       "default": "3.12"
     },
+    "UBUNTU_VERSION": {
+      "default": "22.04"
+    },
     "BUILD_BASE_IMAGE": {
       "default": "nvidia/cuda:12.9.1-devel-ubuntu20.04"
     },
