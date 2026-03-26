@@ -23,7 +23,7 @@ def _get_expected_num_patches(
     min_num: int,
     max_num: int,
 ):
-    from vllm.model_executor.models.h2ovl import (
+    from vllm.transformers_utils.processors.h2ovl import (
         calculate_h2ovl_targets,
         get_h2ovl_target_ratios,
     )
@@ -106,7 +106,7 @@ def _run_check(
         for image in images
     )
 
-    processed_inputs = processor.apply(
+    processed_inputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs=mm_processor_kwargs,

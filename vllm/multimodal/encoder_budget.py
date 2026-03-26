@@ -62,6 +62,7 @@ class MultiModalBudget:
             processor = mm_registry.create_processor(model_config, cache=cache)
 
             self.cache = cache
+            self.processor = processor
             mm_config = model_config.get_multimodal_config()
             enable_mm_embeds = mm_config is not None and mm_config.enable_mm_embeds
 
@@ -180,7 +181,7 @@ class MultiModalBudget:
 
     def get_modality_with_max_tokens(self) -> str:
         mm_max_toks_per_item = self.mm_max_toks_per_item
-        modality, _ = max(mm_max_toks_per_item.items(), key=lambda x: x[1])
+        modality, _ = max(mm_max_toks_per_item.items(), key=lambda x: (x[1], x[0]))
 
         return modality
 

@@ -30,44 +30,21 @@ from collections.abc import Callable, Iterable
 import torch
 from einops import rearrange
 from torch import nn
-from transformers.activations import ACT2FN
-from transformers.models.qwen3_5.configuration_qwen3_5 import (
-    Qwen3_5Config,
-    Qwen3_5TextConfig,
-)
-from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
-    Qwen3_5MoeConfig,
-    Qwen3_5MoeTextConfig,
-)
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (
-    CacheConfig,
-    ModelConfig,
-    SpeculativeConfig,
-    VllmConfig,
-    get_current_vllm_config,
-)
+from vllm.config import VllmConfig
 from vllm.distributed import (
-    divide,
     get_pp_group,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3_5RMSNorm,
 )
-from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
-    RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.mamba_mixer2 import (
-    mamba_v2_sharded_weight_loader,
-)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncCalculator,
@@ -81,18 +58,25 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
-    sharded_weight_loader,
+    maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.qwen3_5 import (
+    Qwen3_5Config,
+    Qwen3_5TextConfig,
+)
+from vllm.transformers_utils.configs.qwen3_5_moe import (
+    Qwen3_5MoeConfig,
+    Qwen3_5MoeTextConfig,
+)
 
 from .interfaces import (
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
     _require_is_multimodal,
@@ -138,150 +122,81 @@ class Qwen3_5MoeProcessingInfo(Qwen3VLProcessingInfo):
 
 
 class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
-    def __init__(
-        self,
-        config: Qwen3_5TextConfig | Qwen3_5MoeTextConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        speculative_config: SpeculativeConfig | None = None,
-        prefix: str = "",
-    ) -> None:
-        super(Qwen3NextGatedDeltaNet, self).__init__()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.hidden_size = config.hidden_size
-        self.num_v_heads = config.linear_num_value_heads
-        self.num_k_heads = config.linear_num_key_heads
-        self.head_k_dim = config.linear_key_head_dim
-        self.head_v_dim = config.linear_value_head_dim
-        self.key_dim = self.head_k_dim * self.num_k_heads
-        self.value_dim = self.head_v_dim * self.num_v_heads
-
-        self.conv_kernel_size = config.linear_conv_kernel_dim
-        self.layer_idx = extract_layer_index(prefix)
-        self.activation = config.hidden_act
-        self.act = ACT2FN[config.hidden_act]
-        self.layer_norm_epsilon = config.rms_norm_eps
-        self.prefix = prefix
-
-        self.config = config
-        self.model_config = model_config
-        self.cache_config = cache_config
-        self.quant_config = quant_config
-        self.speculative_config = speculative_config
-        self.num_spec = (
-            self.speculative_config.num_speculative_tokens
-            if self.speculative_config
-            else 0
-        )
-
-        # QKV
-        self.conv_dim = self.key_dim * 2 + self.value_dim
-        self.conv1d = ColumnParallelLinear(
-            input_size=self.conv_kernel_size,
-            output_size=self.conv_dim,
-            bias=False,
-            prefix=f"{prefix}.conv1d",
-        )
-        self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
-
-        self.in_proj_qkv = MergedColumnParallelLinear(
-            input_size=self.hidden_size,
-            output_sizes=[self.key_dim, self.key_dim, self.value_dim],
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_qkv",
-        )
-        self.in_proj_z = ColumnParallelLinear(
-            input_size=self.hidden_size,
-            output_size=self.value_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_z",
-        )
-        self.in_proj_b = ColumnParallelLinear(
-            input_size=self.hidden_size,
-            output_size=self.num_v_heads,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_ba",
-        )
-        self.in_proj_a = ColumnParallelLinear(
-            input_size=self.hidden_size,
-            output_size=self.num_v_heads,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_a",
-        )
-
-        query_key_settings = (self.key_dim, 0, False)
-        value_settings = (self.value_dim, 0, False)
-
-        delattr(self.conv1d.weight, "weight_loader")
-        set_weight_attrs(
-            self.conv1d.weight,
-            {
-                "weight_loader": mamba_v2_sharded_weight_loader(
-                    [
-                        query_key_settings,
-                        query_key_settings,
-                        value_settings,
-                    ],
-                    self.tp_size,
-                    self.tp_rank,
-                )
-            },
-        )
-
-        # selective projection used to make dt, B and C input dependant
-
-        # time step projection (discretization)
-        # instantiate once and copy inv_dt in init_weights of PretrainedModel
-        self.dt_bias = nn.Parameter(
-            torch.ones(self.num_v_heads // self.tp_size),
-        )
-        self.A_log = nn.Parameter(
-            torch.empty(
-                divide(self.num_v_heads, self.tp_size),
-            )
-        )
-
-        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
-        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
-
-        self.norm = RMSNormGated(
-            self.head_v_dim,
-            eps=self.layer_norm_epsilon,
-            group_size=None,
-            norm_before_gate=True,
-            device=current_platform.current_device(),
-            dtype=config.dtype,
-        )
-
-        self.out_proj = RowParallelLinear(
-            self.value_dim,
-            self.hidden_size,
-            bias=False,
-            input_is_parallel=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.out_proj",
-        )
-
-        compilation_config = get_current_vllm_config().compilation_config
-        if prefix in compilation_config.static_forward_context:
-            raise ValueError(f"Duplicate layer name: {prefix}")
-        compilation_config.static_forward_context[prefix] = self
-
     def fix_query_key_value_ordering(
         self,
-        mixed_qkv,
-        z,
-        b,
-        a,
+        mixed_qkvz: torch.Tensor,
+        mixed_ba: torch.Tensor,
     ):
         raise NotImplementedError(
             "Qwen3.5 Series dont need to fix query key value ordering"
+        )
+
+    def __init__(
+        self,
+        config: Qwen3_5Config,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
+        create_in_proj_qkvz = vllm_config.lora_config is None
+        super().__init__(
+            config,
+            vllm_config=vllm_config,
+            prefix=prefix,
+            create_in_proj_qkvz=create_in_proj_qkvz,
+        )
+        if vllm_config.lora_config is not None:
+            # Separate in_proj_qkv (Q,K,V) and in_proj_z for LoRA compatibility.
+            # Use MergedColumnParallelLinear for in_proj_qkv because GDN can have
+            # linear_num_key_heads != linear_num_value_heads (e.g. 16 vs 32), so
+            # output sizes [key_dim, key_dim, value_dim] are not representable
+            # with a single QKVParallelLinear (which ties K and V head counts).
+            self.in_proj_qkv = MergedColumnParallelLinear(
+                input_size=self.hidden_size,
+                output_sizes=[self.key_dim, self.key_dim, self.value_dim],
+                bias=False,
+                quant_config=vllm_config.quant_config,
+                prefix=f"{prefix}.in_proj_qkv",
+            )
+            self.in_proj_z = ColumnParallelLinear(
+                input_size=self.hidden_size,
+                output_size=self.value_dim,
+                bias=False,
+                quant_config=vllm_config.quant_config,
+                prefix=f"{prefix}.in_proj_z",
+            )
+
+    def create_qkvz_proj(
+        self,
+        hidden_size: int,
+        key_dim: int,
+        value_dim: int,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> MergedColumnParallelLinear:
+        return MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[key_dim, key_dim, value_dim, value_dim],
+            bias=False,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+    def create_ba_proj(
+        self,
+        hidden_size: int,
+        num_v_heads: int,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> MergedColumnParallelLinear:
+        # Qwen3.5 has separate in_proj_b and in_proj_a weights in the
+        # checkpoint, which are loaded into the fused in_proj_ba parameter
+        # via stacked_params_mapping with shard_id 0 and 1 respectively.
+        return MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[num_v_heads] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=prefix,
         )
 
     def forward(
@@ -300,11 +215,19 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkv, _ = self.in_proj_qkv(hidden_states)
-        z, _ = self.in_proj_z(hidden_states)
+        if hasattr(self, "in_proj_qkv"):
+            # LoRA path: separate in_proj_qkv and in_proj_z
+            mixed_qkv, _ = self.in_proj_qkv(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+            z, _ = self.in_proj_z(hidden_states)
+        else:
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+            qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+            z_size = self.value_dim // self.tp_size
+            mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
         z = z.reshape(z.size(0), -1, self.head_v_dim)
-        b, _ = self.in_proj_b(hidden_states)
-        a, _ = self.in_proj_a(hidden_states)
+        b, a = ba.chunk(2, dim=-1)
 
         b = b.contiguous()
         a = a.contiguous()
@@ -354,18 +277,14 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        speculative_config = vllm_config.speculative_config
 
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
 
         if self.layer_type == "linear_attention":
             self.linear_attn = Qwen3_5GatedDeltaNet(
-                config,
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                speculative_config=speculative_config,
+                config=config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
             )
         elif self.layer_type == "full_attention":
@@ -411,7 +330,6 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                     1,
                     1,
                     config.hidden_size,
-                    dtype=config.dtype,
                 ),
             )
             self.ffn_layer_scale = torch.nn.Parameter(
@@ -419,7 +337,6 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                     1,
                     1,
                     config.hidden_size,
-                    dtype=config.dtype,
                 ),
             )
 
@@ -447,6 +364,7 @@ class Qwen3_5Model(Qwen3NextModel):
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
+        self.enable_lora = vllm_config.lora_config is not None
 
         self.vocab_size = config.vocab_size
 
@@ -473,6 +391,8 @@ class Qwen3_5Model(Qwen3NextModel):
             self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+
+        self.aux_hidden_state_layers: tuple[int, ...] = ()
 
     def load_fused_expert_weights(
         self,
@@ -503,12 +423,31 @@ class Qwen3_5Model(Qwen3NextModel):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
+            # self attention
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
+            # mlp
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
+            ("in_proj_ba", "in_proj_b", 0),
+            ("in_proj_ba", "in_proj_a", 1),
         ]
+
+        if self.enable_lora:
+            stacked_params_mapping.extend(
+                [
+                    ("in_proj_qkv", "in_proj_qkv", (0, 1, 2)),
+                    ("in_proj_z", "in_proj_z", 0),
+                ]
+            )
+        else:
+            stacked_params_mapping.extend(
+                [
+                    ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
+                    ("in_proj_qkvz", "in_proj_z", 3),
+                ]
+            )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -527,6 +466,12 @@ class Qwen3_5Model(Qwen3NextModel):
 
             if name.startswith("mtp."):
                 continue
+
+            # Remapping the name of FP8 kv-scale.
+            if name.endswith("scale"):
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if "experts.gate_up_proj" in name or "experts.down_proj" in name:
@@ -551,7 +496,10 @@ class Qwen3_5Model(Qwen3NextModel):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                if param_name == "in_proj_z" and self.enable_lora:
+                    weight_loader(param, loaded_weight)
+                else:
+                    weight_loader(param, loaded_weight, shard_id)
                 break
             else:
                 is_expert_weight = False
@@ -644,6 +592,7 @@ class Qwen3_5Model(Qwen3NextModel):
 class Qwen3_5ForCausalLMBase(
     nn.Module,
     HasInnerState,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
 ):
@@ -654,6 +603,9 @@ class Qwen3_5ForCausalLMBase(
             "v_proj",
         ],
         "gate_up_proj": ["gate_proj", "up_proj"],
+        # GDN fused projections.
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -677,6 +629,15 @@ class Qwen3_5ForCausalLMBase(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
+        # When LoRA is enabled, GDN uses separate in_proj_qkv and in_proj_z
+        # instead of merged in_proj_qkvz; pack mapping must match.
+        if vllm_config.lora_config:
+            base = getattr(Qwen3_5ForCausalLMBase, "packed_modules_mapping", {})
+            self.packed_modules_mapping = {k: list(v) for k, v in base.items()}
+            self.packed_modules_mapping.pop("in_proj_qkvz", None)
+            self.packed_modules_mapping["in_proj_qkv"] = ["in_proj_qkv"]
+            self.packed_modules_mapping["in_proj_z"] = ["in_proj_z"]
+
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
@@ -696,6 +657,13 @@ class Qwen3_5ForCausalLMBase(
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def forward(
         self,
@@ -751,9 +719,18 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    # Qwen3.5 does not support multimodal pruning (EVS).
+    supports_multimodal_pruning = False
+
+    packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
         nn.Module.__init__(self)
+        self.update_packed_mapping(enable_lora=vllm_config.lora_config is not None)
         config: Qwen3_5Config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
@@ -761,10 +738,8 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         self.config = config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        self.video_pruning_rate = multimodal_config.video_pruning_rate
-        self.is_multimodal_pruning_enabled = (
-            multimodal_config.is_multimodal_pruning_enabled()
-        )
+        # Qwen3.5 does not support multimodal pruning (EVS).
+        self.is_multimodal_pruning_enabled = False
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
@@ -783,19 +758,27 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             self.language_model.make_empty_intermediate_tensors
         )
 
+    def update_packed_mapping(self, enable_lora: bool):
+        # When LoRA is enabled, GDN uses separate in_proj_qkv and in_proj_z
+        if enable_lora:
+            base = getattr(
+                Qwen3_5ForConditionalGeneration, "packed_modules_mapping", {}
+            )
+            self.packed_modules_mapping = {k: list(v) for k, v in base.items()}
+            self.packed_modules_mapping.pop("in_proj_qkvz", None)
+            self.packed_modules_mapping["in_proj_qkv"] = ["in_proj_qkv"]
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.language_model.embed_input_ids,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
@@ -810,6 +793,12 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         )
 
         return inputs_embeds
+
+    def recompute_mrope_positions(self, *args, **kwargs):
+        raise NotImplementedError(
+            "Qwen3.5 does not support multimodal pruning (EVS). "
+            "recompute_mrope_positions should never be called."
+        )
 
     def forward(
         self,
@@ -868,7 +857,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod
@@ -957,9 +948,13 @@ class Qwen3_5_MoeMixtureOfExperts(MixtureOfExperts):
 class Qwen3_5MoeForConditionalGeneration(
     Qwen3_5ForConditionalGeneration, Qwen3_5_MoeMixtureOfExperts
 ):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    # For MoE LoRA weights loading
+    is_3d_moe_weight: bool = True
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
         nn.Module.__init__(self)
+        self.update_packed_mapping(enable_lora=vllm_config.lora_config is not None)
         config: Qwen3_5MoeConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
@@ -967,10 +962,8 @@ class Qwen3_5MoeForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        self.video_pruning_rate = multimodal_config.video_pruning_rate
-        self.is_multimodal_pruning_enabled = (
-            multimodal_config.is_multimodal_pruning_enabled()
-        )
+        # Qwen3.5 does not support multimodal pruning (EVS).
+        self.is_multimodal_pruning_enabled = False
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(

@@ -20,7 +20,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     NaiveBatchedExperts,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEPModular,
 )
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
@@ -33,13 +33,15 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.flashinfer import (
+    has_flashinfer_cutlass_fused_moe,
+    has_flashinfer_nvlink_one_sided,
+)
 from vllm.utils.import_utils import (
     has_aiter,
     has_deep_ep,
     has_deep_gemm,
     has_mori,
-    has_pplx,
 )
 
 
@@ -65,19 +67,20 @@ class ExpertInfo:
     activation_format: mk.FusedMoEActivationFormat
     supported_dtypes: list[torch.dtype | str]
     blocked_quantization_support: bool
-    supports_chunking: bool
     supports_expert_map: bool
     needs_matching_quant: bool = False
     needs_deep_gemm: bool = False
     needs_aiter: bool = False
 
 
-PREPARE_FINALIZE_INFO: dict[mk.FusedMoEPrepareAndFinalize, PrepareFinalizeInfo] = {}
-EXPERT_INFO: dict[mk.FusedMoEPermuteExpertsUnpermute, ExpertInfo] = {}
-MK_ALL_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalize] = []
-MK_MULTI_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalize] = []
-MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalize] = []
-MK_FUSED_EXPERT_TYPES: list[mk.FusedMoEPermuteExpertsUnpermute] = []
+PREPARE_FINALIZE_INFO: dict[
+    mk.FusedMoEPrepareAndFinalizeModular, PrepareFinalizeInfo
+] = {}
+EXPERT_INFO: dict[mk.FusedMoEExpertsModular, ExpertInfo] = {}
+MK_ALL_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
+MK_MULTI_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
+MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
+MK_FUSED_EXPERT_TYPES: list[mk.FusedMoEExpertsModular] = []
 
 standard_format = mk.FusedMoEActivationFormat.Standard
 batched_format = mk.FusedMoEActivationFormat.BatchedExperts
@@ -126,7 +129,6 @@ def register_experts(
     activation_format: mk.FusedMoEActivationFormat,
     supported_dtypes: list[torch.dtype | str],
     blocked_quantization_support: bool,
-    supports_chunking: bool,
     supports_expert_map: bool,
     needs_matching_quant: bool = False,
     needs_deep_gemm: bool = False,
@@ -140,7 +142,6 @@ def register_experts(
         activation_format,
         supported_dtypes,
         blocked_quantization_support,
-        supports_chunking,
         supports_expert_map,
         needs_matching_quant,
         needs_deep_gemm,
@@ -163,7 +164,7 @@ def expert_info(kind) -> ExpertInfo:
 
 
 register_prepare_and_finalize(
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEPModular,
     standard_format,
     common_float_types,
     blocked_quantization_support=True,
@@ -175,7 +176,6 @@ register_experts(
     batched_format,
     common_float_types,
     blocked_quantization_support=True,
-    supports_chunking=False,
     supports_expert_map=False,
     needs_matching_quant=True,
 )
@@ -185,7 +185,6 @@ register_experts(
     standard_format,
     common_float_and_int_types,
     blocked_quantization_support=True,
-    supports_chunking=True,
     supports_expert_map=True,
     needs_matching_quant=True,
 )
@@ -195,16 +194,15 @@ register_experts(
     batched_format,
     common_float_and_int_types,
     blocked_quantization_support=True,
-    supports_chunking=False,
     supports_expert_map=True,
 )
 
 # Disable on blackwell for now
 if has_deep_ep() and not current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
         DeepEPHTPrepareAndFinalize,
     )
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
         DeepEPLLPrepareAndFinalize,
     )
 
@@ -238,29 +236,16 @@ if has_mori():
         supports_apply_weight_on_input=False,
     )
 
-if has_pplx():
-    from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-        PplxPrepareAndFinalize,
-    )
-
-    register_prepare_and_finalize(
-        PplxPrepareAndFinalize,
-        batched_format,
-        common_float_and_int_types,
-        blocked_quantization_support=True,
-        backend="pplx",
-    )
-
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import (  # noqa: E501
-        FlashInferCutlassMoEPrepareAndFinalize,
-    )
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
+        FlashInferNVLinkTwoSidedPrepareAndFinalize,
+    )
 
     register_prepare_and_finalize(
-        FlashInferCutlassMoEPrepareAndFinalize,
+        FlashInferNVLinkTwoSidedPrepareAndFinalize,
         standard_format,
         nvfp4_types + fp8_types,
         blocked_quantization_support=True,
@@ -274,7 +259,6 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
         standard_format,
         nvfp4_types + fp8_types,
         blocked_quantization_support=True,
-        supports_chunking=True,
         # Note: this is a hack to get it to run for now
         supports_expert_map=True,
     )
@@ -282,6 +266,36 @@ else:
     FlashInferCutlassMoEPrepareAndFinalize = None
     FlashInferExperts = None
 
+if (
+    has_flashinfer_nvlink_one_sided()
+    and has_flashinfer_cutlass_fused_moe()
+    and current_platform.has_device_capability(100)
+):
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one_sided import (  # noqa: E501
+        FlashInferNVLinkOneSidedPrepareAndFinalize,
+    )
+
+    register_prepare_and_finalize(
+        FlashInferNVLinkOneSidedPrepareAndFinalize,
+        standard_format,
+        nvfp4_types,
+        blocked_quantization_support=False,
+        backend="flashinfer_nvlink_one_sided",
+        supports_apply_weight_on_input=False,
+    )
+
+if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+        TrtLlmNvFp4ExpertsModular,
+    )
+
+    register_experts(
+        TrtLlmNvFp4ExpertsModular,
+        standard_format,
+        nvfp4_types,
+        blocked_quantization_support=False,
+        supports_expert_map=True,
+    )
 
 if has_aiter():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
@@ -293,7 +307,6 @@ if has_aiter():
         standard_format,
         fp8_types,
         blocked_quantization_support=True,
-        supports_chunking=True,
         supports_expert_map=True,
         needs_aiter=True,
     )
@@ -306,7 +319,6 @@ if has_deep_gemm() and is_deep_gemm_supported():
         batched_format,
         fp8_types,
         blocked_quantization_support=True,
-        supports_chunking=False,
         supports_expert_map=False,
         needs_matching_quant=False,
         needs_deep_gemm=True,
@@ -316,7 +328,6 @@ if has_deep_gemm() and is_deep_gemm_supported():
         standard_format,
         fp8_types,
         blocked_quantization_support=True,
-        supports_chunking=True,
         supports_expert_map=True,
         needs_matching_quant=False,
         needs_deep_gemm=True,
@@ -326,7 +337,6 @@ if has_deep_gemm() and is_deep_gemm_supported():
         standard_format,
         common_float_and_int_types,
         blocked_quantization_support=True,
-        supports_chunking=True,
         supports_expert_map=True,
         needs_matching_quant=True,
         needs_deep_gemm=True,
@@ -343,7 +353,6 @@ if cutlass_fp8_supported():
         standard_format,
         fp8_types,
         blocked_quantization_support=False,
-        supports_chunking=True,
         supports_expert_map=False,
     )
     register_experts(
@@ -351,7 +360,6 @@ if cutlass_fp8_supported():
         batched_format,
         fp8_types,
         blocked_quantization_support=False,
-        supports_chunking=False,
         supports_expert_map=False,
     )
 else:
@@ -366,7 +374,6 @@ if cutlass_fp4_supported():
         standard_format,
         nvfp4_types,
         blocked_quantization_support=True,
-        supports_chunking=True,
         supports_expert_map=False,
     )
 else:
@@ -444,12 +451,12 @@ def make_cutlass_strides(
 
 
 def make_fused_experts(
-    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
+    fused_experts_type: mk.FusedMoEExpertsModular,
     moe: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig,
     num_dispatchers: int,
     N: int,
-) -> mk.FusedMoEPermuteExpertsUnpermute:
+) -> mk.FusedMoEExpertsModular:
     if (
         fused_experts_type.activation_format()
         == mk.FusedMoEActivationFormat.BatchedExperts

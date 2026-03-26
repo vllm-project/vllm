@@ -38,7 +38,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature, Glm4vProcessor
-from transformers.models.glm4v.configuration_glm4v import Glm4vVisionConfig
+from transformers.models.glm4v.configuration_glm4v import (
+    Glm4vTextConfig,
+    Glm4vVisionConfig,
+)
 from transformers.models.glm4v.image_processing_glm4v import (
     Glm4vImageProcessor,
     smart_resize,
@@ -50,6 +53,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
@@ -63,6 +67,9 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.compressed_tensors import (
+    compressed_tensors,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
@@ -71,7 +78,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -280,7 +286,9 @@ class Glm4vVisionAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             # Change qkv prefix to align with GLM-4.5V-FP8 quantization cfg
-            prefix=f"{prefix}.qkv_proj" if quant_config else f"{prefix}.qkv",
+            prefix=f"{prefix}.qkv_proj"
+            if isinstance(quant_config, compressed_tensors.CompressedTensorsConfig)
+            else f"{prefix}.qkv",
             disable_tp=use_data_parallel,
         )
         self.proj = RowParallelLinear(
@@ -599,6 +607,7 @@ class Glm4vVisionEmbeddings(nn.Module):
 class Glm4vVisionTransformer(nn.Module):
     def __init__(
         self,
+        text_config: Glm4vTextConfig,
         vision_config: Glm4vVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
@@ -723,10 +732,11 @@ class Glm4vVisionTransformer(nn.Module):
         cu_seqlens: torch.Tensor,
     ) -> torch.Tensor | None:
         max_seqlen = None
-        if (
-            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-            or self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
-        ):
+        if self.attn_backend in {
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
+        }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
 
@@ -752,11 +762,10 @@ class Glm4vVisionTransformer(nn.Module):
             grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
         ).cumsum(dim=0, dtype=torch.int32)
         cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
-        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
-
         # pre-compute max_seqlen for attn mask to reduce cuMemcpy operations
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
         x = self.embeddings(
             x, seqlens, grid_thw, image_type_ids[:, 0], image_type_ids[:, 1]
         )
@@ -869,9 +878,28 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
 
         return preprocessed_size, num_vision_tokens
 
+    def _get_image_max_pixels(self) -> int:
+        """Read max_pixels from the HF image processor config.
+
+        Despite the name, ``longest_edge`` is a pixel **area** (total pixel
+        count), not an edge length.  The HF processor passes it directly to
+        ``smart_resize`` as the ``max_pixels`` argument, which constrains
+        ``t_bar * h_bar * w_bar <= max_pixels``.
+        """
+        return self.get_image_processor().size["longest_edge"]
+
     def get_image_size_with_most_features(self) -> ImageSize:
+        # Use num_frames=1 for single-image budget estimation.
+        # _get_vision_info defaults to num_frames=16 (video), which
+        # makes smart_resize constrain 16*H*W <= max_pixels, vastly
+        # underestimating the spatial budget for a single image and
+        # causing encoder cache overflow for large images
+        # (see https://github.com/vllm-project/vllm/issues/34040).
         max_image_size, _ = self._get_vision_info(
-            image_width=9999999, image_height=9999999
+            image_width=9999999,
+            image_height=9999999,
+            num_frames=1,
+            max_image_pixels=self._get_image_max_pixels(),
         )
         return max_image_size
 
@@ -884,7 +912,8 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
-            max_image_pixels=28 * 28 * 2 * 6144,
+            num_frames=1,
+            max_image_pixels=self._get_image_max_pixels(),
         )
         return num_image_tokens
 
@@ -1142,7 +1171,7 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1152,8 +1181,8 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
         return {
             "image": self._get_dummy_images(
@@ -1180,49 +1209,32 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         num_videos: int,
         overrides: VideoDummyOptions | None = None,
     ) -> list[VideoItem]:
-        if overrides:
-            if overrides.num_frames:
-                if overrides.num_frames > num_frames:
-                    logger.warning(
-                        "video.num_frames override (%d) exceeds model's "
-                        "maximum number of frames (%d), will be ignored",
-                        overrides.num_frames,
-                        num_frames,
-                    )
-                num_frames = min(num_frames, overrides.num_frames)
-            if overrides.width:
-                if overrides.width > width:
-                    logger.warning(
-                        "video.width override (%d) exceeds model's "
-                        "maximum width (%d), will be ignored",
-                        overrides.width,
-                        width,
-                    )
-                width = min(width, overrides.width)
-            if overrides.height:
-                if overrides.height > height:
-                    logger.warning(
-                        "video.height override (%d) exceeds model's "
-                        "maximum height (%d), will be ignored",
-                        overrides.height,
-                        height,
-                    )
-                height = min(height, overrides.height)
+        # GLM 4.6V requires at least 2 frames
+        num_frames = max(num_frames, 2)
+        if overrides and overrides.num_frames:
+            overrides.num_frames = max(overrides.num_frames, 2)
 
-        num_frames = max(num_frames, 2)  # GLM 4.6V requires 2 frames
-        video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
+        videos = super()._get_dummy_videos(
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_videos=num_videos,
+            overrides=overrides,
+        )
+        videos = [v.copy() for v in videos]
+
         video_items = []
-        for i in range(num_videos):
+        for video in videos:
+            video_num_frames = video.shape[0]
             video_metadata = {
                 "fps": 2.0,
-                "duration": num_frames / 2.0,
-                "total_num_frames": num_frames,
-                "frames_indices": [i for i in range(num_frames)],
+                "duration": video_num_frames / 2.0,
+                "total_num_frames": video_num_frames,
+                "frames_indices": list(range(video_num_frames)),
                 "video_backend": "opencv",
                 "do_sample_frames": False,
             }
-            video_item = (video.copy(), video_metadata)
-            video_items.append(video_item)
+            video_items.append((video, video_metadata))
 
         return video_items
 
@@ -1416,6 +1428,7 @@ class Glm4vForConditionalGeneration(
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Glm4vVisionTransformer(
+                config.text_config,
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-5),
                 quant_config=quant_config,

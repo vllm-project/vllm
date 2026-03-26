@@ -23,8 +23,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 from transformers.activations import GELUActivation
+from transformers.image_utils import ChannelDimension
 from transformers.modeling_outputs import (
     BaseModelOutputWithPooling,
 )
@@ -34,6 +35,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
@@ -52,7 +54,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -147,21 +148,38 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        image_processor,
+        image_processor: BaseImageProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
-        if image_processor is None:
-            image_processor = self.get_image_processor()
-
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
+
+        if self.ctx.model_config.trust_remote_code:
+            # Defined in HF Hub repo
+            min_pixels_key = "min_pixels"
+            max_pixels_key = "max_pixels"
+        else:
+            # Defined in Transformers library (requires v5.0 or above)
+            min_pixels_key = "shortest_edge"
+            max_pixels_key = "longest_edge"
+
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {min_pixels_key: override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {max_pixels_key: override_max_pixels}
+
         resized_height, resized_width = smart_resize(
             height=image_height,
             width=image_width,
             factor=patch_size * merge_size,
-            min_pixels=image_processor.min_pixels,
-            max_pixels=image_processor.max_pixels,
+            min_pixels=size[min_pixels_key],
+            max_pixels=size[max_pixels_key],
         )
         preprocessed_size = ImageSize(width=resized_width, height=resized_height)
 
@@ -176,12 +194,13 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         hf_config = self.get_hf_config()
+        image_processor = self.get_image_processor()
 
         # See `smart_resize` for the calculation of the image size.
         merge_size = hf_config.vision_config.spatial_merge_size
         patch_size = hf_config.vision_config.patch_size
         factor = merge_size * patch_size
-        max_num_tokens = self.get_image_processor().max_pixels // (factor**2)
+        max_num_tokens = image_processor.max_pixels // (factor**2)
         # Find factors of max_num_tokens close to its square root
         # to create a dummy image with a reasonable aspect ratio.
         h_patches = int(math.sqrt(max_num_tokens))
@@ -203,12 +222,12 @@ class PaddleOCRVLDummyInputsBuilder(BaseDummyInputsBuilder[PaddleOCRVLProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         max_image_size = self.info.get_image_size_with_most_features()
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -231,8 +250,12 @@ class PaddleOCRVLMultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
+            final_mm_kwargs = dict(mm_kwargs or {})
+            final_mm_kwargs.setdefault("images_kwargs", {})
+            # vLLM use PIL.Image, always set channel_last
+            final_mm_kwargs["input_data_format"] = ChannelDimension.LAST
             processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
+                self.info.get_hf_processor(**final_mm_kwargs),
                 dict(text=prompt, **mm_data),
                 dict(**mm_kwargs, **tok_kwargs),
             )
@@ -275,6 +298,7 @@ class PaddleOCRVLMultiModalProcessor(
                 image_width=image_size.width,
                 image_height=image_size.height,
                 image_processor=image_processor,
+                mm_kwargs=hf_processor_mm_kwargs,
             )
 
             return [image_token_id] * num_image_tokens
@@ -467,7 +491,7 @@ class SiglipVisionEmbeddings(nn.Module):
                 )
             (
                 batch_size,
-                squence_len,
+                sequence_len,
                 channel,
                 height,
                 width,
@@ -725,14 +749,7 @@ class SiglipEncoder(nn.Module):
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
         )
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }:
-            raise RuntimeError(
-                f"PaddleOCR-VL does not support {self.attn_backend} backend now."
-            )
+
         self.layers = nn.ModuleList(
             [
                 SiglipEncoderLayer(
@@ -800,6 +817,7 @@ class SiglipEncoder(nn.Module):
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 

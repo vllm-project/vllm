@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from pydantic import ValidationError
 
 from vllm.compilation.counter import compilation_counter
@@ -413,16 +414,21 @@ def test_cudagraph_sizes_post_init(
         ctx,
         patch("vllm.config.parallel.cuda_device_count_stateless", return_value=tp_size),
     ):
+        kwargs = {}
+        if cudagraph_capture_sizes is not None:
+            kwargs["cudagraph_capture_sizes"] = cudagraph_capture_sizes
+        if max_cudagraph_capture_size is not None:
+            kwargs["max_cudagraph_capture_size"] = max_cudagraph_capture_size
         compilation_config = CompilationConfig(
-            cudagraph_capture_sizes=cudagraph_capture_sizes,
-            max_cudagraph_capture_size=max_cudagraph_capture_size,
             pass_config=PassConfig(
                 enable_sp=enable_sp,
                 fuse_norm_quant=True,
                 fuse_act_quant=True,
                 eliminate_noops=True,
+                sp_min_token_num=512 if enable_sp else None,
             ),
             cudagraph_mode=cudagraph_mode,
+            **kwargs,
         )
         engine_args = EngineArgs(
             model="facebook/opt-125m",
@@ -569,3 +575,100 @@ def test_compile_sizes_padding_validation():
     assert sorted(config.compile_sizes) == [3, 5, 7]
     dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
     dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)  # Should not raise
+
+
+@pytest.mark.parametrize(
+    "capture_sizes, max_size, num_blocks, expected_sizes, expected_max",
+    [
+        # Normal capping: sizes filtered to <= num_blocks
+        (
+            [1, 2, 4, 8, 16, 32, 64, 128, 256, 512],
+            512,
+            200,
+            [1, 2, 4, 8, 16, 32, 64, 128],
+            128,
+        ),
+        # No capping needed: num_blocks >= max
+        ([1, 2, 4, 8, 16], 16, 1000, [1, 2, 4, 8, 16], 16),
+        # Exact boundary: num_blocks == max (no capping)
+        ([1, 2, 4, 8, 16, 32], 32, 32, [1, 2, 4, 8, 16, 32], 32),
+        # All sizes capped: num_blocks < smallest size
+        ([8, 16, 32], 32, 4, [], 0),
+        # num_blocks <= 0: early return, no change
+        ([1, 2, 4], 4, 0, [1, 2, 4], 4),
+    ],
+)
+def test_adjust_cudagraph_sizes_for_mamba_cache(
+    capture_sizes, max_size, num_blocks, expected_sizes, expected_max
+):
+    """Test that cudagraph capture sizes are correctly capped to fit
+    available Mamba cache blocks.
+
+    See: https://github.com/vllm-project/vllm/issues/34094
+    """
+    config = CompilationConfig(
+        cudagraph_capture_sizes=capture_sizes,
+        max_cudagraph_capture_size=max_size,
+        cudagraph_mode=CUDAGraphMode.NONE,
+    )
+    config.adjust_cudagraph_sizes_for_mamba_cache(num_blocks)
+    assert config.cudagraph_capture_sizes == expected_sizes
+    assert config.max_cudagraph_capture_size == expected_max
+    # Invariant: last element == max_cudagraph_capture_size
+    if expected_sizes:
+        assert config.cudagraph_capture_sizes[-1] == config.max_cudagraph_capture_size
+
+
+def test_inductor_asserts_default_disabled(monkeypatch):
+    """Test that inductor runtime asserts are disabled by default
+    (INFO logging level) on torch < 2.12."""
+    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
+
+    import importlib
+
+    import vllm.envs
+
+    importlib.reload(vllm.envs)
+
+    config = CompilationConfig()
+    if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
+        assert config.inductor_compile_config.get("size_asserts") is False
+        assert config.inductor_compile_config.get("alignment_asserts") is False
+        assert config.inductor_compile_config.get("scalar_asserts") is False
+
+
+def test_inductor_asserts_enabled_in_debug(monkeypatch):
+    """Test that VLLM_LOGGING_LEVEL=DEBUG enables inductor runtime asserts
+    on torch < 2.12."""
+    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "DEBUG")
+
+    import importlib
+
+    import vllm.envs
+
+    importlib.reload(vllm.envs)
+
+    config = CompilationConfig()
+    if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
+        assert config.inductor_compile_config.get("size_asserts") is True
+        assert config.inductor_compile_config.get("alignment_asserts") is True
+        assert config.inductor_compile_config.get("scalar_asserts") is True
+
+
+def test_inductor_asserts_user_override(monkeypatch):
+    """Test that explicit inductor_compile_config overrides the
+    debug-logging default."""
+    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
+
+    import importlib
+
+    import vllm.envs
+
+    importlib.reload(vllm.envs)
+
+    config = CompilationConfig(
+        inductor_compile_config={"size_asserts": True},
+    )
+    assert config.inductor_compile_config.get("size_asserts") is True
+    if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
+        assert config.inductor_compile_config.get("alignment_asserts") is False

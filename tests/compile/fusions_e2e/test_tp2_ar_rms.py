@@ -5,6 +5,7 @@ from collections.abc import Callable
 import pytest
 
 from vllm.config import PassConfig
+from vllm.platforms import current_platform
 
 from ...utils import multi_gpu_test
 from .common import (
@@ -16,7 +17,10 @@ from .common import (
 )
 from .models import (
     FLASHINFER_ATTN,
+    FLASHINFER_MLA_ATTN,
     TRITON_ATTN,
+    deepseek_v3_fp8,
+    gpt_oss_20b,
     llama3_8b,
     llama3_8b_fp4,
     llama3_8b_fp8,
@@ -26,14 +30,18 @@ from .models import (
     qwen3_a3b_fp8,
 )
 
+pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides",
-    # qwen3-fp8 should still fuse AR+rms even though group quant is not yet supported
-    [llama3_8b_fp8, llama4_scout_fp8, qwen3_a3b_fp8],
+    # qwen3 & dsv3 should still fuse AR+rms even though group quant is not yet supported
+    [llama3_8b_fp8, llama4_scout_fp8, qwen3_a3b_fp8, deepseek_v3_fp8],
 )
-@pytest.mark.parametrize("attn_backend", [TRITON_ATTN, FLASHINFER_ATTN])
+@pytest.mark.parametrize(
+    "attn_backend", [TRITON_ATTN, FLASHINFER_ATTN, FLASHINFER_MLA_ATTN]
+)
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("quant_fp8", "rms_norm"))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
@@ -51,7 +59,8 @@ def test_tp2_ar_rms_fp8_fusions(
 ):
     matches = matches_fn(n_layers)
 
-    if "qwen" in model_name.lower() and "-quant_fp8" in custom_ops:
+    block_fp8 = "qwen" in model_name.lower() or "deepseek" in model_name.lower()
+    if block_fp8 and "-quant_fp8" in custom_ops:
         # This is why config forces +quant_fp8 by default
         pytest.skip("native QuantFP8 matching not supported for group quant")
 
@@ -150,7 +159,7 @@ def test_tp2_ar_rms_fp4_fusions(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b, qwen3_a3b],
+    [llama3_8b, qwen3_a3b, gpt_oss_20b],
 )
 @pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
 @pytest.mark.parametrize("n_layers", [4])

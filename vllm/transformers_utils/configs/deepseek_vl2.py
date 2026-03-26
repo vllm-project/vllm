@@ -89,8 +89,7 @@ class MlpProjectorConfig(PretrainedConfig):
 
 class DeepseekVLV2Config(PretrainedConfig):
     model_type = "deepseek_vl_v2"
-    vision_config: VisionEncoderConfig
-    projector_config: MlpProjectorConfig
+    architectures: list[str] | None = None
 
     tile_tag: str = "2D"
     global_view_pos: str = "head"
@@ -105,6 +104,9 @@ class DeepseekVLV2Config(PretrainedConfig):
     ):
         super().__init__(**kwargs)
 
+        if self.architectures is None:
+            self.architectures = ["DeepseekVLV2ForCausalLM"]
+
         vision_config = kwargs.get("vision_config", {})
         self.vision_config = VisionEncoderConfig(**vision_config)
 
@@ -112,6 +114,9 @@ class DeepseekVLV2Config(PretrainedConfig):
         self.projector_config = MlpProjectorConfig(**projector_config)
 
         language_config = kwargs.get("language_config", {})
+        # remove kv_lora_rank if not specified, passing None is prohibited
+        if language_config.get("kv_lora_rank") is None:
+            language_config.pop("kv_lora_rank", None)
         self.text_config = DeepseekV2Config(**language_config)
 
         self.tile_tag = tile_tag
@@ -120,8 +125,7 @@ class DeepseekVLV2Config(PretrainedConfig):
         self.vocab_size = self.text_config.vocab_size
 
         # update model_type for OCR models
-        architectures = self.architectures or kwargs.get("architectures", [])
-        if "DeepseekOCRForCausalLM" in architectures:
+        if "DeepseekOCRForCausalLM" in self.architectures:
             self.model_type = "deepseek_ocr"
-        elif "DeepseekOCR2ForCausalLM" in architectures:
+        elif "DeepseekOCR2ForCausalLM" in self.architectures:
             self.model_type = "deepseek_ocr2"

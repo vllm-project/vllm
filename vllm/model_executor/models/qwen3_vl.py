@@ -51,9 +51,13 @@ from transformers.video_utils import VideoMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, parallel_state
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
+from vllm.model_executor.layers.attention.mm_encoder_attention import (
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -73,9 +77,9 @@ from vllm.multimodal.evs import (
     recompute_mrope_positions,
 )
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
+    MultiModalFieldElem,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     PlaceholderRange,
@@ -90,13 +94,16 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers.protocol import TokenizerLike
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -244,6 +251,7 @@ class Qwen3_VisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor,  # Only used for FlashInfer CuDNN backend
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
@@ -251,6 +259,7 @@ class Qwen3_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
 
         x = x + self.mlp(self.norm2(x))
@@ -332,6 +341,13 @@ class Qwen3_VisionTransformer(nn.Module):
         )
         self.num_grid_per_side = int(self.num_position_embeddings**0.5)
 
+        use_data_parallel = is_vit_use_data_parallel()
+        self.tp_size = (
+            1
+            if use_data_parallel
+            else parallel_state.get_tensor_model_parallel_world_size()
+        )
+
         # NOTE: This is used for creating empty tensor for all_gather for
         # DP ViT. Here out_hidden_size is enlarged due to deepstack
         self.out_hidden_size = vision_config.out_hidden_size * (
@@ -385,14 +401,6 @@ class Qwen3_VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
         )
 
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }:
-            raise RuntimeError(
-                f"Qwen3-VL does not support {self.attn_backend} backend now."
-            )
         self.blocks = nn.ModuleList(
             [
                 Qwen3_VisionBlock(
@@ -521,55 +529,120 @@ class Qwen3_VisionTransformer(nn.Module):
 
         return torch.cat(outputs, dim=0)
 
-    def compute_attn_mask_seqlen(
+    def prepare_encoder_metadata(
         self,
-        cu_seqlens: torch.Tensor,
-    ) -> torch.Tensor:
-        max_seqlen = torch.zeros([], device=cu_seqlens.device)
-        if (
-            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-            or self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
-        ):
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        return max_seqlen
+        grid_thw_list: list[list[int]],
+        *,
+        max_batch_size: int | None = None,
+        max_seqlen_override: int | None = None,
+        device: torch.device | None = None,
+    ) -> dict[str, torch.Tensor | None]:
+        """Compute encoder metadata from grid_thw_list.
+
+        Shared by the eager forward path, CUDA graph capture, and
+        CUDA graph replay to avoid duplicated implementation.
+
+        Args:
+            grid_thw_list: Grid configurations as list of [t, h, w].
+            max_batch_size: If set, pad cu_seqlens to this size
+                (needed for CUDA graph capture/replay).
+            max_seqlen_override: If set, use this value for max_seqlen
+                instead of computing from cu_seqlens (needed for CUDA
+                graph capture to cover worst-case replay scenarios).
+            device: Device to place tensors on. Defaults to self.device.
+        """
+        if device is None:
+            device = self.device
+
+        metadata: dict[str, torch.Tensor | None] = {}
+
+        # Positional embeddings
+        metadata["pos_embeds"] = self.fast_pos_embed_interpolate(grid_thw_list)
+        rotary_cos, rotary_sin = self.rot_pos_emb(grid_thw_list)
+        metadata["rotary_pos_emb_cos"] = rotary_cos
+        metadata["rotary_pos_emb_sin"] = rotary_sin
+
+        # cu_seqlens from grid_thw
+        grid_thw_np = np.array(grid_thw_list, dtype=np.int32)
+        patches_per_frame = grid_thw_np[:, 1] * grid_thw_np[:, 2]
+        cu_seqlens = np.repeat(patches_per_frame, grid_thw_np[:, 0]).cumsum(
+            dtype=np.int32
+        )
+        cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
+
+        # Pad cu_seqlens if max_batch_size specified
+        if max_batch_size is not None:
+            num_seqs = len(cu_seqlens) - 1
+            if num_seqs < max_batch_size:
+                cu_seqlens = np.concatenate(
+                    [
+                        cu_seqlens,
+                        np.full(
+                            max_batch_size - num_seqs,
+                            cu_seqlens[-1],
+                            dtype=np.int32,
+                        ),
+                    ]
+                )
+
+        # sequence_lengths (backend-specific)
+        metadata["sequence_lengths"] = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend, cu_seqlens, device
+        )
+
+        # max_seqlen
+        if max_seqlen_override is not None:
+            max_seqlen_val = max_seqlen_override
+        else:
+            max_seqlen_val = MMEncoderAttention.compute_max_seqlen(
+                self.attn_backend, cu_seqlens
+            )
+        # Keep max_seqlen on CPU: attention wrappers call .item() on it,
+        # and having it on GPU would capture a wasteful D2H copy in CUDA
+        # graphs without changing behavior (the scalar is baked at capture).
+        metadata["max_seqlen"] = torch.tensor(max_seqlen_val, dtype=torch.int32)
+
+        # Recompute cu_seqlens (backend-specific transformation)
+        metadata["cu_seqlens"] = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.attn_backend,
+            cu_seqlens,
+            self.hidden_size,
+            self.tp_size,
+            device,
+        )
+
+        return metadata
 
     def forward(
         self,
         x: torch.Tensor,
         grid_thw: torch.Tensor | list[list[int]],
+        *,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
         hidden_states = self.patch_embed(hidden_states)
 
-        if isinstance(grid_thw, list):
-            grid_thw_list = grid_thw
-            grid_thw = np.array(grid_thw, dtype=np.int32)
-        else:
-            grid_thw_list = grid_thw.tolist()
-            grid_thw = grid_thw.numpy()
+        if encoder_metadata is None:
+            if isinstance(grid_thw, list):
+                grid_thw_list = grid_thw
+            else:
+                grid_thw_list = grid_thw.tolist()
+            encoder_metadata = self.prepare_encoder_metadata(grid_thw_list)
 
-        pos_embeds = self.fast_pos_embed_interpolate(grid_thw_list)
+        pos_embeds = encoder_metadata["pos_embeds"]
         hidden_states = hidden_states + pos_embeds
-        rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw_list)
-
-        cu_seqlens = np.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
-            axis=0, dtype=np.int32
-        )
-        cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
-        cu_seqlens = torch.from_numpy(cu_seqlens)
-
         hidden_states = hidden_states.unsqueeze(1)
-        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
-        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
 
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
                 hidden_states,
-                cu_seqlens=cu_seqlens,
-                rotary_pos_emb_cos=rotary_pos_emb_cos,
-                rotary_pos_emb_sin=rotary_pos_emb_sin,
-                max_seqlen=max_seqlen,
+                cu_seqlens=encoder_metadata["cu_seqlens"],
+                rotary_pos_emb_cos=encoder_metadata["rotary_pos_emb_cos"],
+                rotary_pos_emb_sin=encoder_metadata["rotary_pos_emb_sin"],
+                max_seqlen=encoder_metadata["max_seqlen"],
+                sequence_lengths=encoder_metadata.get("sequence_lengths"),
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)
@@ -642,13 +715,9 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         image_height: int,
         num_frames: int = 2,
         do_resize: bool = True,
-        image_processor: Qwen2VLImageProcessorFast | Qwen3VLVideoProcessor | None,
+        image_processor: Qwen2VLImageProcessorFast | Qwen3VLVideoProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> tuple[ImageSize, int]:
-        if image_processor is None and num_frames > 1:
-            image_processor = self.get_video_processor()
-        elif image_processor is None:
-            image_processor = self.get_image_processor()
-
         is_video = isinstance(image_processor, Qwen3VLVideoProcessor)
 
         hf_config = self.get_hf_config()
@@ -656,6 +725,15 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = vision_config.temporal_patch_size
+
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {"shortest_edge": override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {"longest_edge": override_max_pixels}
 
         if do_resize:
             if is_video:
@@ -667,12 +745,13 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             else:
                 smart_resize = image_smart_resize
                 extra_kwargs = {}
+
             resized_height, resized_width = smart_resize(
                 height=image_height,
                 width=image_width,
                 factor=patch_size * merge_size,
-                min_pixels=image_processor.size["shortest_edge"],
-                max_pixels=image_processor.size["longest_edge"],
+                min_pixels=size["shortest_edge"],
+                max_pixels=size["longest_edge"],
                 **extra_kwargs,
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
@@ -710,17 +789,25 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> int:
         video_processor = self.get_video_processor()
-        video_max_pixels = video_processor.size["longest_edge"]
+
+        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+        video_size = mm_kwargs.get("size", video_processor.size)
+        temporal_patch_size = mm_kwargs.get(
+            "temporal_patch_size", video_processor.temporal_patch_size
+        )
+
         # video_max_pixels contains the temporal compression factor,
         # so we divide by 2 to get the maximum number of image pixels.
+        video_max_pixels = video_size["longest_edge"]
         target_width, target_height = self.get_image_size_with_most_features(
-            max_pixels=video_max_pixels // video_processor.temporal_patch_size
+            max_pixels=video_max_pixels // temporal_patch_size
         )
         num_video_soft_tokens = self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
             num_frames=2,
-            image_processor=None,
+            image_processor=video_processor,
+            mm_kwargs={},
         )
         return num_video_soft_tokens
 
@@ -742,12 +829,12 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
     def _get_video_second_idx(
         self,
         metadata: dict[str, Any],
-        out_item: MultiModalKwargsItem,
         do_sample_frames: bool | None = None,
         sampled_fps: float | None = None,
+        sampled_num_frames: int | None = None,
     ) -> list[int]:
         video_processor = self.get_video_processor()
-        merge_size = video_processor.merge_size
+        temporal_patch_size = video_processor.temporal_patch_size
         indices = metadata["frames_indices"]
 
         # metadata["fps"] refers to the true fps of the input video.
@@ -759,11 +846,20 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         # video loader), we need to re-calculate the indices from original
         # metadata.
         if do_sample_frames:
-            # here video_fps is the fps of the sampled video, and
-            # metadata["fps"] refers to the fps of the original video.
-            sampled_fps = sampled_fps if sampled_fps else video_processor.fps
             total_num_frames = metadata["total_num_frames"]
-            num_frames = int(total_num_frames / metadata["fps"] * sampled_fps)
+
+            # When num_frames is explicitly provided, use it directly
+            # instead of computing from fps. This mirrors the behavior of
+            # HF's Qwen3VLVideoProcessor.sample_frames where num_frames
+            # and fps are mutually exclusive.
+            if sampled_num_frames is not None:
+                num_frames = sampled_num_frames
+            else:
+                # here video_fps is the fps of the sampled video, and
+                # metadata["fps"] refers to the fps of the original video.
+                sampled_fps = sampled_fps if sampled_fps else video_processor.fps
+                num_frames = int(total_num_frames / metadata["fps"] * sampled_fps)
+
             num_frames = min(
                 min(
                     max(num_frames, video_processor.min_frames),
@@ -777,7 +873,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
                 .astype(int)
                 .tolist()
             )
-        timestamps = self._calculate_timestamps(indices, video_fps, merge_size)
+        timestamps = self._calculate_timestamps(indices, video_fps, temporal_patch_size)
         return timestamps
 
 
@@ -795,12 +891,12 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
         target_image_width, target_image_height = (
             self.info.get_image_size_with_most_features()
@@ -829,12 +925,19 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         target_num_frames = max(target_num_frames, 2)
 
         video_processor = self.info.get_video_processor()
-        video_max_pixels = video_processor.size["longest_edge"]
+
+        mm_kwargs = self.info.ctx.get_merged_mm_kwargs({})
+        video_size = mm_kwargs.get("size", video_processor.size)
+        temporal_patch_size = mm_kwargs.get(
+            "temporal_patch_size", video_processor.temporal_patch_size
+        )
+
         # video_max_pixels contains the temporal compression factor,
         # so we divide by 2 to get the maximum number of image pixels.
+        video_max_pixels = video_size["longest_edge"]
         target_video_width, target_video_height = (
             self.info.get_image_size_with_most_features(
-                max_pixels=video_max_pixels // video_processor.temporal_patch_size
+                max_pixels=video_max_pixels // temporal_patch_size
             )
         )
         target_video_size, _ = self.info._get_vision_info(
@@ -842,6 +945,7 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             image_height=target_video_height,
             num_frames=target_num_frames,
             image_processor=video_processor,
+            mm_kwargs={},
         )
         # NOTE: we need to do this check here since Qwen3-VL resizes video
         # frames depending on how many frames there are.
@@ -894,20 +998,30 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         height: int,
         num_frames: int,
         num_videos: int,
+        overrides: VideoDummyOptions | None = None,
     ) -> list[VideoItem]:
-        video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
+        videos = super()._get_dummy_videos(
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_videos=num_videos,
+            overrides=overrides,
+        )
+        videos = [v.copy() for v in videos]
+
         video_items = []
-        for i in range(num_videos):
+        for video in videos:
+            video_num_frames = video.shape[0]
             video_metadata = {
                 "fps": 2.0,
-                "duration": num_frames / 2.0,
-                "total_num_frames": num_frames,
-                "frames_indices": [i for i in range(num_frames)],
+                "duration": video_num_frames / 2.0,
+                "total_num_frames": video_num_frames,
+                "frames_indices": list(range(video_num_frames)),
                 "video_backend": "opencv",
                 "do_sample_frames": False,
             }
-            video_item = (video.copy(), video_metadata)
-            video_items.append(video_item)
+            video_items.append((video, video_metadata))
+
         return video_items
 
 
@@ -927,6 +1041,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         if videos := mm_data.pop("videos", []):
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
+            timestamps_per_video = []
 
             for item in videos:
                 video_array, metadata = item
@@ -950,15 +1065,74 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     **{k: metadata[k] for k in metadata if k != "do_sample_frames"}
                 )
 
+                # Compute timestamps here where we have access to metadata
+                timestamps = self.info._get_video_second_idx(
+                    metadata=metadata,
+                    do_sample_frames=video_mm_kwargs["do_sample_frames"],
+                    sampled_fps=video_mm_kwargs.get("fps"),
+                    sampled_num_frames=video_mm_kwargs.get("num_frames"),
+                )
+                timestamps_per_video.append(timestamps)
+
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
                 video_mm_data["video_metadata"] = [[metadata]]
+
+                # When num_frames is specified, explicitly set fps=None
+                # to prevent HF's BaseVideoProcessor.preprocess() from
+                # filling in the class default (fps=2) via setdefault(),
+                # which would conflict with num_frames (mutually exclusive).
+                if "num_frames" in video_mm_kwargs and "fps" not in video_mm_kwargs:
+                    video_mm_kwargs["fps"] = None
 
                 video_outputs = super()._call_hf_processor(
                     prompt="<|vision_start|><|video_pad|><|vision_end|>",
                     mm_data=video_mm_data,
                     mm_kwargs=video_mm_kwargs,
                     tok_kwargs=tok_kwargs,
+                )
+
+                merge_size = processor.video_processor.merge_size
+                # Get video grid info for EVS calculation.
+                video_grid_thw = video_outputs["video_grid_thw"]
+                num_frames = int(video_grid_thw[0, 0])
+                tokens_per_frame_base = int(video_grid_thw[0, 1:].prod()) // (
+                    merge_size**2
+                )
+
+                # Apply EVS if enabled.
+                video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
+                if video_pruning_rate is not None and video_pruning_rate > 0.0:
+                    num_tokens = compute_retained_tokens_count(
+                        tokens_per_frame=tokens_per_frame_base,
+                        num_frames=num_frames,
+                        q=video_pruning_rate,
+                    )
+                    # Here we just need placeholders that won't actually be replaced -
+                    # we just need to make sure the total number of tokens is correct
+                    # assign all tokens to the first frame.
+                    tokens_per_frame = [num_tokens] + [0] * (num_frames - 1)
+                    select_token_id = False
+                else:
+                    tokens_per_frame = [tokens_per_frame_base] * num_frames
+                    select_token_id = True
+
+                # Generate the video replacement with EVS-adjusted token counts
+                tokenizer = self.info.get_tokenizer()
+                hf_config = self.info.get_hf_config()
+                video_repl = Qwen3VLMultiModalProcessor.get_video_repl(
+                    tokens_per_frame=tokens_per_frame,
+                    timestamps=timestamps,
+                    tokenizer=tokenizer,
+                    vision_start_token_id=hf_config.vision_start_token_id,
+                    vision_end_token_id=hf_config.vision_end_token_id,
+                    video_token_id=hf_config.video_token_id,
+                    select_token_id=select_token_id,
+                )
+
+                # Convert token IDs to text for the HF processor flow
+                video_placeholder = tokenizer.decode(
+                    video_repl.full, skip_special_tokens=False
                 )
                 input_ids = video_outputs.pop("input_ids")
                 video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
@@ -973,6 +1147,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             video_outputs = dict(
                 pixel_values_videos=torch.cat(pixel_values_videos_lst),
                 video_grid_thw=torch.cat(video_grid_thw_lst),
+                timestamps=timestamps_per_video,
             )
         else:
             video_outputs = dict()
@@ -1028,60 +1203,42 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             grid_thw = out_item["video_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
 
-            video, metadata = mm_items["video"][item_idx]
-            do_sample_frames = hf_processor_mm_kwargs.get("do_sample_frames")
             sampled_fps = hf_processor_mm_kwargs.get("fps")
             if is_list_of(sampled_fps, float):
                 sampled_fps = sampled_fps[item_idx]
-            timestamps = self.info._get_video_second_idx(
-                metadata, out_item, do_sample_frames, sampled_fps
-            )
 
+            timestamps = out_item["timestamps"].data
             assert len(timestamps) == grid_thw[0], (
                 f"The timestamps length({len(timestamps)}) should be equal "
                 f"video length ({grid_thw[0]})."
             )
 
-            frames_idx_token = [
-                tokenizer.encode(f"<{curr_time:.1f} seconds>", add_special_tokens=False)
-                for curr_time in timestamps
-            ]
-            tokens_per_frame = int(grid_thw[1:].prod()) // merge_length
-            per_frame_token_counts = [tokens_per_frame for _ in frames_idx_token]
+            # Compute tokens per frame, with EVS support
+            num_frames = int(grid_thw[0])
+            tokens_per_frame_base = int(grid_thw[1:].prod()) // merge_length
 
             video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
             if video_pruning_rate is not None and video_pruning_rate > 0.0:
-                total_retained = compute_retained_tokens_count(
-                    tokens_per_frame,
-                    len(frames_idx_token),
-                    video_pruning_rate,
+                num_tokens = compute_retained_tokens_count(
+                    tokens_per_frame=tokens_per_frame_base,
+                    num_frames=num_frames,
+                    q=video_pruning_rate,
                 )
-                if len(frames_idx_token) == 0:
-                    per_frame_token_counts = []
-                elif len(frames_idx_token) == 1:
-                    per_frame_token_counts = [tokens_per_frame]
-                else:
-                    first_frame_tokens = tokens_per_frame
-                    remaining_tokens = max(total_retained - first_frame_tokens, 0)
-                    base = remaining_tokens // (len(frames_idx_token) - 1)
-                    remainder = remaining_tokens % (len(frames_idx_token) - 1)
-                    per_frame_token_counts = [first_frame_tokens]
-                    for frame_idx in range(1, len(frames_idx_token)):
-                        extra = base + (1 if (frame_idx - 1) < remainder else 0)
-                        per_frame_token_counts.append(extra)
+                tokens_per_frame = [num_tokens] + [0] * (num_frames - 1)
+                select_token_id = False
+            else:
+                tokens_per_frame = [tokens_per_frame_base] * num_frames
+                select_token_id = True
 
-            placeholder = []
-            for frame_idx, timestamp_tokens in enumerate(frames_idx_token):
-                placeholder.extend(timestamp_tokens)
-                tokens_this_frame = per_frame_token_counts[
-                    frame_idx if frame_idx < len(per_frame_token_counts) else -1
-                ]
-                placeholder.extend(
-                    [vision_start_token_id]
-                    + [video_token_id] * tokens_this_frame
-                    + [vision_end_token_id]
-                )
-            return PromptUpdateDetails.select_token_id(placeholder, video_token_id)
+            return Qwen3VLMultiModalProcessor.get_video_repl(
+                tokens_per_frame=tokens_per_frame,
+                timestamps=timestamps,
+                tokenizer=tokenizer,
+                vision_start_token_id=vision_start_token_id,
+                vision_end_token_id=vision_end_token_id,
+                video_token_id=video_token_id,
+                select_token_id=select_token_id,
+            )
 
         return [
             PromptReplacement(
@@ -1098,6 +1255,69 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             ),
         ]
 
+    @staticmethod
+    def get_video_repl(
+        *,
+        tokens_per_frame: list[int],
+        timestamps: list[float | int],
+        tokenizer: TokenizerLike,
+        vision_start_token_id: int,
+        vision_end_token_id: int,
+        video_token_id: int,
+        select_token_id: bool = False,
+    ) -> PromptUpdateDetails[list[int]]:
+        """Build prompt replacement for a video in Qwen3VL format.
+
+        The replacement structure for each frame is:
+        timestamp_tokens + vision_start_token + video_tokens + vision_end_token
+
+        Args:
+            tokens_per_frame: Number of video tokens per frame (can vary per frame for
+                EVS).
+            timestamps: List of timestamps in seconds for each frame
+            tokenizer: Tokenizer to encode timestamp strings
+            vision_start_token_id: Token ID for vision start marker
+            vision_end_token_id: Token ID for vision end marker
+            video_token_id: Token ID for video content
+
+        Returns:
+            PromptUpdateDetails with full token sequence
+        """
+        assert len(timestamps) == len(tokens_per_frame), (
+            "timestamps and tokens_per_frame must have the same length"
+        )
+
+        # Tokenize timestamp strings independently to avoid tokenizer merging
+        # tokens across boundaries.
+        # TODO: switch to `_seq2tokens` which has some caching.
+        timestamp_token_ids = [
+            tokenizer.encode(f"<{timestamp:.1f} seconds>", add_special_tokens=False)
+            for timestamp in timestamps
+        ]
+
+        # Build the full token sequence
+        all_token_ids = []
+        for frame_timestamp_ids, num_tokens in zip(
+            timestamp_token_ids, tokens_per_frame
+        ):
+            # Add timestamp tokens
+            all_token_ids.extend(frame_timestamp_ids)
+
+            # Add vision tokens: vision_start + video_tokens + vision_end
+            all_token_ids.append(vision_start_token_id)
+            all_token_ids.extend([video_token_id] * num_tokens)
+            all_token_ids.append(vision_end_token_id)
+
+        if select_token_id:
+            return PromptUpdateDetails.select_token_id(all_token_ids, video_token_id)
+
+        # NOTE: we use `from_seq` instead of `select_token_id` because we want all
+        # tokens in the placeholder to be initially marked as candidates. Then
+        # in `get_input_embeddings``, we refine the mask to only replace
+        # `video_token_id` / `image_token_id`` positions with video/image embeddings,
+        # keeping text embeddings for timestamps and structural tokens.
+        return PromptUpdateDetails.from_seq(all_token_ids)
+
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -1112,17 +1332,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
     }
 )
 class Qwen3LLMModel(Qwen3Model):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        vision_config = vllm_config.model_config.hf_config.vision_config
-        if not get_pp_group().is_first_rank and hasattr(
-            vision_config, "deepstack_visual_indexes"
-        ):
-            assert self.start_layer >= len(vision_config.deepstack_visual_indexes), (
-                "start_layer should be greater than or equal to "
-                "len(deepstack_visual_indexes)"
-            )
-
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -1143,13 +1352,10 @@ class Qwen3LLMModel(Qwen3Model):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = []
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
-            if layer_idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
-
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -1163,6 +1369,9 @@ class Qwen3LLMModel(Qwen3Model):
                     hidden_states
                     + deepstack_input_embeds[f"deepstack_input_embeds_{layer_idx}"]
                 )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -1178,7 +1387,7 @@ class Qwen3LLMModel(Qwen3Model):
 class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3ForCausalLM, self).__init__()
-        config = vllm_config.model_config.hf_config.text_config
+        config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -1216,9 +1425,11 @@ class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
 class Qwen3VLForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,
+    SupportsEagle,
     SupportsEagle3,
     SupportsMultiModalPruning,
 ):
@@ -1262,6 +1473,7 @@ class Qwen3VLForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.video_pruning_rate = multimodal_config.video_pruning_rate
@@ -1298,19 +1510,23 @@ class Qwen3VLForConditionalGeneration(
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3LLMForCausalLM(
-                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
+                vllm_config=vllm_config.with_hf_config(config.text_config),
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
+
+        if not get_pp_group().is_first_rank and hasattr(
+            config.vision_config, "deepstack_visual_indexes"
+        ):
+            assert self.language_model.start_layer >= len(
+                config.vision_config.deepstack_visual_indexes
+            ), (
+                "start_layer should be greater than or equal to "
+                "len(deepstack_visual_indexes)"
             )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.language_model.model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.language_model.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
 
     def _get_deepstack_input_embeds(
         self,
@@ -1359,6 +1575,178 @@ class Qwen3VLForConditionalGeneration(
             for idx in range(self.deepstack_num_level):
                 self.deepstack_input_embeds[idx][:num_tokens].zero_()
 
+    # -- SupportsEncoderCudaGraph protocol methods --
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+            EncoderCudaGraphConfig,
+        )
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            input_key="pixel_values",
+            buffer_keys=[
+                "pos_embeds",
+                "rotary_pos_emb_cos",
+                "rotary_pos_emb_sin",
+                "cu_seqlens",
+                "max_seqlen",
+                "sequence_lengths",
+            ],
+            out_hidden_size=self.visual.out_hidden_size,
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config,
+    ) -> tuple[int, int]:
+        # Min: estimated smallest possible encoder input.
+        # 224x224 image → 16x16 patches, spatial_merge_size=2 → 8x8 = 64 tokens
+        min_budget = 64
+        # Max: capped by max_num_batched_tokens
+        max_budget = vllm_config.scheduler_config.max_num_batched_tokens
+        return (min_budget, max_budget)
+
+    def get_encoder_cudagraph_num_items(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> int:
+        return len(mm_kwargs["image_grid_thw"])
+
+    def get_encoder_cudagraph_per_item_output_tokens(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        m = self.visual.spatial_merge_size
+        return [t * (h // m) * (w // m) for t, h, w in mm_kwargs["image_grid_thw"]]
+
+    def get_encoder_cudagraph_per_item_input_sizes(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        return [t * h * w for t, h, w in mm_kwargs["image_grid_thw"]]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        grid_thw = mm_kwargs["image_grid_thw"]
+        pixel_values = mm_kwargs["pixel_values"]
+
+        if len(indices) == 0:
+            return {
+                "pixel_values": pixel_values[:0],
+                "image_grid_thw": [],
+            }
+
+        # Compute cumulative patch offsets for slicing pixel_values
+        patches_per_item = [t * h * w for t, h, w in grid_thw]
+        cum_patches = [0]
+        for p in patches_per_item:
+            cum_patches.append(cum_patches[-1] + p)
+
+        selected_pv = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        selected_grid = [grid_thw[i] for i in indices]
+
+        return {
+            "pixel_values": selected_pv,
+            "image_grid_thw": selected_grid,
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        spatial_merge_size = self.visual.spatial_merge_size
+        per_image_output = token_budget // max_batch_size
+
+        # Synthetic rectangular grid: [1, merge, per_image_output * merge]
+        # produces exactly per_image_output tokens per image.
+        grid_config = [
+            [1, spatial_merge_size, per_image_output * spatial_merge_size]
+            for _ in range(max_batch_size)
+        ]
+
+        # Create dummy pixel_values
+        patch_embed = self.visual.patch_embed
+        in_channels = patch_embed.proj.in_channels
+        patch_size = patch_embed.patch_size
+        temporal_patch_size = patch_embed.temporal_patch_size
+        total_patches = sum(t * h * w for t, h, w in grid_config)
+        flattened_patch_size = (
+            in_channels * temporal_patch_size * patch_size * patch_size
+        )
+        dummy_pixel_values = torch.randn(
+            total_patches, flattened_patch_size, device=device, dtype=dtype
+        )
+
+        # Override max_seqlen with a safe upper bound for capture.
+        # max_seqlen.item() gets baked into the CUDA graph (not replayed),
+        # so the capture value must cover any replay scenario.
+        # Worst case: 1 image consuming the full budget ->
+        # seq_len = token_budget * spatial_merge_size^2.
+        buffers = self.visual.prepare_encoder_metadata(
+            grid_config,
+            max_batch_size=max_batch_size,
+            max_seqlen_override=token_budget * (spatial_merge_size**2),
+            device=device,
+        )
+
+        mm_kwargs = {
+            "pixel_values": dummy_pixel_values,
+            "image_grid_thw": grid_config,
+        }
+
+        return EncoderCudaGraphCaptureInputs(
+            mm_kwargs=mm_kwargs,
+            buffers=buffers,
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+    ):
+        from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        grid_thw_list = mm_kwargs["image_grid_thw"]
+
+        buffers = self.visual.prepare_encoder_metadata(
+            grid_thw_list,
+            max_batch_size=max_batch_size,
+        )
+
+        return EncoderCudaGraphReplayBuffers(buffers=buffers)
+
+    def encoder_cudagraph_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        buffers: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        pixel_values = mm_kwargs["pixel_values"]
+        grid_thw = mm_kwargs["image_grid_thw"]
+        return self.visual(pixel_values, grid_thw, encoder_metadata=buffers)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        pixel_values = mm_kwargs["pixel_values"]
+        grid_thw = mm_kwargs["image_grid_thw"]
+        return self.visual(pixel_values, grid_thw)
+
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> Qwen2_5_VLImageInputs | None:
@@ -1390,6 +1778,7 @@ class Qwen3VLForConditionalGeneration(
         video_embeds = kwargs.pop("video_embeds", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
         second_per_grid_ts = kwargs.pop("second_per_grid_ts", None)
+        timestamps = kwargs.pop("timestamps", None)
 
         if pixel_values_videos is None and video_embeds is None:
             return None
@@ -1400,6 +1789,7 @@ class Qwen3VLForConditionalGeneration(
                 pixel_values_videos=pixel_values_videos,
                 video_grid_thw=video_grid_thw,
                 second_per_grid_ts=second_per_grid_ts,
+                timestamps=timestamps,
             )
 
         if video_embeds is not None:
@@ -1407,6 +1797,7 @@ class Qwen3VLForConditionalGeneration(
                 type="video_embeds",
                 video_embeds=video_embeds,
                 video_grid_thw=video_grid_thw,
+                timestamps=timestamps,
             )
 
     def _process_image_input(
@@ -1473,19 +1864,29 @@ class Qwen3VLForConditionalGeneration(
 
         Returns:
             Tuple of image embeddings for each image item.
-            Resulting embeddings will have extra 4 channels for
-            computed mrope positions.
+            Resulting embeddings will have extra 5 channels for
+            computed mrope positions, consistent with video embeddings.
         """
-        merge_size = self.visual.spatial_merge_size
-        grid_thw = image_input["image_grid_thw"]
-        grid_thw_list = grid_thw.tolist()
-        image_embeds_out = []
-        for emb, size in zip(image_embeds_split, grid_thw_list):
-            positions = compute_mrope_for_media(size, merge_size).to(emb.device)
-            emb = torch.cat([emb, positions], dim=1)
-            image_embeds_out.append(emb)
-        image_embeds_split = image_embeds_out
-        return tuple(image_embeds_split)
+        if self.is_multimodal_pruning_enabled:
+            merge_size = self.visual.spatial_merge_size
+            grid_thw = image_input["image_grid_thw"]
+            grid_thw_list = grid_thw.tolist()
+            image_embeds_out = []
+            for emb, size in zip(image_embeds_split, grid_thw_list):
+                positions = compute_mrope_for_media(size, merge_size).to(emb.device)
+                positions = torch.cat(
+                    [
+                        positions,
+                        torch.zeros_like(
+                            positions[:, 0:1]
+                        ),  # Dummy extra fifth channel
+                    ],
+                    dim=1,
+                )
+                emb = torch.cat([emb, positions], dim=1)
+                image_embeds_out.append(emb)
+            image_embeds_split = tuple(image_embeds_out)
+        return image_embeds_split
 
     def _postprocess_video_embeds_evs(
         self,
@@ -1502,62 +1903,218 @@ class Qwen3VLForConditionalGeneration(
 
         Returns:
             Tuple of video embeddings for each video item.
-            Resulting embeddings will have extra 4 channels for
-            computed mrope positions.
+            Resulting embeddings will have extra 5 channels for computed mrope
+            positions, and whether the index corresponds to a video embedding.
         """
         grid_thw = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
         grid_thw_list = grid_thw.tolist()
         merge_size = self.visual.spatial_merge_size
 
-        # Cast to long to match the original code
-        # https://github.com/huggingface/transformers/blob/41980ce93e775f6c88500c51c8db7946fc6a2add/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py#L491 # noqa
-        second_per_grid_ts = video_input.get("second_per_grid_ts")
-        if second_per_grid_ts is None:
-            # For Qwen3-VL, second_per_grid_ts might not be available
-            # Use default value of 1.0 for each video
-            second_per_grid_ts = torch.ones(len(grid_thw_list), dtype=torch.long)
-        else:
-            second_per_grid_ts = second_per_grid_ts.long()
-        tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)
-
+        # Apply EVS to each video.
         video_embeds_out = []
-        for emb, size, video_second_per_grid_t in zip(
-            video_embeds_split, grid_thw_list, second_per_grid_ts
-        ):
-            # For each video, we compute retention mask using EVS
-            retention_mask = compute_retention_mask(
-                emb,
-                size,
-                spatial_merge_size=self.visual.spatial_merge_size,
-                q=self.video_pruning_rate,
+        for video_idx, (emb, size) in enumerate(zip(video_embeds_split, grid_thw_list)):
+            # Compute positions.
+            timestamps = video_input.timestamps[video_idx]
+            num_frames = len(timestamps)
+
+            t, h, w = size
+            if self.is_multimodal_pruning_enabled:
+                # For each video, compute retention mask using EVS.
+                # retention_mask: [11424].
+                retention_mask = compute_retention_mask(
+                    emb,
+                    size,
+                    spatial_merge_size=self.visual.spatial_merge_size,
+                    q=self.video_pruning_rate,
+                )
+                # Apply retention mask.
+                emb = emb[retention_mask]
+
+                # Calculate the actual number of retained tokens per frame.
+                num_frames, rows, cols = (
+                    t,
+                    h // merge_size,
+                    w // merge_size,
+                )
+                retention_mask_thw = retention_mask.reshape(num_frames, rows, cols)
+                num_tokens_per_frame = (
+                    retention_mask_thw.sum(dim=(1, 2)).long().tolist()
+                )
+            else:
+                feature_size = emb.shape[0] // num_frames
+                num_tokens_per_frame = [feature_size] * num_frames
+                retention_mask = None
+
+            emb = self._create_final_video_embeddings(
+                video_embeddings=emb,
+                num_tokens_per_frame=num_tokens_per_frame,
+                timestamps=timestamps,
+                video_grid_thw=size,
+                retention_mask=retention_mask,
             )
 
-            # Debug logging for EVS pruning
-            logger.debug(
-                "EVS: Video tokens pruned from %d to %d (T=%d,H=%d,W=%d, "
-                "pruning_rate=%.2f, reduction=%.1f%%)",
-                emb.shape[0],
-                retention_mask.sum().item(),
-                size[0],
-                size[1],
-                size[2],
-                self.video_pruning_rate,
-                (1 - retention_mask.float().mean().item()) * 100,
-            )
-
-            positions = compute_mrope_for_media(
-                size,
-                merge_size,
-                tokens_per_second=tokens_per_second,
-                video_second_per_grid=video_second_per_grid_t.item(),
-            ).to(emb.device)
-
-            emb = emb[retention_mask]
-            positions = positions[retention_mask]
-            emb = torch.cat([emb, positions], dim=1)
             video_embeds_out.append(emb)
+
         return tuple(video_embeds_out)
+
+    def _create_final_video_embeddings(
+        self,
+        video_embeddings: torch.Tensor,
+        num_tokens_per_frame: list[int],
+        timestamps: list[float],
+        video_grid_thw: list[int],
+        retention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Create final embeddings that combine video embeddings with
+        text embeddings of indicator tokens.
+
+        These final embeddings contain:
+        - Actual video embeddings in positions corresponding to video content
+        - Text embeddings for indicator tokens (<img>, </img>, and
+          frame separation text) in their respective positions
+
+        These embeddings will replace the placeholder embeddings to create
+        input_embeds for the LLM.
+        """
+        device = video_embeddings.device
+
+        # Generate video replacement token IDs using get_video_repl
+        # This tokenizes each frame separator independently, then uses pre-tokenized
+        # special tokens to ensure consistent tokenization regardless of
+        # num_tokens_per_frame values.
+        video_repl = Qwen3VLMultiModalProcessor.get_video_repl(
+            tokens_per_frame=num_tokens_per_frame,
+            tokenizer=self._tokenizer,
+            timestamps=timestamps,
+            vision_start_token_id=self.config.vision_start_token_id,
+            vision_end_token_id=self.config.vision_end_token_id,
+            video_token_id=self.config.video_token_id,
+            select_token_id=self.is_multimodal_pruning_enabled,
+        )
+
+        repl_token_ids = torch.tensor(video_repl.full, device=device)
+        embed_token_id = _cached_tensor(self.config.video_token_id, device=device)
+        is_video_embed = torch.isin(repl_token_ids, embed_token_id)
+
+        # Get text embeddings for indicator tokens (has only `visual_dim``).
+        text_embeddings = self.get_language_model().embed_input_ids(repl_token_ids)
+
+        if self.use_deepstack:
+            (
+                deepstack_input_embeds,
+                multimodal_embeddings,
+            ) = self._compute_deepstack_embeds(
+                inputs_embeds=text_embeddings,
+                multimodal_embeddings=[video_embeddings],
+                is_multimodal=is_video_embed,
+            )
+        else:
+            deepstack_input_embeds = None
+            multimodal_embeddings = [video_embeddings]
+
+        merged_embeddings = _merge_multimodal_embeddings(
+            inputs_embeds=text_embeddings,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_video_embed,
+        )
+
+        to_concat = [merged_embeddings]
+        if deepstack_input_embeds is not None:
+            to_concat.append(
+                deepstack_input_embeds.permute(1, 0, 2).reshape(
+                    deepstack_input_embeds.shape[1], -1
+                )
+            )
+
+        expanded_positions = None
+        if self.is_multimodal_pruning_enabled:
+            is_vision_start = repl_token_ids.eq(self.config.vision_start_token_id)
+            expanded_positions = self._get_expanded_positions(
+                device=merged_embeddings.device,
+                seq_len=merged_embeddings.shape[0],
+                video_grid_thw=video_grid_thw,
+                num_tokens_per_frame=num_tokens_per_frame,
+                timestamps=timestamps,
+                is_video_embed=is_video_embed,
+                is_vision_start=is_vision_start,
+                retention_mask=retention_mask,
+            )
+            to_concat.append(expanded_positions)
+
+        final_video_embeddings = torch.cat(to_concat, dim=-1)
+
+        return final_video_embeddings
+
+    def _get_expanded_positions(
+        self,
+        device,
+        seq_len,
+        video_grid_thw,
+        num_tokens_per_frame,
+        timestamps,
+        is_video_embed,
+        is_vision_start,
+        retention_mask,
+    ):
+        embed_token_id = _cached_tensor(self.config.video_token_id, device=device)
+
+        # Expand positions to match the full sequence length
+        # (includes both video tokens and indicator tokens)
+        # Shape: [full_length, 5] where positions are filled for video tokens
+        # and zeros for indicator tokens.
+        # Channel 3 flags VISION_START tokens so that
+        # recompute_mrope_positions can reliably count timestamp tokens
+        # (even when early frames have all video tokens pruned).
+        # Channel 4 flags video-embedding tokens.
+        expanded_positions = torch.zeros(
+            seq_len,
+            5,  # [t_index, h_index, w_index, is_vision_start, is_video]
+            device=device,
+            dtype=torch.long,
+        )
+        _, h, w = video_grid_thw
+        merge_size = self.visual.spatial_merge_size
+        num_frames = len(num_tokens_per_frame)
+        unpruned_token_ids = Qwen3VLMultiModalProcessor.get_video_repl(
+            tokens_per_frame=[(h // merge_size) * (w // merge_size)] * num_frames,
+            tokenizer=self._tokenizer,
+            timestamps=timestamps,
+            vision_start_token_id=self.config.vision_start_token_id,
+            vision_end_token_id=self.config.vision_end_token_id,
+            video_token_id=self.config.video_token_id,
+        ).full
+        unpruned_token_ids_tensor = torch.tensor(unpruned_token_ids, device=device)
+        mm_feature = MultiModalFeatureSpec(
+            data=MultiModalKwargsItem(
+                {
+                    "video_grid_thw": MultiModalFieldElem(
+                        data=torch.tensor(video_grid_thw),
+                        field=None,  # HACK.
+                    ),
+                }
+            ),
+            modality="video",
+            identifier="DUMMY",
+            mm_position=PlaceholderRange(offset=0, length=len(unpruned_token_ids)),
+        )
+        original_mrope = (
+            self.get_mrope_input_positions(
+                input_tokens=unpruned_token_ids,
+                mm_features=[mm_feature],
+            )[0]
+            .to(device)
+            .permute(1, 0)
+        )
+        full_is_video_embed = unpruned_token_ids_tensor == embed_token_id
+        expanded_positions[is_video_embed, :3] = original_mrope[full_is_video_embed][
+            retention_mask
+        ]
+        expanded_positions[~is_video_embed, :3] = original_mrope[~full_is_video_embed]
+        expanded_positions[..., 3] = is_vision_start
+        expanded_positions[..., 4] = is_video_embed
+
+        return expanded_positions
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
@@ -1578,177 +2135,174 @@ class Qwen3VLForConditionalGeneration(
                 )
         return mm_input_by_modality
 
-    def iter_mm_grid_hw(
-        self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
-    ) -> Iterator[tuple[int, int, int]]:
-        """
-        Iterate over multimodal features and yield grid information.
-
-        For videos with EVS (Efficient Video Sampling) enabled, this function
-        computes the offset based on the pruned token count rather than relying
-        on input_tokens.index(), which would fail when tokens are pruned.
+    @staticmethod
+    def _iter_mm_grid_hw(
+        input_tokens: list[int],
+        mm_features: list[MultiModalFeatureSpec],
+        video_token_id: int,
+        vision_start_token_id: int,
+        vision_end_token_id: int,
+        spatial_merge_size: int,
+    ) -> Iterator[tuple[int, int, int, int]]:
+        """Iterate over multimodal features and yield position info.
 
         Args:
-            input_tokens: List of token IDs in the prompt
-            mm_features: List of multimodal feature specifications
+            input_tokens: List of token IDs in the input sequence.
+            mm_features: List of multimodal feature specifications containing
+                image/video data and position information.
+            video_token_id: Token ID used for video tokens.
+            vision_start_token_id: Token ID marking the start of a vision sequence.
+            vision_end_token_id: Token ID marking the end of a vision sequence.
+            spatial_merge_size: Size of the spatial merge operation used to
+                compute logical grid dimensions from the original feature grid.
 
         Yields:
-            Tuple of (offset, grid_h, grid_w) for each frame/image
+            offset: Position of the first video/image token in the sequence.
+            llm_grid_h: Logical grid height (may not match actual token count with EVS).
+            llm_grid_w: Logical grid width (may not match actual token count with EVS).
+            actual_num_tokens: Actual number of video/image tokens in the placeholder.
         """
-        video_token_id = self.config.video_token_id
-        spatial_merge_size = self.config.vision_config.spatial_merge_size
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
             if mm_feature.modality == "image":
                 t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
-                yield offset, h // spatial_merge_size, w // spatial_merge_size
+                llm_grid_h = h // spatial_merge_size
+                llm_grid_w = w // spatial_merge_size
+                yield offset, llm_grid_h, llm_grid_w, llm_grid_h * llm_grid_w
             elif mm_feature.modality == "video":
                 t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
                 llm_grid_h = h // spatial_merge_size
                 llm_grid_w = w // spatial_merge_size
 
-                # Check if EVS (Efficient Video Sampling) is enabled
-                is_evs_enabled = (
-                    hasattr(self, "video_pruning_rate")
-                    and self.video_pruning_rate is not None
-                    and self.video_pruning_rate > 0.0
-                )
+                for _ in range(t):
+                    # When EVS is enabled, some frames may have 0 video tokens in the
+                    # placeholder. We use `vision_start_token_id` to locate each frame
+                    # since it is always present for every frame.
+                    # We then look for the first `video_token_id` after
+                    # `vision_start_token_id` and before `vision_end_token_id`.
+                    offset = input_tokens.index(vision_start_token_id, offset)
+                    vision_end_offset = input_tokens.index(vision_end_token_id, offset)
 
-                if is_evs_enabled:
-                    frame_offsets = self._extract_frame_offsets_from_mask(
-                        mm_feature.mm_position, t
-                    )
-                    if frame_offsets is not None:
-                        for rel_offset in frame_offsets:
-                            yield offset + rel_offset, llm_grid_h, llm_grid_w
-                        continue
+                    try:
+                        actual_num_tokens = 0
+                        video_offset = input_tokens.index(
+                            video_token_id, offset, vision_end_offset
+                        )
+                        # NOTE: looking at the
+                        # `Qwen3VLMultiModalProcessor.get_video_repl` code, we can
+                        # see that we can use the below formula to get the token
+                        # count, since everything in between `video_offset` and
+                        # `vision_end_offset` is populated as `video_token_id`.
+                        # This saves us from manually counting the number tokens
+                        # that match `video_token_id` in between.
+                        actual_num_tokens += vision_end_offset - video_offset
+                    except ValueError:
+                        # No `video_token_id` in this frame (EVS with 0 tokens for
+                        # this frame) -> use `offset + 1`` to move past
+                        # `vision_start_token_id`.
+                        video_offset = offset + 1
 
-                    # If EVS is enabled but mask is missing, this indicates a bug
-                    # in the prompt processing pipeline. The is_embed mask should
-                    # always be present when video_pruning_rate > 0.
-                    raise RuntimeError(
-                        f"EVS is enabled (pruning_rate={self.video_pruning_rate}) "
-                        "but is_embed mask is missing from mm_position. "
-                        "This indicates a bug in prompt processing."
-                    )
-                else:
-                    # Non-EVS mode: Use original logic with input_tokens.index()
-                    for _ in range(t):
-                        offset = input_tokens.index(video_token_id, offset)
-                        yield offset, llm_grid_h, llm_grid_w
-                        offset += llm_grid_h * llm_grid_w
+                    yield video_offset, llm_grid_h, llm_grid_w, actual_num_tokens
+                    # Move offset past this frame for next iteration.
+                    offset = vision_end_offset + 1
             else:
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
 
-    def _get_evs_mask_segments(
-        self, mm_position: PlaceholderRange, expected_frames: int
-    ) -> list[torch.Tensor] | None:
-        """Extract contiguous segments from EVS is_embed mask.
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list[MultiModalFeatureSpec],
+    ) -> tuple[torch.Tensor, int]:
+        return self._get_mrope_input_positions(
+            input_tokens=input_tokens,
+            mm_features=mm_features,
+            config=self.config,
+        )
 
-        The EVS (Efficient Video Sampling) mask marks which placeholder
-        positions should be filled with video embeddings. This method splits
-        the mask into contiguous segments, where each segment represents one
-        retained frame.
+    @staticmethod
+    def _get_mrope_input_positions(
+        input_tokens: list[int],
+        mm_features: list[MultiModalFeatureSpec],
+        config: Qwen3VLConfig,
+    ):
+        llm_pos_ids_list = []
+        st = 0
+        for (
+            offset,
+            llm_grid_h,
+            llm_grid_w,
+            actual_num_tokens,
+        ) in Qwen3VLForConditionalGeneration._iter_mm_grid_hw(
+            input_tokens,
+            mm_features,
+            video_token_id=config.video_token_id,
+            vision_start_token_id=config.vision_start_token_id,
+            vision_end_token_id=config.vision_end_token_id,
+            spatial_merge_size=config.vision_config.spatial_merge_size,
+        ):
+            # Skip frames with 0 tokens (EVS placeholder with tokens lumped elsewhere)
+            if actual_num_tokens == 0:
+                continue
 
-        This is a pure function - it does not modify any state and always
-        returns the same output for the same input (idempotent).
-
-        Args:
-            mm_position: MultiModal position containing the is_embed mask
-            expected_frames: Expected number of frame segments
-
-        Returns:
-            List of tensors, each containing indices for one frame segment,
-            or None if EVS is not enabled or validation fails.
-        """
-        is_embed_mask = getattr(mm_position, "is_embed", None)
-        if is_embed_mask is None:
-            return None
-
-        # Find all True positions in the mask
-        mask_tensor = torch.as_tensor(is_embed_mask, dtype=torch.bool).view(-1)
-        true_indices = torch.nonzero(mask_tensor, as_tuple=False).flatten()
-        if true_indices.numel() == 0:
-            return None
-
-        # Split into contiguous segments (where diff > 1 indicates a gap)
-        if true_indices.numel() == 1:
-            segments = [true_indices]
-        else:
-            diffs = torch.diff(true_indices)
-            split_points = torch.nonzero(diffs != 1, as_tuple=False).flatten()
-            if split_points.numel() == 0:
-                segments = [true_indices]
-            else:
-                segments = torch.tensor_split(
-                    true_indices, split_points.add(1).tolist()
-                )
-
-        # Validate segment count matches expected frames
-        if len(segments) < expected_frames:
-            logger.debug(
-                "EVS mask segments (%d) do not match expected frames (%d)",
-                len(segments),
-                expected_frames,
+            text_len = offset - st
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
             )
-            return None
 
-        return segments[:expected_frames]
+            # Check if this is a "lumped placeholder" (all tokens from multiple frames
+            # assigned to the 0-th frame - see
+            # `Qwen3VLMultiModalProcessor.get_video_repl`.
+            expected_tokens_per_frame = llm_grid_h * llm_grid_w
+            if actual_num_tokens > expected_tokens_per_frame:
+                # Lumped placeholder: create grid positions for all "logical" frames
+                # represented.
+                num_logical_frames = actual_num_tokens // expected_tokens_per_frame
+                remainder = actual_num_tokens % expected_tokens_per_frame
 
-    def _extract_frame_offsets_from_mask(
-        self, mm_position: PlaceholderRange, expected_frames: int
-    ) -> list[int] | None:
-        """Return relative offsets for each EVS-retained frame.
+                # Create positions for complete frames.
+                for _ in range(num_logical_frames):
+                    grid_indices = np.indices((1, llm_grid_h, llm_grid_w)).reshape(
+                        3, -1
+                    )
+                    llm_pos_ids_list.append(grid_indices + text_len + st_idx)
+                    st_idx = llm_pos_ids_list[-1].max() + 1
+                    text_len = 0  # No text between frames within the lump
 
-        The prompt processor stores a boolean mask inside ``mm_position`` that
-        marks which placeholder locations should be populated with video
-        embeddings. By splitting that mask into contiguous runs we can recover
-        the start of every retained frame without probing ``input_tokens``.
+                # Handle remainder tokens if any (partial frame).
+                # NOTE: this should never be the case. Should we have an assert?
+                if remainder > 0:
+                    # Create a partial grid - take first 'remainder' positions
+                    full_grid = np.indices((1, llm_grid_h, llm_grid_w)).reshape(3, -1)
+                    grid_indices = full_grid[:, :remainder]
+                    llm_pos_ids_list.append(grid_indices + text_len + st_idx)
+            else:
+                # Normal case: frame has exactly the expected tokens (after actual EVS
+                # pruning).
+                grid_indices = np.indices((1, llm_grid_h, llm_grid_w)).reshape(3, -1)
+                llm_pos_ids_list.append(grid_indices + text_len + st_idx)
 
-        Args:
-            mm_position: MultiModal position containing the is_embed mask
-            expected_frames: Expected number of frames
+            st = offset + actual_num_tokens
 
-        Returns:
-            List of starting offsets (relative to mm_position) for each frame,
-            or None if EVS is not enabled.
-        """
-        segments = self._get_evs_mask_segments(mm_position, expected_frames)
-        if segments is None:
-            return None
+        if st < len(input_tokens):
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            text_len = len(input_tokens) - st
+            llm_pos_ids_list.append(
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+            )
 
-        return [int(segment[0].item()) for segment in segments]
-
-    def _get_actual_frame_token_counts(
-        self, mm_position: PlaceholderRange, expected_frames: int
-    ) -> list[int] | None:
-        """Return actual token count for each EVS-retained frame.
-
-        This function calculates the actual number of tokens per frame by
-        analyzing the is_embed mask, accounting for EVS pruning. Each frame
-        may have a different token count due to content-aware pruning.
-
-        Args:
-            mm_position: MultiModal position containing the is_embed mask
-            expected_frames: Expected number of frames
-
-        Returns:
-            List of token counts for each frame, or None if EVS is not enabled.
-        """
-        segments = self._get_evs_mask_segments(mm_position, expected_frames)
-        if segments is None:
-            return None
-
-        return [len(seg) for seg in segments]
+        llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
+        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
+        return torch.from_numpy(llm_positions), mrope_position_delta
 
     def recompute_mrope_positions(
         self,
         input_ids: list[int],
-        multimodal_embeddings: tuple[torch.Tensor, ...],
+        multimodal_embeddings: MultiModalEmbeddings,
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
-    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, int]:
+    ) -> tuple[MultiModalEmbeddings, torch.Tensor, int]:
         """
         Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
@@ -1757,9 +2311,10 @@ class Qwen3VLForConditionalGeneration(
         mrope_positions before we feed it to LLM.
 
         Args:
-            input_ids: (N,) All input tokens of the prompt (Containing
-                entire sequence).
-            multimodal_embeddings: Tuple of multimodal embeddings.
+            input_ids: (N,) All input tokens of the prompt containing
+                entire sequence.
+            multimodal_embeddings: Tuple of multimodal embeddings that
+                fits into the prefill chunk that is being processed.
             mrope_positions: Existing mrope positions (3, N) for entire
                 sequence
             num_computed_tokens: A number of computed tokens so far.
@@ -1768,10 +2323,26 @@ class Qwen3VLForConditionalGeneration(
             Tuple of (multimodal_embeddings, mrope_positions,
                 mrope_position_delta).
         """
-        image_token_id = self.config.image_token_id
-        video_token_id = self.config.video_token_id
-        vision_start_token_id = self.config.vision_start_token_id
+        return self._recompute_mrope_positions(
+            input_ids=input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            mrope_positions=mrope_positions,
+            num_computed_tokens=num_computed_tokens,
+            image_token_id=self.config.image_token_id,
+            video_token_id=self.config.video_token_id,
+            vision_start_token_id=self.config.vision_start_token_id,
+        )
 
+    @staticmethod
+    def _recompute_mrope_positions(
+        input_ids: list[int],
+        multimodal_embeddings: MultiModalEmbeddings,
+        mrope_positions: torch.LongTensor,
+        num_computed_tokens: int,
+        vision_start_token_id: int,
+        image_token_id: int,
+        video_token_id: int,
+    ) -> tuple[MultiModalEmbeddings, torch.Tensor, int]:
         # Device
         device = (
             multimodal_embeddings[0].device
@@ -1782,10 +2353,21 @@ class Qwen3VLForConditionalGeneration(
         # Tensors
         input_ids_t = torch.as_tensor(input_ids, device=device, dtype=torch.long)
 
-        mm_embeddings_out = [mm[:, :-4] for mm in multimodal_embeddings]
-        mm_embeddings_pos = [
-            mm[:, -4:].permute(1, 0).long() for mm in multimodal_embeddings
-        ]
+        mm_embeddings_out = []
+        mm_embeddings_pos = []
+        # Strip position information from embeddings (last 5 channels)
+        # For Qwen3 VL, handle potentially empty frames (from unpacking)
+        for mm in multimodal_embeddings:
+            if mm.shape[0] > 0:  # Only process non-empty frames
+                mm_embeddings_out.append(mm[:, :-5])
+                mm_embeddings_pos.append(mm[:, -5:].permute(1, 0).long())
+            else:
+                # Empty frame - keep as is
+                mm_embeddings_out.append(mm)
+                # Create empty position tensor with correct shape
+                mm_embeddings_pos.append(
+                    torch.empty(5, 0, device=device, dtype=torch.long)
+                )
 
         positions, mrope_positions_delta = recompute_mrope_positions(
             input_ids_t,
@@ -1799,107 +2381,14 @@ class Qwen3VLForConditionalGeneration(
 
         return tuple(mm_embeddings_out), positions, mrope_positions_delta
 
-    def get_mrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list[MultiModalFeatureSpec],
-    ) -> tuple[torch.Tensor, int]:
-        # Pre-collect actual frame token counts for EVS mode
-        frame_token_counts_map = {}
-        for mm_feature in mm_features:
-            if mm_feature.modality == "video":
-                is_evs_enabled = (
-                    hasattr(self, "video_pruning_rate")
-                    and self.video_pruning_rate is not None
-                    and self.video_pruning_rate > 0.0
-                )
-                if is_evs_enabled:
-                    t = mm_feature.data["video_grid_thw"].data.tolist()[0]
-                    token_counts = self._get_actual_frame_token_counts(
-                        mm_feature.mm_position, t
-                    )
-                    assert token_counts is not None, (
-                        "EVS enabled but failed to extract frame token counts "
-                        "from is_embed mask"
-                    )
-                    frame_token_counts_map[mm_feature.mm_position.offset] = token_counts
-
-        llm_pos_ids_list = []
-        st = 0
-        frame_counts_idx = {}
-
-        for offset, llm_grid_h, llm_grid_w in self.iter_mm_grid_hw(
-            input_tokens, mm_features
-        ):
-            text_len = offset - st
-            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-
-            # Determine actual token count for this frame
-            base_offset = None
-            for feat_offset in frame_token_counts_map:
-                if offset >= feat_offset:
-                    base_offset = feat_offset
-
-            if base_offset is not None:
-                # EVS mode: use actual token count from is_embed mask
-                assert base_offset in frame_token_counts_map, (
-                    f"Found base_offset {base_offset} but not in frame_token_counts_map"
-                )
-
-                if base_offset not in frame_counts_idx:
-                    frame_counts_idx[base_offset] = 0
-
-                counts = frame_token_counts_map[base_offset]
-                idx = frame_counts_idx[base_offset]
-
-                assert idx < len(counts), (
-                    f"EVS frame index {idx} out of range (total frames: {len(counts)})"
-                )
-
-                actual_frame_tokens = counts[idx]
-                frame_counts_idx[base_offset] += 1
-            else:
-                # Non-EVS mode (or image): use theoretical grid size
-                actual_frame_tokens = llm_grid_h * llm_grid_w
-
-            # Add text segment
-            text_positions = (
-                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
-            )
-            llm_pos_ids_list.append(text_positions)
-            st_idx += text_len
-
-            # Add frame segment with actual token count (not theoretical)
-            grid_indices = np.indices((1, llm_grid_h, llm_grid_w)).reshape(3, -1)
-            # Only take the first actual_frame_tokens positions
-            frame_positions = grid_indices[:, :actual_frame_tokens] + st_idx
-            llm_pos_ids_list.append(frame_positions)
-
-            # Update st using actual token count
-            st = offset + actual_frame_tokens
-
-        # Handle final text segment
-        if st < len(input_tokens):
-            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-            text_len = len(input_tokens) - st
-            final_text_positions = (
-                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
-            )
-            llm_pos_ids_list.append(final_text_positions)
-
-        llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
-        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
-
-        return torch.from_numpy(llm_positions), mrope_position_delta
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
-        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+        # tensor corresponding to a multimodal data item (image or video).
+        multimodal_embeddings: list[torch.Tensor] = []
 
         # NOTE: It is important to iterate over the keys in this dictionary
         # to preserve the order of the modalities.
@@ -1907,19 +2396,20 @@ class Qwen3VLForConditionalGeneration(
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
                 image_embeddings = self._process_image_input(multimodal_input)
-                if self.is_multimodal_pruning_enabled:
-                    image_embeddings = self._postprocess_image_embeds_evs(
-                        image_embeddings, multimodal_input
-                    )
-                multimodal_embeddings += tuple(image_embeddings)
+                image_embeddings = self._postprocess_image_embeds_evs(
+                    image_embeddings, multimodal_input
+                )
+                multimodal_embeddings.extend(image_embeddings)
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
                 if self.is_multimodal_pruning_enabled:
                     video_embeddings = self._postprocess_video_embeds_evs(
                         video_embeddings, multimodal_input
                     )
-                multimodal_embeddings += tuple(video_embeddings)
-        return multimodal_embeddings
+                multimodal_embeddings.extend(video_embeddings)
+
+        embeddings_tuple = tuple(multimodal_embeddings)
+        return embeddings_tuple
 
     def _compute_deepstack_embeds(
         self,
@@ -1968,13 +2458,11 @@ class Qwen3VLForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.language_model.embed_input_ids,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
@@ -2099,3 +2587,8 @@ class Qwen3VLForConditionalGeneration(
         vision_config = hf_config.vision_config
         merge_size = vision_config.spatial_merge_size
         return num_vision_tokens // merge_size**2
+
+
+@lru_cache
+def _cached_tensor(x, device) -> torch.Tensor:
+    return torch.tensor(x, device=device)

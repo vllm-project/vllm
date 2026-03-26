@@ -22,12 +22,6 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_lora_router(app)
 
-    from vllm.entrypoints.serve.elastic_ep.api_router import (
-        attach_router as attach_elastic_ep_router,
-    )
-
-    attach_elastic_ep_router(app)
-
     from vllm.entrypoints.serve.profile.api_router import (
         attach_router as attach_profile_router,
     )
@@ -58,37 +52,6 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_tokenize_router(app)
 
-    from vllm.entrypoints.serve.disagg.api_router import (
-        attach_router as attach_disagg_router,
-    )
+    from .instrumentator import register_instrumentator_api_routers
 
-    attach_disagg_router(app)
-
-    from vllm.entrypoints.serve.rlhf.api_router import (
-        attach_router as attach_rlhf_router,
-    )
-
-    attach_rlhf_router(app)
-
-    from vllm.entrypoints.serve.instrumentator.metrics import (
-        attach_router as attach_metrics_router,
-    )
-
-    attach_metrics_router(app)
-
-    from vllm.entrypoints.serve.instrumentator.health import (
-        attach_router as attach_health_router,
-    )
-
-    attach_health_router(app)
-
-    from vllm.entrypoints.serve.instrumentator.offline_docs import (
-        attach_router as attach_offline_docs_router,
-    )
-
-    attach_offline_docs_router(app)
-    from vllm.entrypoints.serve.instrumentator.server_info import (
-        attach_router as attach_server_info_router,
-    )
-
-    attach_server_info_router(app)
+    register_instrumentator_api_routers(app)

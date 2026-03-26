@@ -54,7 +54,7 @@ wait_for_server() {
 # You can also adjust --kv-ip and --kv-port for distributed inference.
 
 # prefilling instance, which is the KV producer
-CUDA_VISIBLE_DEVICES=0 vllm serve $MODEL_NAME \
+CUDA_VISIBLE_DEVICES=0 vllm serve "$MODEL_NAME" \
     --host 0.0.0.0 \
     --port 8100 \
     --max-model-len 100 \
@@ -64,7 +64,7 @@ CUDA_VISIBLE_DEVICES=0 vllm serve $MODEL_NAME \
     '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":"1e9","kv_port":"14579","kv_connector_extra_config":{"proxy_ip":"'"$VLLM_HOST_IP"'","proxy_port":"30001","http_ip":"'"$VLLM_HOST_IP"'","http_port":"8100","send_type":"PUT_ASYNC"}}' &
 
 # decoding instance, which is the KV consumer  
-CUDA_VISIBLE_DEVICES=1 vllm serve $MODEL_NAME \
+CUDA_VISIBLE_DEVICES=1 vllm serve "$MODEL_NAME" \
     --host 0.0.0.0 \
     --port 8200 \
     --max-model-len 100 \
