@@ -169,7 +169,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
-    VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "trtllm"
+    VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -247,6 +247,7 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = False
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
+    VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
 
 
 def get_default_cache_root():
@@ -1304,14 +1305,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ["throughput", "latency", "masked_gemm"],
     ),
     # Flashinfer fused allreduce backend.
-    # "auto" will default to "mnnvl", which performs mostly same/better than "trtllm".
-    # But "mnnvl" backend does not support fuse with quantization.
-    # TODO: Default is "trtllm" right now because "mnnvl" has issues with cudagraph:
-    # https://github.com/vllm-project/vllm/issues/35772
-    # Should switch back to "auto" if the issue is resolved.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
-        "trtllm",
+        "auto",
         ["auto", "trtllm", "mnnvl"],
     ),
     # Control the workspace buffer size for the FlashInfer backend.
@@ -1647,6 +1643,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NIXL EP environment variables
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
         os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
+    ),
+    # Whether enable XPU graph on Intel GPU
+    "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
+        int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
     ),
 }
 
