@@ -71,7 +71,7 @@ def calculate_expression(expression: str):
         tree = ast.parse(expression, mode="eval")
         result = _safe_eval_node(tree)
         return f"The result of {expression} is {result}"
-    except Exception as e:
+    except (SyntaxError, ValueError) as e:
         return f"Could not calculate {expression}: {e}"
 
 
