@@ -190,9 +190,7 @@ def maybe_make_prepare_finalize(
             # For PTPC (per token per channel) quant, scale dim is 1
             # For 1x128 quant, scale dim is hidden_dim // 128
             quant_dtype = quant_config.quant_dtype
-            scale_dim = (
-                1 if quant_config.is_per_act_token else moe.hidden_dim // 128
-            )
+            scale_dim = 1 if quant_config.is_per_act_token else moe.hidden_dim // 128
         else:
             # Unquantized dispatch (e.g. AITER with defer_input_quant):
             # dispatch raw BF16/FP16 data, no scales needed.
