@@ -555,8 +555,8 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         result_generator: AsyncGenerator[ConversationContext, None],
-        *,
         sampling_params: SamplingParams,
+        *,
         context: ConversationContext,
         model_name: str,
         tokenizer: Any,
@@ -826,7 +826,6 @@ class OpenAIServingResponses(OpenAIServing):
         # we guarantee that if the status is not "completed", it is accurate.
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
-        raise NotImplementedError("LOL")
 
         input_messages: ResponseInputOutputMessage | None = None
         output_messages: ResponseInputOutputMessage | None = None
