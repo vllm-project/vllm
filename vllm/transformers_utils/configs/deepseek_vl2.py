@@ -87,16 +87,16 @@ class MlpProjectorConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
 
-class DeepseekVLV2TextConfig(DeepseekV2Config):
-    kv_lora_rank: None
+if hasattr(DeepseekV2Config, "validate"):
+    # Transformers v5
+    from huggingface_hub.dataclasses import strict
 
-    def __init__(self, **kwargs):
-        # DeepseekV2Config enforces kv_lora_rank is int, so we use this workaround
-        kv_lora_rank = kwargs.pop("kv_lora_rank", None)
-        if hasattr(self, "__validators__"):
-            self.__validators__.pop("kv_lora_rank", None)
-        super().__init__(**kwargs)
-        self.kv_lora_rank = kv_lora_rank
+    @strict
+    class DeepseekVLV2TextConfig(DeepseekV2Config):
+        kv_lora_rank: int | None = None
+else:
+    # Transformers v4
+    DeepseekVLV2TextConfig = DeepseekV2Config  # type: ignore[misc]
 
 
 class DeepseekVLV2Config(PretrainedConfig):
