@@ -81,7 +81,7 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import NemotronHConfig
+from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 
 class NemotronHMLP(nn.Module):

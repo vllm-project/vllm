@@ -558,6 +558,7 @@ class InternVLProcessor(ProcessorMixin):
         else:
             text_inputs = {}
 
-        combined_outputs = {**text_inputs, **image_inputs, **video_inputs}
-
-        return BatchFeature(combined_outputs, tensor_type=return_tensors)
+        return BatchFeature(
+            data={**text_inputs, **image_inputs, **video_inputs},
+            tensor_type=return_tensors,
+        )

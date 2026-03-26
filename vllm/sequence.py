@@ -62,3 +62,12 @@ class IntermediateTensors:
 
     def __repr__(self) -> str:
         return f"IntermediateTensors(tensors={self.tensors})"
+
+    @staticmethod
+    def empty_like(
+        intermediate_tensors: "IntermediateTensors",
+    ) -> "IntermediateTensors":
+        tensors = {
+            k: torch.empty_like(v) for k, v in intermediate_tensors.tensors.items()
+        }
+        return IntermediateTensors(tensors)

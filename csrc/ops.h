@@ -201,7 +201,6 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              torch::Tensor _zeros, int64_t split_k_iters,
                              int64_t thx, int64_t thy);
 
-torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
 #endif
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
@@ -286,16 +285,6 @@ void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            std::optional<torch::Tensor> const& azp,
                            std::optional<torch::Tensor> const& bias);
 
-bool cutlass_sparse_scaled_mm_supported(int64_t cuda_device_capability);
-
-void cutlass_scaled_sparse_mm(torch::Tensor& out, torch::Tensor const& a,
-                              torch::Tensor const& b, torch::Tensor const& e,
-                              torch::Tensor const& a_scales,
-                              torch::Tensor const& b_scales,
-                              std::optional<torch::Tensor> const& bias);
-
-std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a);
-
 std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_func(
     torch::Tensor const& input, torch::Tensor const& input_scale,
     bool is_sf_swizzled_layout);
@@ -316,25 +305,6 @@ void silu_and_mul_scaled_fp4_experts_quant(
     torch::Tensor const& input, torch::Tensor const& input_global_scale,
     torch::Tensor const& input_offset_by_experts,
     torch::Tensor const& output_scale_offset_by_experts);
-
-void per_token_group_quant_fp8(const torch::Tensor& input,
-                               torch::Tensor& output_q, torch::Tensor& output_s,
-                               int64_t group_size, double eps, double fp8_min,
-                               double fp8_max, bool scale_ue8m0,
-                               bool dummy_is_scale_transposed,
-                               bool dummy_is_tma_aligned);
-
-void per_token_group_quant_int8(const torch::Tensor& input,
-                                torch::Tensor& output_q,
-                                torch::Tensor& output_s, int64_t group_size,
-                                double eps, double int8_min, double int8_max);
-
-// Fused activation quantisation + DeepGEMM-compatible UE8M0-packed scales.
-void per_token_group_quant_8bit_packed(const torch::Tensor& input,
-                                       torch::Tensor& output_q,
-                                       torch::Tensor& output_s_packed,
-                                       int64_t group_size, double eps,
-                                       double min_8bit, double max_8bit);
 
 #endif
 
