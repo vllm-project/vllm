@@ -50,6 +50,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
@@ -74,7 +75,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -758,11 +758,10 @@ class Glm4vVisionTransformer(nn.Module):
             grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
         ).cumsum(dim=0, dtype=torch.int32)
         cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
-        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
-
         # pre-compute max_seqlen for attn mask to reduce cuMemcpy operations
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
         x = self.embeddings(
             x, seqlens, grid_thw, image_type_ids[:, 0], image_type_ids[:, 1]
         )
