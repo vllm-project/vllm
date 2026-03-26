@@ -35,6 +35,16 @@ class ReasoningConfig:
     """Private backing field for `think_end_token_ids`. Set by
     `initialize_token_ids`. Not intended to be configured directly."""
 
+    _enabled: bool = field(default=False, init=False, repr=False)
+    """Private field indicating whether reasoning token IDs have been initialized.
+    Set to True by `initialize_token_ids` once token IDs are initialized."""
+
+    @property
+    def enabled(self) -> bool:
+        """Returns True if reasoning is enabled (i.e. if token IDs have been
+        initialized), False otherwise."""
+        return self._enabled
+
     @property
     def think_start_token_ids(self) -> list[int] | None:
         """Token IDs derived from `think_start_str`. Set automatically by
@@ -55,6 +65,7 @@ class ReasoningConfig:
             self._think_start_token_ids is not None
             and self._think_end_token_ids is not None
         ):
+            self._enabled = True
             return True  # Already initialized
 
         tokenizer = cached_tokenizer_from_config(model_config=model_config)
@@ -91,4 +102,5 @@ class ReasoningConfig:
                 f"think_end_str='{think_end_str}'. "
                 "Ensure the strings are valid tokens in the model's vocabulary."
             )
+        self._enabled = True
         return True
