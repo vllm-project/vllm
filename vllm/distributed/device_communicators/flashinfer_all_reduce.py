@@ -145,6 +145,17 @@ def get_fi_ar_workspace(
     _fi_ar_workspace = _create_workspace(
         backend, world_size, rank, max_token_num, hidden_dim, dtype, group
     )
+    if _fi_ar_workspace is not None:
+        logger.info_once(
+            "Initialized FlashInfer Allreduce norm fusion workspace "
+            f"with backend={backend}"
+        )
+    else:
+        logger.warning_once(
+            "Failed to initialize FlashInfer Allreduce norm fusion workspace "
+            f"with backend={backend}"
+        )
+
     return _fi_ar_workspace
 
 
@@ -182,6 +193,17 @@ def get_fi_ar_quant_workspace(
     _fi_ar_quant_workspace = _create_workspace(
         "trtllm", world_size, rank, max_token_num, hidden_dim, dtype, group
     )
+    if _fi_ar_quant_workspace is not None:
+        logger.info_once(
+            "Initialized FlashInfer Allreduce norm quantization "
+            "fusion workspace with backend=trtllm"
+        )
+    else:
+        logger.warning_once(
+            "Failed to initialize FlashInfer Allreduce norm quantization "
+            "fusion workspace with backend=trtllm"
+        )
+
     return _fi_ar_quant_workspace
 
 
