@@ -749,7 +749,10 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         prefix_kv_lens = None
         suffix_kv_lens = None
         if use_cascade:
-            raise NotImplementedError("Not yet my friend")
+            raise NotImplementedError(
+                "Cascade prefix attention is not yet implemented "
+                "for FlexAttention backend"
+            )
 
         block_size = self.kv_cache_spec.block_size
         max_possible_seq_len = self.model_config.max_model_len
