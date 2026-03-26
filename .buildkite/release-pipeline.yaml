@@ -383,11 +383,12 @@ steps:
         fi
         
         # Check S3 for wheels
-        WHEEL_CACHE_STATUS=$$(.buildkite/scripts/cache-rocm-base-wheels.sh check)
+        WHEEL_CACHE_STATUS=$(.buildkite/scripts/cache-rocm-base-wheels.sh check)
         if [ "$${WHEEL_CACHE_STATUS}" = "hit" ]; then
           WHEELS_EXIST=true
           echo "S3 wheels cache HIT"
         fi
+
 
         # Scenario 1: Both cached (best case)
         if [ "$${IMAGE_EXISTS}" = "true" ] && [ "$${WHEELS_EXIST}" = "true" ]; then
