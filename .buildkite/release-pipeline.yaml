@@ -383,7 +383,7 @@ steps:
         fi
         
         # Check S3 for wheels
-        WHEEL_CACHE_STATUS=$(.buildkite/scripts/cache-rocm-base-wheels.sh check)
+        WHEEL_CACHE_STATUS=$$(.buildkite/scripts/cache-rocm-base-wheels.sh check)
         if [ "$${WHEEL_CACHE_STATUS}" = "hit" ]; then
           WHEELS_EXIST=true
           echo "S3 wheels cache HIT"
@@ -414,7 +414,7 @@ steps:
           DOCKER_BUILDKIT=1 docker buildx build \
             --file docker/Dockerfile.rocm_base \
             --tag rocm-base-debs:$${BUILDKITE_BUILD_NUMBER} \
-            --build-arg BASE_IMAGE="$${ECR_CACHE_TAG}" \
+            --cache-from type=registry,ref="$${ECR_CACHE_TAG}" \
             --target debs_wheel_release \
             --build-arg USE_SCCACHE=1 \
             --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
@@ -447,7 +447,6 @@ steps:
             --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
             --build-arg SCCACHE_REGION_NAME=us-west-2 \
             --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
-            --push \
             .
           
           # Build wheel extraction stage
