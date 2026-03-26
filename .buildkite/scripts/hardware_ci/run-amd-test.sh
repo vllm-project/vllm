@@ -514,7 +514,7 @@ else
     -e "PYTHONPATH=${MYPYTHONPATH}" \
     --name "${container_name}" \
     "${image_name}" \
-    /bin/bash -c "unset PYTORCH_ROCM_ARCH && ${commands}"
+    /bin/bash -eo pipefail -c "unset PYTORCH_ROCM_ARCH && ${commands}"
 
   exit_code=$?
   handle_pytest_exit "$exit_code"
