@@ -87,6 +87,7 @@ if current_platform.is_cuda_alike():
             return topk_ids
         out_flat = torch.empty((numel,), device=topk_ids.device, dtype=topk_ids.dtype)
         grid = lambda meta: (triton.cdiv(numel, meta["BLOCK_SIZE"]),)
+        assert expert_load_view.is_contiguous()
         _eplb_map_and_record_i32_kernel[grid](
             topk_ids_in,
             logical_replica_count.contiguous(),

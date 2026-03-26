@@ -595,7 +595,7 @@ class EplbState:
                     eplb_model_state.expert_load_window[
                         self.expert_load_window_step
                     ].copy_(eplb_model_state.expert_load_pass)
-                eplb_model_state.expert_load_pass.zero_()
+                    eplb_model_state.expert_load_pass.zero_()
 
             if should_record:
                 self.expert_load_window_step += 1
