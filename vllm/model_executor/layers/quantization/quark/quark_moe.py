@@ -461,6 +461,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 activation=layer.activation,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 quant_config=self.moe_quant_config,
+                moe_config=layer.moe_config,
                 expert_map=layer.expert_map,
             )
         elif self.use_marlin:
@@ -649,6 +650,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
             activation=layer.activation,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             quant_config=self.moe_quant_config,
+            moe_config=layer.moe_config,
             expert_map=layer.expert_map,
         )
 
@@ -1082,6 +1084,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 topk_ids=topk_ids,
                 activation=layer.activation,
                 quant_config=self.moe_quant_config,
+                moe_config=layer.moe_config,
                 expert_map=layer.expert_map,
             )
         else:

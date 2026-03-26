@@ -153,11 +153,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.num_experts = num_experts
         self.intermediate_size = intermediate_size_per_partition
         self.hidden_size = hidden_size
-        self.hidden_pad = hidden_size - layer.moe_config.hidden_dim_unpadded
-        self.intermediate_pad = (
-            intermediate_size_per_partition
-            - layer.moe_config.intermediate_size_per_partition_unpadded
-        )
 
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
@@ -363,8 +358,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w2_scale=w2_scale,
             w1_bias=w1_bias,
             w2_bias=w2_bias,
-            hidden_pad=self.hidden_pad,
-            intermediate_pad=self.intermediate_pad,
         )
 
     def select_gemm_impl(
