@@ -624,7 +624,7 @@ def cuda_device_count_stateless() -> int:
     """Get number of CUDA devices, caching based on the value of
     CUDA_VISIBLE_DEVICES at the time of call.
 
-    This should be used instead of torch.cuda.device_count()
+    This should be used instead of torch.accelerator.device_count()
     unless CUDA_VISIBLE_DEVICES has already been set to the desired
     value."""
 
@@ -683,7 +683,7 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
     if current_platform.is_xpu():
         assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
-    elif current_platform.is_cuda() or current_platform.is_rocm():
+    elif current_platform.is_cuda_alike():
         return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
     else:
         raise ValueError(

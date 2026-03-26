@@ -28,7 +28,7 @@ from typing import Any
 from datasets import load_dataset
 
 from vllm import LLM, SamplingParams
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import TokensPrompt
 
 logger = logging.getLogger(__name__)
 

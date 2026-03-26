@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
 
-from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
@@ -10,7 +8,6 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages_async,
 )
 from vllm.logger import init_logger
-from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.grok2 import Grok2Tokenizer
 
 from .base import BaseRenderer
@@ -22,23 +19,6 @@ logger = init_logger(__name__)
 
 
 class Grok2Renderer(BaseRenderer[Grok2Tokenizer]):
-    @classmethod
-    def from_config(  # type: ignore[override]
-        cls,
-        config: VllmConfig,
-        tokenizer_kwargs: dict[str, Any],
-    ) -> "Grok2Renderer":
-        model_config = config.model_config
-        if model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = cached_get_tokenizer(
-                tokenizer_cls=Grok2Tokenizer,
-                **tokenizer_kwargs,
-            )
-
-        return cls(config, tokenizer)
-
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
@@ -50,6 +30,7 @@ class Grok2Renderer(BaseRenderer[Grok2Tokenizer]):
             self.model_config,
             content_format="string",
             media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
         prompt_raw = tokenizer.apply_chat_template(
@@ -77,6 +58,7 @@ class Grok2Renderer(BaseRenderer[Grok2Tokenizer]):
             self.model_config,
             content_format="string",
             media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
         prompt_raw = tokenizer.apply_chat_template(

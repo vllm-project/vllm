@@ -47,7 +47,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe import GateLinear, SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    GateLinear,
+    RoutingMethodType,
+    SharedFusedMoE,
+)
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -82,7 +86,13 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
-from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
+from .interfaces import (
+    MixtureOfExperts,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
@@ -327,8 +337,12 @@ class DeepseekV2MoE(nn.Module):
         # NOTE(rob): this is a hack until we finish off the PR for
         # merging TRTLLM kernels into the MK framework. Then we can
         # query the MonolithicMK for the expected router logits.
+        # NOTE(dbari): Use BF16 if routing is not Deepseek, e.g. Mistral Large 3
         self.gate.set_out_dtype(
-            torch.float32 if self.experts.quant_method.is_monolithic else torch.bfloat16
+            torch.float32
+            if self.experts.quant_method.is_monolithic
+            and self.experts.routing_method_type == RoutingMethodType.DeepSeekV3
+            else torch.bfloat16
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -572,7 +586,7 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         self, head_dim: int, dtype: torch.dtype, prefix: str, cache_config: CacheConfig
     ):
         super().__init__()
-        self.kv_cache = [torch.tensor([])]
+        self.kv_cache = torch.tensor([])
         self.head_dim = head_dim
         self.prefix = prefix
         self.cache_config = cache_config
@@ -828,6 +842,7 @@ class DeepseekV2MLAAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
+        input_size: int | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -847,16 +862,20 @@ class DeepseekV2MLAAttention(nn.Module):
         self.scaling = self.qk_head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
 
+        # Use input_size for projection input dimensions if provided,
+        # otherwise default to hidden_size (used in Eagle3 Deepseek with MLA)
+        proj_input_size = input_size if input_size is not None else self.hidden_size
+
         if self.q_lora_rank is not None:
             self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(
-                self.hidden_size,
+                proj_input_size,
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 quant_config=quant_config,
                 prefix=f"{prefix}.fused_qkv_a_proj",
             )
         else:
             self.kv_a_proj_with_mqa = ReplicatedLinear(
-                self.hidden_size,
+                proj_input_size,
                 self.kv_lora_rank + self.qk_rope_head_dim,
                 bias=False,
                 quant_config=quant_config,
@@ -874,7 +893,7 @@ class DeepseekV2MLAAttention(nn.Module):
             )
         else:
             self.q_proj = ColumnParallelLinear(
-                self.hidden_size,
+                proj_input_size,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
                 quant_config=quant_config,
@@ -1170,6 +1189,8 @@ class DeepseekV2Model(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
+        self.aux_hidden_state_layers = tuple[int, ...]()
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -1184,6 +1205,11 @@ class DeepseekV2Model(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
+                if input_ids is None:
+                    raise ValueError(
+                        "Either input_ids or inputs_embeds must be provided "
+                        "to DeepseekV2Model.forward"
+                    )
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
@@ -1205,7 +1231,13 @@ class DeepseekV2Model(nn.Module):
         else:
             llama_4_scaling = None
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = []
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
+            if idx in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
             )
@@ -1216,6 +1248,8 @@ class DeepseekV2Model(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
 
@@ -1261,7 +1295,12 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
 
 
 class DeepseekV2ForCausalLM(
-    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle
+    nn.Module,
+    SupportsPP,
+    DeepseekV2MixtureOfExperts,
+    SupportsLoRA,
+    SupportsEagle,
+    SupportsEagle3,
 ):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -1339,6 +1378,13 @@ class DeepseekV2ForCausalLM(
                 self.moe_layers.append(layer.mlp.experts)
 
         self.extract_moe_parameters(example_moe)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

@@ -38,7 +38,7 @@ from safetensors.torch import safe_open, save_file
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import TokensPrompt
 
 logger = logging.getLogger(__name__)
 
@@ -253,12 +253,21 @@ def calculate_kld(
         outputs = llm.generate([prompt], sampling_params=sampling_params)
         out = outputs[0]
 
+        if ref_is_directory and not os.path.exists(ref_file):
+            logger.warning(
+                "Reference logits file missing for window %d: %s — skipping "
+                "(reference logits may be incomplete from a killed run)",
+                window_idx,
+                ref_file,
+            )
+            window_idx += 1
+            continue
+
         if out.kld_result is not None:
             win_kld_sum, win_kld_count = out.kld_result
             kld_sum += win_kld_sum
             kld_count += win_kld_count
         else:
-            # Fallback: get model logits, load ref, compute KLD in script
             sampling_params_fallback = SamplingParams(
                 prompt_logprobs=1,
                 max_tokens=1,
@@ -383,6 +392,12 @@ def main():
         help="Trust remote code when loading model",
     )
     parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Disable multimodal modules for text-only models (e.g., Qwen-3.5) "
+        "to save GPU memory",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -410,6 +425,8 @@ def main():
     }
     if args.quantization:
         llm_kwargs["quantization"] = args.quantization
+    if args.language_model_only:
+        llm_kwargs["language_model_only"] = True
 
     print("\nCalculating KLD...")
     print(f"  Context length: {args.context_length}")

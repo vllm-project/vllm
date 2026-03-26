@@ -104,10 +104,6 @@ class WorkerBase:
         """
         raise NotImplementedError
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
-        """Initialize the KV cache with the given size in blocks."""
-        raise NotImplementedError
-
     def reset_mm_cache(self) -> None:
         reset_fn = getattr(self.model_runner, "reset_mm_cache", None)
         if callable(reset_fn):
@@ -126,7 +122,7 @@ class WorkerBase:
 
         return format_model_inspection(self.get_model())
 
-    def load_model(self) -> None:
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
         """Load model onto target device."""
         raise NotImplementedError
 

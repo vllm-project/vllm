@@ -7,8 +7,31 @@ from typing import Any
 import msgspec
 
 from vllm.config import ModelConfig, PoolerConfig
+from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask
+
+logger = init_logger(__name__)
+
+
+class LateInteractionParams(
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    array_like=True,
+):  # type: ignore[call-arg]
+    """Metadata for worker-side late-interaction scoring.
+
+    Attributes:
+        mode:
+            - "cache_query": cache query token embeddings
+            - "score_doc": score a document against a cached query.
+        query_key: stable key used for both DP routing and worker cache lookup.
+        query_uses: expected number of document requests
+    """
+
+    mode: str
+    query_key: str
+    query_uses: int | None = None
 
 
 class PoolingParams(
@@ -34,10 +57,6 @@ class PoolingParams(
     dimensions: int | None = None
     # --8<-- [end:embed-pooling-params]
 
-    ## for classification, scoring and rerank
-    # --8<-- [start:classify-pooling-params]
-    # --8<-- [end:classify-pooling-params]
-
     ## for step pooling models
     step_tag_id: int | None = None
     returned_token_ids: list[int] | None = None
@@ -46,6 +65,7 @@ class PoolingParams(
     task: PoolingTask | None = None
     requires_token_ids: bool = False
     skip_reading_prefix_cache: bool | None = None
+    late_interaction_params: LateInteractionParams | None = None
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
@@ -58,7 +78,6 @@ class PoolingParams(
         return {
             "embed": ["dimensions", "use_activation"],
             "classify": ["use_activation"],
-            "score": ["use_activation"],
             "token_embed": ["dimensions", "use_activation"],
             "token_classify": ["use_activation"],
         }
@@ -68,11 +87,22 @@ class PoolingParams(
         return deepcopy(self)
 
     def verify(self, model_config: ModelConfig) -> None:
+        if self.task == "score":
+            logger.warning_once(
+                "`score` task is deprecated and will be removed in v0.20. "
+                "Please use `classify` instead."
+            )
+            self.task = "classify"
+
         # plugin task uses io_processor.parse_request to verify inputs,
         # skipping PoolingParams verify
         if self.task == "plugin":
             if self.skip_reading_prefix_cache is None:
                 self.skip_reading_prefix_cache = True
+            return
+
+        # skipping verify, let plugins configure and validate pooling params
+        if self.task not in self.valid_parameters:
             return
 
         # NOTE: Task validation needs to done against the model instance,
@@ -159,7 +189,7 @@ class PoolingParams(
                 elif self.dimensions < 1:
                     raise ValueError("Dimensions must be greater than 0")
 
-        elif self.task in ["classify", "score", "token_classify"]:
+        elif self.task in ["classify", "token_classify"]:
             if self.use_activation is None:
                 self.use_activation = True
         else:
@@ -193,6 +223,7 @@ class PoolingParams(
             f"returned_token_ids={self.returned_token_ids}, "
             f"requires_token_ids={self.requires_token_ids}, "
             f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
+            f"late_interaction_params={self.late_interaction_params}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
 

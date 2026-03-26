@@ -13,6 +13,7 @@ import torch.nn as nn
 from PIL import Image
 
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config.cache import CacheConfig
 from vllm.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
@@ -131,7 +132,9 @@ def initialize_dummy_model(
 ):
     temp_file = tempfile.mkstemp()[1]
     current_device = torch.get_default_device()
-    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config = VllmConfig(
+        model_config=model_config, cache_config=CacheConfig(block_size=16)
+    )
     with set_current_vllm_config(vllm_config=vllm_config):
         init_distributed_environment(
             world_size=1,

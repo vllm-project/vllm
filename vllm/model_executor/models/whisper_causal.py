@@ -150,8 +150,10 @@ def create_whisper_attention_backend_with_block_pooling(
             new_common_attn_metadata.query_start_loc *= block_pool_size
             new_common_attn_metadata.query_start_loc_cpu *= block_pool_size
             new_common_attn_metadata.seq_lens *= block_pool_size
-            new_common_attn_metadata._seq_lens_cpu *= block_pool_size
-            new_common_attn_metadata._num_computed_tokens_cpu *= block_pool_size
+            if new_common_attn_metadata._seq_lens_cpu is not None:
+                new_common_attn_metadata._seq_lens_cpu *= block_pool_size
+            if new_common_attn_metadata._num_computed_tokens_cpu is not None:
+                new_common_attn_metadata._num_computed_tokens_cpu *= block_pool_size
             new_common_attn_metadata.num_actual_tokens *= block_pool_size
             new_common_attn_metadata.max_query_len *= block_pool_size
             new_common_attn_metadata.max_seq_len *= block_pool_size
@@ -290,16 +292,13 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
 
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
-            block_size = cache_config.block_size
         else:
             kv_cache_dtype = "auto"
-            block_size = 16
 
         underlying_attn_backend = get_attn_backend(
             head_size,
             dtype,
             kv_cache_dtype,
-            block_size,
             attn_type=attn_type,
         )
         attn_backend = create_whisper_attention_backend_with_block_pooling(

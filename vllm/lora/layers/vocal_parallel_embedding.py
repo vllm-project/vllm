@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config.lora import LoRAConfig
+from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
 
@@ -132,7 +133,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is VocabParallelEmbedding
+        return type(source_layer) is maybe_get_oot_by_class(VocabParallelEmbedding)
 
     @property
     def weight(self):

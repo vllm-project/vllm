@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import field
-from typing import Literal
+from typing import ClassVar, Literal
 
-from pydantic import Field, SkipValidation, field_validator
+from pydantic import Field, SkipValidation, field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
 CacheDType = Literal[
     "auto",
+    "float16",
     "bfloat16",
     "fp8",
     "fp8_e4m3",
@@ -31,12 +31,13 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: SkipValidation[BlockSize] = None  # type: ignore[assignment]
-    """Size of a contiguous cache block in number of tokens.
+    DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
-    This config has no static default. If left unspecified by the user, it will
-    be set in `Platform.check_and_update_config()` based on the current
-    platform."""
+    block_size: SkipValidation[int] = None  # type: ignore[assignment]
+    """Size of a contiguous cache block in number of tokens.
+    Accepts None (meaning "use default"). After construction, always int."""
+    user_specified_block_size: bool = field(default=False, init=False)
+    """Whether block_size was explicitly provided. Derived automatically."""
     gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
@@ -82,7 +83,8 @@ class CacheConfig:
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
     reproducible hashing. Requires the optional ``xxhash`` package."""
     calculate_kv_scales: bool = False
-    """This enables dynamic calculation of `k_scale` and `v_scale` when
+    """Deprecated: This option is deprecated and will be removed in v0.19.
+    It enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
     checkpoint if available. Otherwise, the scales will default to 1.0."""
     cpu_kvcache_space_bytes: int | None = None
@@ -169,6 +171,8 @@ class CacheConfig:
             "prefix_caching_hash_algo",
             "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",
+            "user_specified_block_size",
+            "_block_size_resolved",
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
@@ -185,6 +189,34 @@ class CacheConfig:
         # convert cache_config to dict(key: str, value: str) for prometheus
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
+
+    _block_size_resolved: bool = field(default=False, init=False)
+    """Guard against pydantic re-running _apply_block_size_default."""
+
+    @model_validator(mode="after")
+    def _apply_block_size_default(self) -> "CacheConfig":
+        # Pydantic re-runs validators when CacheConfig is nested inside
+        # another pydantic model (e.g. VllmConfig). Guard against that.
+        if self._block_size_resolved:
+            return self
+        object.__setattr__(self, "_block_size_resolved", True)
+        if self.block_size is None:
+            object.__setattr__(self, "block_size", self.DEFAULT_BLOCK_SIZE)
+        else:
+            object.__setattr__(self, "user_specified_block_size", True)
+        return self
+
+    @field_validator("calculate_kv_scales", mode="after")
+    @classmethod
+    def _warn_deprecated_calculate_kv_scales(cls, calculate_kv_scales: bool) -> bool:
+        if calculate_kv_scales:
+            logger.warning(
+                "The `--calculate-kv-scales` option is deprecated and will "
+                "be removed in v0.19. The scales will be loaded from the "
+                "model checkpoint if available, otherwise they default to "
+                "1.0."
+            )
+        return calculate_kv_scales
 
     @field_validator("cache_dtype", mode="after")
     @classmethod
