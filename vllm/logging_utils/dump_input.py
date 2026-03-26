@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import contextlib
 import enum
 import json
 
@@ -54,17 +53,6 @@ def prepare_object_to_dump(obj) -> str:
 
 
 def dump_engine_exception(
-    config: VllmConfig,
-    scheduler_output: SchedulerOutput,
-    scheduler_stats: SchedulerStats | None,
-):
-    # NOTE: ensure we can log extra info without risking raises
-    # unexpected errors during logging
-    with contextlib.suppress(Exception):
-        _dump_engine_exception(config, scheduler_output, scheduler_stats)
-
-
-def _dump_engine_exception(
     config: VllmConfig,
     scheduler_output: SchedulerOutput,
     scheduler_stats: SchedulerStats | None,
