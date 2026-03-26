@@ -206,6 +206,7 @@ class HFConfigParser(ConfigParserBase):
                 # Register the config class to AutoConfig to ensure it's used in future
                 # calls to `from_pretrained`
                 config_class = _CONFIG_REGISTRY[model_type]
+                config_class.model_type = model_type
                 AutoConfig.register(model_type, config_class, exist_ok=True)
                 # Now that it is registered, it is not considered remote code anymore
                 trust_remote_code = False
