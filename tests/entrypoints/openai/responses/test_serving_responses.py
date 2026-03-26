@@ -47,6 +47,7 @@ from vllm.entrypoints.openai.responses.serving import (
     _extract_allowed_tools_from_mcp_requests,
     extract_tool_types,
 )
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
 )
@@ -167,6 +168,7 @@ class TestInitializeToolSessions:
         models = MagicMock()
 
         tool_server = MagicMock(spec=ToolServer)
+        openai_serving_render = MagicMock(spec=OpenAIServingRender)
 
         # Create the actual instance
         instance = OpenAIServingResponses(
@@ -176,6 +178,7 @@ class TestInitializeToolSessions:
             chat_template=None,
             chat_template_content_format="auto",
             tool_server=tool_server,
+            openai_serving_render=openai_serving_render,
         )
 
         return instance
@@ -254,6 +257,8 @@ class TestValidateGeneratorInput:
 
         models = MagicMock()
 
+        openai_serving_render = MagicMock(spec=OpenAIServingRender)
+
         # Create the actual instance
         instance = OpenAIServingResponses(
             engine_client=engine_client,
@@ -261,6 +266,7 @@ class TestValidateGeneratorInput:
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
+            openai_serving_render=openai_serving_render,
         )
 
         return instance
@@ -325,6 +331,7 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
         chat_template=None,
         chat_template_content_format="auto",
         reasoning_parser="qwen3",
+        openai_serving_render=MagicMock(spec=OpenAIServingRender),
     )
 
     # Build a SimpleContext with thinking tokens in the output.
@@ -624,6 +631,7 @@ def _make_serving_instance_with_reasoning():
         chat_template=None,
         chat_template_content_format="auto",
         reasoning_parser="qwen3",
+        openai_serving_render=MagicMock(spec=OpenAIServingRender),
     )
     return serving
 
