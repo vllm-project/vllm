@@ -68,8 +68,13 @@ class ImageMediaIO(MediaIO[Image.Image]):
             return convert_image_mode(image, self.image_mode)
 
     def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
-        image = Image.open(BytesIO(data))
-        return MediaWithBytes(self._convert_image_mode(image), data)
+        try:
+            image = Image.open(BytesIO(data))
+            image.load()
+            image = self._convert_image_mode(image)
+        except (OSError, Image.UnidentifiedImageError) as e:
+            raise ValueError(f"Failed to load image: {e}") from e
+        return MediaWithBytes(image, data)
 
     def load_base64(self, media_type: str, data: str) -> MediaWithBytes[Image.Image]:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
@@ -77,8 +82,13 @@ class ImageMediaIO(MediaIO[Image.Image]):
     def load_file(self, filepath: Path) -> MediaWithBytes[Image.Image]:
         with open(filepath, "rb") as f:
             data = f.read()
-        image = Image.open(BytesIO(data))
-        return MediaWithBytes(self._convert_image_mode(image), data)
+        try:
+            image = Image.open(BytesIO(data))
+            image.load()
+            image = self._convert_image_mode(image)
+        except (OSError, Image.UnidentifiedImageError) as e:
+            raise ValueError(f"Failed to load image: {e}") from e
+        return MediaWithBytes(image, data)
 
     def encode_base64(
         self,
