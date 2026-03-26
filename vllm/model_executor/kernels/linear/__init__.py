@@ -139,7 +139,7 @@ _POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]
         # To be added
     ],
     PlatformEnum.XPU: [
-        XPUFP8ScaledMMLinearKernel,
+        # To be added
     ],
 }
 
