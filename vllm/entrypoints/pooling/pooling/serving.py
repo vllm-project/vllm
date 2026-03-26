@@ -33,10 +33,11 @@ from vllm.entrypoints.pooling.utils import (
     encode_pooling_output_float,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.inputs import ProcessorInputs
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.renderers.inputs.preprocess import prompt_to_seq
+from vllm.tasks import SupportedTask
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
@@ -49,6 +50,7 @@ class OpenAIServingPooling(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         openai_serving_render: OpenAIServingRender,
+        supported_tasks: tuple[SupportedTask, ...],
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
@@ -60,7 +62,8 @@ class OpenAIServingPooling(OpenAIServing):
             models=models,
             request_logger=request_logger,
         )
-
+        self.supported_tasks = supported_tasks
+        self.pooling_task = self.model_config.get_pooling_task(supported_tasks)
         self.openai_serving_render = openai_serving_render
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -86,10 +89,28 @@ class OpenAIServingPooling(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
+        if request.task is None:
+            request.task = self.pooling_task
+
         if getattr(request, "dimensions", None) is not None:
             return self.create_error_response("dimensions is currently not supported")
 
-        engine_prompts: Sequence[ProcessorInputs]
+        # plugin task uses io_processor.parse_request to verify inputs
+        if request.task != "plugin" and request.task != self.pooling_task:
+            if request.task not in self.supported_tasks:
+                raise ValueError(
+                    f"Unsupported task: {request.task!r} "
+                    f"Supported tasks: {self.supported_tasks}"
+                )
+            else:
+                logger.warning_once(
+                    "Pooling multitask support is deprecated and will be removed "
+                    "in v0.20. When the default pooling task is not what you want, you "
+                    'need to manually specify it via --pooler-config.task "%s". ',
+                    request.task,
+                )
+
+        engine_inputs: Sequence[EngineInput]
         if use_io_processor := isinstance(request, IOProcessorRequest):
             if self.io_processor is None:
                 raise ValueError(
@@ -104,7 +125,7 @@ class OpenAIServingPooling(OpenAIServing):
             raw_prompts = await self.io_processor.pre_process_async(
                 prompt=validated_prompt, request_id=request_id
             )
-            engine_prompts = await self.openai_serving_render.preprocess_cmpl(
+            engine_inputs = await self.openai_serving_render.preprocess_cmpl(
                 request,
                 prompt_to_seq(raw_prompts),
             )
@@ -117,7 +138,7 @@ class OpenAIServingPooling(OpenAIServing):
             if error_check_ret is not None:
                 return error_check_ret
 
-            _, engine_prompts = await self.openai_serving_render.preprocess_chat(
+            _, engine_inputs = await self.openai_serving_render.preprocess_chat(
                 request,
                 request.messages,
                 default_template=self.chat_template,
@@ -125,7 +146,7 @@ class OpenAIServingPooling(OpenAIServing):
                 default_template_kwargs=None,
             )
         elif isinstance(request, PoolingCompletionRequest):
-            engine_prompts = await self.openai_serving_render.preprocess_completion(
+            engine_inputs = await self.openai_serving_render.preprocess_completion(
                 request,
                 prompt_input=request.input,
                 prompt_embeds=None,
@@ -144,12 +165,12 @@ class OpenAIServingPooling(OpenAIServing):
         else:
             pooling_params = request.to_pooling_params()  # type: ignore
 
-        for i, engine_prompt in enumerate(engine_prompts):
+        for i, engine_input in enumerate(engine_inputs):
             request_id_item = f"{request_id}-{i}"
 
             self._log_inputs(
                 request_id_item,
-                engine_prompt,
+                engine_input,
                 params=pooling_params,
                 lora_request=lora_request,
             )
@@ -161,7 +182,7 @@ class OpenAIServingPooling(OpenAIServing):
             )
 
             generator = self.engine_client.encode(
-                engine_prompt,
+                engine_input,
                 pooling_params,
                 request_id_item,
                 lora_request=lora_request,
@@ -200,7 +221,7 @@ class OpenAIServingPooling(OpenAIServing):
             return IOProcessorResponse(request_id=request_id, data=output)
 
         assert isinstance(request, (PoolingCompletionRequest, PoolingChatRequest))
-        num_prompts = len(engine_prompts)
+        num_prompts = len(engine_inputs)
 
         # Non-streaming response
         final_res_batch: list[PoolingRequestOutput | None]
