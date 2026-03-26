@@ -83,7 +83,6 @@ class Step3p5Config(PretrainedConfig):
         # For some reason the checkpoint has longer layer_types than num_hidden_layers
         if layer_types is not None:
             layer_types = layer_types[: self.num_hidden_layers]
-            print(len(layer_types))
         self.layer_types = layer_types
         self.use_rope_layers = use_rope_layers
         self.yarn_only_types = yarn_only_types
