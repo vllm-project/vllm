@@ -17,7 +17,7 @@ from transformers import (
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs.data import PromptType
+from vllm.inputs import MultiModalDataDict, PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
@@ -37,7 +37,6 @@ from vllm.model_executor.models.whisper_utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -573,6 +572,8 @@ class Transformer(nn.Module):
             )
 
     def forward(self, hidden_states: torch.Tensor, ilens: int = 0):
+        max_len = max(ilens)
+        hidden_states = hidden_states[:, :max_len, :]
         batch_size, seq_len, dim = hidden_states.size()
         chunk_num = (seq_len - 1) // self.k + 1
         pad_num = chunk_num * self.k - seq_len

@@ -105,9 +105,6 @@ class BaseFrontendArgs:
     """When `--max-logprobs` is specified, represents single tokens as
     strings of the form 'token_id:{token_id}' so that tokens that are not
     JSON-encodable can be identified."""
-    disable_frontend_multiprocessing: bool = False
-    """If specified, will run the OpenAI frontend server in the same process as
-    the model serving engine."""
     enable_auto_tool_choice: bool = False
     """Enable auto tool choice for supported models. Use `--tool-call-parser`
     to specify which parser to use."""
@@ -287,10 +284,6 @@ class FrontendArgs(BaseFrontendArgs):
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
-    use_gpu_for_pooling_score: bool = False
-    """If set, run pooling score MaxSim on GPU in the API server process.
-    Can significantly improve late-interaction scoring performance.
-    https://github.com/vllm-project/vllm/pull/35330"""
 
     @classmethod
     def _customize_cli_kwargs(
