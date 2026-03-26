@@ -23,12 +23,16 @@ def _get_env_var(worker, name):
     return os.environ.get(name)
 
 
-@ray.remote(num_cpus=0)
+# Follows the same pattern as Ray Serve LLM (LLMServer / VLLMEngine):
+# sync __init__ and start() (AsyncLLM constructor is sync), async methods
+# for generate/collective_rpc.  max_concurrency=1 gives the actor an
+# event loop so async methods work.
+@ray.remote(num_cpus=0, max_concurrency=1)
 class AsyncLLMActor:
-    async def __init__(self):
+    def __init__(self):
         self.engine: AsyncLLM
 
-    async def start(self, pg, bundle_indices=None, ray_runtime_env=None):
+    def start(self, pg, bundle_indices=None, ray_runtime_env=None):
         os.environ["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] = "1"
         # VLLM_ALLOW_INSECURE_SERIALIZATION is needed so collective_rpc can
         # pickle _get_env_var over the AsyncLLM -> EngineCore ZMQ boundary.
@@ -77,7 +81,7 @@ class AsyncLLMActor:
         )
         return results
 
-    async def shutdown(self):
+    def shutdown(self):
         if engine := getattr(self, "engine", None):
             engine.shutdown()
             del self.engine
