@@ -74,8 +74,10 @@ In addition, we have the following custom APIs:
     - Compatible with [Cohere's Embed API](https://docs.cohere.com/reference/embed)
     - Works with any [embedding model](../models/pooling_models/embed.md#supported-models), including multimodal models.
 - [Score API](../models/pooling_models/scoring.md#score-api) (`/score`, `/v1/score`)
-    - Applicable to [score models](../models/pooling_models/scoring.md) and [CausalLM models](../models/generative_models.md).
-    - For CausalLM models, computes next-token probabilities for specified `label_token_ids`.
+    - Applicable to [score models](../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
+- [Generative Scoring API](#generative-scoring-api) (`/generative_scoring`)
+    - Applicable to [CausalLM models](../models/generative_models.md) (task `"generate"`).
+    - Computes next-token probabilities for specified `label_token_ids`.
 - [Rerank API](../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 rerank API](https://jina.ai/reranker/)
     - Also compatible with [Cohere's v1 & v2 rerank APIs](https://docs.cohere.com/v2/reference/rerank)
@@ -482,17 +484,19 @@ This approach is more robust than index-based access (`messages[0]`, `messages[1
 
 Example template file: [examples/pooling/score/template/nemotron-rerank.jinja](../../examples/pooling/score/template/nemotron-rerank.jinja)
 
-#### CausalLM Models (Generative Scoring)
+### Generative Scoring API
 
-When using a CausalLM model (e.g., Llama, Qwen, Mistral) with the Score API, the `/generative_scoring` endpoint computes the probability of specified token IDs appearing as the next token. Each item (document) is concatenated with the query to form a prompt, and the model predicts how likely each label token is as the next token after that prompt. This lets you score items against a query — for example, asking "Is this the capital of France?" and scoring each city by how likely the model is to answer "Yes".
+The `/generative_scoring` endpoint uses a CausalLM model (e.g., Llama, Qwen, Mistral) to compute the probability of specified token IDs appearing as the next token. Each item (document) is concatenated with the query to form a prompt, and the model predicts how likely each label token is as the next token after that prompt. This lets you score items against a query — for example, asking "Is this the capital of France?" and scoring each city by how likely the model is to answer "Yes".
 
-**Requirements for CausalLM models:**
+This endpoint is automatically available when the server is started with a generative model (task `"generate"`). It is separate from the pooling-based [Score API](#score-api), which uses cross-encoder, bi-encoder, or late-interaction models.
+
+**Requirements:**
 
 - The `label_token_ids` parameter is **required** and must contain **at least 1 token ID**.
 - When 2 label tokens are provided, the score equals `P(label_token_ids[0]) / (P(label_token_ids[0]) + P(label_token_ids[1]))` (softmax over the two labels).
 - When more labels are provided, the score is the softmax-normalized probability of the first label token across all label tokens.
 
-##### Example: Score with CausalLM
+#### Example
 
 ```bash
 curl -X POST http://localhost:8000/generative_scoring \
@@ -524,7 +528,7 @@ Here, each item is appended to the query to form prompts like `"Is this city the
     }
     ```
 
-##### How it works
+#### How it works
 
 1. **Prompt Construction**: For each item, builds `prompt = query + item` (or `item + query` if `item_first=true`)
 2. **Forward Pass**: Runs the model on each prompt to get next-token logits
@@ -532,7 +536,7 @@ Here, each item is appended to the query to form prompts like `"Is this city the
 4. **Softmax Normalization**: Applies softmax over only the label tokens (when `apply_softmax=true`)
 5. **Score**: Returns the normalized probability of the first label token
 
-##### Finding Token IDs
+#### Finding Token IDs
 
 To find the token IDs for your labels, use the tokenizer:
 
