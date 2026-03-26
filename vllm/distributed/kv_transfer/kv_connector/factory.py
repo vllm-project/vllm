@@ -114,11 +114,14 @@ class KVConnectorFactory:
             if connector_module_path is None:
                 raise ValueError(f"Unsupported connector type: {connector_name}")
             connector_module = importlib.import_module(connector_module_path)
+            class_name = (
+                kv_transfer_config.kv_connector_class_name or connector_name
+            )
             try:
-                connector_cls = getattr(connector_module, connector_name)
+                connector_cls = getattr(connector_module, class_name)
             except AttributeError as e:
                 raise AttributeError(
-                    f"Class {connector_name} not found in {connector_module_path}"
+                    "Class %s not found in %s" % (class_name, connector_module_path)
                 ) from e
             connector_cls = cast(type[KVConnectorBaseType], connector_cls)
             if not supports_kw(connector_cls, "kv_cache_config"):
