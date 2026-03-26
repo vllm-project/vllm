@@ -561,9 +561,6 @@ class FlashlbEplbPolicy(AbstractEplbPolicy):
     def __init__(self):
         """
         Initialize FlashLB policy with dynamic configuration
-
-        Args:
-            config: Dynamic configuration object containing policy parameters
         """
         # Max window size for expert hotness observation
         self.max_observation_window = 2000
@@ -727,7 +724,6 @@ class FlashlbEplbPolicy(AbstractEplbPolicy):
         Update expert hotness statistics with sliding window for all layers
 
         Args:
-            deployment: Expert deployment matrix (num_layers, num_ranks, num_slots)
             rank_load: Load data (num_stages, num_layers, num_experts)
             num_layers: Total number of layers
             num_experts: Total number of experts
