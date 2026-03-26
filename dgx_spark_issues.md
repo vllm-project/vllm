@@ -196,26 +196,31 @@ PyTorch only supports compute capabilities 8.0-9.0.
 
 ---
 
-## 2026-03-26 11:34 Cron 检查摘要
+## 2026-03-26 12:38 Cron 检查摘要
 
 **PR #37959 (我的 Helm chart 修复):**
-- 状态：Open ~55h
+- 状态：Open ~56h
 - Labels: `bug`, `documentation` (仍无 `ready`)
 - 人类 review: 0
 - 下一步：在 Slack #pr-reviews 礼貌求助
 
 **PR #38126 (NVIDIA DGX Spark 修复):**
-- 状态：Open，~14h 无更新
+- 状态：Open，~15h 无更新
 - Labels: `ready`, `ci/build`, `nvidia`
 - 等待 merge 后检查代码是否覆盖 SM 12.1 Marlin 自动检测
 
 **izhuhaoran 动态:**
-- 5 open PRs (#38183, #38181, #38180, #38179, #38178)
-- 专注 MRV2、ROCm、KVTransfer 方向
-- 节奏稳定，无新 merge
+- 5 open PRs，无新 merge
+- 专注 Model Runner V2、HMA、Blackwell 方向
+- 节奏稳定，非批量提交
 
 **本地环境:**
 - GPU: NVIDIA GB10 (SM 12.1)
 - Driver: 580.95.05
 - 分支：fix/helm-chart-selector-labels
 - 未提交更改：DAILY_LEARNINGS.md, dgx_spark_issues.md
+
+**DGX Spark 独特优势确认:**
+- 真实 GB10 硬件可测试
+- 社区 DGX Spark 用户少，贡献易被注意
+- 维护者 (johnnynunez, ProExpertProg) 明确需要 DGX Spark 改进
