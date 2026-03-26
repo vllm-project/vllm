@@ -373,8 +373,15 @@ class InductorStandaloneAdaptor(CompilerInterface):
                 break
 
         if input_fake_mode is not None:
-            fake_mode_ctx: Any = patch(
-                "torch._inductor.standalone_compile.FakeTensorMode",
+            # Use patch.object on the actual module from sys.modules
+            # because in Python <=3.10 the string-based patch() resolves
+            # torch._inductor.standalone_compile to the wrapper function
+            # (defined in __init__.py) instead of the module.
+            import sys
+
+            fake_mode_ctx: Any = patch.object(
+                sys.modules["torch._inductor.standalone_compile"],
+                "FakeTensorMode",
                 lambda *a, **kw: input_fake_mode,
             )
         else:
@@ -624,6 +631,23 @@ class InductorAdaptor(CompilerInterface):
                 torch._functorch.config.patch(enable_remote_autograd_cache=False)
             )
             stack.enter_context(_patch_constrain_to_fx_strides())
+
+            # Clear the tracing context before calling compile_fx.
+            # vLLM calls compile_fx from within a PiecewiseCompileInterpreter
+            # that runs under Dynamo's tracing context. The tracing context
+            # has a FakeTensorMode from Dynamo, but the example inputs for
+            # this subgraph have fake tensors from a different FakeTensorMode.
+            # compile_fx's _compile_fx_main calls detect_fake_mode() which
+            # asserts all FakeTensorModes match, causing a crash.
+            # Clearing the tracing context lets compile_fx create its own.
+            saved_tracing_context = torch._guards.TracingContext.try_get()
+            if saved_tracing_context is not None:
+                torch._guards._TLS.tracing_context = None
+
+                def _restore_tracing_context():
+                    torch._guards._TLS.tracing_context = saved_tracing_context
+
+                stack.callback(_restore_tracing_context)
 
             compiled_graph = compile_fx(
                 graph,

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
+from multiprocessing.queues import Queue
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -95,6 +96,7 @@ class CoreEngineProcManager:
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
+        tensor_queue: Queue | None = None,
     ):
         context = get_mp_context()
         common_kwargs = {
@@ -103,6 +105,7 @@ class CoreEngineProcManager:
             "handshake_address": handshake_address,
             "executor_class": executor_class,
             "log_stats": log_stats,
+            "tensor_queue": tensor_queue,
         }
 
         if client_handshake_address:
@@ -301,7 +304,20 @@ class CoreEngineActorManager:
         else:
             ray.init()
 
-        vllm_config.parallel_config.allocate_elastic_ep_ports()
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.enable_elastic_ep:
+            from vllm.distributed.utils import create_tcp_store
+
+            ip = parallel_config.data_parallel_master_ip
+            store = create_tcp_store(
+                ip,
+                0,
+                is_master=True,
+                world_size=-1,
+                wait_for_workers=False,
+            )
+            parallel_config._coord_store_port = store.port
+            self._coord_store = store
 
         if placement_groups is not None:
             assert local_dp_ranks is not None, (
@@ -851,6 +867,7 @@ def launch_core_engines(
         CoreEngineProcManager | CoreEngineActorManager | None,
         DPCoordinator | None,
         EngineZmqAddresses,
+        Queue | None,
     ]
 ]:
     """Launch engine and DP coordinator processes as needed."""
@@ -864,6 +881,14 @@ def launch_core_engines(
     local_engines_only = parallel_config.local_engines_only
 
     offline_mode = local_start_index is not None
+
+    # Create a single tensor IPC queue for sharing multimodal tensors between
+    # API servers and engine core. Returns a single queue since we only support
+    # DP=1 for this data flow.
+    tensor_queue: Queue | None = None
+    multimodal_config = vllm_config.model_config.multimodal_config
+    if multimodal_config is not None and multimodal_config.mm_tensor_ipc == "torch_shm":
+        tensor_queue = get_mp_context().Queue()
 
     # Run the DP Coordinator process with rank 0 when in online DP mode.
     # The coordinator is needed for:
@@ -900,7 +925,7 @@ def launch_core_engines(
             log_stats=log_stats,
         )
 
-        yield engine_actor_manager, coordinator, addresses
+        yield engine_actor_manager, coordinator, addresses, tensor_queue
         return
 
     if offline_mode:
@@ -962,11 +987,12 @@ def launch_core_engines(
                 local_engine_count=local_engine_count,
                 start_index=dp_rank,
                 local_start_index=local_start_index or 0,
+                tensor_queue=tensor_queue,
             )
         else:
             local_engine_manager = None
 
-        yield local_engine_manager, coordinator, addresses
+        yield local_engine_manager, coordinator, addresses, tensor_queue
 
         # Now wait for engines to start.
         wait_for_engine_startup(

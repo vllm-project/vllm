@@ -27,7 +27,7 @@ pull_request_rules:
         Hi @{{author}}, the pre-commit checks have failed. Please run:
 
         ```bash 
-        uv pip install pre-commit
+        uv pip install pre-commit>=4.5.1
         pre-commit install
         pre-commit run --all-files
         ```
@@ -260,7 +260,7 @@ pull_request_rules:
       - files=examples/offline_inference/structured_outputs.py
       - files=examples/online_serving/structured_outputs/structured_outputs.py
       - files~=^tests/v1/structured_output/
-      - files=tests/v1/entrypoints/llm/test_struct_output_generate.py
+      - files=tests/entrypoints/llm/test_struct_output_generate.py
       - files~=^vllm/v1/structured_output/
   actions:
     label:
@@ -333,9 +333,10 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=^tests/tool_use/
-      - files~=^tests/entrypoints/openai/tool_parsers/
-      - files=tests/entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py
-      - files~=^vllm/entrypoints/openai/tool_parsers/
+      - files~=^tests/tool_parsers/
+      - files~=^tests/entrypoints/openai/.*tool.*
+      - files~=^tests/entrypoints/anthropic/.*tool.*
+      - files~=^vllm/tool_parsers/
       - files=docs/features/tool_calling.md
       - files~=^examples/tool_chat_*
       - files=examples/offline_inference/chat_with_tools.py
@@ -381,7 +382,7 @@ pull_request_rules:
     - or:
       - files~=^vllm/model_executor/model_loader/tensorizer.py
       - files~=^vllm/model_executor/model_loader/tensorizer_loader.py
-      - files~=^tests/entrypoints/openai/test_tensorizer_entrypoint.py
+      - files~=^tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
       - files~=^tests/model_executor/model_loader/tensorizer_loader/
   actions:
     assign:

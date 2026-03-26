@@ -22,16 +22,14 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config.utils import getattr_iter
+from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
 from vllm.multimodal import MultiModalKwargsItems
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
-    MultiModalInputs,
     PlaceholderRange,
-    mm_inputs,
 )
 from vllm.multimodal.parse import (
     ImageProcessorItems,
@@ -179,7 +177,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         """
         Process multi-modal inputs to be used in vLLM.
 
@@ -261,7 +259,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         with timing_ctx.record("get_mm_hashes"):
             mm_hashes = inputs.get_mm_hashes(self.info.model_id)
 
-        return mm_inputs(
+        return mm_input(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
@@ -448,20 +446,21 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # In v4 `get_rope_index` doesn't have wildcard `kwargs`, and
         # can't accept arbitrary args, even if its value is `None`
         kwargs = {}
-        if mm_token_type_ids:
-            if not hasattr(self, "_get_rope_index_accepts_mm_token_type_ids"):
-                import inspect
+        if not hasattr(self, "_get_rope_index_accepts_mm_token_type_ids"):
+            import inspect
 
-                sig = inspect.signature(self.model.get_rope_index)
-                params = sig.parameters
-                self._get_rope_index_accepts_mm_token_type_ids = (
-                    "mm_token_type_ids" in params
-                    or any(
-                        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
-                    )
-                )
-            if self._get_rope_index_accepts_mm_token_type_ids:
+            sig = inspect.signature(self.model.get_rope_index)
+            params = sig.parameters
+            self._get_rope_index_accepts_mm_token_type_ids = (
+                "mm_token_type_ids" in params
+                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            )
+        if self._get_rope_index_accepts_mm_token_type_ids:
+            if mm_token_type_ids:
                 kwargs["mm_token_type_ids"] = torch.cat(mm_token_type_ids)
+            else:
+                shape = (1, len(input_tokens))
+                kwargs["mm_token_type_ids"] = torch.zeros(*shape, dtype=torch.int)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),
