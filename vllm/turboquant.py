@@ -7,12 +7,15 @@ bit-widths for flexible accuracy/compression trade-offs.
 """
 from __future__ import annotations
 
+import logging
 import math
 from functools import lru_cache
 from typing import Dict, NamedTuple, Optional, Tuple
 
 import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
 
 __version__ = "1.0.0"
 __all__ = [
@@ -183,7 +186,12 @@ def _packed_width(length: int, bits: int) -> int:
 
 
 def _pack_lowbit(values: torch.Tensor, bits: int) -> torch.Tensor:
-    """Pack values into low-bit integers."""
+    """Pack values into low-bit integers.
+    
+    Note: This Python implementation has performance implications for large
+    tensors. A custom C++/CUDA kernel is recommended for production use to
+    avoid Python loop overhead and leverage GPU acceleration.
+    """
     if bits == 0:
         return torch.zeros((*values.shape[:-1], 0), dtype=torch.uint32)
 
@@ -211,7 +219,12 @@ def _pack_lowbit(values: torch.Tensor, bits: int) -> torch.Tensor:
 
 
 def _unpack_lowbit(packed: torch.Tensor, bits: int, length: int) -> torch.Tensor:
-    """Unpack low-bit integers from packed representation."""
+    """Unpack low-bit integers from packed representation.
+    
+    Note: This Python implementation has performance implications for large
+    tensors. A custom C++/CUDA kernel is recommended for production use to
+    avoid Python loop overhead and leverage GPU acceleration.
+    """
     if bits == 0:
         return torch.zeros((*packed.shape[:-1], 0), dtype=torch.uint32)
 
@@ -432,7 +445,7 @@ class _TurboQuantProdCodec:
 
 def _select_outlier_indices(
     tensor: torch.Tensor, avg_bits: float
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Select outlier(high-magnitude) dimensions for mixed-precision quantization."""
     lower_bits = math.floor(avg_bits)
     upper_bits = math.ceil(avg_bits)
@@ -443,12 +456,12 @@ def _select_outlier_indices(
     high_count = int(round((avg_bits - lower_bits) * dim / (upper_bits - lower_bits)))
     high_count = max(1, min(dim - 1, high_count))
 
-    scores = torch.mean(torch.abs(tensor.to(torch.float32)), dim=(0, 1, 2) if tensor.ndim == 4 else tuple(range(tensor.ndim - 1)))
-    order = np.argsort(scores.cpu().numpy())
-    high_idx = np.sort(order[-high_count:].astype(np.int32))
-    low_mask = np.ones(dim, dtype=bool)
+    scores = torch.mean(torch.abs(tensor.to(torch.float32)), dim=tuple(range(tensor.ndim - 1)))
+    order = torch.argsort(scores)
+    high_idx = torch.sort(order[-high_count:])[0]
+    low_mask = torch.ones(dim, dtype=torch.bool, device=tensor.device)
     low_mask[high_idx] = False
-    low_idx = np.nonzero(low_mask)[0].astype(np.int32)
+    low_idx = torch.nonzero(low_mask).squeeze(-1)
     return low_idx, high_idx
 
 
@@ -462,11 +475,11 @@ class _SplitCodec:
         self.lower_bits = math.floor(bits)
         self.upper_bits = math.ceil(bits)
         low_idx, high_idx = _select_outlier_indices(tensor, bits)
-        self.low_idx = torch.tensor(low_idx, dtype=torch.int32)
-        self.high_idx = torch.tensor(high_idx, dtype=torch.int32)
+        self.low_idx = low_idx.to(torch.int32)
+        self.high_idx = high_idx.to(torch.int32)
 
-        concat_order = np.concatenate([low_idx, high_idx])
-        self.restore_order = torch.tensor(np.argsort(concat_order), dtype=torch.int32)
+        concat_order = torch.cat([self.low_idx, self.high_idx])
+        self.restore_order = torch.argsort(concat_order).to(torch.int32)
 
         codec_cls = _TurboQuantProdCodec if mode == "prod" else _TurboQuantMSECodec
         self.low_codec = codec_cls(len(low_idx), self.lower_bits, seed)
@@ -581,13 +594,22 @@ class TurboQuantKVCache:
     @property
     def nbytes(self) -> int:
         """Estimate memory usage of compressed cache."""
-        nbytes = 0
-        if self.keys is not None:
-            if isinstance(self.keys, torch.Tensor):
-                nbytes += self.keys.nbytes
-            if isinstance(self.values, torch.Tensor):
-                nbytes += self.values.nbytes
-        return nbytes
+        def _get_size(state):
+            if state is None:
+                return 0
+            
+            total_bytes = 0
+            if hasattr(state, '_asdict'):  # Handles NamedTuple
+                for field in state._asdict().values():
+                    total_bytes += _get_size(field)
+            elif isinstance(state, torch.Tensor):
+                total_bytes += state.nbytes
+            elif isinstance(state, (list, tuple)):
+                for item in state:
+                    total_bytes += _get_size(item)
+            return total_bytes
+
+        return _get_size(self.keys) + _get_size(self.values)
 
 
 # ============================================================================
@@ -682,13 +704,15 @@ def _init_module() -> None:
                 _rotation_matrix(dim, 0)
                 _projection_matrix(dim, 0)
                 _codebook(dim, bits)
-            except Exception:
-                pass  # Silently skip errors
+            except Exception as e:
+                logger.warning(
+                    f"Failed to pre-warm cache for dim={dim}, bits={bits}: {e}"
+                )
 
 
 # Initialize on module load
 try:
     _init_module()
-except Exception:
-    pass  # Module still functional even if init fails
+except Exception as e:
+    logger.warning(f"TurboQuant module initialization failed: {e}")
 

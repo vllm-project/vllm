@@ -150,7 +150,7 @@ class TestFractionalBits:
 
     def test_bit_validation(self):
         """Test bit-width validation."""
-        with pytest.raises(ValueError, match="requires a fractional bit-width"):
+        with pytest.raises(ValueError, match="supports integer and .5 bit-widths"):
             _build_codec(torch.randn(1, 1, 1, 32), 3.7, mode="mse", seed=0)
 
         with pytest.raises(ValueError, match="kv_bits >= 1"):

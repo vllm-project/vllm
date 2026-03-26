@@ -1,5 +1,4 @@
-"""
-TurboQuant: Efficient KV Cache Quantization for vLLM
+# TurboQuant: Efficient KV Cache Quantization for vLLM
 
 This module provides an optimized implementation of TurboQuant, a quantization
 scheme for key-value (KV) cache compression in large language models. TurboQuant
@@ -171,8 +170,9 @@ llm = LLM(
 Known Limitations
 =================
 
-1. **Fractional bits only**: TurboQuant is only activated for fractional bit-widths
-   (e.g., 3.5 bits). Integer bit-widths use standard quantization schemes.
+1. **Activation**: TurboQuant is automatically activated for fractional bit-widths
+   (e.g., 3.5 bits). For integer bit-widths, set `scheme='turboquant'` explicitly.
+   Otherwise, integer bit-widths use standard quantization schemes.
 
 2. **Single seed per model**: While different seeds can be used per layer, consistency
    within a model is recommended.
@@ -211,15 +211,3 @@ To contribute improvements to TurboQuant:
 3. Follow vLLM coding standards
 4. Update documentation for significant changes
 5. Add tests for new functionality
-
-"""
-
-__all__ = [
-    "TurboQuantKVCache",
-    "TurboQuantMSEState",
-    "TurboQuantProdState",
-    "TurboQuantPolarState",
-    "TurboQuantPolarProdState",
-    "TurboQuantSplitState",
-    "turboquant_enabled",
-]
