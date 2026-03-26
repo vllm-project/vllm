@@ -15,7 +15,6 @@ from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
-from vllm.tokenizers.registry import tokenizer_args_from_config
 
 MODEL_NAME = "openai-community/gpt2"
 
@@ -81,8 +80,6 @@ def _build_renderer(
     truncation_side: str = "left",
     max_chars_per_token: int = 1,
 ):
-    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
-
     renderer = HfRenderer(
         MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
         tokenizer=(
