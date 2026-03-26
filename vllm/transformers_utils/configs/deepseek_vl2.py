@@ -102,8 +102,6 @@ class DeepseekVLV2Config(PretrainedConfig):
         candidate_resolutions: tuple[tuple[int, int]] = ((384, 384),),
         **kwargs,
     ):
-        super().__init__(**kwargs)
-
         if self.architectures is None:
             self.architectures = ["DeepseekVLV2ForCausalLM"]
 
@@ -126,3 +124,4 @@ class DeepseekVLV2Config(PretrainedConfig):
             self.model_type = "deepseek_ocr"
         elif "DeepseekOCR2ForCausalLM" in self.architectures:
             self.model_type = "deepseek_ocr2"
+        super().__init__(**kwargs)
