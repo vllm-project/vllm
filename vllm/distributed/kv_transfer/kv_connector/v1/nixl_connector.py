@@ -41,6 +41,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.hma_transfer_config import (
+    HeteroTPTransferConfig,
+    create_transfer_config,
+    fa_divisor,
+    should_skip_fa,
+    uses_split_handles,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mamba_conv_transfer_utils import (
     MambaConvSplitInfo,
     compute_mamba_phys_ratio,
@@ -1184,6 +1191,8 @@ class NixlConnectorWorker:
         # Populated dynamically during handshake based on remote configuration.
         # Keep track of regions at different tp_ratio values. tp_ratio->handles
         self.src_xfer_handles_by_tp_ratio: dict[int, list[int]] = {}
+        # Per-engine transfer config (single source of truth for FA/mamba sizing).
+        self._transfer_configs: dict[str, HeteroTPTransferConfig] = {}
         # Map of engine_id -> {tp_rank: nixl_prepped_dlist_handle (int)}.
         self.dst_xfer_side_handles = defaultdict[EngineId, dict[int, int]](dict)
 
@@ -2071,6 +2080,21 @@ class NixlConnectorWorker:
             not self.kv_topo.replicates_kv_cache(engine_id) and tp_ratio > 0
         )
 
+        # Create transfer config (single source of truth for descriptor sizes).
+        if engine_id not in self._transfer_configs and self._has_mamba:
+            self._transfer_configs[engine_id] = create_transfer_config(
+                tp_ratio=tp_ratio,
+                total_num_kv_heads=kv_topo.total_num_kv_heads,
+                d_tp=self.world_size,
+                p_tp=remote_tp_size,
+                d_rank=self.tp_rank,
+                has_mamba=self._has_mamba,
+                use_mla=self.use_mla,
+                d_block_len=self.block_len_per_layer[0],
+                p_block_len=nixl_agent_meta.block_lens[0],
+                is_blocks_first=kv_topo.is_kv_layout_blocks_first,
+            )
+
         logger.debug(
             "Registering remote agent (%s, rank %s) memory regions with tp_ratio %s",
             engine_id,
@@ -2079,29 +2103,67 @@ class NixlConnectorWorker:
         )
 
         ### (Optional) Register local agent memory regions. MLA is not split.
+        cfg = self._transfer_configs.get(engine_id)
         if (
             tp_ratio < 0
             and not self.use_mla
             and tp_ratio not in self.src_xfer_handles_by_tp_ratio
         ):
-            # Remote tp_size > local tp_size: read from multiple remote ranks.
-            # Logically "split" own regions into |tp_ratio| chunks. Mind that
-            # we only do this once per remote tp_size (replica-friendly).
+            abs_tp = -tp_ratio
             self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
-            for i in range(-tp_ratio):
-                blocks_data = []
-                for memory_region in self.src_blocks_data:
-                    addr, local_block_len, own_tp_rank = memory_region
-                    # Computing block len layer by layer allows for different
-                    # block sizes to be used.
-                    remote_block_len = local_block_len // (-tp_ratio)
-                    addr = addr + i * remote_block_len
-                    blocks_data.append((addr, remote_block_len, own_tp_rank))
-                descs = self.nixl_wrapper.get_xfer_descs(
-                    blocks_data, self.nixl_memory_type
+
+            if uses_split_handles(cfg):
+                # ---- HMA path: FA and Mamba use different split factors ----
+                # Replaces old uniform-divide loop below.  FA entries are
+                # divided by physical_fa_num_reads, Mamba by abs_tp.
+                assert cfg is not None  # for type narrowing
+                for p_idx, p_rank in enumerate(cfg.transfer_targets):
+                    handle_data: list[tuple[int, int, int]] = []
+                    _skip = cfg.should_skip_fa(p_rank)
+                    fa_slot = cfg.fa_head_slot(p_rank) if not _skip else 0
+
+                    for j, (addr, local_len, tp) in enumerate(self.src_blocks_data):
+                        if j < self.num_descs:
+                            fa_chunk = local_len // max(1, cfg.physical_fa_num_reads)
+                            handle_data.append(
+                                (addr + fa_slot * fa_chunk, fa_chunk, tp)
+                            )
+                        else:
+                            mamba_chunk = local_len // abs_tp
+                            handle_data.append(
+                                (addr + p_idx * mamba_chunk, mamba_chunk, tp)
+                            )
+
+                    descs = self.nixl_wrapper.get_xfer_descs(
+                        handle_data, self.nixl_memory_type
+                    )
+                    handle = self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
+                    self.src_xfer_handles_by_tp_ratio[tp_ratio].append(handle)
+
+                logger.info(
+                    "HMA split handles: targets=%s, fa_reads=%s, "
+                    "fa_entry=%s, mamba_reads=%s, num_descs=%s",
+                    cfg.transfer_targets,
+                    cfg.physical_fa_num_reads,
+                    cfg.fa_entry_size,
+                    cfg.mamba_num_reads,
+                    self.num_descs,
                 )
-                handle = self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
-                self.src_xfer_handles_by_tp_ratio[tp_ratio].append(handle)
+            else:
+                # ---- Original path: uniform divide by abs_tp ----
+                # (kept for non-HMA models and when FA/mamba reads match)
+                for i in range(abs_tp):
+                    blocks_data = []
+                    for memory_region in self.src_blocks_data:
+                        addr, local_block_len, own_tp_rank = memory_region
+                        remote_block_len = local_block_len // abs_tp
+                        addr = addr + i * remote_block_len
+                        blocks_data.append((addr, remote_block_len, own_tp_rank))
+                    descs = self.nixl_wrapper.get_xfer_descs(
+                        blocks_data, self.nixl_memory_type
+                    )
+                    handle = self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
+                    self.src_xfer_handles_by_tp_ratio[tp_ratio].append(handle)
 
         ### Register remote agent memory regions
         blocks_data = []
@@ -2125,8 +2187,11 @@ class NixlConnectorWorker:
                     local_block_len = remote_kv_block_len
 
                 if tp_ratio < 0 and not self.use_mla:
-                    # Remote tp is bigger: read a chunk of local region from remote
-                    local_block_len = local_block_len // (-tp_ratio)
+                    # OLD: local_block_len = local_block_len // (-tp_ratio)
+                    # NEW: FA divides by physical_fa_num_reads, mamba by abs_tp.
+                    local_block_len = local_block_len // fa_divisor(
+                        cfg, -tp_ratio, is_mamba=mamba
+                    )
                 rank_offset = (
                     self.tp_rank % tp_ratio * remote_kv_block_len
                     if indexes_into_remote
@@ -2162,7 +2227,11 @@ class NixlConnectorWorker:
                     # Apply the same scaling as local_block_len above for when we read
                     # a chunk of local V from `tp_ratio` separate remote workers.
                     if tp_ratio < 0 and not self.use_mla:
-                        second_split = second_split // (-tp_ratio)
+                        # OLD: second_split = second_split // (-tp_ratio)
+                        # NEW: FA divides by physical_fa_num_reads, mamba by abs_tp.
+                        second_split = second_split // fa_divisor(
+                            cfg, -tp_ratio, is_mamba=mamba
+                        )
                     for block_id in range(num_blocks):
                         block_offset = block_id * page_size
                         addr = base_addr + block_offset + rank_offset
@@ -2743,12 +2812,33 @@ class NixlConnectorWorker:
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
                 remote_rank
             ]
+
+            # For HMA models: P ranks outside fa_read_targets only
+            # contribute mamba data.  Empty FA groups so NIXL skips them.
+            hma_cfg = self._transfer_configs.get(meta.remote.engine_id)
+            skip_fa = should_skip_fa(hma_cfg, remote_rank)
+            if skip_fa:
+                num_groups = len(meta.local_physical_block_ids)
+                local_ids: BlockIds = [
+                    []
+                    if not self._is_mamba_group[g]
+                    else meta.local_physical_block_ids[g]
+                    for g in range(num_groups)
+                ]
+                remote_ids: BlockIds = [
+                    [] if not self._is_mamba_group[g] else meta.remote.block_ids[g]
+                    for g in range(num_groups)
+                ]
+            else:
+                local_ids = meta.local_physical_block_ids
+                remote_ids = meta.remote.block_ids
+
             self._read_blocks(
                 request_id=req_id,
                 dst_engine_id=meta.remote.engine_id,
                 remote_request_id=meta.remote.request_id,
-                local_block_ids=meta.local_physical_block_ids,
-                remote_block_ids=meta.remote.block_ids,
+                local_block_ids=local_ids,
+                remote_block_ids=remote_ids,
                 remote_rank=remote_rank,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
