@@ -127,6 +127,7 @@ class Fp8Config(QuantizationConfig):
                     f"{activation_scheme} activation scheme."
                 )
         self.weight_block_size = weight_block_size
+        self.use_deep_gemm: bool | None = None
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -275,7 +276,10 @@ class Fp8LinearMethod(LinearMethodBase):
         self.marlin_input_dtype = None
         self.use_marlin = False
 
-        self.use_deep_gemm = is_deep_gemm_supported()
+        if self.quant_config.use_deep_gemm is not None:
+            self.use_deep_gemm = self.quant_config.use_deep_gemm
+        else:
+            self.use_deep_gemm = is_deep_gemm_supported()
 
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None
