@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import threading
 from collections.abc import Sequence
 
 import partial_json_parser
@@ -31,6 +32,29 @@ logger = init_logger(__name__)
 
 
 class Hermes2ProToolParser(ToolParser):
+    _token_cache: dict[tuple[int, str], tuple[list[int], list[str]]] = {}
+    _token_cache_lock: threading.Lock = threading.Lock()
+
+    @classmethod
+    def _get_cached_token_data(
+        cls,
+        tokenizer: TokenizerLike,
+        token: str,
+    ) -> tuple[list[int], list[str]]:
+        cache_key = (id(tokenizer), token)
+        cached = cls._token_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        with cls._token_cache_lock:
+            cached = cls._token_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            token_ids: list[int] = tokenizer.encode(token, add_special_tokens=False)
+            token_str_array: list[str] = [tokenizer.decode([tid]) for tid in token_ids]
+            result = (token_ids, token_str_array)
+            cls._token_cache[cache_key] = result
+            return result
+
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
 
@@ -60,22 +84,16 @@ class Hermes2ProToolParser(ToolParser):
                 "The model tokenizer must be passed to the ToolParser "
                 "constructor during construction."
             )
-        self.tool_call_start_token_ids = self.model_tokenizer.encode(
-            self.tool_call_start_token, add_special_tokens=False
+        start_ids, start_arr = self._get_cached_token_data(
+            self.model_tokenizer, self.tool_call_start_token
         )
-        self.tool_call_end_token_ids = self.model_tokenizer.encode(
-            self.tool_call_end_token, add_special_tokens=False
+        end_ids, end_arr = self._get_cached_token_data(
+            self.model_tokenizer, self.tool_call_end_token
         )
-
-        self.tool_call_start_token_array = [
-            self.model_tokenizer.decode([token_id])
-            for token_id in self.tool_call_start_token_ids
-        ]
-
-        self.tool_call_end_token_array = [
-            self.model_tokenizer.decode([token_id])
-            for token_id in self.tool_call_end_token_ids
-        ]
+        self.tool_call_start_token_ids = start_ids
+        self.tool_call_end_token_ids = end_ids
+        self.tool_call_start_token_array = start_arr
+        self.tool_call_end_token_array = end_arr
 
         self.buffered_delta_text = ""
 

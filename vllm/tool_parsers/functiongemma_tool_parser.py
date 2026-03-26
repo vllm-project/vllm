@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import threading
 from collections.abc import Sequence
 
 import regex as re
@@ -33,6 +34,27 @@ class FunctionGemmaToolParser(ToolParser):
     <start_function_call>call:func_name{param:<escape>value<escape>}<end_function_call>
     """
 
+    _encode_cache: dict[tuple[int, str], list[int]] = {}
+    _encode_cache_lock: threading.Lock = threading.Lock()
+
+    @classmethod
+    def _get_cached_token_ids(
+        cls,
+        tokenizer: TokenizerLike,
+        token: str,
+    ) -> list[int]:
+        cache_key = (id(tokenizer), token)
+        cached = cls._encode_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        with cls._encode_cache_lock:
+            cached = cls._encode_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            token_ids: list[int] = tokenizer.encode(token, add_special_tokens=False)
+            cls._encode_cache[cache_key] = token_ids
+            return token_ids
+
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
 
@@ -58,11 +80,11 @@ class FunctionGemmaToolParser(ToolParser):
         )
 
         if self.model_tokenizer:
-            self.tool_call_start_token_ids = self.model_tokenizer.encode(
-                self.tool_call_start_token, add_special_tokens=False
+            self.tool_call_start_token_ids = self._get_cached_token_ids(
+                self.model_tokenizer, self.tool_call_start_token
             )
-            self.tool_call_end_token_ids = self.model_tokenizer.encode(
-                self.tool_call_end_token, add_special_tokens=False
+            self.tool_call_end_token_ids = self._get_cached_token_ids(
+                self.model_tokenizer, self.tool_call_end_token
             )
         else:
             self.tool_call_start_token_ids = []

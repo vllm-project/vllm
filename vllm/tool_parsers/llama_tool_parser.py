@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import threading
 from collections.abc import Sequence
 
 import partial_json_parser
@@ -44,6 +45,27 @@ class Llama3JsonToolParser(ToolParser):
     llama4_json are set.
     """
 
+    _encode_cache: dict[tuple[int, str], list[int]] = {}
+    _encode_cache_lock: threading.Lock = threading.Lock()
+
+    @classmethod
+    def _get_cached_token_ids(
+        cls,
+        tokenizer: PreTrainedTokenizerBase,
+        token: str,
+    ) -> list[int]:
+        cache_key = (id(tokenizer), token)
+        cached = cls._encode_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        with cls._encode_cache_lock:
+            cached = cls._encode_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            token_ids: list[int] = tokenizer.encode(token, add_special_tokens=False)
+            cls._encode_cache[cache_key] = token_ids
+            return token_ids
+
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
 
@@ -56,9 +78,7 @@ class Llama3JsonToolParser(ToolParser):
             str
         ] = []  # map what has been streamed for each tool so far to a list
         self.bot_token = "<|python_tag|>"
-        self.bot_token_id = tokenizer.encode(self.bot_token, add_special_tokens=False)[
-            0
-        ]
+        self.bot_token_id = self._get_cached_token_ids(tokenizer, self.bot_token)[0]
         # Simple regex to find opening braces - we'll use JSON decoder for parsing
         # This handles arbitrary nesting depth correctly
         self.tool_call_start_regex = re.compile(r"\{")
