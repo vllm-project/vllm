@@ -21,9 +21,9 @@ class ReasoningConfig:
 
     reasoning_parser_name: str | None = None
     """The name of the ReasoningParser to use for this model."""
-    think_start_str: str | None = None
+    think_start_str: str = ""
     """String that indicates the start of reasoning."""
-    think_end_str: str | None = None
+    think_end_str: str = ""
     """String that indicates the end of reasoning content."""
 
     _think_start_token_ids: list[int] | None = field(
@@ -59,7 +59,7 @@ class ReasoningConfig:
         think_start_str = self.think_start_str
         think_end_str = self.think_end_str
         if self.reasoning_parser_name is not None and (
-            think_start_str is None or think_end_str is None
+            not think_start_str or not think_end_str
         ):
             parser_cls = ReasoningParserManager.get_reasoning_parser(
                 self.reasoning_parser_name
