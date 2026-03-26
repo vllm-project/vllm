@@ -22,9 +22,8 @@ pub struct GenerateOutput {
     pub prompt_token_ids: Arc<[u32]>,
     /// Generated token IDs for this update.
     ///
-    /// The exact semantics depend on `sampling_params.output_kind`:
+    /// The exact semantics depend on the request's `output_kind`:
     /// - `Delta`: only the newly produced token IDs for this step
-    /// - `Cumulative`: the full completion-so-far
     /// - `FinalOnly`: the full completion, emitted once on the terminal step
     pub token_ids: Vec<u32>,
     /// Raw engine-core output for callers that need finish reason, stop reason, or other
@@ -47,7 +46,7 @@ pub struct GenerateOutputStream {
     output_kind: RequestOutputKind,
     prompt_token_ids: Arc<[u32]>,
     raw_stream: EngineCoreOutputStream,
-    cumulative_token_ids: Vec<u32>,
+    collected_token_ids: Vec<u32>,
     request_metrics: RequestMetricsTracker,
 }
 
@@ -63,7 +62,7 @@ impl GenerateOutputStream {
             output_kind,
             prompt_token_ids,
             raw_stream,
-            cumulative_token_ids: Vec::new(),
+            collected_token_ids: Vec::new(),
             request_metrics,
         }
     }
@@ -99,25 +98,15 @@ impl Stream for GenerateOutputStream {
                     token_ids: raw.new_token_ids.clone(),
                     raw,
                 }),
-                RequestOutputKind::Cumulative => {
-                    self.cumulative_token_ids
-                        .extend_from_slice(&raw.new_token_ids);
-                    Some(GenerateOutput {
-                        request_id: raw.request_id.clone(),
-                        prompt_token_ids: self.prompt_token_ids.clone(),
-                        token_ids: self.cumulative_token_ids.clone(),
-                        raw,
-                    })
-                }
                 RequestOutputKind::FinalOnly => {
-                    self.cumulative_token_ids
+                    self.collected_token_ids
                         .extend_from_slice(&raw.new_token_ids);
                     // `FINAL_ONLY` suppresses intermediate updates and emits once when the
                     // underlying raw output indicates terminal completion.
                     finished.then(|| GenerateOutput {
                         request_id: raw.request_id.clone(),
                         prompt_token_ids: self.prompt_token_ids.clone(),
-                        token_ids: self.cumulative_token_ids.clone(),
+                        token_ids: std::mem::take(&mut self.collected_token_ids),
                         raw,
                     })
                 }

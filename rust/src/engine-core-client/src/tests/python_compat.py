@@ -16,7 +16,6 @@ import numpy as np
 
 
 class RequestOutputKind(Enum):
-    CUMULATIVE = 0
     DELTA = 1
     FINAL_ONLY = 2
 
@@ -43,7 +42,7 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True):
     stop_token_ids: list[int] = []
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = set()
-    output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
+    output_kind: RequestOutputKind = RequestOutputKind.DELTA
 
 
 class EngineCoreRequest(

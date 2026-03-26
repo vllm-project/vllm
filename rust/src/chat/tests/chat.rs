@@ -246,11 +246,6 @@ async fn chat_streams_text_events() {
                     .unwrap(),
                     "system: You are terse.\nuser: Say hi\nassistant:"
                 );
-                assert_eq!(
-                    request.sampling_params.unwrap().output_kind,
-                    vllm_engine_core_client::protocol::RequestOutputKind::Delta
-                );
-
                 send_outputs(
                     push,
                     EngineCoreOutputs {

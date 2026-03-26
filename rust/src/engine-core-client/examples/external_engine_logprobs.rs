@@ -6,7 +6,7 @@ use futures::StreamExt as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::protocol::{
-    EngineCoreRequest, EngineCoreSamplingParams, FinishReason, RequestOutputKind,
+    EngineCoreRequest, EngineCoreSamplingParams, FinishReason,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineCoreStreamOutput};
 
@@ -72,7 +72,6 @@ fn build_request(
             max_tokens,
             logprobs: Some(logprobs),
             prompt_logprobs: Some(prompt_logprobs),
-            output_kind: RequestOutputKind::FinalOnly,
             ..EngineCoreSamplingParams::for_test()
         }),
         pooling_params: None,

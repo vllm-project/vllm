@@ -32,8 +32,13 @@ pub fn lower_text_request(
             request.sampling_params.clone(),
             sampling_hints,
             prompt_len,
-            intermediate,
         )?,
+        // Only request intermediate deltas if the caller explicitly opts in.
+        output_kind: if intermediate {
+            RequestOutputKind::Delta
+        } else {
+            RequestOutputKind::FinalOnly
+        },
         // Fields below are currently placeholders.
         arrival_time: None,
         cache_salt: None,
@@ -66,7 +71,6 @@ pub fn lower_sampling_params(
         max_model_len,
     }: SamplingHints,
     prompt_len: u32,
-    intermediate: bool,
 ) -> Result<EngineCoreSamplingParams> {
     let SamplingParams {
         temperature,
@@ -124,12 +128,6 @@ pub fn lower_sampling_params(
         stop_token_ids,
         eos_token_id: (!ignore_eos).then_some(primary_eos_token_id).flatten(),
         all_stop_token_ids,
-        // Only request intermediate deltas if the caller explicitly opts in.
-        output_kind: if intermediate {
-            RequestOutputKind::Delta
-        } else {
-            RequestOutputKind::FinalOnly
-        },
     })
 }
 
@@ -239,10 +237,13 @@ mod tests {
                     77,
                     99,
                 },
-                output_kind: Delta,
             }
         "#]]
         .assert_debug_eq(&params);
+        assert_eq!(
+            prepared.generate_request.output_kind,
+            RequestOutputKind::Delta
+        );
     }
 
     #[test]
@@ -273,10 +274,13 @@ mod tests {
                     77,
                     99,
                 },
-                output_kind: Delta,
             }
         "#]]
         .assert_debug_eq(&params);
+        assert_eq!(
+            prepared.generate_request.output_kind,
+            RequestOutputKind::Delta
+        );
     }
 
     #[tokio::test]
@@ -346,10 +350,13 @@ mod tests {
                     151643,
                     151645,
                 },
-                output_kind: Delta,
             }
         "#]]
         .assert_debug_eq(&params);
+        assert_eq!(
+            prepared.generate_request.output_kind,
+            RequestOutputKind::Delta
+        );
     }
 
     #[test]
@@ -373,7 +380,6 @@ mod tests {
                 max_model_len: None,
             },
             3,
-            true,
         )
         .unwrap();
 
@@ -405,7 +411,6 @@ mod tests {
                     88,
                     99,
                 },
-                output_kind: Delta,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -436,7 +441,6 @@ mod tests {
                 max_model_len: None,
             },
             3,
-            true,
         )
         .unwrap();
 
@@ -457,7 +461,6 @@ mod tests {
                 stop_token_ids: [],
                 eos_token_id: None,
                 all_stop_token_ids: {},
-                output_kind: Delta,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -479,7 +482,6 @@ mod tests {
                 max_model_len: None,
             },
             3,
-            true,
         )
         .unwrap();
 
@@ -500,7 +502,6 @@ mod tests {
                 stop_token_ids: [],
                 eos_token_id: None,
                 all_stop_token_ids: {},
-                output_kind: Delta,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -513,26 +514,16 @@ mod tests {
     }
 
     #[test]
-    fn lower_sampling_params_uses_final_only_when_intermediate_is_false() {
-        let params = lower_sampling_params(
-            SamplingParams::default(),
-            SamplingHints {
-                primary_eos_token_id: None,
-                extra_eos_token_ids: BTreeSet::new(),
-                default_temperature: None,
-                default_top_p: None,
-                default_top_k: None,
-                default_min_p: None,
-                default_repetition_penalty: None,
-                default_max_tokens: None,
-                max_model_len: None,
-            },
-            3,
-            false,
-        )
-        .unwrap();
+    fn lower_text_request_uses_final_only_when_intermediate_is_false() {
+        let mut request = sample_request();
+        request.intermediate = false;
 
-        assert_eq!(params.output_kind, RequestOutputKind::FinalOnly);
+        let prepared = lower_text_request(request, vec![1, 2, 3], sample_sampling_hints()).unwrap();
+
+        assert_eq!(
+            prepared.generate_request.output_kind,
+            RequestOutputKind::FinalOnly
+        );
     }
 
     #[test]

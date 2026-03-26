@@ -48,9 +48,9 @@ fn build_request(request_id: String, max_tokens: u32) -> GenerateRequest {
         prompt_token_ids: PROMPT_TOKEN_IDS.to_vec(),
         sampling_params: EngineCoreSamplingParams {
             max_tokens,
-            output_kind: RequestOutputKind::FinalOnly,
             ..EngineCoreSamplingParams::for_test()
         },
+        output_kind: RequestOutputKind::FinalOnly,
         arrival_time: None,
         cache_salt: None,
         trace_headers: None,
@@ -124,7 +124,7 @@ async fn main() -> Result<()> {
     let request = build_request(request_id.clone(), args.max_tokens);
     println!("request_id={request_id}");
     println!("prompt_token_ids={PROMPT_TOKEN_IDS:?}");
-    println!("output_kind={:?}", request.sampling_params.output_kind);
+    println!("output_kind={:?}", request.output_kind);
 
     let stream = llm
         .generate(request)

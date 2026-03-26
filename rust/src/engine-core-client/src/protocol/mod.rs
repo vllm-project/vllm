@@ -124,15 +124,15 @@ pub struct EngineCoreEvent {
 
 /// Controls how intermediate outputs are returned to the frontend.
 ///
+/// `Cumulative = 0` is intentionally not supported in Rust frontend.
+///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L146-L152>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum RequestOutputKind {
-    /// Return the entire output-so-far in every update.
-    #[default]
-    Cumulative = 0,
     /// Return only token deltas in each update.
+    #[default]
     Delta = 1,
     /// Suppress intermediate updates and return only the final output.
     FinalOnly = 2,
@@ -156,8 +156,8 @@ pub enum StopReason {
 ///
 /// This is the normalized southbound subset used by the Rust frontend when it
 /// talks to Python engine-core over the wire. User-facing request semantics
-/// such as `stop` strings, `n`, and `ignore_eos` are intentionally handled by
-/// higher layers before values reach this DTO.
+/// such as `stop` strings, `n`, `ignore_eos`, and output aggregation mode are
+/// intentionally handled by higher layers before values reach this DTO.
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L155-L291>
@@ -207,14 +207,6 @@ pub struct EngineCoreSamplingParams {
     /// contain explicit `stop_token_ids` plus any frontend-derived EOS token IDs.
     #[serde(rename = "_all_stop_token_ids")]
     pub all_stop_token_ids: BTreeSet<u32>,
-    /// Whether higher-level frontend updates are cumulative, delta-based, or
-    /// final-only.
-    ///
-    /// Note: when talking directly to headless `EngineCoreProc` over the raw
-    /// engine-core ZMQ protocol, callers should still treat outputs as
-    /// incremental step updates. Python's frontend `OutputProcessor` is what
-    /// enforces `FINAL_ONLY` behavior for user-facing request outputs.
-    pub output_kind: RequestOutputKind,
 }
 
 impl EngineCoreSamplingParams {
@@ -236,7 +228,6 @@ impl EngineCoreSamplingParams {
             stop_token_ids: Vec::new(),
             eos_token_id: None,
             all_stop_token_ids: BTreeSet::new(),
-            output_kind: RequestOutputKind::default(),
         }
     }
 }

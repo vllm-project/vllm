@@ -18,8 +18,7 @@ use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
 use crate::protocol::handshake::ReadyMessage;
 use crate::protocol::{
     EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams, FinishReason,
-    MaybeWireLogprobs, RequestOutputKind, UtilityOutput, UtilityResultEnvelope,
-    decode_engine_core_outputs,
+    MaybeWireLogprobs, UtilityOutput, UtilityResultEnvelope, decode_engine_core_outputs,
 };
 use crate::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use crate::{ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, Error};
@@ -140,7 +139,6 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             stop_token_ids: vec![151643],
             eos_token_id: Some(151645),
             all_stop_token_ids: BTreeSet::from([151643, 151645]),
-            output_kind: RequestOutputKind::FinalOnly,
             ..EngineCoreSamplingParams::for_test()
         }),
         pooling_params: None,

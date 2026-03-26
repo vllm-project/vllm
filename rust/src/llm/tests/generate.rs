@@ -60,10 +60,10 @@ fn sample_generate_request(
         request_id: request_id.to_string(),
         prompt_token_ids: vec![11, 22],
         sampling_params: EngineCoreSamplingParams {
-            output_kind,
             max_tokens,
             ..EngineCoreSamplingParams::for_test()
         },
+        output_kind,
         arrival_time: Some(42.5),
         cache_salt: None,
         trace_headers: None,
@@ -183,63 +183,6 @@ async fn generate_streams_delta_outputs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn generate_streams_cumulative_outputs() {
-    let ipc = IpcNamespace::new().unwrap();
-    let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-cumulative".to_vec();
-
-    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
-        handshake_address.clone(),
-        engine_identity.clone(),
-        |dealer, push| {
-            Box::pin(async move {
-                let add = recv_engine_message(dealer).await;
-                assert_eq!(add[0].as_ref(), &[0x00]);
-
-                send_outputs(
-                    push,
-                    EngineCoreOutputs {
-                        outputs: vec![
-                            request_output("req-cumulative", vec![9], None),
-                            request_output(
-                                "req-cumulative",
-                                vec![10, 11],
-                                Some(FinishReason::Length),
-                            ),
-                        ],
-                        finished_requests: Some(BTreeSet::from(["req-cumulative".to_string()])),
-                        ..Default::default()
-                    },
-                )
-                .await;
-            })
-        },
-    );
-
-    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
-    let mut stream = llm
-        .generate(sample_generate_request(
-            "req-cumulative",
-            RequestOutputKind::Cumulative,
-            3,
-        ))
-        .await
-        .unwrap();
-
-    let first = stream.next().await.unwrap().unwrap();
-    assert_eq!(first.token_ids, vec![9]);
-
-    let second = stream.next().await.unwrap().unwrap();
-    assert_eq!(second.token_ids, vec![9, 10, 11]);
-    assert_eq!(second.raw.finish_reason, Some(FinishReason::Length));
-    assert!(stream.next().await.is_none());
-
-    let _ = shutdown_tx.send(());
-    engine_task.await.unwrap();
-    llm.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generate_streams_final_only_outputs() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
@@ -319,7 +262,7 @@ async fn generate_propagates_unexpected_close_errors() {
     let mut stream = llm
         .generate(sample_generate_request(
             "req-close",
-            RequestOutputKind::Cumulative,
+            RequestOutputKind::Delta,
             1,
         ))
         .await

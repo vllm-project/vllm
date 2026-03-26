@@ -16,8 +16,8 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
-    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, RequestOutputKind,
-    StopReason, UtilityOutput, UtilityResultEnvelope, decode_value,
+    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, StopReason,
+    UtilityOutput, UtilityResultEnvelope, decode_value,
 };
 use vllm_engine_core_client::test_utils::IpcNamespace;
 use vllm_engine_core_client::{
@@ -1324,14 +1324,6 @@ async fn non_stream_chat_uses_final_only_output_kind() {
             let add = recv_engine_message(&mut dealer).await;
             let request: EngineCoreRequest =
                 rmp_serde::from_slice(&add[1]).expect("decode request");
-            assert_eq!(
-                request
-                    .sampling_params
-                    .as_ref()
-                    .expect("sampling params")
-                    .output_kind,
-                RequestOutputKind::FinalOnly
-            );
             send_outputs(
                 &mut push,
                 engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
@@ -1394,14 +1386,6 @@ async fn non_stream_completions_use_final_only_output_kind() {
             let add = recv_engine_message(&mut dealer).await;
             let request: EngineCoreRequest =
                 rmp_serde::from_slice(&add[1]).expect("decode request");
-            assert_eq!(
-                request
-                    .sampling_params
-                    .as_ref()
-                    .expect("sampling params")
-                    .output_kind,
-                RequestOutputKind::FinalOnly
-            );
             send_outputs(
                 &mut push,
                 engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
