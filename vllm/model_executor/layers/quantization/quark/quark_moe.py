@@ -51,7 +51,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -835,18 +834,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         )
 
         params_dtype = torch.uint8
-
-        # On GFX950, the GFX950MXScaleLayout swizzle requires
-        # hidden_size to be a multiple of 256 (SCALE_K = hidden_size / 32
-        # must be divisible by 8). Pad hidden_size for weight/scale
-        # allocation; the original value is preserved in unpadded_hidden_size.
-        # Only applies to the native (non-emulated) CK path on GFX950.
-        if (
-            self.model_type == "gpt_oss"
-            and current_platform.is_rocm()
-            and not self.emulate
-        ):
-            hidden_size = round_up(hidden_size, 256)
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(

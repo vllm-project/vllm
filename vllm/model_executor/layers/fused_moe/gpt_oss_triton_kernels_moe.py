@@ -428,13 +428,9 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     assert quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
     assert quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
 
-    # Shape check: when weights are padded (e.g. hidden_size padded for
-    # GFX950 swizzle), unpadded_K_w1 carries the original dimension.
-    expected_K_w1 = unpadded_K_w1 if unpadded_K_w1 is not None else w1.shape[-2]
-    assert hidden_states.shape[-1] == expected_K_w1, (
-        f"hidden_states K={hidden_states.shape[-1]} != "
-        f"expected K={expected_K_w1} (w1 K={w1.shape[-2]})"
-    )
+    # Shape check: weights are padded (e.g. hidden_size padded for
+    # GFX950 swizzle).
+    assert hidden_states.shape[-1] == w1.shape[-2]
     assert w2.shape[-1] == w1.shape[1]
 
     E, _, N = w1.shape
