@@ -461,9 +461,11 @@ class Platform:
             return
 
         backend_cls = cls._find_non_ssm_backend(vllm_config)
+        if backend_cls is None:
+            return
 
         # Phase 1: Pick block size from backend (skip if user set --block-size)
-        if not cache_config.user_specified_block_size and backend_cls:
+        if not cache_config.user_specified_block_size:
             with set_current_vllm_config(vllm_config):
                 preferred = backend_cls.get_preferred_block_size(
                     CacheConfig.DEFAULT_BLOCK_SIZE
@@ -478,9 +480,6 @@ class Platform:
 
         # Phase 2: Align for hybrid models (always runs, may increase block_size)
         if model_config.is_hybrid:
-            assert backend_cls, (
-                "Hybrid model must have at least one non-SSM attention backend"
-            )
             cls._align_hybrid_block_size(vllm_config, backend_cls)
 
     @classmethod
