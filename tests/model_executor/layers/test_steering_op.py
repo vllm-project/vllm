@@ -115,3 +115,17 @@ class TestApplySteering:
         assert result.dtype == hidden.dtype, (
             f"Dtype mismatch: {result.dtype} != {hidden.dtype}"
         )
+
+    def test_dtype_mismatch_preserves_hidden_dtype(self):
+        """Output dtype must match hidden_states even when steering_vector has different dtype."""
+        batch_size, hidden_size = 6, 8
+        hidden = torch.randn(batch_size, hidden_size, dtype=torch.bfloat16)
+        steering_vec = torch.ones(1, hidden_size, dtype=torch.float32)
+
+        ctx = _make_forward_context(num_decode_tokens=3)
+        with patch(f"{FC_MODULE}._forward_context", ctx):
+            result = apply_steering(hidden, steering_vec)
+
+        assert result.dtype == hidden.dtype, (
+            f"Output dtype {result.dtype} should match hidden_states dtype {hidden.dtype}"
+        )

@@ -31,7 +31,7 @@ def apply_steering(
         torch.arange(hidden_states.shape[0], device=hidden_states.device)
         < num_decode_tokens
     ).unsqueeze(1)
-    return hidden_states + decode_mask.to(hidden_states.dtype) * steering_vector
+    return hidden_states + decode_mask.to(hidden_states.dtype) * steering_vector.to(hidden_states.dtype)
 
 
 def apply_steering_fake(
