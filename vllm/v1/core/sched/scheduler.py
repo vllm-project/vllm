@@ -1193,15 +1193,10 @@ class Scheduler(SchedulerInterface):
                 # in subsequent iterations.
                 if self.connector is not None:  # PD disaggregation only
                     for child_request in child_requests:
-                        # Child request status is FINISHED_LENGTH_CAPPED,
-                        # so _connector_finished will generate kv_transfer_params.
-                        _, child_kv_transfer_params = self._connector_finished(
-                            child_request)
-
                         # Child shares parent's first token and logprobs.
                         child_new_token_ids = list(new_token_ids) if new_token_ids else []
 
-                        if child_new_token_ids or child_kv_transfer_params:
+                        if child_new_token_ids or kv_transfer_params:
                             outputs[child_request.client_index].append(
                                 EngineCoreOutput(
                                     request_id=child_request.request_id,
@@ -1214,7 +1209,7 @@ class Scheduler(SchedulerInterface):
                                     pooling_output=None,
                                     stop_reason=None,
                                     events=[],
-                                    kv_transfer_params=child_kv_transfer_params,
+                                    kv_transfer_params=kv_transfer_params,
                                     trace_headers=child_request.trace_headers,
                                     num_cached_tokens=child_request.num_cached_tokens,
                                     num_nans_in_logits=0,
