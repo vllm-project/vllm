@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
 
         while let Some(event) = stream.next().await.transpose()? {
             match event {
-                ChatEvent::Start => {
+                ChatEvent::Start { .. } => {
                     saw_start = true;
                 }
                 ChatEvent::BlockStart { kind, .. } => {
@@ -134,6 +134,7 @@ async fn main() -> Result<()> {
                     print!("[tool:{name}] ");
                     saw_stream_output = true;
                 }
+                ChatEvent::LogprobsDelta { .. } => {}
                 ChatEvent::Done {
                     message,
                     token_ids,

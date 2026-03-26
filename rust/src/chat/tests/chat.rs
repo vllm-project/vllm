@@ -11,12 +11,16 @@ use vllm_chat::{
     ChatToolChoice, SamplingParams,
 };
 use vllm_engine_core_client::protocol::{
-    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, StopReason,
+    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, Logprobs,
+    MaybeWireLogprobs, PositionLogprobs, StopReason, TokenLogprob,
 };
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
-use vllm_text::TextBackend;
+use vllm_text::{
+    DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob,
+    TextBackend,
+};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
@@ -43,6 +47,70 @@ fn request_output(
         num_external_computed_tokens: 0,
         routed_experts: None,
         num_nans_in_logits: 0,
+    }
+}
+
+fn request_output_with_logprobs(
+    request_id: &str,
+    new_token_ids: Vec<u32>,
+    finish_reason: Option<FinishReason>,
+    stop_reason: Option<StopReason>,
+    new_logprobs: Option<Logprobs>,
+    new_prompt_logprobs_tensors: Option<Logprobs>,
+) -> EngineCoreOutput {
+    EngineCoreOutput {
+        request_id: request_id.to_string(),
+        new_token_ids,
+        new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
+        new_prompt_logprobs_tensors: new_prompt_logprobs_tensors.map(MaybeWireLogprobs::Direct),
+        pooling_output: None,
+        finish_reason,
+        stop_reason,
+        events: None,
+        kv_transfer_params: None,
+        trace_headers: None,
+        num_cached_tokens: 0,
+        num_external_computed_tokens: 0,
+        routed_experts: None,
+        num_nans_in_logits: 0,
+    }
+}
+
+fn sample_logprobs_for_token(token_id: u32, alternate_token_id: u32) -> Logprobs {
+    Logprobs {
+        positions: vec![PositionLogprobs {
+            entries: vec![
+                TokenLogprob {
+                    token_id,
+                    logprob: -0.1,
+                    rank: 1,
+                },
+                TokenLogprob {
+                    token_id: alternate_token_id,
+                    logprob: -0.2,
+                    rank: 2,
+                },
+            ],
+        }],
+    }
+}
+
+fn prompt_logprobs_for_hi() -> Logprobs {
+    Logprobs {
+        positions: vec![PositionLogprobs {
+            entries: vec![
+                TokenLogprob {
+                    token_id: b'i' as u32,
+                    logprob: -0.3,
+                    rank: 1,
+                },
+                TokenLogprob {
+                    token_id: b'!' as u32,
+                    logprob: -0.4,
+                    rank: 2,
+                },
+            ],
+        }],
     }
 }
 
@@ -283,7 +351,13 @@ async fn chat_streams_text_events() {
 
     let mut stream = chat.chat(sample_request("chat-1")).await.unwrap();
 
-    assert_eq!(stream.next().await.unwrap().unwrap(), ChatEvent::Start);
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::Start {
+            prompt_token_count: "system: You are terse.\nuser: Say hi\nassistant:".len(),
+            prompt_logprobs: None,
+        }
+    );
     assert_eq!(
         stream.next().await.unwrap().unwrap(),
         ChatEvent::BlockStart {
@@ -380,7 +454,13 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
 
     let mut stream = chat.chat(sample_request("chat-utf8")).await.unwrap();
 
-    assert!(matches!(stream.next().await, Some(Ok(ChatEvent::Start))));
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ChatEvent::Start {
+            prompt_logprobs: None,
+            ..
+        }))
+    ));
     assert_eq!(
         stream.next().await.unwrap().unwrap(),
         ChatEvent::BlockStart {
@@ -461,7 +541,13 @@ async fn chat_stream_flushes_held_text_on_finish() {
 
     let mut stream = chat.chat(sample_request("chat-final-flush")).await.unwrap();
 
-    assert!(matches!(stream.next().await, Some(Ok(ChatEvent::Start))));
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ChatEvent::Start {
+            prompt_logprobs: None,
+            ..
+        }))
+    ));
     assert_eq!(
         stream.next().await.unwrap().unwrap(),
         ChatEvent::BlockStart {
@@ -562,7 +648,13 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
 
     let mut stream = chat.chat(sample_request("chat-4")).await.unwrap();
     assert_eq!(stream.request_id(), "chat-4");
-    assert!(matches!(stream.next().await, Some(Ok(ChatEvent::Start))));
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ChatEvent::Start {
+            prompt_logprobs: None,
+            ..
+        }))
+    ));
 
     match timeout(Duration::from_secs(2), stream.next())
         .await
@@ -621,7 +713,13 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
     request.decode_options.include_stop_str_in_output = true;
     let mut stream = chat.chat(request).await.unwrap();
 
-    assert!(matches!(stream.next().await, Some(Ok(ChatEvent::Start))));
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ChatEvent::Start {
+            prompt_logprobs: None,
+            ..
+        }))
+    ));
     assert_eq!(
         stream.next().await.unwrap().unwrap(),
         ChatEvent::BlockStart {
@@ -723,7 +821,13 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
 
     let mut stream = chat.chat(sample_request("chat-reasoning")).await.unwrap();
 
-    assert_eq!(stream.next().await.unwrap().unwrap(), ChatEvent::Start);
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ChatEvent::Start {
+            prompt_logprobs: None,
+            ..
+        }))
+    ));
     assert_eq!(
         stream.next().await.unwrap().unwrap(),
         ChatEvent::BlockStart {
@@ -918,7 +1022,8 @@ async fn chat_stream_parses_tool_calls_automatically() {
 
     while let Some(event) = stream.next().await {
         match event.unwrap() {
-            ChatEvent::Start => {}
+            ChatEvent::Start { .. } => {}
+            ChatEvent::LogprobsDelta { .. } => {}
             ChatEvent::ToolCallStart { name, .. } => {
                 saw_tool_start = true;
                 assert_eq!(name, "get_weather");
@@ -1026,6 +1131,195 @@ async fn chat_collect_message_preserves_tool_call_arguments_in_final_only_mode()
     assert_eq!(
         message.message.tool_calls().next().unwrap().arguments,
         r#"{"city":"Paris"}"#
+    );
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    chat.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_identity = b"engine-chat-logprobs".to_vec();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_identity.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                for _ in 0..2 {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                    send_outputs(
+                        push,
+                        EngineCoreOutputs {
+                            outputs: vec![
+                                request_output_with_logprobs(
+                                    &request.request_id,
+                                    vec![b'H' as u32],
+                                    None,
+                                    None,
+                                    Some(sample_logprobs_for_token(b'H' as u32, b'h' as u32)),
+                                    Some(prompt_logprobs_for_hi()),
+                                ),
+                                request_output_with_logprobs(
+                                    &request.request_id,
+                                    vec![b'i' as u32],
+                                    Some(FinishReason::Length),
+                                    None,
+                                    Some(sample_logprobs_for_token(b'i' as u32, b'I' as u32)),
+                                    None,
+                                ),
+                            ],
+                            finished_requests: Some(BTreeSet::from([request.request_id])),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                }
+            })
+        },
+    );
+
+    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
+    let chat = connect_chat_llm_with_ipc(
+        EngineCoreClientConfig::new(handshake_address.clone()),
+        &ipc,
+        backend,
+    )
+    .await;
+
+    let mut request = sample_request("chat-logprobs");
+    request.sampling_params.logprobs = Some(1);
+    request.sampling_params.prompt_logprobs = Some(1);
+
+    let mut stream = chat.chat(request.clone()).await.unwrap();
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::Start {
+            prompt_token_count: "system: You are terse.\nuser: Say hi\nassistant:".len(),
+            prompt_logprobs: Some(DecodedPromptLogprobs {
+                first_token: "s".to_string(),
+                scored_positions: vec![DecodedPositionLogprobs {
+                    entries: vec![
+                        DecodedTokenLogprob {
+                            token: "i".to_string(),
+                            logprob: -0.3,
+                            rank: 1,
+                        },
+                        DecodedTokenLogprob {
+                            token: "!".to_string(),
+                            logprob: -0.4,
+                            rank: 1,
+                        },
+                    ],
+                }],
+            }),
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockStart {
+            index: 0,
+            kind: AssistantBlockKind::Text,
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::BlockDelta {
+            index: 0,
+            kind: AssistantBlockKind::Text,
+            delta: "H".to_string(),
+        }
+    );
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ChatEvent::LogprobsDelta {
+            logprobs: DecodedLogprobs {
+                positions: vec![DecodedPositionLogprobs {
+                    entries: vec![
+                        DecodedTokenLogprob {
+                            token: "H".to_string(),
+                            logprob: -0.1,
+                            rank: 1,
+                        },
+                        DecodedTokenLogprob {
+                            token: "h".to_string(),
+                            logprob: -0.2,
+                            rank: 1,
+                        },
+                    ],
+                }],
+            },
+        }
+    );
+    while !matches!(stream.next().await, Some(Ok(ChatEvent::Done { .. }))) {}
+
+    request.request_id = "chat-logprobs-collect".to_string();
+    let collected = chat
+        .chat(request)
+        .await
+        .unwrap()
+        .collect_message()
+        .await
+        .unwrap();
+    assert_eq!(collected.message.text(), "Hi");
+    assert_eq!(
+        collected.prompt_logprobs,
+        Some(DecodedPromptLogprobs {
+            first_token: "s".to_string(),
+            scored_positions: vec![DecodedPositionLogprobs {
+                entries: vec![
+                    DecodedTokenLogprob {
+                        token: "i".to_string(),
+                        logprob: -0.3,
+                        rank: 1,
+                    },
+                    DecodedTokenLogprob {
+                        token: "!".to_string(),
+                        logprob: -0.4,
+                        rank: 1,
+                    },
+                ],
+            }],
+        })
+    );
+    assert_eq!(
+        collected.logprobs,
+        Some(DecodedLogprobs {
+            positions: vec![
+                DecodedPositionLogprobs {
+                    entries: vec![
+                        DecodedTokenLogprob {
+                            token: "H".to_string(),
+                            logprob: -0.1,
+                            rank: 1,
+                        },
+                        DecodedTokenLogprob {
+                            token: "h".to_string(),
+                            logprob: -0.2,
+                            rank: 1,
+                        },
+                    ],
+                },
+                DecodedPositionLogprobs {
+                    entries: vec![
+                        DecodedTokenLogprob {
+                            token: "i".to_string(),
+                            logprob: -0.1,
+                            rank: 1,
+                        },
+                        DecodedTokenLogprob {
+                            token: "I".to_string(),
+                            logprob: -0.2,
+                            rank: 1,
+                        },
+                    ],
+                },
+            ],
+        })
     );
 
     let _ = shutdown_tx.send(());

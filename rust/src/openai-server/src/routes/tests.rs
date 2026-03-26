@@ -1922,7 +1922,8 @@ async fn chat_harness_streams_text_events() {
                 saw_done = true;
                 break;
             }
-            ChatEvent::Start
+            ChatEvent::Start { .. }
+            | ChatEvent::LogprobsDelta { .. }
             | ChatEvent::BlockStart { .. }
             | ChatEvent::BlockEnd { .. }
             | ChatEvent::ToolCallStart { .. }
@@ -1965,7 +1966,8 @@ async fn prepared_openai_request_streams_text_events() {
                 saw_done = true;
                 break;
             }
-            ChatEvent::Start
+            ChatEvent::Start { .. }
+            | ChatEvent::LogprobsDelta { .. }
             | ChatEvent::BlockStart { .. }
             | ChatEvent::BlockEnd { .. }
             | ChatEvent::ToolCallStart { .. }

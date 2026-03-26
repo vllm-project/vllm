@@ -91,7 +91,9 @@ pub(crate) async fn reasoning_event_stream(
     // Without a parser, pass through as plain text deltas.
     let Some(reasoning_parser) = reasoning_parser else {
         while let Some(event) = decoded_stream.next().await.transpose()? {
-            yield ContentEvent::from_decoded_plain_text(event);
+            for next in ContentEvent::from_decoded_plain_text(event) {
+                yield next;
+            }
         }
         return Ok(());
     };
@@ -100,10 +102,23 @@ pub(crate) async fn reasoning_event_stream(
 
     while let Some(event) = decoded_stream.next().await.transpose()? {
         match event {
-            DecodedTextEvent::Start { .. } => yield ContentEvent::Start,
-            DecodedTextEvent::TextDelta { delta, .. } => {
+            DecodedTextEvent::Start {
+                prompt_token_count,
+                prompt_logprobs,
+            } => {
+                yield ContentEvent::Start {
+                    prompt_token_count,
+                    prompt_logprobs,
+                }
+            }
+            DecodedTextEvent::TextDelta {
+                delta, logprobs, ..
+            } => {
                 for next in state.process_delta(delta) {
                     yield next;
+                }
+                if let Some(logprobs) = logprobs {
+                    yield ContentEvent::LogprobsDelta { logprobs };
                 }
             }
             DecodedTextEvent::Done {
@@ -129,7 +144,9 @@ mod tests {
     use futures::{StreamExt as _, stream};
     use reasoning_parser::{ParseError, ParserResult, ReasoningParser};
     use vllm_engine_core_client::protocol::FinishReason;
-    use vllm_text::output::DecodedTextEvent;
+    use vllm_text::output::{
+        DecodedLogprobs, DecodedPositionLogprobs, DecodedTextEvent, DecodedTokenLogprob,
+    };
 
     use super::super::ContentEvent;
     use super::reasoning_event_stream;
@@ -210,7 +227,10 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                ContentEvent::Start,
+                ContentEvent::Start {
+                    prompt_token_count: 3,
+                    prompt_logprobs: None,
+                },
                 ContentEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "abc".to_string(),
@@ -224,6 +244,61 @@ mod tests {
                     token_ids: vec![],
                     finish_reason: Some(FinishReason::Stop),
                     stop_reason: None,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_stream_preserves_logprobs_delta() {
+        let events = stream::iter(vec![
+            Ok(DecodedTextEvent::Start {
+                prompt_token_count: 1,
+                prompt_logprobs: None,
+            }),
+            Ok(DecodedTextEvent::TextDelta {
+                delta: "abc".to_string(),
+                text: "abc".to_string(),
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token: "a".to_string(),
+                            logprob: -0.1,
+                            rank: 1,
+                        }],
+                    }],
+                }),
+            }),
+        ]);
+
+        let collected = reasoning_event_stream(events, None)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(
+            collected,
+            vec![
+                ContentEvent::Start {
+                    prompt_token_count: 1,
+                    prompt_logprobs: None,
+                },
+                ContentEvent::TextDelta {
+                    kind: AssistantBlockKind::Text,
+                    delta: "abc".to_string(),
+                },
+                ContentEvent::LogprobsDelta {
+                    logprobs: DecodedLogprobs {
+                        positions: vec![DecodedPositionLogprobs {
+                            entries: vec![DecodedTokenLogprob {
+                                token: "a".to_string(),
+                                logprob: -0.1,
+                                rank: 1,
+                            }],
+                        }],
+                    },
                 },
             ]
         );

@@ -164,10 +164,13 @@ async fn chat_completion_chunk_stream(
 
     while let Some(next) = stream.next().await {
         match next {
-            Ok(ChatEvent::Start) => yield start_chunk(&response_id, &response_model, created),
+            Ok(ChatEvent::Start { .. }) => {
+                yield start_chunk(&response_id, &response_model, created)
+            }
             Ok(ChatEvent::BlockDelta { kind, delta, .. }) => {
                 yield block_delta_chunk(&response_id, &response_model, created, kind, delta)
             }
+            Ok(ChatEvent::LogprobsDelta { .. }) => {}
             Ok(ChatEvent::BlockStart { kind, .. }) => {
                 debug!(request_id = %response_id, ?kind, "starting new block");
             }

@@ -4,6 +4,7 @@ use std::task::{Context, Poll};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
+use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs};
 
 use crate::error::{Error, Result};
 use crate::event::{AssistantContentBlock, AssistantMessage, ChatEvent};
@@ -13,6 +14,8 @@ use crate::event::{AssistantContentBlock, AssistantMessage, ChatEvent};
 pub struct CollectedAssistantMessage {
     pub message: AssistantMessage,
     pub prompt_token_count: usize,
+    pub prompt_logprobs: Option<DecodedPromptLogprobs>,
+    pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
     pub finish_reason: Option<FinishReason>,
     pub stop_reason: Option<StopReason>,
@@ -42,9 +45,20 @@ impl ChatEventStream {
         use futures::StreamExt as _;
 
         let mut message = AssistantMessage::default();
+        let mut prompt_logprobs = None;
+        let mut logprob_positions: Vec<DecodedPositionLogprobs> = Vec::new();
         while let Some(event) = self.next().await.transpose()? {
             match event {
+                ChatEvent::Start {
+                    prompt_logprobs: start_prompt_logprobs,
+                    prompt_token_count: _,
+                } => {
+                    prompt_logprobs = start_prompt_logprobs;
+                }
                 ChatEvent::BlockEnd { block, .. } => message.push_block(block),
+                ChatEvent::LogprobsDelta { logprobs } => {
+                    logprob_positions.extend(logprobs.positions);
+                }
                 ChatEvent::Done {
                     message: done,
                     prompt_token_count,
@@ -55,6 +69,10 @@ impl ChatEventStream {
                     return Ok(CollectedAssistantMessage {
                         message: done,
                         prompt_token_count,
+                        prompt_logprobs,
+                        logprobs: (!logprob_positions.is_empty()).then_some(DecodedLogprobs {
+                            positions: logprob_positions,
+                        }),
                         token_ids,
                         finish_reason,
                         stop_reason,
@@ -63,8 +81,7 @@ impl ChatEventStream {
                 ChatEvent::ToolCallEnd { call, .. } => {
                     message.push_block(AssistantContentBlock::ToolCall(call));
                 }
-                ChatEvent::Start
-                | ChatEvent::BlockStart { .. }
+                ChatEvent::BlockStart { .. }
                 | ChatEvent::BlockDelta { .. }
                 | ChatEvent::ToolCallStart { .. }
                 | ChatEvent::ToolCallArgumentsDelta { .. } => {}
@@ -90,8 +107,12 @@ impl Stream for ChatEventStream {
 #[cfg(test)]
 mod tests {
     use futures::stream;
+    use vllm_engine_core_client::protocol::FinishReason;
+    use vllm_text::{
+        DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob,
+    };
 
-    use super::ChatEventStream;
+    use super::{ChatEventStream, CollectedAssistantMessage};
     use crate::error::Error;
     use crate::event::ChatEvent;
 
@@ -99,7 +120,10 @@ mod tests {
     async fn collect_message_requires_terminal_done_event() {
         let stream = ChatEventStream::new(
             "chat-missing-done".to_string(),
-            stream::iter([Ok(ChatEvent::Start)]),
+            stream::iter([Ok(ChatEvent::Start {
+                prompt_token_count: 1,
+                prompt_logprobs: None,
+            })]),
         );
 
         let error = stream.collect_message().await.expect_err("missing done");
@@ -108,5 +132,76 @@ mod tests {
             Error::StreamClosedBeforeTerminalOutput { request_id }
             if request_id == "chat-missing-done"
         ));
+    }
+
+    #[tokio::test]
+    async fn collect_message_retains_prompt_and_sample_logprobs() {
+        let stream = ChatEventStream::new(
+            "chat-logprobs".to_string(),
+            stream::iter(vec![
+                Ok(ChatEvent::Start {
+                    prompt_token_count: 2,
+                    prompt_logprobs: Some(DecodedPromptLogprobs {
+                        first_token: "o".to_string(),
+                        scored_positions: vec![DecodedPositionLogprobs {
+                            entries: vec![DecodedTokenLogprob {
+                                token: "p".to_string(),
+                                logprob: -0.1,
+                                rank: 1,
+                            }],
+                        }],
+                    }),
+                }),
+                Ok(ChatEvent::LogprobsDelta {
+                    logprobs: DecodedLogprobs {
+                        positions: vec![DecodedPositionLogprobs {
+                            entries: vec![DecodedTokenLogprob {
+                                token: "a".to_string(),
+                                logprob: -0.2,
+                                rank: 1,
+                            }],
+                        }],
+                    },
+                }),
+                Ok(ChatEvent::Done {
+                    message: Default::default(),
+                    prompt_token_count: 2,
+                    token_ids: vec![1],
+                    finish_reason: Some(FinishReason::Stop),
+                    stop_reason: None,
+                }),
+            ]),
+        );
+
+        let collected = stream.collect_message().await.unwrap();
+        assert_eq!(
+            collected,
+            CollectedAssistantMessage {
+                message: Default::default(),
+                prompt_token_count: 2,
+                prompt_logprobs: Some(DecodedPromptLogprobs {
+                    first_token: "o".to_string(),
+                    scored_positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token: "p".to_string(),
+                            logprob: -0.1,
+                            rank: 1,
+                        }],
+                    }],
+                }),
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token: "a".to_string(),
+                            logprob: -0.2,
+                            rank: 1,
+                        }],
+                    }],
+                }),
+                token_ids: vec![1],
+                finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
+            }
+        );
     }
 }

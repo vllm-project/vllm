@@ -9,7 +9,7 @@ use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use subenum::subenum;
 use tool_parser::ParserFactory as ToolParserFactory;
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
-use vllm_text::output::DecodedTextEvent;
+use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
 
 use self::reasoning::reasoning_event_stream;
 use self::tool::tool_event_stream;
@@ -26,11 +26,18 @@ use crate::output::structured::structured_chat_event_stream;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AssistantEvent {
     #[subenum(ContentEvent)]
-    Start,
+    Start {
+        prompt_token_count: usize,
+        prompt_logprobs: Option<DecodedPromptLogprobs>,
+    },
     #[subenum(ContentEvent)]
     TextDelta {
         kind: AssistantBlockKind,
         delta: String,
+    },
+    #[subenum(ContentEvent)]
+    LogprobsDelta {
+        logprobs: DecodedLogprobs,
     },
     ToolCallStart {
         id: String,
@@ -53,27 +60,44 @@ pub(crate) enum AssistantEvent {
 }
 
 impl ContentEvent {
-    /// Convert a [`DecodedTextEvent`] into a [`ContentEvent`] by treating all text as plain
-    /// (non-reasoning) content and discarding cumulative fields.
-    fn from_decoded_plain_text(event: DecodedTextEvent) -> Self {
+    /// Convert a [`DecodedTextEvent`] into one or more [`ContentEvent`] values by treating all text
+    /// as plain (non-reasoning) content.
+    fn from_decoded_plain_text(event: DecodedTextEvent) -> Vec<Self> {
         match event {
-            DecodedTextEvent::Start { .. } => Self::Start,
-            DecodedTextEvent::TextDelta { delta, .. } => Self::TextDelta {
-                kind: AssistantBlockKind::Text,
-                delta,
-            },
+            DecodedTextEvent::Start {
+                prompt_token_count,
+                prompt_logprobs,
+            } => vec![Self::Start {
+                prompt_token_count,
+                prompt_logprobs,
+            }],
+            DecodedTextEvent::TextDelta {
+                delta, logprobs, ..
+            } => {
+                let mut events = Vec::new();
+                if !delta.is_empty() {
+                    events.push(Self::TextDelta {
+                        kind: AssistantBlockKind::Text,
+                        delta,
+                    });
+                }
+                if let Some(logprobs) = logprobs {
+                    events.push(Self::LogprobsDelta { logprobs });
+                }
+                events
+            }
             DecodedTextEvent::Done {
                 prompt_token_count,
                 token_ids,
                 finish_reason,
                 stop_reason,
                 ..
-            } => Self::Done {
+            } => vec![Self::Done {
                 prompt_token_count,
                 token_ids,
                 finish_reason,
                 stop_reason,
-            },
+            }],
         }
     }
 }

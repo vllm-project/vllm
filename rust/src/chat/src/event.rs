@@ -2,6 +2,7 @@ use std::ops::Deref;
 
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
+use vllm_text::{DecodedLogprobs, DecodedPromptLogprobs};
 
 /// One finalized assistant tool call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,8 +108,14 @@ impl AssistantMessage {
 /// Streamed chat event emitted by [`crate::ChatEventStream`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEvent {
-    /// The request was accepted and streaming has started.
-    Start,
+    /// The request was accepted, streaming has started, and prompt metadata is ready.
+    Start {
+        /// Number of prompt tokens actually sent to the engine after chat
+        /// template rendering and tokenization.
+        prompt_token_count: usize,
+        /// Once-only prompt logprobs metadata, when requested.
+        prompt_logprobs: Option<DecodedPromptLogprobs>,
+    },
     /// A new assistant output block has started.
     BlockStart {
         index: usize,
@@ -120,6 +127,8 @@ pub enum ChatEvent {
         kind: AssistantBlockKind,
         delta: String,
     },
+    /// Token-update-aligned output logprobs for one streamed assistant update.
+    LogprobsDelta { logprobs: DecodedLogprobs },
     /// One assistant output block has ended.
     BlockEnd {
         index: usize,

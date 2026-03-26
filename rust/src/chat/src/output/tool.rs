@@ -213,13 +213,24 @@ async fn final_only_tool_event_stream(
 
     while let Some(event) = stream.next().await.transpose()? {
         match event {
-            ContentEvent::Start => yield AssistantEvent::Start,
+            ContentEvent::Start {
+                prompt_token_count,
+                prompt_logprobs,
+            } => {
+                yield AssistantEvent::Start {
+                    prompt_token_count,
+                    prompt_logprobs,
+                }
+            }
             ContentEvent::TextDelta { kind, delta } => {
                 if kind == AssistantBlockKind::Text {
                     final_text.push_str(&delta);
                 } else {
                     yield AssistantEvent::TextDelta { kind, delta };
                 }
+            }
+            ContentEvent::LogprobsDelta { logprobs } => {
+                yield AssistantEvent::LogprobsDelta { logprobs };
             }
             ContentEvent::Done {
                 prompt_token_count,
@@ -304,11 +315,22 @@ pub(crate) async fn tool_event_stream(
 
     while let Some(event) = stream.next().await.transpose()? {
         match event {
-            ContentEvent::Start => yield AssistantEvent::Start,
+            ContentEvent::Start {
+                prompt_token_count,
+                prompt_logprobs,
+            } => {
+                yield AssistantEvent::Start {
+                    prompt_token_count,
+                    prompt_logprobs,
+                }
+            }
             ContentEvent::TextDelta { kind, delta } => {
                 for next in state.process_text_delta(kind, delta).await {
                     yield next;
                 }
+            }
+            ContentEvent::LogprobsDelta { logprobs } => {
+                yield AssistantEvent::LogprobsDelta { logprobs };
             }
             ContentEvent::Done {
                 prompt_token_count,
@@ -349,6 +371,7 @@ mod tests {
     use tool_parser::errors::{ParserError, ParserResult};
     use tool_parser::types::{StreamingParseResult, ToolCall, ToolCallItem};
     use vllm_engine_core_client::protocol::FinishReason;
+    use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
     use super::super::structured::structured_chat_event_stream;
     use super::super::{AssistantEvent, ContentEvent};
@@ -416,7 +439,10 @@ mod tests {
     #[tokio::test]
     async fn tool_parser_failure_falls_back_to_plain_text() {
         let events = stream::iter(vec![
-            Ok(ContentEvent::Start),
+            Ok(ContentEvent::Start {
+                prompt_token_count: 3,
+                prompt_logprobs: None,
+            }),
             Ok(ContentEvent::TextDelta {
                 kind: AssistantBlockKind::Text,
                 delta: "abc".to_string(),
@@ -449,7 +475,10 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                AssistantEvent::Start,
+                AssistantEvent::Start {
+                    prompt_token_count: 3,
+                    prompt_logprobs: None,
+                },
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "abc".to_string(),
@@ -478,5 +507,72 @@ mod tests {
         .expect("collect_message should succeed");
         assert_eq!(message.message.text(), "abcdef");
         assert!(message.message.tool_calls().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn tool_stream_preserves_logprobs_delta_in_final_only_mode() {
+        let events = stream::iter(vec![
+            Ok(ContentEvent::Start {
+                prompt_token_count: 1,
+                prompt_logprobs: None,
+            }),
+            Ok(ContentEvent::LogprobsDelta {
+                logprobs: DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token: "a".to_string(),
+                            logprob: -0.2,
+                            rank: 1,
+                        }],
+                    }],
+                },
+            }),
+            Ok(ContentEvent::Done {
+                prompt_token_count: 1,
+                token_ids: vec![],
+                finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
+            }),
+        ]);
+        let mut request = tool_request("req_final_only_logprobs");
+        request.intermediate = false;
+
+        let events = tool_event_stream(
+            events,
+            request,
+            Some(Box::new(FailingParser { fail_next: false })),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<crate::Result<Vec<_>>>()
+        .unwrap();
+
+        assert_eq!(
+            events,
+            vec![
+                AssistantEvent::Start {
+                    prompt_token_count: 1,
+                    prompt_logprobs: None,
+                },
+                AssistantEvent::LogprobsDelta {
+                    logprobs: DecodedLogprobs {
+                        positions: vec![DecodedPositionLogprobs {
+                            entries: vec![DecodedTokenLogprob {
+                                token: "a".to_string(),
+                                logprob: -0.2,
+                                rank: 1,
+                            }],
+                        }],
+                    },
+                },
+                AssistantEvent::Done {
+                    prompt_token_count: 1,
+                    token_ids: vec![],
+                    finish_reason: Some(FinishReason::Stop),
+                    stop_reason: None,
+                },
+            ]
+        );
     }
 }

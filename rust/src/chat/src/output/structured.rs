@@ -8,6 +8,7 @@
 use futures::{StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
+use vllm_text::DecodedLogprobs;
 
 use super::{AssistantEvent, AssistantEventStream};
 use crate::error::Error;
@@ -64,6 +65,11 @@ impl StructuredEventState {
         self.close_open_tool_call(&mut events);
         self.push_text_delta(kind, delta, &mut events);
         events
+    }
+
+    /// Forward one token-update-aligned logprobs delta without attaching it to text blocks.
+    fn process_logprobs_delta(&mut self, logprobs: DecodedLogprobs) -> Vec<ChatEvent> {
+        vec![ChatEvent::LogprobsDelta { logprobs }]
     }
 
     /// Start one new tool call, closing any incompatible open block first.
@@ -226,9 +232,22 @@ pub(super) async fn structured_chat_event_stream(stream: impl AssistantEventStre
 
     while let Some(event) = stream.next().await.transpose()? {
         match event {
-            AssistantEvent::Start => yield ChatEvent::Start,
+            AssistantEvent::Start {
+                prompt_token_count,
+                prompt_logprobs,
+            } => {
+                yield ChatEvent::Start {
+                    prompt_token_count,
+                    prompt_logprobs,
+                }
+            }
             AssistantEvent::TextDelta { kind, delta } => {
                 for next in state.process_text_delta(kind, delta) {
+                    yield next;
+                }
+            }
+            AssistantEvent::LogprobsDelta { logprobs } => {
+                for next in state.process_logprobs_delta(logprobs) {
                     yield next;
                 }
             }
