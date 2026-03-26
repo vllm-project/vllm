@@ -401,6 +401,8 @@ class SpeculativeConfig:
             # prompt_lookup_min is set (guaranteed by the first branch)
             self.prompt_lookup_max = self.prompt_lookup_min
 
+        assert self.prompt_lookup_min is not None
+        assert self.prompt_lookup_max is not None
         if self.prompt_lookup_min > self.prompt_lookup_max:
             raise ValueError(
                 f"prompt_lookup_min={self.prompt_lookup_min} must "
@@ -419,6 +421,7 @@ class SpeculativeConfig:
 
     def _build_draft_model_config(self) -> None:
         """Build the draft ModelConfig from self.model and target config."""
+        assert self.model is not None
         self.prompt_lookup_max = 0
         self.prompt_lookup_min = 0
         self.draft_model_config = ModelConfig(
