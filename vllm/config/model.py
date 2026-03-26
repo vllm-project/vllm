@@ -546,7 +546,9 @@ class ModelConfig:
 
         # Set default tokenizer modes based on model architecture
         if self.tokenizer_mode == "auto":
-            if arch == "Grok1ForCausalLM":
+            if self.model_impl == "terratorch":
+                self.tokenizer_mode = "terratorch"
+            elif arch == "Grok1ForCausalLM":
                 self.tokenizer_mode = "grok2"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
