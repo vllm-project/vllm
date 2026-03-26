@@ -554,7 +554,12 @@ class LoRAModelManager:
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
+                n_slices = getattr(module, "n_slices", len(replacements))
                 subloras: list[LoRALayerWeights | None] = []
+                # HACK: overrides replacements for qkvz = qkv + z case.
+                # Any better methods to handle this case?
+                if n_slices != len(replacements):
+                    replacements = [f"slice_{i}" for i in range(n_slices)]
                 for i, r in enumerate(replacements):
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,
