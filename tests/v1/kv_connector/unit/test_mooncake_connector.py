@@ -322,7 +322,8 @@ async def test_kv_producer(monkeypatch):
         prefill_connector = MooncakeConnector(vllm_config, KVConnectorRole.WORKER)
         prefill_worker = prefill_connector.connector_worker
         prefill_worker.kv_caches_base_addr = [0x1000]
-        prefill_worker.block_len = 4096
+        block_len = 4096
+        prefill_worker.block_len_per_layer = [block_len]
 
         # Override loop to use current test loop
         origin_sender_loop = prefill_worker.sender_loop
@@ -347,6 +348,7 @@ async def test_kv_producer(monkeypatch):
             remote_tp_rank=0,
             req_blocks={"d-req-1": (transfer_id, [20, 21])},
             kv_caches_base_addr=[0x2000],
+            block_lens=[block_len],
         )
 
         mock_socket = AsyncMock(spec=zmq.asyncio.Socket)
@@ -360,9 +362,9 @@ async def test_kv_producer(monkeypatch):
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
             # Verify transfer parameters are correct
-            src_ptr = 0x1000 + 10 * prefill_worker.block_len
-            dst_ptr = 0x2000 + 20 * prefill_worker.block_len
-            length = 2 * prefill_worker.block_len
+            src_ptr = 0x1000 + 10 * block_len
+            dst_ptr = 0x2000 + 20 * block_len
+            length = 2 * block_len
             mock_send_blocks.assert_called_once_with(
                 "consumer-host:54321", [src_ptr], [dst_ptr], [length]
             )
@@ -391,9 +393,9 @@ async def test_kv_producer(monkeypatch):
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
             # Verify transfer parameters are correct: 11 to 20
-            src_ptr = 0x1000 + 11 * prefill_worker.block_len
-            dst_ptr = 0x2000 + 20 * prefill_worker.block_len
-            length = 1 * prefill_worker.block_len
+            src_ptr = 0x1000 + 11 * block_len
+            dst_ptr = 0x2000 + 20 * block_len
+            length = 1 * block_len
             mock_send_blocks.assert_called_once_with(
                 "consumer-host:54321", [src_ptr], [dst_ptr], [length]
             )
