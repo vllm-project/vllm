@@ -92,7 +92,7 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import ProcessorInputs, token_inputs
+from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
@@ -254,7 +254,7 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _validate_generator_input(
         self,
-        engine_prompt: ProcessorInputs,
+        engine_prompt: EngineInput,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
         prompt_len = self._extract_prompt_len(engine_prompt)
@@ -884,14 +884,15 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Use parser to extract and create response output items
         if self.parser:
-            parser = self.parser(tokenizer)
-            return parser.extract_response_outputs(
-                model_output=final_output.text,
-                request=request,
-                enable_auto_tools=self.enable_auto_tools,
-                tool_call_id_type=self.tool_call_id_type,
-                logprobs=logprobs,
-            )
+           parser = self.parser(tokenizer)
+           return parser.extract_response_outputs(
+               model_output=final_output.text,
+                model_output_token_ids=final_output.token_ids,
+               request=request,
+               enable_auto_tools=self.enable_auto_tools,
+               tool_call_id_type=self.tool_call_id_type,
+               logprobs=logprobs,
+           )
 
         # Fallback when no parser is configured
         return [
