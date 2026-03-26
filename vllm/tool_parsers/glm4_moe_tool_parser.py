@@ -186,7 +186,7 @@ class Glm4MoeModelToolParser(ToolParser):
                 for key, value in pairs:
                     arg_key = key.strip()
                     arg_val = value.strip()
-                    if not self._is_string_type(tc_name, arg_key, request.tools):
+                    if not self._is_string_type(tc_name, arg_key, self.tools):
                         arg_val = self._deserialize(arg_val)
                     logger.debug("arg_key = %s, arg_val = %s", arg_key, arg_val)
                     arg_dct[arg_key] = arg_val
@@ -327,7 +327,7 @@ class Glm4MoeModelToolParser(ToolParser):
                 key = (self._pending_key or "").strip()
 
                 is_string = self._is_string_type(
-                    self._current_tool_name, key, request.tools
+                    self._current_tool_name, key, self.tools
                 )
 
                 if is_string:

@@ -79,9 +79,8 @@ class Step3ToolParser(ToolParser):
         self,
         func_name: str,
         params: dict[str, Any],
-        request: ChatCompletionRequest,
     ) -> dict[str, Any]:
-        for tool in request.tools or []:
+        for tool in self.tools or []:
             if tool.function.name == func_name:
                 schema = tool.function.parameters or {}
                 properties = schema.get("properties", {})
@@ -231,7 +230,6 @@ class Step3ToolParser(ToolParser):
                     final_args = self._cast_arguments(
                         function_name,
                         tool_call_arr.get("parameters", {}),  # type: ignore
-                        request,
                     )
                     if final_args:
                         final_args_json = json.dumps(final_args, ensure_ascii=False)
@@ -288,7 +286,7 @@ class Step3ToolParser(ToolParser):
             function_name, params_dict = self._parse_steptml_invoke(invoke_part)
 
             if function_name and params_dict is not None:
-                params_dict = self._cast_arguments(function_name, params_dict, request)
+                params_dict = self._cast_arguments(function_name, params_dict)
                 params_str = json.dumps(params_dict, ensure_ascii=False)
                 tool_calls.append(
                     ToolCall(
