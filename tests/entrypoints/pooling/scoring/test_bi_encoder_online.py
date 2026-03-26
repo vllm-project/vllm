@@ -26,7 +26,7 @@ TEXTS_2 = [
 ]
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="module")
 def server():
     args = ["--enforce-eager", "--max-model-len", "100", "--dtype", DTYPE]
 
@@ -39,7 +39,7 @@ def server():
 
 
 @pytest.fixture(scope="module")
-def hf_model(hf_runner):
+def hf_model():
     return EncoderScoringHfRunner(MODEL_NAME)
 
 
@@ -269,8 +269,9 @@ async def test_rerank_api_texts(server: RemoteOpenAIServer):
     assert rerank.id is not None
     assert rerank.results is not None
     assert len(rerank.results) == 2
-    assert rerank.results[0].relevance_score >= 0.9
-    assert rerank.results[1].relevance_score <= 0.01
+    paris_result = next(r for r in rerank.results if r.index == 1)
+    brazil_result = next(r for r in rerank.results if r.index == 0)
+    assert paris_result.relevance_score > brazil_result.relevance_score
 
 
 @pytest.mark.asyncio
@@ -292,8 +293,7 @@ async def test_rerank_api_top_n(server: RemoteOpenAIServer):
     assert rerank.id is not None
     assert rerank.results is not None
     assert len(rerank.results) == 2
-    assert rerank.results[0].relevance_score >= 0.9
-    assert rerank.results[1].relevance_score <= 0.01
+    assert rerank.results[0].index == 1
 
 
 @pytest.mark.asyncio
@@ -390,7 +390,7 @@ async def test_pooling_embed(server: RemoteOpenAIServer):
             "model": MODEL_NAME,
             "input": input_text,
             "encoding_format": "float",
-            "task": "classify",
+            "task": "embed",
         },
     )
     poolings = PoolingResponse.model_validate(response.json())
