@@ -362,8 +362,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_interleave=self.cp_interleave,
         )
 
-        self.attn_backends, self.attn_groups = init_attn_backend(
-            self.kv_cache_config, self.vllm_config, self.device
+        self.attn_backends, self.attn_groups, self.kernel_block_sizes = (
+            init_attn_backend(self.kv_cache_config, self.vllm_config, self.device)
         )
         check_attention_cp_compatibility(self.vllm_config)
         if self.speculator is not None:
@@ -382,6 +382,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_backends,
             self.device,
             self.cache_config.cache_dtype,
+            self.kernel_block_sizes,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
