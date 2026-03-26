@@ -210,26 +210,31 @@ class VllmPatternReplacement(ABC, Generic[P, R]):
         """Returns a closure defining the FX subgraph to substitute in place of each match."""
         ...
 
-    @property
     @abstractmethod
     def get_inputs(self) -> list[torch.Tensor]:
         """Example tensors used to trace pattern and replacement."""
         ...
 
     # Helpers for get_inputs: uninitialized tensors of common dtypes.
-    empty: ClassVar = staticmethod(functools.partial(torch.empty, device="cuda"))
-    empty_bf16: ClassVar = staticmethod(
-        functools.partial(torch.empty, dtype=torch.bfloat16, device="cuda")
-    )
-    empty_fp16: ClassVar = staticmethod(
-        functools.partial(torch.empty, dtype=torch.float16, device="cuda")
-    )
-    empty_fp32: ClassVar = staticmethod(
-        functools.partial(torch.empty, dtype=torch.float32, device="cuda")
-    )
-    empty_i32: ClassVar = staticmethod(
-        functools.partial(torch.empty, dtype=torch.int32, device="cuda")
-    )
+    @staticmethod
+    def empty(*args, **kwargs) -> torch.Tensor:
+        return torch.empty(*args, device="cuda", **kwargs)
+
+    @staticmethod
+    def empty_bf16(*args, **kwargs) -> torch.Tensor:
+        return torch.empty(*args, dtype=torch.bfloat16, device="cuda", **kwargs)
+
+    @staticmethod
+    def empty_fp16(*args, **kwargs) -> torch.Tensor:
+        return torch.empty(*args, dtype=torch.float16, device="cuda", **kwargs)
+
+    @staticmethod
+    def empty_fp32(*args, **kwargs) -> torch.Tensor:
+        return torch.empty(*args, dtype=torch.float32, device="cuda", **kwargs)
+
+    @staticmethod
+    def empty_i32(*args, **kwargs) -> torch.Tensor:
+        return torch.empty(*args, dtype=torch.int32, device="cuda", **kwargs)
 
 
 def _fx_view_to_reshape(gm: fx.GraphModule) -> None:
@@ -266,7 +271,7 @@ class VllmFusionPatternMatcherPass(VllmPatternMatcherPass):
         pm.register_replacement(
             pr.pattern,
             pr.replacement,
-            pr.get_inputs,
+            pr.get_inputs(),
             self._trace_fn,
             self.pm_pass,
         )

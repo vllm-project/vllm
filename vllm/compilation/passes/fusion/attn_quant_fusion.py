@@ -109,7 +109,6 @@ class AttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
 
         return _replacement
 
-    @property
     def get_inputs(self):
         dtype = self._dtype
         num_heads = self._num_heads
