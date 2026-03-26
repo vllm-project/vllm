@@ -114,9 +114,6 @@ class DeepseekVLV2Config(PretrainedConfig):
         self.projector_config = MlpProjectorConfig(**projector_config)
 
         language_config = kwargs.get("language_config", {})
-        # remove kv_lora_rank if not specified, passing None is prohibited
-        if language_config.get("kv_lora_rank") is None:
-            language_config.pop("kv_lora_rank", None)
         self.text_config = DeepseekV2Config(**language_config)
 
         self.tile_tag = tile_tag

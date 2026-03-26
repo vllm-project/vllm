@@ -112,7 +112,6 @@ def _re_import_modules():
     aliased_module_patterns = [
         r".+\.tokenization_utils$",
         r".+\.tokenization_utils_fast$",
-        r".+\.image_processing_utils_fast$",
         r".+\.models\..+\.image_processing_.+_fast$",
     ]
 
