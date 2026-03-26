@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
 import time
 from collections.abc import Sequence
 from copy import copy
@@ -161,9 +160,6 @@ class OpenAIServingRender:
         # These are set after init by generate/api_router.py when an engine
         # is available.  GPU-less render servers use the defaults (None / {}).
         self.tool_server: ToolServer | None = None
-        self.response_store: dict[str, ResponsesResponse] = {}
-        self.response_store_lock: asyncio.Lock = asyncio.Lock()
-        self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
 
     async def render_chat_request(
         self,
@@ -409,7 +405,10 @@ class OpenAIServingRender:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
-        result = await self.render_responses(request)
+        # GPU-less render server has no store; only new conversations.
+        result = await self.render_responses(
+            request, prev_response=None, prev_messages=None
+        )
         if isinstance(result, ErrorResponse):
             return result
 
@@ -455,42 +454,27 @@ class OpenAIServingRender:
     async def render_responses(
         self,
         request: ResponsesRequest,
+        prev_response: ResponsesResponse | None,
+        prev_messages: list[ChatCompletionMessageParam] | None,
     ) -> tuple[list[ChatCompletionMessageParam], list[ProcessorInputs]] | ErrorResponse:
         """Core preprocessing logic for responses requests (no model/engine
         check).
 
-        Called directly by render_responses_request and delegated to by
-        OpenAIServingResponses.render_responses_request after its
-        engine-aware checks.
+        State lookups (response_store, msg_store) are performed by the
+        caller (OpenAIServingResponses) and passed in as parameters.
         """
-        # Handle previous_response_id (engine-side store lookup).
-        prev_response_id = request.previous_response_id
-        if prev_response_id is not None:
-            async with self.response_store_lock:
-                prev_response = self.response_store.get(prev_response_id)
-            if prev_response is None:
-                return self.create_error_response(
-                    err_type="invalid_request_error",
-                    message=f"Response '{prev_response_id}' not found.",
-                    status_code=HTTPStatus.NOT_FOUND,
-                )
-            prev_msg = self.msg_store.get(prev_response.id)
-            prev_output = prev_response.output
-        else:
-            prev_response = None
-            prev_msg = None
-            prev_output = None
-
         if self.use_harmony:
-            return self._make_responses_request_with_harmony(request, prev_response)
+            return self._make_responses_request_with_harmony(
+                request, prev_response, prev_messages
+            )
 
         # Non-harmony path.
         tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         messages = construct_input_messages(
             request_instructions=request.instructions,
             request_input=request.input,
-            prev_msg=prev_msg,
-            prev_response_output=prev_output,
+            prev_msg=prev_messages,
+            prev_response_output=prev_response.output if prev_response else None,
         )
 
         _, engine_prompts = await self.preprocess_chat(
@@ -512,6 +496,7 @@ class OpenAIServingRender:
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
+        prev_messages: list[ChatCompletionMessageParam] | None,
     ) -> tuple[list[OpenAIMessage], list[ProcessorInputs]]:
         if request.tool_choice != "auto":
             raise NotImplementedError(
@@ -519,7 +504,9 @@ class OpenAIServingRender:
             )
 
         arrival_time = time.time()
-        messages = self._construct_responses_input_with_harmony(request, prev_response)
+        messages = self._construct_responses_input_with_harmony(
+            request, prev_response, prev_messages
+        )
         prompt_token_ids = render_for_completion(messages)
         engine_prompt = token_inputs(prompt_token_ids)
         engine_prompt["arrival_time"] = arrival_time
@@ -534,6 +521,7 @@ class OpenAIServingRender:
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
+        prev_messages: list[ChatCompletionMessageParam] | None,
     ) -> list[OpenAIMessage]:
         messages: list[OpenAIMessage] = []
         if prev_response is None:
@@ -556,7 +544,8 @@ class OpenAIServingRender:
             # Continue the previous conversation.
             # FIXME(woosuk): Currently, request params like reasoning and
             # instructions are ignored.
-            prev_msgs = self.msg_store[prev_response.id]
+            assert prev_messages is not None
+            prev_msgs = prev_messages
 
             # FIXME(woosuk): The slice-delete-reappend cycle below is
             # currently a no-op --- it removes messages then puts them all

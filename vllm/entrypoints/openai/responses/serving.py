@@ -194,11 +194,16 @@ class OpenAIServingResponses(OpenAIServing):
         self.tool_call_id_type = get_tool_call_id_type(self.model_config)
 
         self.enable_auto_tools = enable_auto_tools
-        # Stores are managed by OpenAIServingRender so that
-        # render_responses() can access them directly.
-        self.response_store = self.openai_serving_render.response_store
-        self.response_store_lock = self.openai_serving_render.response_store_lock
-        self.msg_store = self.openai_serving_render.msg_store
+        # HACK(woosuk): This is a hack. We should use a better store.
+        # FIXME: If enable_store=True, this may cause a memory leak since we
+        # never remove responses from the store.
+        self.response_store: dict[str, ResponsesResponse] = {}
+        self.response_store_lock = asyncio.Lock()
+
+        # HACK(woosuk): This is a hack. We should use a better store.
+        # FIXME: If enable_store=True, this may cause a memory leak since we
+        # never remove messages from the store.
+        self.msg_store: dict[str, list] = {}
 
         # HACK(wuhang): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
@@ -236,7 +241,21 @@ class OpenAIServingResponses(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        return await self.openai_serving_render.render_responses(request)
+        # Handle the previous response ID.
+        prev_response_id = request.previous_response_id
+        if prev_response_id is not None:
+            async with self.response_store_lock:
+                prev_response = self.response_store.get(prev_response_id)
+            if prev_response is None:
+                return self._make_not_found_error(prev_response_id)
+        else:
+            prev_response = None
+
+        prev_messages = self.msg_store.get(prev_response.id) if prev_response else None
+
+        return await self.openai_serving_render.render_responses(
+            request, prev_response, prev_messages
+        )
 
     def _validate_generator_input(
         self,
