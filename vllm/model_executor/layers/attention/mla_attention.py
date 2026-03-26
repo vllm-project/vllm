@@ -471,17 +471,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # Store positions for forward_impl's fused RoPE+quant path.
         self._positions = positions
 
-        # When the fused path is active, skip upfront RoPE -- it will
-        # be applied inside the fused kernel in forward_impl.
-        rotary_emb = getattr(self.impl, "rotary_emb", None)
-        use_fused = getattr(self.impl, "use_fused_rope_quant", False)
-        if rotary_emb is not None and positions is not None and not use_fused:
-            q_nope, q_pe = q.split(
-                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-            )
-            q_pe, k_pe = rotary_emb(positions, q_pe, k_pe)
-            q = torch.cat([q_nope, q_pe], dim=-1)
-
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
 
