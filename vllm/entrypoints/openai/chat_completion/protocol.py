@@ -179,7 +179,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | ChatCompletionNamedToolChoiceParam
         | None
     ) = "none"
-    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
+    reasoning_effort: Literal["none", "low", "medium", "high", "xhigh"] | None = None
     thinking_token_budget: int | None = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
@@ -783,9 +783,23 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def set_include_reasoning_for_none_effort(cls, data: Any) -> Any:
-        if data.get("reasoning_effort") == "none":
-            data["include_reasoning"] = False
+    def set_thinking_token_budget(cls, data: Any) -> Any:
+        reasoning_effort = data.get("reasoning_effort")
+        thinking_token_budget = data.get("thinking_token_budget")
+
+        # Only set thinking_token_budget based on reasoning_effort when
+        # thinking_token_budget is not explicitly provided by the user
+        if reasoning_effort is not None and thinking_token_budget is None:
+            if reasoning_effort == "none":
+                data["thinking_token_budget"] = 0
+            elif reasoning_effort == "low":
+                data["thinking_token_budget"] = 1024
+            elif reasoning_effort == "medium":
+                data["thinking_token_budget"] = 2048
+            elif reasoning_effort == "high":
+                data["thinking_token_budget"] = 8192
+            elif reasoning_effort == "xhigh":
+                data["thinking_token_budget"] = 16384
         return data
 
 
