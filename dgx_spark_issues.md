@@ -259,18 +259,44 @@ PyTorch only supports compute capabilities 8.0-9.0.
 
 ---
 
-## 2026-03-26 14:49 更新
+## 2026-03-26 19:09 更新
 
-**PR #38126 状态：** 仍未 merge，最后更新 ~17h 前
+**PR #38126 状态：** 仍未 merge，最后更新 ~22h 前
 - 等待 NVIDIA maintainer johnnynunez 推进
 - merge 后将检查代码是否覆盖 SM 12.1 Marlin 自动检测
 - 如未覆盖，继续推进 #37141
 
-**PR #37959 状态：** 58h 无人类 review
-- 考虑在 Slack #pr-reviews 礼貌求助
-- 请求加 `ready` label 跑 CI
+**PR #37959 状态：** 62h 无人类 review
+- Slack CLI 不可用，无法在 #pr-reviews 求助
+- 选项：在 PR 上追加评论或继续等待（周末 review 可能较慢）
 
 **DGX Spark 环境稳定：**
 - GPU: NVIDIA GB10 (SM 12.1)
 - Driver: 580.95.05
+- 无新问题发现
+
+**下一步计划：**
+1. 等 #38126 merge 后检查代码
+2. 如未覆盖 Marlin auto-detect → 准备 #37141 PR
+3. 继续跟进 #37959 的 review 进展
+
+---
+
+## 2026-03-26 20:13 更新
+
+**PR #38126 状态跟踪：**
+- 仍 open，最后更新 ~23h 前
+- 等待 merge 后检查代码变更
+- 关键问题：是否覆盖 SM 12.1 (GB10) Marlin 自动检测？
+- 如未覆盖 → 推进 #37141
+
+**PR #37959 (Helm chart 修复)：**
+- 64h 无人类 review
+- 仍缺 `ready` label
+- 今天不追加评论，继续等待
+
+**DGX Spark 环境稳定：**
+- GPU: NVIDIA GB10 (SM 12.1)
+- Driver: 580.95.05
+- CUDA: 13.0
 - 无新问题发现
