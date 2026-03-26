@@ -808,7 +808,8 @@ class SamplingParams(
             if _is_non_tekken_mistral(tokenizer=tokenizer):
                 raise ValueError(
                     "Non-tekken Mistral tokenizers are not supported for the 'guidance'"
-                    " structured output backend. Please use ['xgrammar', 'outlines'] "
+                    " structured output backend. Please either use a more recent "
+                    "Mistral model, the ['xgrammar', 'outlines'] "
                     "backends or tokenizer_mode='hf' instead."
                 )
             # TODO: ideally we would have the LLTokenizer here as Lark syntax
