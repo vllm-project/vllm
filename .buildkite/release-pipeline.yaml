@@ -414,7 +414,7 @@ steps:
           DOCKER_BUILDKIT=1 docker buildx build \
             --file docker/Dockerfile.rocm_base \
             --tag rocm-base-debs:$${BUILDKITE_BUILD_NUMBER} \
-            --build-arg BASE_IMAGE="$${ECR_IMAGE_TAG}" \
+            --build-arg BASE_IMAGE="$${ECR_CACHE_TAG}" \
             --target debs_wheel_release \
             --build-arg USE_SCCACHE=1 \
             --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
@@ -453,7 +453,7 @@ steps:
           # Build wheel extraction stage
           DOCKER_BUILDKIT=1 docker buildx build \
             --file docker/Dockerfile.rocm_base \
-            --tag rocm-base-debs:${BUILDKITE_BUILD_NUMBER} \
+            --tag rocm-base-debs:$${BUILDKITE_BUILD_NUMBER} \
             --target debs_wheel_release \
             --build-arg USE_SCCACHE=1 \
             --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
