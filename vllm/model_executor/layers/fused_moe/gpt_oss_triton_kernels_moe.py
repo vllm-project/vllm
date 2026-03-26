@@ -253,10 +253,16 @@ def triton_kernel_moe_forward(
         logits = gating_output
         if sm_first:
             logits = torch.softmax(logits, dim=-1)
-        sparse_logits = topk_fn(logits, topk, apply_softmax=not sm_first)
-        # sparse_logits.indx contains global expert IDs – remap to local.
-        topk_ids = expert_map[sparse_logits.indx.to(torch.long)]
-        topk_weights = sparse_logits.vals
+        topk_result = topk_fn(logits, topk, apply_softmax=not sm_first)
+        # topk may return a tuple (vals, indx, bitmatrix) or a
+        # SparseMatrix depending on the triton_kernels version.
+        if isinstance(topk_result, tuple):
+            topk_weights, topk_ids_raw, _ = topk_result
+        else:
+            topk_weights = topk_result.vals
+            topk_ids_raw = topk_result.indx
+        # topk_ids_raw contains global expert IDs - remap to local.
+        topk_ids = expert_map[topk_ids_raw.to(torch.long)]
         local_num_experts = w1.shape[0]
         routing_data, gather_idx, scatter_idx = make_routing_data(
             topk_ids, topk_weights, local_num_experts
@@ -422,8 +428,13 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     assert quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
     assert quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
 
-    # Shape check, only check non-mxfp4
-    assert hidden_states.shape[-1] == w1.shape[-2]
+    # Shape check: when weights are padded (e.g. hidden_size padded for
+    # GFX950 swizzle), unpadded_K_w1 carries the original dimension.
+    expected_K_w1 = unpadded_K_w1 if unpadded_K_w1 is not None else w1.shape[-2]
+    assert hidden_states.shape[-1] == expected_K_w1, (
+        f"hidden_states K={hidden_states.shape[-1]} != "
+        f"expected K={expected_K_w1} (w1 K={w1.shape[-2]})"
+    )
     assert w2.shape[-1] == w1.shape[1]
 
     E, _, N = w1.shape
@@ -482,6 +493,12 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         unpadded_N=unpadded_N_w2,
         unpadded_K=unpadded_K_w2,
     )
+
+    # When hidden_size was padded for alignment (e.g. GFX950 swizzle),
+    # the kernel output has the padded dimension. Slice back to the
+    # original hidden_size so downstream layers see the expected shape.
+    if unpadded_N_w2 is not None and intermediate_cache3.shape[-1] != unpadded_N_w2:
+        intermediate_cache3 = intermediate_cache3[..., :unpadded_N_w2].contiguous()
 
     return intermediate_cache3
 
