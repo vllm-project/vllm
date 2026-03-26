@@ -2244,7 +2244,7 @@ class NixlConnectorWorker:
         # indexes_into_remote to account for local KV replication.
         # TODO (ZhanqiuHu): fix indexes_into_remote so all D ranks read full
         # KV when local KV is replicated, then remove this guard.
-        local_kv_replicated = self.world_size // self.kv_topo.total_num_kv_heads >= 1
+        local_kv_replicated = self.world_size // self.kv_topo.total_num_kv_heads > 1
         if tp_ratio > 1 and local_kv_replicated:
             raise NotImplementedError(
                 f"Hetero-TP with D_TP ({self.world_size}) > num_kv_heads "
