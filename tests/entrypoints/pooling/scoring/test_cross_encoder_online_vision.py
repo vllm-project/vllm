@@ -123,7 +123,10 @@ def server(request):
         yield remote_server, backend
 
 
-def test_score_api_queries_str_documents_str(server: tuple[RemoteOpenAIServer, str]):
+@pytest.mark.asyncio
+async def test_score_api_queries_str_documents_str(
+    server: tuple[RemoteOpenAIServer, str],
+):
     remote_server, backend = server
     score_response = requests.post(
         remote_server.url_for("score"),
@@ -143,7 +146,8 @@ def test_score_api_queries_str_documents_str(server: tuple[RemoteOpenAIServer, s
     assert_score(score.data[0].score, TEXT_VS_TEXT, backend, "text_vs_text")
 
 
-def test_score_api_queries_str_documents_text_content(
+@pytest.mark.asyncio
+async def test_score_api_queries_str_documents_text_content(
     server: tuple[RemoteOpenAIServer, str],
 ):
     remote_server, backend = server
@@ -165,7 +169,8 @@ def test_score_api_queries_str_documents_text_content(
     assert_score(score.data[0].score, TEXT_VS_TEXT, backend, "text_vs_text")
 
 
-def test_score_api_queries_str_documents_image_url_content(
+@pytest.mark.asyncio
+async def test_score_api_queries_str_documents_image_url_content(
     server: tuple[RemoteOpenAIServer, str],
 ):
     remote_server, backend = server
@@ -187,7 +192,8 @@ def test_score_api_queries_str_documents_image_url_content(
     assert_score(score.data[0].score, TEXT_VS_IMAGE, backend, "text_vs_image")
 
 
-def test_score_api_queries_str_documents_image_base64_content(
+@pytest.mark.asyncio
+async def test_score_api_queries_str_documents_image_base64_content(
     server: tuple[RemoteOpenAIServer, str],
 ):
     remote_server, backend = server
@@ -209,7 +215,8 @@ def test_score_api_queries_str_documents_image_base64_content(
     assert_score(score.data[0].score, TEXT_VS_IMAGE, backend, "text_vs_image_base64")
 
 
-def test_score_api_queries_str_documents_image_url_plus_text_content(
+@pytest.mark.asyncio
+async def test_score_api_queries_str_documents_image_url_plus_text_content(
     server: tuple[RemoteOpenAIServer, str],
 ):
     remote_server, backend = server
@@ -233,7 +240,8 @@ def test_score_api_queries_str_documents_image_url_plus_text_content(
     )
 
 
-def test_score_api_queries_str_documents_list(
+@pytest.mark.asyncio
+async def test_score_api_queries_str_documents_list(
     server: tuple[RemoteOpenAIServer, str],
 ):
     remote_server, backend = server
@@ -268,7 +276,8 @@ def test_score_api_queries_str_documents_list(
     )
 
 
-def test_rerank_api_queries_str_documents_list(
+@pytest.mark.asyncio
+async def test_rerank_api_queries_str_documents_list(
     server: tuple[RemoteOpenAIServer, str],
 ):
     remote_server, backend = server
@@ -320,7 +329,8 @@ def test_rerank_api_queries_str_documents_list(
     )
 
 
-def test_score_api_queries_list_documents_list(
+@pytest.mark.asyncio
+async def test_score_api_queries_list_documents_list(
     server: tuple[RemoteOpenAIServer, str],
 ):
     remote_server, backend = server
