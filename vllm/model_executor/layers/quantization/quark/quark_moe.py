@@ -25,9 +25,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     ocp_mx_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
-from vllm.model_executor.layers.quantization.mxfp4 import (
-    Mxfp4Backend,
-    get_mxfp4_backend,
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    Mxfp4MoeBackend,
+    select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
@@ -92,7 +92,8 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                 rocm_aiter_ops.is_fused_moe_enabled()
             )
             if (
-                input_config.get("dtype") == "fp8_e4m3"
+                input_config is not None
+                and input_config.get("dtype") == "fp8_e4m3"
                 and not input_config.get("is_dynamic")
                 and not emulate
             ):
@@ -698,9 +699,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 f"Please check that the combination is supported in OCP_MX_Scheme."
             )
 
-        self.mxfp4_backend: Mxfp4Backend | None = None
+        self.mxfp4_backend: Mxfp4MoeBackend | None = None
         if self.ocp_mx_scheme == "w_mxfp4":
-            self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
+            self.mxfp4_backend, _ = select_mxfp4_moe_backend(moe)
 
         if self.input_quant is not None:
             self.static_input_scales = not self.input_quant.get("is_dynamic")
@@ -740,11 +741,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # TP=4 yields intermediate_size_per_partition=384), AITER raises:
         # "device_gemm ... does not support this GEMM problem".
         # Fall back to emulation in that case.
+        # For gpt_oss models, create_weights rounds up the dimensions
+        # internally, so the alignment check is skipped.
         if (
             not self.emulate
             and self.use_rocm_aiter_moe
             and self.ocp_mx_scheme is not None
             and self.ocp_mx_scheme.startswith("w_mxfp4")
+            and self.model_type != "gpt_oss"
             and moe.intermediate_size_per_partition % CK_MXFP4_MOE_DIM_ALIGNMENT != 0
         ):
             logger.warning_once(
@@ -764,7 +768,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         if self.emulate:
             logger.warning_once(
                 f"The current mode (supports_mx={current_platform.supports_mx()}, "
-                f"use_mxfp4_aiter_moe={self.use_rocm_aiter_moe}, "
+                f"use_rocm_aiter_moe={self.use_rocm_aiter_moe}, "
                 f"ocp_mx_scheme={self.ocp_mx_scheme}) "
                 "does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
@@ -817,6 +821,18 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         self.unpadded_hidden_size = extra_weight_attrs.get(
             "unpadded_hidden_size", hidden_size
         )
+
+        # On GFX950, the GFX950MXScaleLayout swizzle requires
+        # hidden_size to be a multiple of 256 (SCALE_K = hidden_size / 32
+        # must be divisible by 8). Pad hidden_size for weight/scale
+        # allocation; the original value is preserved in unpadded_hidden_size.
+        # Only applies to the native (non-emulated) CK path on GFX950.
+        if (
+            self.model_type == "gpt_oss"
+            and current_platform.is_rocm()
+            and not self.emulate
+        ):
+            hidden_size = round_up(hidden_size, 256)
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
@@ -961,7 +977,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         # secondly, process mxfp weights
         if self.emulate:
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
             return
 
         from aiter.utility.fp4_utils import e8m0_shuffle
@@ -995,7 +1011,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
         layer.w13_weight.is_shuffled = True
         layer.w2_weight.is_shuffled = True
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -1116,7 +1132,7 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
         del layer.w2_weight
         layer.w13_weight = None
         layer.w2_weight = None
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
         if self.static_input_scales:
             if layer.w13_input_scale is None or layer.w2_input_scale is None:

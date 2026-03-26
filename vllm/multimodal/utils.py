@@ -10,7 +10,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
+from typing_extensions import deprecated
 
+from vllm.inputs import MultiModalPlaceholders
 from vllm.utils.import_utils import LazyLoader
 
 from .hasher import MultiModalHasher
@@ -18,7 +20,6 @@ from .inputs import (
     BatchedTensorInputs,
     MultiModalFieldElem,
     MultiModalKwargsItem,
-    MultiModalPlaceholderDict,
     MultiModalSharedField,
 )
 from .media import AudioMediaIO, ImageMediaIO, MediaConnector, VideoMediaIO
@@ -109,10 +110,10 @@ def encode_video_url(
 
 
 def argsort_mm_positions(
-    mm_positions: MultiModalPlaceholderDict,
+    mm_positions: MultiModalPlaceholders,
 ) -> list[tuple[str, int]]:
     """
-    Given a `MultiModalPlaceholderDict`, output a sequence of keys to
+    Given a `MultiModalPlaceholders`, output a sequence of keys to
     sort the dictionary by `offset` (starting index in the input sequence)
     in ascending order.
 
@@ -207,7 +208,7 @@ def group_and_batch_mm_items(
     assert start_idx == len(items)
 
 
-def group_mm_kwargs_by_modality(
+def group_and_batch_mm_kwargs(
     mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
     *,
     device: torch.types.Device = None,
@@ -244,6 +245,19 @@ def group_mm_kwargs_by_modality(
             pin_memory=pin_memory,
         ):
             yield modality, num_items, mm_kwargs_batch
+
+
+@deprecated(
+    "`group_mm_kwargs_by_modality` has been renamed to `group_and_batch_mm_kwargs`. "
+    "The old name will be removed in v0.19."
+)
+def group_mm_kwargs_by_modality(
+    mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
+    *,
+    device: torch.types.Device = None,
+    pin_memory: bool = False,
+) -> Generator[tuple[str, int, BatchedTensorInputs], None, None]:
+    return group_and_batch_mm_kwargs(mm_kwargs, device=device, pin_memory=pin_memory)
 
 
 def fetch_audio(

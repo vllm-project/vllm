@@ -14,12 +14,12 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
-    mxfp4_w4a16_moe_quant_config,
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
+    prepare_nvfp4_moe_layer_for_flashinfer_cutedsl,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -39,6 +39,7 @@ class NvFp4MoeBackend(Enum):
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
     FLASHINFER_CUTLASS = "FLASHINFER_CUTLASS"
     FLASHINFER_CUTEDSL = "FLASHINFER_CUTEDSL"
+    FLASHINFER_CUTEDSL_BATCHED = "FLASHINFER_CUTEDSL_BATCHED"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     MARLIN = "MARLIN"
 
@@ -47,6 +48,7 @@ FLASHINFER_NVFP4_MOE_BACKENDS = [
     NvFp4MoeBackend.FLASHINFER_TRTLLM,
     NvFp4MoeBackend.FLASHINFER_CUTLASS,
     NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+    NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
 ]
 
 fi_2_vllm_backend_map: dict[FlashinferMoeBackend, NvFp4MoeBackend] = {
@@ -87,11 +89,18 @@ def backend_to_kernel_cls(
         return [FlashInferExperts]
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (  # noqa: E501
             FlashInferCuteDSLExperts,
         )
 
         return [FlashInferCuteDSLExperts]
+
+    elif backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
+            FlashInferCuteDSLBatchedExperts,
+        )
+
+        return [FlashInferCuteDSLBatchedExperts]
 
     elif backend == NvFp4MoeBackend.VLLM_CUTLASS:
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
@@ -141,6 +150,7 @@ def select_nvfp4_moe_backend(
     AVAILABLE_BACKENDS = [
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
@@ -196,6 +206,12 @@ def select_nvfp4_moe_backend(
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_nvfp4_backend(runner_backend)
+        # For batched activation format, use batched variant if available.
+        if (
+            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+            and requested_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
+        ):
+            requested_backend = NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
         )
@@ -286,7 +302,28 @@ def convert_to_nvfp4_moe_kernel_format(
     torch.Tensor,
     torch.Tensor,
 ]:
-    if (
+    if nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
+        (
+            w13,
+            w13_scale,
+            w13_scale_2,
+            a13_scale,
+            w2,
+            w2_scale,
+            w2_scale_2,
+            a2_scale,
+        ) = prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
+            layer=layer,
+            w13=w13,
+            w13_scale=w13_scale,
+            w13_scale_2=w13_scale_2,
+            a13_scale=a13_scale,
+            w2=w2,
+            w2_scale=w2_scale,
+            w2_scale_2=w2_scale_2,
+            a2_scale=a2_scale,
+        )
+    elif (
         nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
         or nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
     ):
@@ -347,16 +384,6 @@ def convert_to_nvfp4_moe_kernel_format(
     )
 
 
-def make_mxfp4_moe_quant_config(
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-) -> FusedMoEQuantConfig:
-    return mxfp4_w4a16_moe_quant_config(
-        w1_scale=w13_scale,
-        w2_scale=w2_scale,
-    )
-
-
 def make_nvfp4_moe_quant_config(
     backend: NvFp4MoeBackend,
     w13_scale: torch.Tensor,
@@ -374,11 +401,13 @@ def make_nvfp4_moe_quant_config(
             w2_scale=w2_scale,
         )
 
-    g1_alphas = a13_scale * w13_scale_2
-    g2_alphas = a2_scale * w2_scale_2
+    # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
+    # The expert's process_weights_after_loading will fuse activation
+    # scales in-place. Since the quant config references the same tensor
+    # as the registered parameter, EPLB rearrangement stays in sync.
     return nvfp4_moe_quant_config(
-        g1_alphas=g1_alphas,
-        g2_alphas=g2_alphas,
+        g1_alphas=w13_scale_2,
+        g2_alphas=w2_scale_2,
         a1_gscale=(1.0 / a13_scale),
         a2_gscale=(1.0 / a2_scale),
         w1_scale=w13_scale,
@@ -386,7 +415,13 @@ def make_nvfp4_moe_quant_config(
         # NOTE(rob): this is a hack until the MoE kernels
         # create their own quant configs. TRTLLM kernel
         # does not accept swizzled input quant scales.
-        is_nvfp4_scale_swizzled=(backend != NvFp4MoeBackend.FLASHINFER_TRTLLM),
+        is_nvfp4_scale_swizzled=(
+            backend
+            not in (
+                NvFp4MoeBackend.FLASHINFER_TRTLLM,
+                NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+            )
+        ),
     )
 
 
@@ -433,7 +468,7 @@ def make_nvfp4_moe_kernel(
         experts,
         shared_experts=(
             shared_experts
-            if moe_config.moe_parallel_config.use_all2all_kernels
+            if moe_config.moe_parallel_config.use_deepep_ll_kernels
             else None
         ),
         moe_parallel_config=moe_config.moe_parallel_config,
