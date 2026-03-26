@@ -16,6 +16,7 @@ from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
@@ -35,7 +36,6 @@ from vllm.model_executor.models.kimi_k25_vit import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     NestedTensors,
@@ -104,19 +104,25 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
 
     def __init__(self, ctx: InputProcessingContext) -> None:
         super().__init__(ctx)
-        self.hf_config = self.get_hf_config()
-        self.media_token_id = self.hf_config.media_placeholder_token_id
-        media_processor = cached_get_image_processor(
+
+        self.hf_config = hf_config = self.get_hf_config()
+
+        tokenizer = self.get_tokenizer()
+        image_processor = cached_get_image_processor(
             self.ctx.model_config.model,
             trust_remote_code=self.ctx.model_config.trust_remote_code,
         )
-        self.media_processor = media_processor
+
+        self.media_token_id = media_token_id = hf_config.media_placeholder_token_id
+        self.media_token = tokenizer.decode(media_token_id)
+
+        self.image_processor = image_processor
         self.hf_processor = KimiK25Processor(
-            media_processor=self.media_processor,
-            tokenizer=self.get_tokenizer(),
-            media_token_id=self.media_token_id,
+            tokenizer=tokenizer,
+            image_processor=image_processor,
+            media_token_id=media_token_id,
         )
-        self.media_tokens_calculator = self.media_processor.media_tokens_calculator
+        self.media_tokens_calculator = image_processor.media_tokens_calculator
 
     def get_hf_processor(self):
         return self.hf_processor
@@ -132,20 +138,15 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
 class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
     """Builds dummy inputs for Kimi-K2.5 model profiling."""
 
-    def __init__(self, info: KimiK25ProcessingInfo) -> None:
-        super().__init__(info)
-        self.media_token_id = self.info.media_token_id
-        self.frame_per_chunk = self.info.media_processor.num_frames_per_chunk
-
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_media = mm_counts.get("vision_chunk", 0)
-        return "<|media_pad|>" * num_media
+        return self.info.media_token * num_media
 
     def get_dummy_mm_items(self):
         dummy_videos = self._get_dummy_images(
             height=MaxImageTokenMeta.height,
             width=MaxImageTokenMeta.width,
-            num_images=self.frame_per_chunk,
+            num_images=self.info.image_processor.num_frames_per_chunk,
         )
 
         video_chunk_dummy_item = VisionChunkVideo(
@@ -214,6 +215,17 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
             grid_thws=MultiModalFieldConfig.batched("vision_chunk"),
         )
 
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Override to use the text path instead of token path because vision chunk
+        # is not considered
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -235,9 +247,6 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
                 replacement=get_replacement,
             ),
         ]
-
-    def split_video_chunks(self, video):
-        return self.info.media_processor.split_video_chunks(video)
 
 
 @MULTIMODAL_REGISTRY.register_processor(

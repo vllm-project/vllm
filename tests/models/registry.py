@@ -628,6 +628,11 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"architectures": ["ColBERTJinaRobertaModel"]},
     ),
+    "ColBERTLfm2Model": _HfExamplesInfo(
+        "LiquidAI/LFM2-ColBERT-350M",
+        trust_remote_code=True,
+        hf_overrides={"architectures": ["ColBERTLfm2Model"]},
+    ),
     # [Multimodal]
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
@@ -747,7 +752,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0"
     ),
     "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.0.0.dev"
+        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.3.0"
     ),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
@@ -805,7 +810,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "GraniteVision": _HfExamplesInfo("ibm-granite/granite-vision-3.3-2b"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
-        "ibm-granite/granite-speech-3.3-2b"
+        "ibm-granite/granite-speech-3.3-2b",
+        extras={"4.0-1b": "ibm-granite/granite-4.0-1b-speech"},
     ),
     "GLM4VForCausalLM": _HfExamplesInfo(
         "zai-org/glm-4v-9b",
@@ -1122,8 +1128,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer_mode="mistral",
     ),
     # [Encoder-decoder]
-    "CohereASRForConditionalGeneration": _HfExamplesInfo(
-        "/host/engines/vllm/audio/2b-release",
+    "CohereAsrForConditionalGeneration": _HfExamplesInfo(
+        "CohereLabs/cohere-transcribe-03-2026",
         trust_remote_code=True,
         is_available_online=False,  # TODO (ekagra): revert after asr release
     ),

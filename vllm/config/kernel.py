@@ -4,7 +4,7 @@
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import field_validator
 
 from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
@@ -26,7 +26,7 @@ MoEBackend = Literal[
 class KernelConfig:
     """Configuration for kernel selection and warmup behavior."""
 
-    enable_flashinfer_autotune: bool = Field(default=None)
+    enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
     moe_backend: MoEBackend = "auto"
