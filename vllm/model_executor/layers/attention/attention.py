@@ -256,7 +256,7 @@ class Attention(nn.Module, AttentionLayerBase):
             if str(layer_idx) in cache_config.kv_cache_dtype_skip_layers:
                 skip = True
             if skip:
-                kv_cache_dtype = "auto"
+                kv_cache_dtype = vllm_config.model_config.dtype
                 calculate_kv_scales = False
             logger.info(
                 "Layer %s: kv_cache_dtype=%s, sliding_window=%s",
