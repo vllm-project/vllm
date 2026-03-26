@@ -343,20 +343,23 @@ class OffloadingConnectorScheduler:
             )
 
         num_computed_tokens = min(computed_tokens_per_group, default=0)
-        if not all(
+        groups_agree = all(
             group_tokens == num_computed_tokens
             for group_tokens in computed_tokens_per_group
-        ):
+        )
+        if not groups_agree:
             # Some groups loaded more blocks than others (e.g., stale
-            # cache files rejected for one group but not others).
-            # Fall back to the minimum across all groups so we don't
-            # use partially-loaded prefixes.
+            # cache files rejected for one group but not others, or
+            # kernel block size mismatch on the attention group).
+            # Fall back to recompute by reporting 0 external tokens.
             logger.warning(
                 "KV groups disagree on computed prefix length: %s. "
-                "Using minimum (%d tokens) to avoid partial loads.",
+                "Falling back to full recompute.",
                 computed_tokens_per_group,
-                num_computed_tokens,
             )
+            num_computed_tokens = 0
+            num_external_tokens = 0
+
         full_block_tokens = num_computed_tokens + num_external_tokens
         start_block_idx = self._chunk_count_for_tokens(num_computed_tokens)
         num_blocks = self._chunk_count_for_tokens(full_block_tokens)
