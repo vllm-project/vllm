@@ -439,9 +439,11 @@ class OpenAIServingResponses(OpenAIServing):
             context: ConversationContext
             if self.use_harmony:
                 if request.stream:
-                    context = StreamingHarmonyContext(messages, available_tools)
+                    context = StreamingHarmonyContext(
+                        messages, available_tools, request=request
+                    )
                 else:
-                    context = HarmonyContext(messages, available_tools)
+                    context = HarmonyContext(messages, available_tools, request=request)
             else:
                 if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
                     # This is a feature in development for parsing
