@@ -257,6 +257,21 @@ class HeteroTPTransferConfig:
             and self.tp_ratio > 0
         )
 
+    def fa_rank_offset(self, remote_kv_block_len: int) -> int:
+        """Byte offset into P's FA block for this D rank.
+
+        When D is replicated (D_TP > K), multiple D ranks share a head.
+        Uses contiguous GQA layout: head_idx = d_rank * K // D_TP.
+        When neither side replicates, falls back to tp_rank % tp_ratio.
+        Returns 0 when D does not index into P's block.
+        """
+        if self.use_mla or self.tp_ratio <= 0:
+            return 0
+        if self.is_d_replicated:
+            head_idx = self.d_rank * self.K // self.d_tp
+            return head_idx * remote_kv_block_len
+        return self.d_rank % self.tp_ratio * remote_kv_block_len
+
     @property
     def needs_split_handles(self) -> bool:
         """Whether per-P-rank split handles are needed.

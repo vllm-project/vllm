@@ -132,9 +132,22 @@ c1 = test_config("4p2d", d_tp=2, p_tp=4, d_rank=1, d_block_len=4096, p_block_len
 assert_eq("4p2d d1 fa_read_targets", c1.fa_read_targets, [2])
 assert_eq("4p2d d1 transfer_targets", c1.transfer_targets, [2, 3])
 
-# 1p4d: D_TP=4, P_TP=1  (tp_ratio > 0)
-test_config("1p4d", d_tp=4, p_tp=1, d_rank=0, d_block_len=4096, p_block_len=8192)
-test_config("1p4d", d_tp=4, p_tp=1, d_rank=1, d_block_len=4096, p_block_len=8192)
+# 1p4d: D_TP=4, P_TP=1  (tp_ratio > 0, D-replicated)
+for r in range(4):
+    c = test_config(
+        "1p4d",
+        d_tp=4,
+        p_tp=1,
+        d_rank=r,
+        d_block_len=4096,
+        p_block_len=8192,
+    )
+    assert_eq(f"1p4d d{r} fa_read_targets", c.fa_read_targets, [0])
+    assert_eq(f"1p4d d{r} is_d_replicated", c.is_d_replicated, True)
+    assert_eq(f"1p4d d{r} indexes_into_remote", c.indexes_into_remote, False)
+    expected_head = r * 2 // 4  # contiguous: ranks 0,1->head 0; 2,3->head 1
+    assert_eq(f"1p4d d{r} d_physical_heads", c.d_physical_heads, 1)
+    assert_eq(f"1p4d d{r} needs_split", c.needs_split_handles, False)
 
 # 1p1d: D_TP=1, P_TP=1  (trivial)
 test_config(

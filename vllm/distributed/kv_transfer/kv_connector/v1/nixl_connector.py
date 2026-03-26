@@ -2230,11 +2230,18 @@ class NixlConnectorWorker:
                     local_block_len = local_block_len // fa_divisor(
                         cfg, -tp_ratio, is_mamba=mamba
                     )
-                rank_offset = (
-                    self.tp_rank % tp_ratio * remote_kv_block_len
-                    if indexes_into_remote
-                    else 0
-                )
+                # OLD: rank_offset = (
+                #     self.tp_rank % tp_ratio * remote_kv_block_len
+                #     if indexes_into_remote else 0
+                # )
+                # NEW: delegate to HeteroTPTransferConfig which handles
+                # D-replicated case (D_TP > K) with head-based offset.
+                if cfg is not None:
+                    rank_offset = cfg.fa_rank_offset(remote_kv_block_len)
+                elif indexes_into_remote:
+                    rank_offset = self.tp_rank % tp_ratio * remote_kv_block_len
+                else:
+                    rank_offset = 0
 
                 # Assume same num_blocks for mamba and fa
                 num_blocks = (
@@ -2362,24 +2369,20 @@ class NixlConnectorWorker:
                 tp_ratio < 0 and self.kv_topo.is_kv_replicated(remote_engine_id)
             )
 
-        # NOTE (ZhanqiuHu): when D_TP > num_kv_heads > P_TP, D's attention KV
-        # is replicated but P's is not.  The upstream FA descriptor logic
-        # (indexes_into_remote) tries to split P's KV into tp_ratio slices,
-        # but P only has num_kv_heads worth of unique data — ranks beyond
-        # that read out-of-bounds addresses.  Fixing this requires changing
-        # indexes_into_remote to account for local KV replication.
-        # TODO (ZhanqiuHu): fix indexes_into_remote so all D ranks read full
-        # KV when local KV is replicated, then remove this guard.
-        local_kv_replicated = self.world_size // self.kv_topo.total_num_kv_heads > 1
-        if tp_ratio > 1 and local_kv_replicated:
-            raise NotImplementedError(
-                f"Hetero-TP with D_TP ({self.world_size}) > num_kv_heads "
-                f"({self.kv_topo.total_num_kv_heads}) > P_TP "
-                f"({remote_tp_size}) is not yet supported.  The FA "
-                f"descriptor offset logic assumes D can split P's KV into "
-                f"tp_ratio={tp_ratio} slices, but P only has "
-                f"{self.kv_topo.total_num_kv_heads} KV heads."
-            )
+        # OLD: D-replicated guard — replaced by head-based fa_rank_offset
+        # in HeteroTPTransferConfig.  Kept for reference.
+        # local_kv_replicated = (
+        #     self.world_size // self.kv_topo.total_num_kv_heads > 1
+        # )
+        # if tp_ratio > 1 and local_kv_replicated:
+        #     raise NotImplementedError(
+        #         f"Hetero-TP with D_TP ({self.world_size}) > num_kv_heads "
+        #         f"({self.kv_topo.total_num_kv_heads}) > P_TP "
+        #         f"({remote_tp_size}) is not yet supported.  The FA "
+        #         f"descriptor offset logic assumes D can split P's KV into "
+        #         f"tp_ratio={tp_ratio} slices, but P only has "
+        #         f"{self.kv_topo.total_num_kv_heads} KV heads."
+        #     )
 
         if self._is_hma_required:
             assert block_size_ratio == 1, (
