@@ -1023,10 +1023,10 @@ def test_tool_end_and_next_begin_same_delta(kimi_k2_tool_parser):
             continue
         for tc in res.tool_calls:
             idx = tc.index
-            func = tc.function if hasattr(tc, "function") else tc.get("function")
+            func = tc.function
             if func is None:
                 continue
-            args = func.get("arguments", "") if isinstance(func, dict) else getattr(func, "arguments", "")
+            args = func.arguments
             if args:
                 tool_args.setdefault(idx, "")
                 tool_args[idx] += args
