@@ -323,3 +323,12 @@ def normalize_batched_scales_shape(
 @functools.cache
 def disable_inplace() -> bool:
     return is_torch_equal_or_newer("2.9")
+
+
+@functools.lru_cache
+def enable_swap_ab(BLOCK_SIZE_M: int, BLOCK_SIZE_N: int) -> bool:
+    return (
+        current_platform.is_device_capability(90)
+        and BLOCK_SIZE_M < 64
+        and BLOCK_SIZE_N >= 64
+    )
