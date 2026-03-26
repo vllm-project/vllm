@@ -11,12 +11,17 @@ PYTHON=${PYTHON_PROG:=python3} # try to read from env var, otherwise use python3
 SUBPATH=$BUILDKITE_COMMIT
 S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
 
-# detect if python3.10+ is available
+# detect if python3.12+ is available
 has_new_python=$($PYTHON -c "print(1 if __import__('sys').version_info >= (3,12) else 0)")
 if [[ "$has_new_python" -eq 0 ]]; then
-    # use new python from docker
-    docker pull python:3-slim
-    PYTHON="docker run --rm -v $(pwd):/app -w /app python:3-slim python3"
+    # use new python from docker (Linux only)
+    if command -v docker &> /dev/null; then
+        docker pull python:3-slim
+        PYTHON="docker run --rm -v $(pwd):/app -w /app python:3-slim python3"
+    else
+        echo "Error: Python 3.12+ required but not found, and Docker is not available"
+        exit 1
+    fi
 fi
 
 echo "Using python interpreter: $PYTHON"
@@ -39,15 +44,16 @@ wheel="${wheel_files[0]}"
 # refer to https://github.com/mayeut/pep600_compliance?tab=readme-ov-file#acceptable-distros-to-build-wheels
 manylinux_version="${1:-manylinux_2_31}"
 
-# Rename 'linux' to the appropriate manylinux version in the wheel filename
-if [[ "$wheel" != *"linux"* ]]; then
-  echo "Error: Wheel filename does not contain 'linux': $wheel"
-  exit 1
+# Rename 'linux' to the appropriate manylinux version in the wheel filename.
+# Non-Linux wheels (e.g., macOS with 'macosx' platform tag) skip this step.
+if [[ "$wheel" == *"linux"* ]]; then
+  new_wheel="${wheel/linux/$manylinux_version}"
+  mv -- "$wheel" "$new_wheel"
+  wheel="$new_wheel"
+  echo "Renamed wheel to: $wheel"
+else
+  echo "Non-Linux wheel, skipping manylinux rename: $wheel"
 fi
-new_wheel="${wheel/linux/$manylinux_version}"
-mv -- "$wheel" "$new_wheel"
-wheel="$new_wheel"
-echo "Renamed wheel to: $wheel"
 
 # Extract the version from the wheel
 version=$(unzip -p "$wheel" '**/METADATA' | grep '^Version: ' | cut -d' ' -f2)
@@ -83,7 +89,12 @@ fi
 
 # HACK: we do not need regex module here, but it is required by pre-commit hook
 # To avoid any external dependency, we simply replace it back to the stdlib re module
-sed -i 's/import regex as re/import re/g' .buildkite/scripts/generate-nightly-index.py
+# Use python for portability (BSD sed on macOS has different -i syntax than GNU sed)
+$PYTHON -c "
+import pathlib
+p = pathlib.Path('.buildkite/scripts/generate-nightly-index.py')
+p.write_text(p.read_text().replace('import regex as re', 'import re'))
+"
 $PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "commit $BUILDKITE_COMMIT" "${alias_args[@]}"
 
 # copy indices to /<commit>/ unconditionally

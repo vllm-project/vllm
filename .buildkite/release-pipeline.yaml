@@ -90,6 +90,18 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+      - label: "Build wheel - macOS arm64 - CPU"
+        depends_on: ~
+        id: build-wheel-macos-arm64-cpu
+        agents:
+          queue: macos_arm64_queue_postmerge
+        commands:
+          - "python3 -m venv .venv && source .venv/bin/activate"
+          - "pip install -r requirements/cpu-build.txt"
+          - "VLLM_TARGET_DEVICE=cpu MACOSX_DEPLOYMENT_TARGET=11.0 python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38"
+          - "mkdir -p artifacts/dist && cp dist/*.whl artifacts/dist/"
+          - "bash .buildkite/scripts/upload-nightly-wheels.sh"
+
   - group: "Build release Docker images"
     key: "build-release-images"
     steps:
