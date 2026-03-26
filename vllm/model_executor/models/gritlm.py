@@ -148,7 +148,7 @@ class GritLMMeanPool(SequencePoolingMethod):
         return {"embed"}
 
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return PoolingParamsUpdate(requires_token_ids_cpu=True)
+        return PoolingParamsUpdate(requires_token_ids=True)
 
     def forward(
         self,

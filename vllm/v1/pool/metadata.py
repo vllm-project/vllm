@@ -94,7 +94,7 @@ class PoolingMetadata:
     def get_prompt_token_ids_cpu(self) -> list[torch.Tensor]:
         prompt_token_ids = self.prompt_token_ids_cpu
         assert prompt_token_ids is not None, (
-            "Please set `requires_token_ids_cpu=True` in `get_pooling_updates`"
+            "Please set `requires_token_ids=True` in `get_pooling_updates`"
         )
         return [prompt_token_ids[i, :num] for i, num in enumerate(self.prompt_lens)]
 

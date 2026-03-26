@@ -443,14 +443,16 @@ def test_pooling_prompt_lens_not_aliased(device: str):
 
 
 @pytest.mark.parametrize(
-    ("pooling_params", "expect_device_prompt_token_ids"),
+    ("pooling_params", "expect_device_prompt_token_ids", "expect_cpu_prompt_token_ids"),
     [
-        ({"task": "classify", "requires_token_ids_cpu": True}, False),
-        ({"task": "token_classify", "requires_token_ids": True}, True),
+        ({"task": "classify"}, False, False),
+        ({"task": "classify", "requires_token_ids": True}, True, True),
     ],
 )
 def test_pooling_metadata_token_id_buffers(
-    pooling_params: dict[str, object], expect_device_prompt_token_ids: bool
+    pooling_params: dict[str, object],
+    expect_device_prompt_token_ids: bool,
+    expect_cpu_prompt_token_ids: bool,
 ):
     from vllm.pooling_params import PoolingParams
 
@@ -473,10 +475,13 @@ def test_pooling_metadata_token_id_buffers(
     if expect_device_prompt_token_ids:
         assert input_batch.sampling_metadata.prompt_token_ids is not None
         assert metadata.prompt_token_ids is not None
-        assert metadata.prompt_token_ids_cpu is None
         assert metadata.get_prompt_token_ids()[0].tolist() == req.prompt_token_ids
     else:
         assert input_batch.sampling_metadata.prompt_token_ids is None
         assert metadata.prompt_token_ids is None
+
+    if expect_cpu_prompt_token_ids:
         assert metadata.prompt_token_ids_cpu is not None
         assert metadata.get_prompt_token_ids_cpu()[0].tolist() == req.prompt_token_ids
+    else:
+        assert metadata.prompt_token_ids_cpu is None

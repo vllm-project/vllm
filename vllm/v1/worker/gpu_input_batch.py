@@ -833,8 +833,13 @@ class InputBatch:
         # step pooling during the sampling/pooling process.
         # Hence copy these tensors only when there are requests which
         # need penalties/step_pooler to be applied.
+        prompt_token_ids_cpu = (
+            self._make_prompt_token_ids_cpu_tensor() if needs_prompt_token_ids else None
+        )
         prompt_token_ids = (
-            self._make_prompt_token_ids_tensor() if needs_prompt_token_ids else None
+            prompt_token_ids_cpu.to(device=self.device, non_blocking=True)
+            if prompt_token_ids_cpu is not None
+            else None
         )
 
         # Only set output_token_ids if required by the current requests'
@@ -892,7 +897,7 @@ class InputBatch:
         pooling_params = self.get_pooling_params()
         pooling_states = self.get_pooling_states()
         prompt_token_ids_cpu = None
-        if any(p.requires_token_ids_cpu for p in pooling_params):
+        if any(p.requires_token_ids for p in pooling_params):
             prompt_token_ids_cpu = self._make_prompt_token_ids_cpu_tensor()
 
         return PoolingMetadata(
@@ -919,11 +924,6 @@ class InputBatch:
         for i in range(num_reqs):
             prompt_token_ids[i, self.num_prompt_tokens[i] :] = self.vocab_size
         return prompt_token_ids_cpu_tensor
-
-    def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
-        return self._make_prompt_token_ids_cpu_tensor().to(
-            device=self.device, non_blocking=True
-        )
 
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray

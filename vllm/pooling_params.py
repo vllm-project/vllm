@@ -64,7 +64,6 @@ class PoolingParams(
     ## Internal use only
     task: PoolingTask | None = None
     requires_token_ids: bool = False
-    requires_token_ids_cpu: bool = False
     skip_reading_prefix_cache: bool | None = None
     late_interaction_params: LateInteractionParams | None = None
     extra_kwargs: dict[str, Any] | None = None
@@ -223,7 +222,6 @@ class PoolingParams(
             f"step_tag_id={self.step_tag_id}, "
             f"returned_token_ids={self.returned_token_ids}, "
             f"requires_token_ids={self.requires_token_ids}, "
-            f"requires_token_ids_cpu={self.requires_token_ids_cpu}, "
             f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
             f"late_interaction_params={self.late_interaction_params}, "
             f"extra_kwargs={self.extra_kwargs})"
