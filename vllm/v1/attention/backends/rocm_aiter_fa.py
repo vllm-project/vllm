@@ -55,10 +55,24 @@ if current_platform.is_rocm():
         seq_start_ptr,  # [num_batches]
         k_scale_ptr,  # [1] / [num_blocks, num_kv_heads, page_size]
         v_scale_ptr,
+        key_cache_stride0,
+        key_cache_stride1,
+        key_cache_stride2,
+        key_cache_stride3,
+        value_cache_stride0,
+        value_cache_stride1,
+        value_cache_stride2,
+        value_cache_stride3,
+        key_stride0,
+        key_stride1,
+        key_stride2,
+        value_stride0,
+        value_stride1,
+        value_stride2,
+        block_table_stride0,
         num_heads,
         head_size,
         x,
-        max_block_num,
         DEQUANT: tl.constexpr,
         PAGE_SIZE: tl.constexpr,
         CACHE_FORMAT: tl.constexpr,
@@ -68,11 +82,9 @@ if current_platform.is_rocm():
         head_id = tl.program_id(1)
         col_offsets = tl.arange(0, BLOCK_SIZE)
 
-        key_ptr_offset = (
-            key_ptr + token_id * head_size * num_heads + head_id * head_size
-        )
+        key_ptr_offset = key_ptr + token_id * key_stride0 + head_id * key_stride1
         value_ptr_offset = (
-            value_ptr + token_id * head_size * num_heads + head_id * head_size
+            value_ptr + token_id * value_stride0 + head_id * value_stride1
         )
         batch_idx = tl.load(token_to_batch_ptr + token_id)
         batch_start = tl.load(seq_start_ptr + batch_idx)
@@ -80,7 +92,7 @@ if current_platform.is_rocm():
         batch_offset = token_id - token_start + batch_start
         block_offset = batch_offset // PAGE_SIZE
         block_id = tl.load(
-            block_table_ptr + max_block_num * batch_idx + block_offset
+            block_table_ptr + block_table_stride0 * batch_idx + block_offset
         ).to(tl.int64)
         slot_id = batch_offset % PAGE_SIZE
 
@@ -90,18 +102,20 @@ if current_platform.is_rocm():
             # V: [num_blocks, page_size, num_head, head_dim]
             key_cache_ptr_offset = (
                 key_cache_ptr
-                + block_id * num_heads * head_size * PAGE_SIZE
-                + slot_id * num_heads * head_size
-                + head_id * head_size
+                + block_id * key_cache_stride0
+                + slot_id * key_cache_stride1
+                + head_id * key_cache_stride2
             )
             value_cache_ptr_offset = (
                 value_cache_ptr
-                + block_id * num_heads * head_size * PAGE_SIZE
-                + slot_id * num_heads * head_size
-                + head_id * head_size
+                + block_id * value_cache_stride0
+                + slot_id * value_cache_stride1
+                + head_id * value_cache_stride2
             )
-            k_reg = tl.load(key_cache_ptr_offset + col_offsets)
-            v_reg = tl.load(value_cache_ptr_offset + col_offsets)
+            k_reg = tl.load(key_cache_ptr_offset + col_offsets * key_cache_stride3)
+            v_reg = tl.load(
+                value_cache_ptr_offset + col_offsets * value_cache_stride3
+            )
             if DEQUANT:
                 k_scale = tl.load(k_scale_ptr)
                 v_scale = tl.load(v_scale_ptr)
@@ -109,8 +123,8 @@ if current_platform.is_rocm():
                 v_dtype = v_reg.dtype
                 k_reg = (k_reg.to(tl.float32) * k_scale).to(k_dtype)
                 v_reg = (v_reg.to(tl.float32) * v_scale).to(v_dtype)
-            tl.store(key_ptr_offset + col_offsets, k_reg)
-            tl.store(value_ptr_offset + col_offsets, v_reg)
+            tl.store(key_ptr_offset + col_offsets * key_stride2, k_reg)
+            tl.store(value_ptr_offset + col_offsets * value_stride2, v_reg)
 
         elif CACHE_FORMAT == "SHUFFLE":
             # for kv cache layout as
@@ -138,8 +152,8 @@ if current_platform.is_rocm():
                 v_scale = 1.0
                 k_reg = k_reg.to(tl.float32) * k_scale
                 v_reg = v_reg.to(tl.float32) * v_scale
-            tl.store(key_ptr_offset + col_offsets, k_reg)
-            tl.store(value_ptr_offset + col_offsets, v_reg)
+            tl.store(key_ptr_offset + col_offsets * key_stride2, k_reg)
+            tl.store(value_ptr_offset + col_offsets * value_stride2, v_reg)
 
     def cp_mha_gather_cache(
         key_cache: torch.Tensor,
@@ -183,10 +197,24 @@ if current_platform.is_rocm():
             seq_starts,
             k_scales,
             v_scales,
+            key_cache.stride(0),
+            key_cache.stride(1),
+            key_cache.stride(2),
+            key_cache.stride(3),
+            value_cache.stride(0),
+            value_cache.stride(1),
+            value_cache.stride(2),
+            value_cache.stride(3),
+            key.stride(0),
+            key.stride(1),
+            key.stride(2),
+            value.stride(0),
+            value.stride(1),
+            value.stride(2),
+            block_tables.stride(0),
             num_heads,
             head_dim,
             x,
-            block_tables.size(1),
             DEQUANT=dequant,
             PAGE_SIZE=page_size,
             CACHE_FORMAT=kv_cache_layout,
