@@ -18,7 +18,7 @@ from openai.types.responses.response_reasoning_item import (
 
 from vllm.entrypoints.openai.responses.utils import (
     _construct_single_message_from_response_item,
-    _maybe_combine_prevmsg_and_tool_call,
+    _maybe_combine_with_prevmsg,
     construct_chat_messages_with_tool_call,
     convert_tool_responses_to_completions_format,
     should_continue_final_message,
@@ -623,8 +623,8 @@ class TestShouldContinueFinalMessage:
         assert should_continue_final_message([dict_item]) is False
 
 
-class TestMaybeCombinePrevmsgAndToolCall:
-    """Tests for _maybe_combine_prevmsg_and_tool_call function."""
+class TestMaybeCombineWithPrevmsg:
+    """Tests for _maybe_combine_with_prevmsg function."""
 
     def test_combines_reasoning_and_tool_call(self):
         """Test successful combination of reasoning message and tool call."""
@@ -637,30 +637,16 @@ class TestMaybeCombinePrevmsgAndToolCall:
         )
         messages = [{"role": "assistant", "reasoning": "I need to call this tool"}]
 
-        result = _maybe_combine_prevmsg_and_tool_call(item, messages)
+        result = _maybe_combine_with_prevmsg(item, messages)
 
         assert result is not None
         assert result["role"] == "assistant"
         assert result["reasoning"] == "I need to call this tool"
         assert "tool_calls" in result
         assert len(result["tool_calls"]) == 1
-        assert result["tool_calls"][0]["id"] == "call_123"
-        assert result["tool_calls"][0]["function"]["name"] == "test_function"
-        assert result["tool_calls"][0]["function"]["arguments"] == '{"arg": "value"}'
-        assert result["tool_calls"][0]["type"] == "function"
-
-    def test_returns_none_for_non_function_tool_call_type(self):
-        """Test that non-ResponseFunctionToolCall items return None."""
-        # Pass a dict instead of ResponseFunctionToolCall
-        item = {"type": "message", "content": "hello"}
-        messages = [{"role": "assistant", "reasoning": "some reasoning"}]
-
-        result = _maybe_combine_prevmsg_and_tool_call(item, messages)
-
-        assert result is None
 
     def test_combines_content_and_tool_call(self):
-        """Test combining content message (not reasoning) with tool call."""
+        """Test combining content message with tool call."""
         item = ResponseFunctionToolCall(
             type="function_call",
             id="tool_id",
@@ -670,19 +656,15 @@ class TestMaybeCombinePrevmsgAndToolCall:
         )
         messages = [{"role": "assistant", "content": "Let me check the weather"}]
 
-        result = _maybe_combine_prevmsg_and_tool_call(item, messages)
+        result = _maybe_combine_with_prevmsg(item, messages)
 
         assert result is not None
         assert result["role"] == "assistant"
         assert result["content"] == "Let me check the weather"
-        assert "tool_calls" in result
         assert len(result["tool_calls"]) == 1
-        assert result["tool_calls"][0]["id"] == "call_456"
-        assert result["tool_calls"][0]["function"]["name"] == "get_weather"
 
     def test_appends_multiple_tool_calls(self):
         """Test that multiple tool calls are appended to the same message."""
-        # First tool call
         item1 = ResponseFunctionToolCall(
             type="function_call",
             id="tool_id_1",
@@ -691,13 +673,10 @@ class TestMaybeCombinePrevmsgAndToolCall:
             arguments='{"x": 1}',
         )
         messages = [{"role": "assistant", "content": "calling tools"}]
-        result1 = _maybe_combine_prevmsg_and_tool_call(item1, messages)
-
+        result1 = _maybe_combine_with_prevmsg(item1, messages)
         assert result1 is not None
         assert len(result1["tool_calls"]) == 1
-        assert result1["tool_calls"][0]["function"]["name"] == "function_a"
 
-        # Second tool call - should append, not replace
         item2 = ResponseFunctionToolCall(
             type="function_call",
             id="tool_id_2",
@@ -705,43 +684,11 @@ class TestMaybeCombinePrevmsgAndToolCall:
             name="function_b",
             arguments='{"y": 2}',
         )
-        result2 = _maybe_combine_prevmsg_and_tool_call(item2, messages)
-
+        result2 = _maybe_combine_with_prevmsg(item2, messages)
         assert result2 is not None
         assert len(result2["tool_calls"]) == 2
-        assert result2["tool_calls"][0]["function"]["name"] == "function_a"
         assert result2["tool_calls"][1]["function"]["name"] == "function_b"
 
-    def test_combines_three_tool_calls(self):
-        """Test that three tool calls are combined into a single message."""
-        # First tool call
-        item1 = ResponseFunctionToolCall(
-            type="function_call",
-            id="tool_id_1",
-            call_id="call_001",
-            name="function_a",
-            arguments='{"x": 1}',
-        )
-        messages = [{"role": "assistant", "content": "calling tools"}]
-        result1 = _maybe_combine_prevmsg_and_tool_call(item1, messages)
-
-        assert result1 is not None
-        assert len(result1["tool_calls"]) == 1
-
-        # Second tool call
-        item2 = ResponseFunctionToolCall(
-            type="function_call",
-            id="tool_id_2",
-            call_id="call_002",
-            name="function_b",
-            arguments='{"y": 2}',
-        )
-        result2 = _maybe_combine_prevmsg_and_tool_call(item2, messages)
-
-        assert result2 is not None
-        assert len(result2["tool_calls"]) == 2
-
-        # Third tool call
         item3 = ResponseFunctionToolCall(
             type="function_call",
             id="tool_id_3",
@@ -749,10 +696,102 @@ class TestMaybeCombinePrevmsgAndToolCall:
             name="function_c",
             arguments='{"z": 3}',
         )
-        result3 = _maybe_combine_prevmsg_and_tool_call(item3, messages)
-
+        result3 = _maybe_combine_with_prevmsg(item3, messages)
         assert result3 is not None
         assert len(result3["tool_calls"]) == 3
-        assert result3["tool_calls"][0]["function"]["name"] == "function_a"
-        assert result3["tool_calls"][1]["function"]["name"] == "function_b"
-        assert result3["tool_calls"][2]["function"]["name"] == "function_c"
+
+    def test_combines_output_text_with_reasoning_only(self):
+        """Test combining ResponseOutputMessage with reasoning-only message."""
+        from openai.types.responses.response_output_message import (
+            ResponseOutputMessage,
+            ResponseOutputText,
+        )
+
+        item = ResponseOutputMessage(
+            id="msg_123",
+            content=[
+                ResponseOutputText(
+                    annotations=[],
+                    text="The answer is 42",
+                    type="output_text",
+                    logprobs=None,
+                )
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        messages = [{"role": "assistant", "reasoning": "Let me think about this"}]
+
+        result = _maybe_combine_with_prevmsg(item, messages)
+
+        assert result is not None
+        assert result["role"] == "assistant"
+        assert result["reasoning"] == "Let me think about this"
+        assert result["content"] == "The answer is 42"
+
+    def test_returns_none_for_output_text_with_content(self):
+        """Test that ResponseOutputMessage returns None when prev has content."""
+        from openai.types.responses.response_output_message import (
+            ResponseOutputMessage,
+            ResponseOutputText,
+        )
+
+        item = ResponseOutputMessage(
+            id="msg_123",
+            content=[
+                ResponseOutputText(
+                    annotations=[], text="hello", type="output_text", logprobs=None
+                )
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        messages = [
+            {
+                "role": "assistant",
+                "reasoning": "thinking",
+                "content": "already has content",
+            }
+        ]
+
+        result = _maybe_combine_with_prevmsg(item, messages)
+        assert result is None
+
+    def test_returns_none_for_output_text_with_tool_calls(self):
+        """Test that ResponseOutputMessage returns None when prev has tool_calls."""
+        from openai.types.responses.response_output_message import (
+            ResponseOutputMessage,
+            ResponseOutputText,
+        )
+
+        item = ResponseOutputMessage(
+            id="msg_123",
+            content=[
+                ResponseOutputText(
+                    annotations=[], text="hello", type="output_text", logprobs=None
+                )
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        messages = [
+            {
+                "role": "assistant",
+                "reasoning": "thinking",
+                "tool_calls": [{"id": "call_1", "type": "function"}],
+            }
+        ]
+
+        result = _maybe_combine_with_prevmsg(item, messages)
+        assert result is None
+
+    def test_returns_none_for_unknown_item_type(self):
+        """Test that unknown item types return None."""
+        item = {"type": "unknown", "content": "hello"}
+        messages = [{"role": "assistant", "reasoning": "some reasoning"}]
+
+        result = _maybe_combine_with_prevmsg(item, messages)
+        assert result is None

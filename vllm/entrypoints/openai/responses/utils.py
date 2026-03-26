@@ -118,55 +118,67 @@ def construct_input_messages(
     return messages
 
 
-def _maybe_combine_prevmsg_and_tool_call(
+def _maybe_combine_with_prevmsg(
     item: ResponseInputOutputItem, messages: list[ChatCompletionMessageParam]
 ) -> ChatCompletionMessageParam | None:
-    """Append tool call to previous message if applicable.
+    """Append output text message or tool call to previous message if applicable.
 
     Many models treat tool calls, content, and reasoning as a single message.
-    If the current item is a tool call and the last message contains content,
-    reasoning, or prior tool calls, append the tool call to that message.
+    If the current item is a tool call and the previous message contains content,
+    reasoning, or prior tool calls, combine the tool call item with that message.
+    If the current item is an output text item and the previous message contains
+    only reasoning, combine the output text item with that previous message.
     """
-    if not (isinstance(item, ResponseFunctionToolCall)):
-        return None
     if len(messages) == 0:
         return None
     last_message = messages[-1]
-    if not (
-        last_message.get("role") == "assistant"
-        and (
+
+    if last_message.get("role") != "assistant":
+        return None
+
+    if isinstance(item, ResponseFunctionToolCall):
+        if not (
             last_message.get("reasoning") is not None
             or last_message.get("content") is not None
             or last_message.get("tool_calls") is not None
-        )
-    ):
-        return None
-
-    if last_message.get("tool_calls") is None:
-        last_message["tool_calls"] = [
-            ChatCompletionMessageToolCallParam(
-                id=item.call_id,
-                function=FunctionCallTool(
-                    name=item.name,
-                    arguments=item.arguments,
-                ),
-                type="function",
+        ):
+            return None
+        if last_message.get("tool_calls") is None:
+            last_message["tool_calls"] = [
+                ChatCompletionMessageToolCallParam(
+                    id=item.call_id,
+                    function=FunctionCallTool(
+                        name=item.name,
+                        arguments=item.arguments,
+                    ),
+                    type="function",
+                )
+            ]
+        else:
+            tool_calls = last_message["tool_calls"]
+            assert isinstance(tool_calls, list)
+            tool_calls.append(
+                ChatCompletionMessageToolCallParam(
+                    id=item.call_id,
+                    function=FunctionCallTool(
+                        name=item.name,
+                        arguments=item.arguments,
+                    ),
+                    type="function",
+                )
             )
-        ]
+        return last_message
+    elif isinstance(item, ResponseOutputMessage):
+        if not (
+            last_message.get("reasoning") is not None
+            and last_message.get("content") is None
+            and last_message.get("tool_calls") is None
+        ):
+            return None
+        last_message["content"] = item.content[0].text
+        return last_message
     else:
-        tool_calls = last_message["tool_calls"]
-        assert isinstance(tool_calls, list)
-        tool_calls.append(
-            ChatCompletionMessageToolCallParam(
-                id=item.call_id,
-                function=FunctionCallTool(
-                    name=item.name,
-                    arguments=item.arguments,
-                ),
-                type="function",
-            )
-        )
-    return last_message
+        return None
 
 
 def construct_chat_messages_with_tool_call(
@@ -178,7 +190,7 @@ def construct_chat_messages_with_tool_call(
     """
     messages: list[ChatCompletionMessageParam] = []
     for item in input_messages:
-        maybe_combined_message = _maybe_combine_prevmsg_and_tool_call(item, messages)
+        maybe_combined_message = _maybe_combine_with_prevmsg(item, messages)
         if maybe_combined_message is not None:
             messages[-1] = maybe_combined_message
         else:
