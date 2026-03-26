@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 import vllm.envs as envs
 from vllm.entrypoints.serve.steering.api_router import attach_router, router
+from vllm.exceptions import SteeringVectorError
 
 
 def _make_app(engine_mock) -> FastAPI:
@@ -132,8 +133,8 @@ class TestSetSteering:
         assert "not found" in resp.json()["error"]
 
     def test_set_vector_size_mismatch_returns_400(self, client, engine):
-        """Worker raises ValueError for wrong size -> 400."""
-        engine.collective_rpc.side_effect = ValueError(
+        """Worker raises SteeringVectorError for wrong size -> 400."""
+        engine.collective_rpc.side_effect = SteeringVectorError(
             "Layer 0: expected vector of size 8, got 3"
         )
         resp = client.post(
@@ -144,8 +145,8 @@ class TestSetSteering:
         assert "expected vector of size" in resp.json()["error"]
 
     def test_set_nonfinite_returns_400(self, client, engine):
-        """Worker raises ValueError for non-finite -> 400."""
-        engine.collective_rpc.side_effect = ValueError(
+        """Worker raises SteeringVectorError for non-finite -> 400."""
+        engine.collective_rpc.side_effect = SteeringVectorError(
             "Layer 0: steering vector contains non-finite values"
         )
         resp = client.post(

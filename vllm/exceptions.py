@@ -36,6 +36,10 @@ class VLLMValidationError(ValueError):
         return f"{base} ({', '.join(extras)})" if extras else base
 
 
+class SteeringVectorError(VLLMValidationError):
+    """Raised when a steering vector fails validation (wrong size, non-finite)."""
+
+
 class VLLMNotFoundError(Exception):
     """vLLM-specific NotFoundError"""
 

@@ -8,6 +8,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from vllm.exceptions import SteeringVectorError
 from vllm.v1.worker.worker_base import WorkerBase
 
 
@@ -127,22 +128,22 @@ class TestSetSteeringVectors:
         assert model.layers[1].steering_vector.sum().item() == 24.0
 
     def test_wrong_vector_size_raises(self, worker):
-        with pytest.raises(ValueError, match="expected vector of size 8"):
+        with pytest.raises(SteeringVectorError, match="expected vector of size 8"):
             worker.set_steering_vectors({0: [1.0, 2.0]})  # too short
 
     def test_nan_raises(self, worker):
         vec = [1.0] * 7 + [float("nan")]
-        with pytest.raises(ValueError, match="non-finite"):
+        with pytest.raises(SteeringVectorError, match="non-finite"):
             worker.set_steering_vectors({0: vec})
 
     def test_inf_raises(self, worker):
         vec = [float("inf")] + [1.0] * 7
-        with pytest.raises(ValueError, match="non-finite"):
+        with pytest.raises(SteeringVectorError, match="non-finite"):
             worker.set_steering_vectors({0: vec})
 
     def test_negative_inf_raises(self, worker):
         vec = [float("-inf")] + [1.0] * 7
-        with pytest.raises(ValueError, match="non-finite"):
+        with pytest.raises(SteeringVectorError, match="non-finite"):
             worker.set_steering_vectors({0: vec})
 
     def test_validate_only_does_not_mutate(self, worker, model):
@@ -153,19 +154,19 @@ class TestSetSteeringVectors:
         assert model.layers[0].steering_vector.sum().item() == 0.0
 
     def test_validate_only_still_checks_size(self, worker):
-        with pytest.raises(ValueError, match="expected vector of size"):
+        with pytest.raises(SteeringVectorError, match="expected vector of size"):
             worker.set_steering_vectors({0: [1.0]}, validate_only=True)
 
     def test_validate_only_still_checks_finite(self, worker):
         vec = [float("nan")] * 8
-        with pytest.raises(ValueError, match="non-finite"):
+        with pytest.raises(SteeringVectorError, match="non-finite"):
             worker.set_steering_vectors({0: vec}, validate_only=True)
 
     def test_validation_error_prevents_mutation(self, worker, model):
         """If layer 0 is valid but layer 1 has wrong size, no layer is
         mutated — validation runs for all layers before any copy."""
         # Layer 0 valid, layer 1 invalid size
-        with pytest.raises(ValueError, match="expected vector of size"):
+        with pytest.raises(SteeringVectorError, match="expected vector of size"):
             worker.set_steering_vectors(
                 {0: [1.0] * 8, 1: [1.0] * 3},
             )

@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.serve.steering.protocol import SetSteeringRequest
+from vllm.exceptions import SteeringVectorError
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -48,8 +49,7 @@ async def set_steering(
         return JSONResponse(
             content={
                 "error": (
-                    "No vectors provided. Include at least one "
-                    "layer index and vector."
+                    "No vectors provided. Include at least one layer index and vector."
                 ),
             },
             status_code=HTTPStatus.BAD_REQUEST.value,
@@ -125,10 +125,14 @@ async def set_steering(
                 "layers_updated": sorted(validated_layers),
             },
         )
+    except SteeringVectorError as err:
+        # Single-process: typed exception comes through directly.
+        return JSONResponse(
+            content={"error": str(err)},
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
     except Exception as err:
-        # ValueError from single-proc, RuntimeError from MultiprocExecutor,
-        # plain Exception from AsyncMPClient — all may carry validation
-        # messages that should map to 400.
+        # Multi-process: exception type is lost; match by message content.
         err_str = str(err)
         if "expected vector of size" in err_str or "non-finite" in err_str:
             return JSONResponse(
@@ -165,13 +169,12 @@ async def get_steering(raw_request: Request) -> JSONResponse:
     engine = engine_client(raw_request)
 
     try:
-        async with _steering_lock:
-            results = await engine.collective_rpc("get_steering_status")
-            # Union across all workers so pipeline-parallel ranks
-            # (which own disjoint layer ranges) are all represented.
-            active: dict = {}
-            for worker_result in results:
-                active.update(worker_result)
+        results = await engine.collective_rpc("get_steering_status")
+        # Union across all workers so pipeline-parallel ranks
+        # (which own disjoint layer ranges) are all represented.
+        active: dict = {}
+        for worker_result in results:
+            active.update(worker_result)
         return JSONResponse(
             content={
                 "active_layers": {str(k): v for k, v in sorted(active.items())},

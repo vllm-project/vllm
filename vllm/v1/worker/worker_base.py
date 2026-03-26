@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.exceptions import SteeringVectorError
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -121,8 +122,13 @@ class WorkerBase:
         """Return ``{layer_idx: module}`` for layers with steering buffers.
 
         Works with any model runner that exposes ``get_model()``,
-        including the V2 runner.
+        including the V2 runner.  Result is cached after first
+        successful discovery.
         """
+        cache = getattr(self, "_steerable_layers_cache", None)
+        if cache is not None:
+            return cache
+
         mr = self.model_runner
         if mr is None or not hasattr(mr, "get_model"):
             return {}
@@ -130,6 +136,10 @@ class WorkerBase:
         for mod in mr.get_model().modules():
             if hasattr(mod, "steering_vector") and hasattr(mod, "layer_idx"):
                 layers[mod.layer_idx] = mod
+
+        if layers:
+            self._steerable_layers_cache = layers
+
         return layers
 
     def set_steering_vectors(
@@ -169,11 +179,11 @@ class WorkerBase:
             vec = vectors_data[idx]
             expected = steerable[idx].steering_vector.shape[1]
             if len(vec) != expected:
-                raise ValueError(
+                raise SteeringVectorError(
                     f"Layer {idx}: expected vector of size {expected}, got {len(vec)}"
                 )
             if not all(math.isfinite(v) for v in vec):
-                raise ValueError(
+                raise SteeringVectorError(
                     f"Layer {idx}: steering vector contains non-finite "
                     f"values (NaN or Infinity)"
                 )
