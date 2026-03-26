@@ -33,12 +33,12 @@ class MultiModalFeatures(BaseModel):
     """Lightweight multimodal metadata produced by the render step.
 
     Carries hashes (for cache lookup / identification) and placeholder
-    positions so the downstream ``/generate`` service knows *where* in
+    positions so the downstream `/generate` service knows *where* in
     the token sequence each multimodal item lives.
     """
 
     mm_hashes: dict[str, list[str]]
-    """Per-modality item hashes, e.g. ``{"image": ["abc", "def"]}``."""
+    """Per-modality item hashes, e.g. `{"image": ["abc", "def"]}`."""
 
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]]
     """Per-modality placeholder ranges in the token sequence."""

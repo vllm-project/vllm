@@ -229,6 +229,9 @@ class FusedMoEQuantConfig:
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
     is_nvfp4_scale_swizzled: bool = True
+    # CK MXFP4 (gfx950) padding info for rocm_aiter_ops.fused_moe()
+    hidden_pad: int = 0
+    intermediate_pad: int = 0
 
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
@@ -346,7 +349,7 @@ class FusedMoEQuantConfig:
 
     @property
     def use_fp8_w8a8(self) -> bool:
-        return self.quant_dtype == torch.float8_e4m3fn
+        return self.quant_dtype == current_platform.fp8_dtype()
 
     @property
     def use_int8_w8a8(self) -> bool:
@@ -566,7 +569,7 @@ def fp8_w8a8_moe_quant_config(
     Construct a quant config for fp8 activations and fp8 weights.
     """
     return FusedMoEQuantConfig.make(
-        torch.float8_e4m3fn,
+        current_platform.fp8_dtype(),
         w1_scale=w1_scale,
         g1_alphas=g1_alphas,
         w2_scale=w2_scale,
