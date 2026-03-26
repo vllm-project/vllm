@@ -65,7 +65,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
     #  `weight_zp`     is: {input_dim = 0, output_dim = 1, packed_dim = 1} (marlin)
     #                  or: {input_dim = 1, output_dim = 0, packed_dim = 0} (CT)
     def _process_gptq_weights(self, layer: torch.nn.Module):
-        # packed_weight = layer.qweight.data
         packed_weight = getattr(layer, self.w_q_name)
         assert packed_weight.input_dim == packed_weight.packed_dim
         is_ct_format = packed_weight.input_dim == 1
