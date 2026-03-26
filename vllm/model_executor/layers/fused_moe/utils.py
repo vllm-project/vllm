@@ -346,7 +346,7 @@ def disable_inplace() -> bool:
     return is_torch_equal_or_newer("2.9")
 
 
-@torch.compile(backend=current_platform.simple_compile_backend)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def trtllm_moe_pack_topk_ids_weights(
     topk_ids: torch.Tensor, topk_weights: torch.Tensor
 ) -> torch.Tensor:
