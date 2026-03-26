@@ -297,8 +297,10 @@ def convert_to_unquantized_kernel_format(
         w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-        # Swap halves to arrange as [w3; w1] (kernel expectation)
-        w13_weight = swap_w13_to_w31(w13_weight)
+        if layer.moe_config.is_act_and_mul:
+            # Swap halves to arrange as [w3; w1] (kernel expectation)
+            # Non-gated MoE: w13 is a single projection, no need to swap.
+            w13_weight = swap_w13_to_w31(w13_weight)
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
         # Swap halves to arrange as [w3; w1] (kernel expectation)
