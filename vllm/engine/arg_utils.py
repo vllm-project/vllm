@@ -2167,7 +2167,7 @@ class EngineArgs:
     def _set_default_reasoning_config_args(self):
         if self.reasoning_config is None and self.reasoning_parser:
             self.reasoning_config = ReasoningConfig(
-                reasoning_parser_name=self.reasoning_parser
+                reasoning_parser=self.reasoning_parser
             )
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
