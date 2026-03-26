@@ -453,10 +453,13 @@ class Worker(WorkerBase):
                     "CUDA graph memory profiling is enabled (default since "
                     "v0.19.0). The current --gpu-memory-utilization=%.4f is "
                     "equivalent to --gpu-memory-utilization=%.4f without "
-                    "CUDA graph memory profiling. To disable, set "
+                    "CUDA graph memory profiling. To maintain the same "
+                    "effective KV cache size as before, increase "
+                    "--gpu-memory-utilization to %.4f. To disable, set "
                     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.",
                     current_util,
                     equiv_util,
+                    suggested_util,
                 )
             else:
                 suggested_util = min(
