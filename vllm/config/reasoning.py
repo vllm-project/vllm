@@ -19,7 +19,7 @@ class ReasoningConfig:
     `initialize_token_ids` and are not intended to be set directly.
     """
 
-    reasoning_parser_name: str | None = None
+    reasoning_parser: str | None = None
     """The name of the ReasoningParser to use for this model."""
     think_start_str: str = ""
     """String that indicates the start of reasoning."""
@@ -48,7 +48,9 @@ class ReasoningConfig:
         return self._think_end_token_ids
 
     def initialize_token_ids(self, model_config: ModelConfig) -> bool:
-        """Initialize reasoning token IDs from strings using the tokenizer."""
+        """Initialize reasoning token IDs from strings using the tokenizer.
+
+        Returns True if initialization was successful, False otherwise."""
         if (
             self._think_start_token_ids is not None
             and self._think_end_token_ids is not None
@@ -58,18 +60,21 @@ class ReasoningConfig:
         tokenizer = cached_tokenizer_from_config(model_config=model_config)
         think_start_str = self.think_start_str
         think_end_str = self.think_end_str
-        if self.reasoning_parser_name is not None and (
+        if self.reasoning_parser is not None and (
             not think_start_str or not think_end_str
         ):
             parser_cls = ReasoningParserManager.get_reasoning_parser(
-                self.reasoning_parser_name
+                self.reasoning_parser
             )
             reasoning_parser = parser_cls(tokenizer)
             if getattr(reasoning_parser, "start_token", None) is not None:
                 think_start_str = reasoning_parser.start_token
             if getattr(reasoning_parser, "end_token", None) is not None:
                 think_end_str = reasoning_parser.end_token
-        if think_start_str is None or think_end_str is None:
+
+        if not think_start_str or not think_end_str:
+            # If we don't have valid strings to tokenize,
+            # we can't initialize the token IDs.
             return False
         self._think_start_token_ids = tokenizer.encode(
             think_start_str, add_special_tokens=False
