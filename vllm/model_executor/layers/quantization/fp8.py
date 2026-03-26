@@ -437,19 +437,7 @@ class Fp8LinearMethod(LinearMethodBase):
         else:
             layer.input_scale = None
 
-<<<<<<< HEAD
-        if self.use_marlin:
-            prepare_fp8_layer_for_marlin(
-                layer, size_k_first, input_dtype=self.marlin_input_dtype
-            )
-            # Activations not quantized for marlin.
-            del layer.input_scale
-            return
-
-        if self.block_quant:
-=======
         if self.block_quant and self.use_deep_gemm:
->>>>>>> 52069012f ([Bugfix] Fix DeepGemm E8M0 accuracy degradation for Qwen3.5 FP8 on Blackwell (#38083))
             maybe_post_process_fp8_weight_block(layer)
 
     def apply(
