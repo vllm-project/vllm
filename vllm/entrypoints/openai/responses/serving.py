@@ -31,6 +31,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    get_tool_call_id_type,
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import ToolServer
@@ -90,6 +91,7 @@ from vllm.entrypoints.openai.responses.utils import (
     construct_tool_dicts,
     extract_tool_types,
 )
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput, tokens_input
@@ -149,6 +151,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         engine_client: EngineClient,
         models: OpenAIServingModels,
+        openai_serving_render: OpenAIServingRender,
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
@@ -168,6 +171,7 @@ class OpenAIServingResponses(OpenAIServing):
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
+        self.openai_serving_render = openai_serving_render
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -219,15 +223,7 @@ class OpenAIServingResponses(OpenAIServing):
                 get_stop_tokens_for_assistant_actions()
             )
 
-        # Handle tool call ID type for Kimi K2 (supporting test mocking via overrides)
-        hf_overrides = getattr(self.model_config, "hf_overrides", None)
-        if self.model_config.hf_text_config.model_type == "kimi_k2" or (
-            isinstance(hf_overrides, dict)
-            and hf_overrides.get("model_type") == "kimi_k2"
-        ):
-            self.tool_call_id_type = "kimi_k2"
-        else:
-            self.tool_call_id_type = "random"
+        self.tool_call_id_type = get_tool_call_id_type(self.model_config)
 
         self.enable_auto_tools = enable_auto_tools
         # HACK(woosuk): This is a hack. We should use a better store.
@@ -254,10 +250,10 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _validate_generator_input(
         self,
-        engine_prompt: EngineInput,
+        engine_input: EngineInput,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
-        prompt_len = self._extract_prompt_len(engine_prompt)
+        prompt_len = self._extract_prompt_len(engine_input)
         max_model_len = self.model_config.max_model_len
 
         if prompt_len >= max_model_len:
@@ -354,11 +350,11 @@ class OpenAIServingResponses(OpenAIServing):
         model_name = self.models.model_name(lora_request)
 
         if self.use_harmony:
-            messages, engine_prompts = self._make_request_with_harmony(
+            messages, engine_inputs = self._make_request_with_harmony(
                 request, prev_response
             )
         else:
-            messages, engine_prompts = await self._make_request(request, prev_response)
+            messages, engine_inputs = await self._make_request(request, prev_response)
 
         request_metadata = RequestResponseMetadata(request_id=request.request_id)
         if raw_request:
@@ -398,15 +394,15 @@ class OpenAIServingResponses(OpenAIServing):
             available_tools = []
         tokenizer = self.renderer.get_tokenizer()
 
-        for engine_prompt in engine_prompts:
-            maybe_error = self._validate_generator_input(engine_prompt)
+        for engine_input in engine_inputs:
+            maybe_error = self._validate_generator_input(engine_input)
             if maybe_error is not None:
                 return maybe_error
 
             default_max_tokens = get_max_tokens(
                 max_model_len,
                 request.max_output_tokens,
-                self._extract_prompt_len(engine_prompt),
+                self._extract_prompt_len(engine_input),
                 self.default_sampling_params,
                 self.override_max_tokens,
             )
@@ -465,7 +461,7 @@ class OpenAIServingResponses(OpenAIServing):
                     )
             generator = self._generate_with_builtin_tools(
                 request_id=request.request_id,
-                engine_prompt=engine_prompt,
+                engine_input=engine_input,
                 sampling_params=sampling_params,
                 context=context,
                 lora_request=lora_request,
@@ -571,7 +567,7 @@ class OpenAIServingResponses(OpenAIServing):
             prev_response_output=prev_response.output if prev_response else None,
         )
 
-        _, engine_prompts = await self._preprocess_chat(
+        _, engine_inputs = await self.openai_serving_render.preprocess_chat(
             request,
             messages,
             default_template=self.chat_template,
@@ -580,7 +576,7 @@ class OpenAIServingResponses(OpenAIServing):
             tool_dicts=tool_dicts,
             tool_parser=self.parser.tool_parser_cls if self.parser else None,
         )
-        return messages, engine_prompts
+        return messages, engine_inputs
 
     def _make_request_with_harmony(
         self,
@@ -592,15 +588,13 @@ class OpenAIServingResponses(OpenAIServing):
                 "Only 'auto' tool_choice is supported in response API with Harmony"
             )
 
+        arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
-        engine_prompt = token_inputs(prompt_token_ids)
+        engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
+        engine_input["arrival_time"] = arrival_time
 
-        # Add cache_salt if provided in the request
-        if request.cache_salt is not None:
-            engine_prompt["cache_salt"] = request.cache_salt
-
-        return messages, [engine_prompt]
+        return messages, [engine_input]
 
     async def _initialize_tool_sessions(
         self,
@@ -755,6 +749,7 @@ class OpenAIServingResponses(OpenAIServing):
             output=output,
             status=status,
             usage=usage,
+            kv_transfer_params=context.kv_transfer_params,
         )
 
         if request.store:
@@ -884,15 +879,15 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Use parser to extract and create response output items
         if self.parser:
-           parser = self.parser(tokenizer)
-           return parser.extract_response_outputs(
-               model_output=final_output.text,
+            parser = self.parser(tokenizer)
+            return parser.extract_response_outputs(
+                model_output=final_output.text,
                 model_output_token_ids=final_output.token_ids,
-               request=request,
-               enable_auto_tools=self.enable_auto_tools,
-               tool_call_id_type=self.tool_call_id_type,
-               logprobs=logprobs,
-           )
+                request=request,
+                enable_auto_tools=self.enable_auto_tools,
+                tool_call_id_type=self.tool_call_id_type,
+                logprobs=logprobs,
+            )
 
         # Fallback when no parser is configured
         return [
@@ -1219,12 +1214,6 @@ class OpenAIServingResponses(OpenAIServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        """Delegate to the refactored simple streaming implementation.
-
-        Parsers are instantiated if configured, and log‑prob handling respects
-        the request flag. The wrapper forwards events through the sequence‑
-        number helper.
-        """
         reasoning_parser = (
             self.parser.reasoning_parser_cls(tokenizer)
             if self.parser and self.parser.reasoning_parser_cls
@@ -1236,7 +1225,6 @@ class OpenAIServingResponses(OpenAIServing):
             else None
         )
 
-        # Prepare optional logprob callback
         get_logprobs = (
             partial(
                 self._create_stream_response_logprobs, top_logprobs=request.top_logprobs
