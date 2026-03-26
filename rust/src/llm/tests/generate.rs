@@ -7,13 +7,13 @@ use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::{
-    EngineCoreEvent, EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
-    EngineCoreSamplingParams, FinishReason, Logprobs, MaybeWireLogprobs, PositionLogprobs,
-    RequestOutputKind, TokenLogprob,
+    EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
+    EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams, Logprobs, MaybeWireLogprobs,
+    PositionLogprobs, RequestOutputKind, TokenLogprob,
 };
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
-use vllm_llm::{Error, GeneratePromptInfo, GenerateRequest, Llm};
+use vllm_llm::{Error, FinishReason, GeneratePromptInfo, GenerateRequest, Llm};
 use vllm_metrics::METRICS;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -23,7 +23,7 @@ static TRACING: Once = Once::new();
 fn request_output(
     request_id: &str,
     new_token_ids: Vec<u32>,
-    finish_reason: Option<FinishReason>,
+    finish_reason: Option<EngineCoreFinishReason>,
 ) -> EngineCoreOutput {
     request_output_with_events(request_id, new_token_ids, finish_reason, None)
 }
@@ -31,7 +31,7 @@ fn request_output(
 fn request_output_with_events(
     request_id: &str,
     new_token_ids: Vec<u32>,
-    finish_reason: Option<FinishReason>,
+    finish_reason: Option<EngineCoreFinishReason>,
     events: Option<Vec<EngineCoreEvent>>,
 ) -> EngineCoreOutput {
     EngineCoreOutput {
@@ -55,7 +55,7 @@ fn request_output_with_events(
 fn request_output_with_logprobs(
     request_id: &str,
     new_token_ids: Vec<u32>,
-    finish_reason: Option<FinishReason>,
+    finish_reason: Option<EngineCoreFinishReason>,
     new_logprobs: Option<Logprobs>,
     prompt_logprobs: Option<Logprobs>,
 ) -> EngineCoreOutput {
@@ -240,7 +240,7 @@ async fn generate_streams_delta_outputs() {
                             request_output_with_logprobs(
                                 "req-delta",
                                 vec![3],
-                                Some(FinishReason::Length),
+                                Some(EngineCoreFinishReason::Length),
                                 Some(logprobs_for_position(3, -0.4, 5, 10, -0.2)),
                                 None,
                             ),
@@ -278,7 +278,7 @@ async fn generate_streams_delta_outputs() {
         first.logprobs,
         Some(logprobs_for_position(1, -0.3, 4, 9, -0.1))
     );
-    assert_eq!(first.raw.finish_reason, None);
+    assert_eq!(first.finish_reason(), None);
 
     let second = stream.next().await.unwrap().unwrap();
     assert_eq!(second.prompt_info, None);
@@ -287,7 +287,7 @@ async fn generate_streams_delta_outputs() {
         second.logprobs,
         Some(logprobs_for_position(3, -0.4, 5, 10, -0.2))
     );
-    assert_eq!(second.raw.finish_reason, Some(FinishReason::Length));
+    assert_eq!(second.finish_reason(), Some(FinishReason::Length));
     assert!(stream.next().await.is_none());
 
     let _ = shutdown_tx.send(());
@@ -323,7 +323,7 @@ async fn generate_streams_final_only_outputs() {
                             request_output_with_logprobs(
                                 "req-final",
                                 vec![5, 6],
-                                Some(FinishReason::Length),
+                                Some(EngineCoreFinishReason::Length),
                                 Some(logprobs_for_position(5, -0.22, 3, 15, -0.12)),
                                 None,
                             ),
@@ -373,7 +373,7 @@ async fn generate_streams_final_only_outputs() {
             ],
         })
     );
-    assert_eq!(final_output.raw.finish_reason, Some(FinishReason::Length));
+    assert_eq!(final_output.finish_reason(), Some(FinishReason::Length));
     assert!(stream.next().await.is_none());
 
     let _ = shutdown_tx.send(());
@@ -551,7 +551,7 @@ async fn duplicate_request_ids_bubble_up_from_engine_core_client() {
                         outputs: vec![request_output(
                             "req-dup",
                             vec![],
-                            Some(FinishReason::Length),
+                            Some(EngineCoreFinishReason::Length),
                         )],
                         finished_requests: Some(BTreeSet::from(["req-dup".to_string()])),
                         ..Default::default()
@@ -642,7 +642,7 @@ async fn generate_records_request_metrics_in_prometheus_output() {
                         outputs: vec![request_output_with_events(
                             "req-metrics",
                             vec![2, 3],
-                            Some(FinishReason::Length),
+                            Some(EngineCoreFinishReason::Length),
                             Some(vec![EngineCoreEvent {
                                 r#type: EngineCoreEventType::Preempted,
                                 timestamp: 10.5,
@@ -665,7 +665,7 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     assert_eq!(stream.next().await.unwrap().unwrap().token_ids, vec![1]);
     let final_output = stream.next().await.unwrap().unwrap();
     assert_eq!(final_output.token_ids, vec![2, 3]);
-    assert_eq!(final_output.raw.finish_reason, Some(FinishReason::Length));
+    assert_eq!(final_output.finish_reason(), Some(FinishReason::Length));
     assert!(stream.next().await.is_none());
 
     let rendered = METRICS.render().unwrap();

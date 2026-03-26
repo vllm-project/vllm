@@ -3,8 +3,7 @@ use std::sync::Arc;
 use futures_async_stream::try_stream;
 use serde::{Deserialize, Serialize};
 use tracing::info;
-use vllm_engine_core_client::protocol::{FinishReason, StopReason};
-use vllm_llm::GenerateOutputStream;
+use vllm_llm::{FinishReason, GenerateOutputStream};
 
 use super::logprobs::{
     DecodedLogprobs, DecodedPromptLogprobs, decode_logprobs, decode_prompt_logprobs,
@@ -53,7 +52,6 @@ pub enum DecodedTextEvent {
     /// Upper-level may further parse `delta` as reasoning or tool calls.
     TextDelta {
         delta: String,
-        text: String,
         logprobs: Option<DecodedLogprobs>,
     },
     /// Terminal event carrying the full decoded text and final metadata.
@@ -63,8 +61,7 @@ pub enum DecodedTextEvent {
         /// Raw cumulative output token IDs, including a terminal stop token when
         /// the engine emitted one.
         token_ids: Vec<u32>,
-        finish_reason: Option<FinishReason>,
-        stop_reason: Option<StopReason>,
+        finish_reason: FinishReason,
     },
 }
 
@@ -117,8 +114,7 @@ pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
             started = true;
         }
 
-        let suppress_terminal_stop_token = output.finished()
-            && output.raw.finish_reason == Some(FinishReason::Stop)
+        let suppress_terminal_stop_token = output.finish_reason().is_some_and(|r| r.is_stop())
             && !decode_options.include_stop_str_in_output;
         let decodable_token_ids = if suppress_terminal_stop_token {
             // Match Python V1 token-stop detokenization by keeping the stop token
@@ -162,16 +158,17 @@ pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
             text.push_str(&delta);
             yield DecodedTextEvent::TextDelta {
                 delta,
-                text: text.clone(),
                 logprobs: decoded_logprobs,
             };
         }
 
         if output.finished() {
+            let finish_reason = output
+                .finish_reason()
+                .expect("terminal output must have a finish reason");
             info!(
                 request_id = %request_id,
-                finish_reason = ?output.raw.finish_reason,
-                stop_reason = ?output.raw.stop_reason,
+                finish_reason = ?finish_reason,
                 text_length = text.chars().count(),
                 token_count = token_ids.len(),
                 "request finished with terminal output"
@@ -181,8 +178,7 @@ pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
                 text,
                 prompt_token_count,
                 token_ids,
-                finish_reason: output.raw.finish_reason,
-                stop_reason: output.raw.stop_reason,
+                finish_reason,
             };
             return Ok(());
         }

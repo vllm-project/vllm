@@ -17,7 +17,7 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
-    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, Logprobs,
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, Logprobs,
     MaybeWireLogprobs, PositionLogprobs, StopReason, TokenLogprob, UtilityOutput,
     UtilityResultEnvelope, decode_value,
 };
@@ -50,7 +50,7 @@ fn ready_message(status: &str) -> ReadyMessage {
 fn request_output(
     request_id: &str,
     new_token_ids: Vec<u32>,
-    finish_reason: Option<FinishReason>,
+    finish_reason: Option<EngineCoreFinishReason>,
 ) -> EngineCoreOutput {
     request_output_with_stop_reason(request_id, new_token_ids, finish_reason, None)
 }
@@ -58,7 +58,7 @@ fn request_output(
 fn request_output_with_stop_reason(
     request_id: &str,
     new_token_ids: Vec<u32>,
-    finish_reason: Option<FinishReason>,
+    finish_reason: Option<EngineCoreFinishReason>,
     stop_reason: Option<StopReason>,
 ) -> EngineCoreOutput {
     EngineCoreOutput {
@@ -82,7 +82,7 @@ fn request_output_with_stop_reason(
 fn request_output_with_logprobs(
     request_id: &str,
     new_token_ids: Vec<u32>,
-    finish_reason: Option<FinishReason>,
+    finish_reason: Option<EngineCoreFinishReason>,
     stop_reason: Option<StopReason>,
     new_logprobs: Option<Logprobs>,
     new_prompt_logprobs_tensors: Option<Logprobs>,
@@ -109,11 +109,11 @@ fn bytes_to_token_ids(bytes: &[u8]) -> Vec<u32> {
     bytes.iter().map(|byte| u32::from(*byte)).collect()
 }
 
-fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<FinishReason>)> {
+fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
     vec![
         (vec![b'h' as u32], None),
         (vec![b'i' as u32], None),
-        (vec![b'!' as u32], Some(FinishReason::Stop)),
+        (vec![b'!' as u32], Some(EngineCoreFinishReason::Stop)),
     ]
 }
 
@@ -125,7 +125,7 @@ fn sse_data_payloads(text: &str) -> Vec<&str> {
 
 fn engine_outputs_for_request(
     request_id: &str,
-    output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> EngineCoreOutputs {
     EngineCoreOutputs {
         engine_index: 0,
@@ -431,7 +431,7 @@ impl ChatBackend for FailingDecodeChatBackend {
 
 async fn test_models_with_engine_outputs_and_backend_inner(
     engine_identity: &[u8],
-    output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
     expected_prompt_token_ids: Option<Vec<u32>>,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, tokio::task::JoinHandle<()>) {
@@ -485,7 +485,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
 
 async fn test_models_with_engine_outputs_and_backend(
     engine_identity: &[u8],
-    output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, tokio::task::JoinHandle<()>) {
     test_models_with_engine_outputs_and_backend_inner(engine_identity, output_specs, None, backend)
@@ -494,7 +494,7 @@ async fn test_models_with_engine_outputs_and_backend(
 
 async fn test_chat_with_engine_outputs(
     engine_identity: &[u8],
-    output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> (ChatLlm, tokio::task::JoinHandle<()>) {
     test_models_with_engine_outputs_and_backend(
         engine_identity,
@@ -602,7 +602,7 @@ async fn test_app_with_engine_handle() -> (axum::Router, tokio::task::JoinHandle
 }
 
 async fn test_app_with_stream_output_specs(
-    output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> (axum::Router, tokio::task::JoinHandle<()>) {
     let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-openai",
@@ -618,7 +618,7 @@ async fn test_app_with_stream_output_specs(
 
 async fn test_app_with_backend_and_stream_output_specs(
     backend: Arc<dyn ChatTextBackend>,
-    output_specs: Vec<(Vec<u32>, Option<FinishReason>)>,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> (axum::Router, tokio::task::JoinHandle<()>) {
     let (chat, engine_task) =
         test_models_with_engine_outputs_and_backend(b"engine-openai", output_specs, backend).await;
@@ -911,7 +911,7 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
                     outputs: vec![request_output_with_logprobs(
                         &request.request_id,
                         bytes_to_token_ids(b"hi"),
-                        Some(FinishReason::Stop),
+                        Some(EngineCoreFinishReason::Stop),
                         None,
                         Some(sample_logprobs_for_tokens(&bytes_to_token_ids(b"hi"))),
                         Some(prompt_logprobs_for_tokens(&prompt_token_ids)),
@@ -1312,7 +1312,8 @@ async fn stream_error_is_returned_as_openai_error_sse() {
 #[serial]
 async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
     let (app, engine_task) =
-        test_app_with_stream_output_specs(vec![(vec![], Some(FinishReason::Error))]).await;
+        test_app_with_stream_output_specs(vec![(vec![], Some(EngineCoreFinishReason::Error))])
+            .await;
     let response = app
         .clone()
         .oneshot(
@@ -1593,7 +1594,7 @@ async fn non_stream_completions_include_logprobs() {
                         request_output_with_logprobs(
                             &request.request_id,
                             vec![b'i' as u32],
-                            Some(FinishReason::Stop),
+                            Some(EngineCoreFinishReason::Stop),
                             None,
                             Some(sample_logprobs_for_token(b'i' as u32, b'I' as u32)),
                             None,
@@ -1689,7 +1690,7 @@ async fn non_stream_completions_include_prompt_logprobs() {
                     outputs: vec![request_output_with_logprobs(
                         &request.request_id,
                         vec![b'h' as u32, b'i' as u32, b'!' as u32],
-                        Some(FinishReason::Stop),
+                        Some(EngineCoreFinishReason::Stop),
                         None,
                         Some(Logprobs {
                             positions: vec![
@@ -2136,7 +2137,10 @@ async fn reasoning_blocks_are_mapped_to_reasoning_content_sse_chunks() {
             (bytes_to_token_ids(b"<think>"), None),
             (bytes_to_token_ids(b"think "), None),
             (bytes_to_token_ids(b"more</think>"), None),
-            (bytes_to_token_ids(b"answer"), Some(FinishReason::Length)),
+            (
+                bytes_to_token_ids(b"answer"),
+                Some(EngineCoreFinishReason::Length),
+            ),
         ],
     )
     .await;
@@ -2185,7 +2189,7 @@ async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
             ),
             (
                 bytes_to_token_ids(b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>"),
-                Some(FinishReason::Stop),
+                Some(EngineCoreFinishReason::Stop),
             ),
         ],
     )
@@ -2264,7 +2268,7 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                 ),
                 (
                     bytes_to_token_ids(b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>"),
-                    Some(FinishReason::Stop),
+                    Some(EngineCoreFinishReason::Stop),
                     sample_logprobs_for_tokens(&bytes_to_token_ids(
                         b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>",
                     )),

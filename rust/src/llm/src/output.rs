@@ -2,11 +2,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
+use enum_as_inner::EnumAsInner;
 use futures::Stream;
 use futures::stream::FusedStream;
+use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::EngineCoreOutputStream;
 use vllm_engine_core_client::protocol::{
-    EngineCoreOutput, FinishReason, Logprobs, PositionLogprobs, RequestOutputKind,
+    EngineCoreFinishReason, EngineCoreOutput, Logprobs, PositionLogprobs, RequestOutputKind,
+    StopReason,
 };
 
 use crate::error::Result;
@@ -19,6 +22,60 @@ pub struct GeneratePromptInfo {
     pub prompt_token_ids: Arc<[u32]>,
     /// Prompt logprobs returned by engine-core for scored prompt positions, when requested.
     pub prompt_logprobs: Option<Logprobs>,
+}
+
+/// The reason a request finished.
+///
+/// This is a higher-level abstraction over engine-core's finish and stop reasons.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, EnumAsInner)]
+pub enum FinishReason {
+    /// Generation stopped for a stop string, stop token, or EOS.
+    ///
+    /// The inner stop reason is present for explicit stop strings or stop tokens, and absent for
+    /// EOS-driven stops.
+    Stop(Option<StopReason>),
+    /// `max_tokens` or `max_model_len` was reached.
+    Length,
+    /// The request was aborted by the client.
+    Abort,
+    /// A retryable request-level internal error occurred.
+    Error,
+    /// A repetitive token pattern was detected.
+    Repetition,
+}
+
+impl FinishReason {
+    /// Construct a stop finish reason caused by EOS rather than an explicit stop string/token.
+    pub fn stop_eos() -> Self {
+        Self::Stop(None)
+    }
+
+    /// Returns a human-readable string for this finish reason, used for metrics and reporting.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stop(_) => "stop",
+            Self::Length => "length",
+            Self::Abort => "abort",
+            Self::Error => "error",
+            Self::Repetition => "repetition",
+        }
+    }
+
+    /// If this is a stop finish reason, returns the inner stop reason if it exists.
+    pub fn as_stop_reason(&self) -> Option<&StopReason> {
+        match self {
+            Self::Stop(stop_reason) => stop_reason.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// If this is a stop finish reason, returns the inner stop reason if it exists.
+    pub fn into_stop_reason(self) -> Option<StopReason> {
+        match self {
+            Self::Stop(stop_reason) => stop_reason,
+            _ => None,
+        }
+    }
 }
 
 /// Token and logprob output item returned by [`GenerateOutputStream`].
@@ -42,9 +99,9 @@ pub struct GenerateOutput {
     /// For `Delta`, this is the per-step payload returned by engine-core. For `FinalOnly`, this
     /// accumulates all generated positions and is emitted once on the terminal step.
     pub logprobs: Option<Logprobs>,
-    /// Raw engine-core output for callers that need finish reason, stop reason, or other
-    /// engine-native fields.
-    pub raw: EngineCoreOutput,
+
+    /// Raw engine-core output.
+    raw: EngineCoreOutput,
 }
 
 impl GenerateOutput {
@@ -64,6 +121,17 @@ impl GenerateOutput {
         self.prompt_info
             .as_ref()
             .and_then(|info| info.prompt_logprobs.as_ref())
+    }
+
+    /// Returns the finish reason when this output indicates terminal completion.
+    pub fn finish_reason(&self) -> Option<FinishReason> {
+        self.raw.finish_reason.map(|reason| match reason {
+            EngineCoreFinishReason::Stop => FinishReason::Stop(self.raw.stop_reason.clone()),
+            EngineCoreFinishReason::Length => FinishReason::Length,
+            EngineCoreFinishReason::Abort => FinishReason::Abort,
+            EngineCoreFinishReason::Error => FinishReason::Error,
+            EngineCoreFinishReason::Repetition => FinishReason::Repetition,
+        })
     }
 
     /// Returns whether this output is terminal for the request.
@@ -127,7 +195,6 @@ impl Stream for GenerateOutputStream {
             );
 
             let raw = raw.output;
-            let finish_reason = raw.finish_reason;
 
             // Populate the one-time prompt info on the first output.
             if let Some(info) = &mut self.pending_prompt_info
@@ -169,7 +236,7 @@ impl Stream for GenerateOutputStream {
                 }
             };
 
-            if let Some(finish_reason) = finish_reason {
+            if let Some(finish_reason) = output.as_ref().and_then(|o| o.finish_reason()) {
                 assert!(finished, "only finished outputs can have finish reasons");
                 self.request_metrics
                     .record_finished(received_at, finish_reason);

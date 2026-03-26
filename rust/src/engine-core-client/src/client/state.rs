@@ -155,7 +155,7 @@ impl RequestRegistry {
 #[cfg(test)]
 mod tests {
     use super::{RequestRegistry, UtilityRegistry};
-    use crate::protocol::{EngineCoreOutput, FinishReason};
+    use crate::protocol::{EngineCoreFinishReason, EngineCoreOutput};
 
     #[test]
     fn registry_rejects_duplicate_request_ids() {
@@ -175,7 +175,7 @@ mod tests {
 
         let sender = registry.sender_for_output(&EngineCoreOutput {
             request_id: "req-1".to_string(),
-            finish_reason: Some(FinishReason::Length),
+            finish_reason: Some(EngineCoreFinishReason::Length),
             ..Default::default()
         });
 

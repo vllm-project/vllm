@@ -25,8 +25,9 @@ use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info};
 use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
+    CollectedAssistantMessage, FinishReason,
 };
-use vllm_engine_core_client::protocol::{FinishReason, StopReason};
+use vllm_engine_core_client::protocol::StopReason;
 
 use crate::error::{ApiError, bail_server_error, server_error};
 use crate::routes::chat_completions::convert::prepare_chat_request;
@@ -115,14 +116,18 @@ async fn collect_chat_completion(
             error.to_report_string()
         )
     })?;
-    let finish_reason = collected
-        .finish_reason
-        .ok_or_else(|| server_error!("chat stream terminated without a terminal finish reason"))?;
-    let saw_tool_calls = collected.message.tool_calls().next().is_some();
-    let finish_reason = chat_finish_reason_to_openai(finish_reason, saw_tool_calls)?.to_string();
-    let matched_stop = collected.stop_reason.map(stop_reason_to_json);
-    let tool_calls = collected
-        .message
+    let CollectedAssistantMessage {
+        message,
+        prompt_token_count,
+        prompt_logprobs,
+        logprobs,
+        token_ids,
+        finish_reason,
+    } = collected;
+    let matched_stop = finish_reason.as_stop_reason().map(stop_reason_to_json);
+    let saw_tool_calls = message.tool_calls().next().is_some();
+    let finish_reason = chat_finish_reason_to_openai(&finish_reason, saw_tool_calls)?.to_string();
+    let tool_calls = message
         .tool_calls()
         .map(|call| ToolCall {
             id: call.id.clone(),
@@ -135,7 +140,7 @@ async fn collect_chat_completion(
         .collect::<Vec<_>>();
     let logprobs = if requested_logprobs {
         Some(decoded_logprobs_to_openai_chat(
-            collected.logprobs.as_ref().ok_or_else(|| {
+            logprobs.as_ref().ok_or_else(|| {
                 server_error!("chat response requested logprobs but generation returned none")
             })?,
         )?)
@@ -144,7 +149,7 @@ async fn collect_chat_completion(
     };
     let prompt_logprobs = if include_prompt_logprobs {
         Some(decoded_prompt_logprobs_to_maps(
-            collected.prompt_logprobs.as_ref().ok_or_else(|| {
+            prompt_logprobs.as_ref().ok_or_else(|| {
                 server_error!(
                     "chat response requested prompt_logprobs but generation returned none"
                 )
@@ -153,10 +158,7 @@ async fn collect_chat_completion(
     } else {
         None
     };
-    let usage = Usage::from_counts(
-        collected.prompt_token_count as u32,
-        collected.token_ids.len() as u32,
-    );
+    let usage = Usage::from_counts(prompt_token_count as u32, token_ids.len() as u32);
 
     Ok(ChatCompletionResponse {
         id: response_id,
@@ -167,9 +169,9 @@ async fn collect_chat_completion(
             index: 0,
             message: ChatCompletionMessage {
                 role: "assistant".to_string(),
-                content: Some(collected.message.text()).filter(|text| !text.is_empty()),
+                content: Some(message.text()).filter(|text| !text.is_empty()),
                 tool_calls: Some(tool_calls).filter(|calls| !calls.is_empty()),
-                reasoning_content: collected.message.reasoning(),
+                reasoning_content: message.reasoning(),
             },
             logprobs,
             finish_reason: Some(finish_reason),
@@ -275,8 +277,7 @@ async fn chat_completion_chunk_stream(
             }
             Ok(ChatEvent::Done {
                 prompt_token_count,
-                finish_reason: Some(finish_reason),
-                stop_reason,
+                finish_reason,
                 token_ids,
                 ..
             }) => {
@@ -292,7 +293,6 @@ async fn chat_completion_chunk_stream(
                     &response_model,
                     created,
                     finish_reason,
-                    stop_reason,
                     !tool_call_indices.is_empty(),
                 ) {
                     Ok(chunk) => yield chunk,
@@ -317,12 +317,6 @@ async fn chat_completion_chunk_stream(
                 }
 
                 return Ok(());
-            }
-            Ok(ChatEvent::Done { .. }) => {
-                let error =
-                    server_error!("chat stream terminated without a terminal finish reason",);
-                error!(request_id = %response_id, "missing terminal finish reason");
-                return Err(error);
             }
             Err(error) => {
                 error!(
@@ -720,19 +714,17 @@ fn final_chunk(
     response_model: &str,
     created: u64,
     finish_reason: FinishReason,
-    stop_reason: Option<StopReason>,
     saw_tool_calls: bool,
 ) -> Result<ChatCompletionStreamResponse, ApiError> {
-    let finish_reason = chat_finish_reason_to_openai(finish_reason, saw_tool_calls)?;
+    let matched_stop = finish_reason.as_stop_reason().map(stop_reason_to_json);
+    let finish_reason = chat_finish_reason_to_openai(&finish_reason, saw_tool_calls)?;
 
     debug!(
         request_id = %response_id,
         finish_reason = %finish_reason,
-        stop_reason = ?stop_reason,
+        matched_stop = ?matched_stop,
         "chat stream finished"
     );
-
-    let matched_stop = stop_reason.map(stop_reason_to_json);
 
     Ok(
         ChatCompletionStreamResponse::builder(response_id.to_string(), response_model.to_string())
@@ -743,12 +735,12 @@ fn final_chunk(
 }
 
 fn chat_finish_reason_to_openai(
-    finish_reason: FinishReason,
+    finish_reason: &FinishReason,
     saw_tool_calls: bool,
 ) -> Result<&'static str, ApiError> {
     match finish_reason {
-        FinishReason::Stop if saw_tool_calls => Ok("tool_calls"),
-        FinishReason::Stop => Ok("stop"),
+        FinishReason::Stop(_) if saw_tool_calls => Ok("tool_calls"),
+        FinishReason::Stop(_) => Ok("stop"),
         FinishReason::Length => Ok("length"),
         FinishReason::Repetition => Ok("stop"),
         FinishReason::Abort | FinishReason::Error => {
@@ -758,7 +750,7 @@ fn chat_finish_reason_to_openai(
 }
 
 /// Convert one internal stop reason into the OpenAI-compatible `matched_stop` JSON shape.
-fn stop_reason_to_json(stop_reason: StopReason) -> Value {
+fn stop_reason_to_json(stop_reason: &StopReason) -> Value {
     serde_json::to_value(stop_reason).expect("StopReason must serialize to JSON")
 }
 
@@ -767,8 +759,8 @@ mod tests {
     use futures::{StreamExt as _, stream};
     use openai_protocol::common::ChatLogProbs;
     use serde_json::json;
-    use vllm_chat::{AssistantBlockKind, ChatEvent};
-    use vllm_engine_core_client::protocol::{FinishReason, StopReason};
+    use vllm_chat::{AssistantBlockKind, ChatEvent, FinishReason};
+    use vllm_engine_core_client::protocol::StopReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
     use super::{block_delta_chunk, chat_completion_chunk_stream, final_chunk};
@@ -810,8 +802,7 @@ mod tests {
             "chatcmpl-1",
             "model",
             1,
-            FinishReason::Stop,
-            Some(StopReason::Text("stop".to_string())),
+            FinishReason::Stop(Some(StopReason::Text("stop".to_string()))),
             false,
         )
         .expect("finish reason is valid");
@@ -822,29 +813,22 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_length_finish_reason() {
-        let chunk = final_chunk(
-            "chatcmpl-1",
-            "model",
-            1,
-            FinishReason::Length,
-            Some(StopReason::TokenId(42)),
-            false,
-        )
-        .expect("finish reason is valid");
+        let chunk = final_chunk("chatcmpl-1", "model", 1, FinishReason::Length, false)
+            .expect("finish reason is valid");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
-        assert_eq!(chunk.choices[0].matched_stop, Some(json!(42)));
+        assert_eq!(chunk.choices[0].matched_stop, None);
     }
 
     #[test]
     fn final_chunk_rejects_abort_and_error_finish_reasons() {
-        assert!(final_chunk("chatcmpl-1", "model", 1, FinishReason::Abort, None, false).is_err());
-        assert!(final_chunk("chatcmpl-1", "model", 1, FinishReason::Error, None, false).is_err());
+        assert!(final_chunk("chatcmpl-1", "model", 1, FinishReason::Abort, false).is_err());
+        assert!(final_chunk("chatcmpl-1", "model", 1, FinishReason::Error, false).is_err());
     }
 
     #[test]
     fn final_chunk_maps_stop_to_tool_calls_when_tool_calls_were_streamed() {
-        let chunk = final_chunk("chatcmpl-1", "model", 1, FinishReason::Stop, None, true)
+        let chunk = final_chunk("chatcmpl-1", "model", 1, FinishReason::stop_eos(), true)
             .expect("finish reason is valid");
 
         assert_eq!(
@@ -884,8 +868,7 @@ mod tests {
                 message: Default::default(),
                 prompt_token_count: 1,
                 token_ids: vec![1],
-                finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
+                finish_reason: FinishReason::stop_eos(),
             }),
         ]);
 
@@ -946,8 +929,7 @@ mod tests {
                 message: Default::default(),
                 prompt_token_count: 1,
                 token_ids: vec![1],
-                finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
+                finish_reason: FinishReason::stop_eos(),
             }),
         ]);
 

@@ -7,10 +7,10 @@
 
 use futures::{StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
-use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 use vllm_text::DecodedLogprobs;
 
 use super::{AssistantEvent, AssistantEventStream};
+use crate::FinishReason;
 use crate::error::Error;
 use crate::event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantToolCall, ChatEvent,
@@ -129,8 +129,7 @@ impl StructuredEventState {
         &mut self,
         prompt_token_count: usize,
         token_ids: Vec<u32>,
-        finish_reason: Option<FinishReason>,
-        stop_reason: Option<StopReason>,
+        finish_reason: FinishReason,
     ) -> Vec<ChatEvent> {
         let mut events = Vec::new();
         self.close_open_text_block(&mut events);
@@ -140,7 +139,6 @@ impl StructuredEventState {
             prompt_token_count,
             token_ids,
             finish_reason,
-            stop_reason,
         });
         events
     }
@@ -270,10 +268,8 @@ pub(super) async fn structured_chat_event_stream(stream: impl AssistantEventStre
                 prompt_token_count,
                 token_ids,
                 finish_reason,
-                stop_reason,
             } => {
-                for next in state.finish(prompt_token_count, token_ids, finish_reason, stop_reason)
-                {
+                for next in state.finish(prompt_token_count, token_ids, finish_reason) {
                     yield next;
                 }
             }

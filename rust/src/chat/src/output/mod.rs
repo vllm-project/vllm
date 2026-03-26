@@ -8,15 +8,14 @@ use futures::Stream;
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use subenum::subenum;
 use tool_parser::ParserFactory as ToolParserFactory;
-use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
 
 use self::reasoning::reasoning_event_stream;
 use self::tool::tool_event_stream;
-use crate::ChatRequest;
 use crate::error::{Error, Result};
 use crate::event::{AssistantBlockKind, AssistantToolCall, ChatEvent};
 use crate::output::structured::structured_chat_event_stream;
+use crate::{ChatRequest, FinishReason};
 
 /// Internal assistant event before final assembly.
 ///
@@ -54,8 +53,7 @@ pub(crate) enum AssistantEvent {
     Done {
         prompt_token_count: usize,
         token_ids: Vec<u32>,
-        finish_reason: Option<FinishReason>,
-        stop_reason: Option<StopReason>,
+        finish_reason: FinishReason,
     },
 }
 
@@ -71,9 +69,7 @@ impl ContentEvent {
                 prompt_token_count,
                 prompt_logprobs,
             }],
-            DecodedTextEvent::TextDelta {
-                delta, logprobs, ..
-            } => {
+            DecodedTextEvent::TextDelta { delta, logprobs } => {
                 let mut events = Vec::new();
                 if !delta.is_empty() {
                     events.push(Self::TextDelta {
@@ -90,13 +86,11 @@ impl ContentEvent {
                 prompt_token_count,
                 token_ids,
                 finish_reason,
-                stop_reason,
                 ..
             } => vec![Self::Done {
                 prompt_token_count,
                 token_ids,
                 finish_reason,
-                stop_reason,
             }],
         }
     }

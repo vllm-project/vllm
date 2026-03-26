@@ -17,8 +17,9 @@ use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
 
 use crate::protocol::handshake::ReadyMessage;
 use crate::protocol::{
-    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams, FinishReason,
-    MaybeWireLogprobs, UtilityOutput, UtilityResultEnvelope, decode_engine_core_outputs,
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
+    EngineCoreSamplingParams, MaybeWireLogprobs, UtilityOutput, UtilityResultEnvelope,
+    decode_engine_core_outputs,
 };
 use crate::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use crate::{ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, Error};
@@ -171,7 +172,7 @@ fn ready_message(status: &str) -> ReadyMessage {
 fn request_output(
     request_id: &str,
     new_token_ids: Vec<u32>,
-    finish_reason: Option<FinishReason>,
+    finish_reason: Option<EngineCoreFinishReason>,
 ) -> EngineCoreOutput {
     EngineCoreOutput {
         request_id: request_id.to_string(),
@@ -287,7 +288,7 @@ fn multipart_logprob_output_frames(request_id: &str) -> Vec<bytes::Bytes> {
             ]),
             Value::Nil,
             Value::Nil,
-            Value::from(FinishReason::Length as u8),
+            Value::from(EngineCoreFinishReason::Length as u8),
         ])]),
         Value::Nil,
         Value::from(0.0),
@@ -392,7 +393,11 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
                 send_outputs(
                     push,
                     EngineCoreOutputs {
-                        outputs: vec![request_output("req-2", vec![], Some(FinishReason::Length))],
+                        outputs: vec![request_output(
+                            "req-2",
+                            vec![],
+                            Some(EngineCoreFinishReason::Length),
+                        )],
                         finished_requests: Some(BTreeSet::from(["req-2".to_string()])),
                         ..Default::default()
                     },
@@ -402,7 +407,11 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
                 send_outputs(
                     push,
                     EngineCoreOutputs {
-                        outputs: vec![request_output("req-1", vec![], Some(FinishReason::Abort))],
+                        outputs: vec![request_output(
+                            "req-1",
+                            vec![],
+                            Some(EngineCoreFinishReason::Abort),
+                        )],
                         finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
                         ..Default::default()
                     },
@@ -466,7 +475,7 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
         .unwrap()
         .unwrap();
     assert_eq!(final_2.request_id, "req-2");
-    assert_eq!(final_2.finish_reason, Some(FinishReason::Length));
+    assert_eq!(final_2.finish_reason, Some(EngineCoreFinishReason::Length));
     assert!(
         timeout(Duration::from_secs(1), stream_2.next())
             .await
@@ -480,7 +489,7 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
         .unwrap()
         .unwrap();
     assert_eq!(final_1.request_id, "req-1");
-    assert_eq!(final_1.finish_reason, Some(FinishReason::Abort));
+    assert_eq!(final_1.finish_reason, Some(EngineCoreFinishReason::Abort));
     assert!(
         timeout(Duration::from_secs(1), stream_1.next())
             .await
@@ -519,7 +528,11 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
                 send_outputs(
                     push,
                     EngineCoreOutputs {
-                        outputs: vec![request_output("req-1", vec![], Some(FinishReason::Length))],
+                        outputs: vec![request_output(
+                            "req-1",
+                            vec![],
+                            Some(EngineCoreFinishReason::Length),
+                        )],
                         finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
                         ..Default::default()
                     },
@@ -556,7 +569,10 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(final_output.finish_reason, Some(FinishReason::Length));
+    assert_eq!(
+        final_output.finish_reason,
+        Some(EngineCoreFinishReason::Length)
+    );
     assert!(
         timeout(Duration::from_secs(1), stream.next())
             .await
@@ -1148,7 +1164,10 @@ async fn client_decodes_multipart_logprob_outputs() {
 
     let output = outputs.into_iter().next().unwrap().unwrap();
     assert_eq!(output.output.new_token_ids, vec![7, 8]);
-    assert_eq!(output.output.finish_reason, Some(FinishReason::Length));
+    assert_eq!(
+        output.output.finish_reason,
+        Some(EngineCoreFinishReason::Length)
+    );
     expect_sample_logprobs(
         output
             .output

@@ -4,7 +4,7 @@ use bytes::Bytes;
 use rmpv::Value;
 
 use super::{Logprobs, PositionLogprobs, TokenLogprob, decode_engine_core_outputs};
-use crate::protocol::FinishReason;
+use crate::protocol::EngineCoreFinishReason;
 
 fn encode_value(value: &Value) -> Vec<u8> {
     let mut out = Vec::new();
@@ -24,7 +24,7 @@ fn output_wire_with_custom_fields(
             new_logprobs.unwrap_or(Value::Nil),
             prompt_logprobs.unwrap_or(Value::Nil),
             Value::Nil,
-            Value::from(FinishReason::Length as u8),
+            Value::from(EngineCoreFinishReason::Length as u8),
         ])]),
         Value::Nil,
         Value::from(0.0),

@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
                     final_reasoning = message.reasoning().unwrap_or_default();
                     final_text = message.text();
                     final_token_ids = token_ids;
-                    finish_reason = reason;
+                    finish_reason = Some(reason);
                     break;
                 }
                 ChatEvent::BlockDelta { kind, delta, .. } => match kind {

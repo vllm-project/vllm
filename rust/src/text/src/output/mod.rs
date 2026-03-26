@@ -9,9 +9,8 @@ mod decoded;
 mod logprobs;
 
 use futures::{StreamExt as _, pin_mut};
-use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
-use crate::{Error, Result, TextOutputStream};
+use crate::{Error, FinishReason, Result, TextOutputStream};
 
 /// Final decoded text plus terminal stream metadata.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,8 +20,7 @@ pub struct CollectedTextOutput {
     pub prompt_logprobs: Option<DecodedPromptLogprobs>,
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
-    pub finish_reason: Option<FinishReason>,
-    pub stop_reason: Option<StopReason>,
+    pub finish_reason: FinishReason,
 }
 
 #[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
@@ -54,7 +52,6 @@ impl<T: TextOutputStream> T {
                         prompt_token_count,
                         token_ids,
                         finish_reason,
-                        stop_reason,
                     } => {
                         return Ok(CollectedTextOutput {
                             text,
@@ -65,7 +62,6 @@ impl<T: TextOutputStream> T {
                             }),
                             token_ids,
                             finish_reason,
-                            stop_reason,
                         });
                     }
                 }
@@ -83,7 +79,7 @@ impl<T: TextOutputStream> T {
 #[cfg(test)]
 mod tests {
     use futures::stream;
-    use vllm_engine_core_client::protocol::FinishReason;
+    use vllm_llm::FinishReason;
 
     use super::*;
 
@@ -105,7 +101,6 @@ mod tests {
             }),
             Ok(DecodedTextEvent::TextDelta {
                 delta: String::new(),
-                text: String::new(),
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
@@ -118,7 +113,6 @@ mod tests {
             }),
             Ok(DecodedTextEvent::TextDelta {
                 delta: "bc".to_string(),
-                text: "bc".to_string(),
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![DecodedTokenLogprob {
@@ -133,8 +127,7 @@ mod tests {
                 text: "bc".to_string(),
                 prompt_token_count: 2,
                 token_ids: vec![1, 2],
-                finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
+                finish_reason: FinishReason::stop_eos(),
             }),
         ]);
 

@@ -74,7 +74,7 @@ impl EngineCoreRequestType {
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L41-L63>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
-pub enum FinishReason {
+pub enum EngineCoreFinishReason {
     /// A stop string was emitted.
     Stop = 0,
     /// `max_tokens` or `max_model_len` was reached.
@@ -85,19 +85,6 @@ pub enum FinishReason {
     Error = 3,
     /// A repetitive token pattern was detected.
     Repetition = 4,
-}
-
-impl FinishReason {
-    /// Returns a human-readable string for this finish reason, used for metrics and reporting.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Stop => "stop",
-            Self::Length => "length",
-            Self::Abort => "abort",
-            Self::Error => "error",
-            Self::Repetition => "repetition",
-        }
-    }
 }
 
 /// Event types emitted by engine-core for one request.
@@ -145,7 +132,7 @@ pub enum RequestOutputKind {
 ///
 /// Original Python field:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L155>
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum StopReason {
     TokenId(u32),
@@ -350,7 +337,7 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub pooling_output: Option<OpaqueValue>,
     #[serde(default)]
-    pub finish_reason: Option<FinishReason>,
+    pub finish_reason: Option<EngineCoreFinishReason>,
     #[serde(default)]
     pub stop_reason: Option<StopReason>,
     #[serde(default)]
@@ -552,7 +539,7 @@ mod tests {
                 new_logprobs: None,
                 new_prompt_logprobs_tensors: None,
                 pooling_output: None,
-                finish_reason: Some(FinishReason::Length),
+                finish_reason: Some(EngineCoreFinishReason::Length),
                 stop_reason: Some(StopReason::Text("stop".to_string())),
                 events: None,
                 kv_transfer_params: None,
@@ -570,7 +557,10 @@ mod tests {
         let decoded: EngineCoreOutputs = decode_msgpack(&encoded).unwrap();
 
         assert_eq!(decoded.outputs.len(), 1);
-        assert_eq!(decoded.outputs[0].finish_reason, Some(FinishReason::Length));
+        assert_eq!(
+            decoded.outputs[0].finish_reason,
+            Some(EngineCoreFinishReason::Length)
+        );
         assert_eq!(
             decoded.finished_requests,
             Some(BTreeSet::from(["req-1".to_string()]))

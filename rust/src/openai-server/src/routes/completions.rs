@@ -15,8 +15,7 @@ use openai_protocol::common::{LogProbs, Usage};
 use openai_protocol::validated::ValidatedJson;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info};
-use vllm_engine_core_client::protocol::FinishReason;
-use vllm_text::{DecodedTextEvent, TextOutputStream, TextOutputStreamExt as _};
+use vllm_text::{DecodedTextEvent, FinishReason, TextOutputStream, TextOutputStreamExt as _};
 
 use super::utils::logprobs::{
     collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_maps,
@@ -116,9 +115,7 @@ async fn collect_completion(
         .collect_output()
         .await
         .map_err(|error| server_error!("completion stream failed: {}", error.to_report_string()))?;
-    let finish_reason = collected.finish_reason.ok_or_else(|| {
-        server_error!("completion stream terminated without a terminal finish reason")
-    })?;
+    let finish_reason = collected.finish_reason.clone();
 
     let prompt_char_count = echo
         .as_ref()
@@ -199,9 +196,7 @@ async fn completion_chunk_stream(
                     ));
                 }
             }
-            Ok(DecodedTextEvent::TextDelta {
-                delta, logprobs, ..
-            }) => {
+            Ok(DecodedTextEvent::TextDelta { delta, logprobs }) => {
                 let delta_text_len = text_len(&delta);
                 let logprobs = if requested_logprobs.is_some() {
                     let decoded_logprobs = logprobs.as_ref().ok_or_else(|| {
@@ -227,7 +222,7 @@ async fn completion_chunk_stream(
             }
             Ok(DecodedTextEvent::Done {
                 prompt_token_count,
-                finish_reason: Some(finish_reason),
+                finish_reason,
                 token_ids,
                 ..
             }) => {
@@ -246,12 +241,6 @@ async fn completion_chunk_stream(
                         Usage::from_counts(prompt_token_count as u32, token_ids.len() as u32),
                     ));
                 }
-            }
-            Ok(DecodedTextEvent::Done { .. }) => {
-                let error =
-                    server_error!("completion stream terminated without a terminal finish reason");
-                error!(request_id = %response_id, "missing terminal finish reason");
-                return Err(error);
             }
             Err(error) => {
                 error!(
@@ -316,7 +305,7 @@ fn completion_finish_reason_to_openai(
     finish_reason: FinishReason,
 ) -> Result<&'static str, ApiError> {
     match finish_reason {
-        FinishReason::Stop | FinishReason::Repetition => Ok("stop"),
+        FinishReason::Stop(_) | FinishReason::Repetition => Ok("stop"),
         FinishReason::Length => Ok("length"),
         FinishReason::Abort | FinishReason::Error => {
             bail_server_error!("stream terminated without a valid OpenAI finish reason");
@@ -384,17 +373,17 @@ fn done_sse_event() -> Event {
 #[cfg(test)]
 mod tests {
     use futures::{StreamExt as _, stream};
-    use vllm_engine_core_client::protocol::FinishReason;
     use vllm_text::{
         DecodedLogprobs, DecodedPositionLogprobs, DecodedTextEvent, DecodedTokenLogprob,
+        FinishReason,
     };
 
     use super::{CompletionSseChunk, completion_chunk_stream, final_chunk};
 
     #[test]
     fn final_chunk_maps_stop_finish_reason() {
-        let chunk =
-            final_chunk("cmpl-1", "model", 1, FinishReason::Stop).expect("finish reason valid");
+        let chunk = final_chunk("cmpl-1", "model", 1, FinishReason::stop_eos())
+            .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
         assert_eq!(chunk.choices[0].text, "");
     }
@@ -421,7 +410,6 @@ mod tests {
             }),
             Ok(DecodedTextEvent::TextDelta {
                 delta: "h".to_string(),
-                text: "h".to_string(),
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![
@@ -441,7 +429,6 @@ mod tests {
             }),
             Ok(DecodedTextEvent::TextDelta {
                 delta: String::new(),
-                text: "h".to_string(),
                 logprobs: Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs {
                         entries: vec![
@@ -463,8 +450,7 @@ mod tests {
                 text: "h".to_string(),
                 prompt_token_count: 5,
                 token_ids: vec![b'h' as u32, b'!' as u32],
-                finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
+                finish_reason: FinishReason::stop_eos(),
             }),
         ]);
 

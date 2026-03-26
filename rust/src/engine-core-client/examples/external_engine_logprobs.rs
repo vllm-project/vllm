@@ -6,7 +6,7 @@ use futures::StreamExt as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::protocol::{
-    EngineCoreRequest, EngineCoreSamplingParams, FinishReason,
+    EngineCoreFinishReason, EngineCoreRequest, EngineCoreSamplingParams,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineCoreStreamOutput};
 
@@ -173,7 +173,7 @@ async fn main() -> Result<()> {
         .await
         .context("failed to shut down engine-core client")?;
 
-    if finish_reason != Some(FinishReason::Length) {
+    if finish_reason != Some(EngineCoreFinishReason::Length) {
         bail!("unexpected finish_reason: expected Length, got {finish_reason:?}");
     }
     if token_ids.is_empty() {

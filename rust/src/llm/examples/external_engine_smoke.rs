@@ -5,11 +5,9 @@ use clap::Parser;
 use futures::StreamExt as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
-use vllm_engine_core_client::protocol::{
-    EngineCoreSamplingParams, FinishReason, RequestOutputKind, StopReason,
-};
+use vllm_engine_core_client::protocol::{EngineCoreSamplingParams, RequestOutputKind};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
-use vllm_llm::{GenerateOutputStream, GenerateRequest, Llm};
+use vllm_llm::{FinishReason, GenerateOutputStream, GenerateRequest, Llm};
 
 const PROMPT_TOKEN_IDS: &[u32] = &[20841, 448, 6896, 25, 23811];
 
@@ -61,11 +59,10 @@ fn build_request(request_id: String, max_tokens: u32) -> GenerateRequest {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct CompletedRequest {
     token_ids: Vec<u32>,
-    finish_reason: Option<FinishReason>,
-    stop_reason: Option<StopReason>,
+    finish_reason: FinishReason,
 }
 
 async fn wait_for_request_completion(mut stream: GenerateOutputStream) -> Result<CompletedRequest> {
@@ -80,10 +77,14 @@ async fn wait_for_request_completion(mut stream: GenerateOutputStream) -> Result
         "expected final-only stream to end after the final output"
     );
 
+    let finish_reason = output
+        .finish_reason()
+        .expect("final-only output must have a finish reason");
+    let token_ids = output.token_ids;
+
     Ok(CompletedRequest {
-        token_ids: output.token_ids,
-        finish_reason: output.raw.finish_reason,
-        stop_reason: output.raw.stop_reason,
+        token_ids,
+        finish_reason,
     })
 }
 
@@ -138,7 +139,6 @@ async fn main() -> Result<()> {
 
     println!("token_ids={:?}", output.token_ids);
     println!("finish_reason={:?}", output.finish_reason);
-    println!("stop_reason={:?}", output.stop_reason);
 
     Ok(())
 }

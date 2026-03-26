@@ -20,4 +20,4 @@ This project aims to implement an alternative frontend to the vLLM Engine in Rus
 - Prefer snapshot testing with the `expect-test` crate over writing multiple `assert_eq!` statements on individual fields. Use `expect_test::expect![[...]].assert_debug_eq(...)` to snapshot the `Debug` output of the entire struct.
   - Write `expect![[""]]` as a placeholder first, then run `UPDATE_EXPECT=1 cargo test` to auto-fill the snapshot content.
   - For values containing non-deterministic data (e.g., UUIDs), set them to a fixed value like `"<placeholder>"` before snapshotting.
-- Prefer `cargo nextest` for running tests as it's much faster.
+- Always run test with `cargo nextest run` instead of  `cargo test`, if available, as it's much faster.

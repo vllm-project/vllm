@@ -236,7 +236,6 @@ async fn final_only_tool_event_stream(
                 prompt_token_count,
                 token_ids,
                 finish_reason,
-                stop_reason,
             } => {
                 match parser.parse_complete(&final_text).await {
                     Ok((normal_text, tool_calls)) => {
@@ -275,7 +274,6 @@ async fn final_only_tool_event_stream(
                     prompt_token_count,
                     token_ids,
                     finish_reason,
-                    stop_reason,
                 };
                 return Ok(());
             }
@@ -336,7 +334,6 @@ pub(crate) async fn tool_event_stream(
                 prompt_token_count,
                 token_ids,
                 finish_reason,
-                stop_reason,
             } => {
                 let mut flush_events = Vec::new();
                 // Some parsers buffer a trailing arguments fragment and only
@@ -355,7 +352,6 @@ pub(crate) async fn tool_event_stream(
                     prompt_token_count,
                     token_ids,
                     finish_reason,
-                    stop_reason,
                 };
             }
         }
@@ -370,7 +366,7 @@ mod tests {
     use tool_parser::ToolParser;
     use tool_parser::errors::{ParserError, ParserResult};
     use tool_parser::types::{StreamingParseResult, ToolCall, ToolCallItem};
-    use vllm_engine_core_client::protocol::FinishReason;
+    use vllm_llm::FinishReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
     use super::super::structured::structured_chat_event_stream;
@@ -454,8 +450,7 @@ mod tests {
             Ok(ContentEvent::Done {
                 prompt_token_count: 3,
                 token_ids: vec![],
-                finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
+                finish_reason: FinishReason::stop_eos(),
             }),
         ]);
 
@@ -490,8 +485,7 @@ mod tests {
                 AssistantEvent::Done {
                     prompt_token_count: 3,
                     token_ids: vec![],
-                    finish_reason: Some(FinishReason::Stop),
-                    stop_reason: None,
+                    finish_reason: FinishReason::stop_eos(),
                 },
             ]
         );
@@ -530,8 +524,7 @@ mod tests {
             Ok(ContentEvent::Done {
                 prompt_token_count: 1,
                 token_ids: vec![],
-                finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
+                finish_reason: FinishReason::stop_eos(),
             }),
         ]);
         let mut request = tool_request("req_final_only_logprobs");
@@ -569,8 +562,7 @@ mod tests {
                 AssistantEvent::Done {
                     prompt_token_count: 1,
                     token_ids: vec![],
-                    finish_reason: Some(FinishReason::Stop),
-                    stop_reason: None,
+                    finish_reason: FinishReason::stop_eos(),
                 },
             ]
         );

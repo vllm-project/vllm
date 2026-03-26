@@ -1,8 +1,9 @@
 use std::ops::Deref;
 
 use serde::{Deserialize, Serialize};
-use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 use vllm_text::{DecodedLogprobs, DecodedPromptLogprobs};
+
+use crate::FinishReason;
 
 /// One finalized assistant tool call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,7 +161,6 @@ pub enum ChatEvent {
         /// Raw cumulative output token IDs, including a terminal stop token when
         /// the engine emitted one.
         token_ids: Vec<u32>,
-        finish_reason: Option<FinishReason>,
-        stop_reason: Option<StopReason>,
+        finish_reason: FinishReason,
     },
 }

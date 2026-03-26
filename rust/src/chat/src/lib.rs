@@ -23,6 +23,7 @@ pub use request::{
     ChatToolChoice, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
+pub use vllm_llm::FinishReason;
 
 mod backend;
 pub mod backends;

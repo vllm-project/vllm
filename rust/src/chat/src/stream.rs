@@ -3,9 +3,9 @@ use std::task::{Context, Poll};
 
 use futures::Stream;
 use serde::{Deserialize, Serialize};
-use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs};
 
+use crate::FinishReason;
 use crate::error::{Error, Result};
 use crate::event::{AssistantContentBlock, AssistantMessage, ChatEvent};
 
@@ -17,8 +17,7 @@ pub struct CollectedAssistantMessage {
     pub prompt_logprobs: Option<DecodedPromptLogprobs>,
     pub logprobs: Option<DecodedLogprobs>,
     pub token_ids: Vec<u32>,
-    pub finish_reason: Option<FinishReason>,
-    pub stop_reason: Option<StopReason>,
+    pub finish_reason: FinishReason,
 }
 
 /// Per-request stream of chat events.
@@ -64,7 +63,6 @@ impl ChatEventStream {
                     prompt_token_count,
                     token_ids,
                     finish_reason,
-                    stop_reason,
                 } => {
                     return Ok(CollectedAssistantMessage {
                         message: done,
@@ -75,7 +73,6 @@ impl ChatEventStream {
                         }),
                         token_ids,
                         finish_reason,
-                        stop_reason,
                     });
                 }
                 ChatEvent::ToolCallEnd { call, .. } => {
@@ -109,7 +106,7 @@ pub trait ChatEventStreamTrait = Stream<Item = Result<ChatEvent>> + Send + 'stat
 #[cfg(test)]
 mod tests {
     use futures::stream;
-    use vllm_engine_core_client::protocol::FinishReason;
+    use vllm_llm::FinishReason;
     use vllm_text::{
         DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob,
     };
@@ -169,8 +166,7 @@ mod tests {
                     message: Default::default(),
                     prompt_token_count: 2,
                     token_ids: vec![1],
-                    finish_reason: Some(FinishReason::Stop),
-                    stop_reason: None,
+                    finish_reason: FinishReason::stop_eos(),
                 }),
             ]),
         );
@@ -201,8 +197,7 @@ mod tests {
                     }],
                 }),
                 token_ids: vec![1],
-                finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
+                finish_reason: FinishReason::stop_eos(),
             }
         );
     }

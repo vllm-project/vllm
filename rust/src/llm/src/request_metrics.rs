@@ -1,11 +1,11 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use vllm_engine_core_client::protocol::{
-    EngineCoreEvent, EngineCoreEventType, EngineCoreOutput, FinishReason,
-};
+use vllm_engine_core_client::protocol::{EngineCoreEvent, EngineCoreEventType, EngineCoreOutput};
 use vllm_metrics::{
     EngineLabels, FinishedReasonLabels, METRICS, PromptTokenSourceLabels, RequestMetrics,
 };
+
+use crate::FinishReason;
 
 fn metrics() -> &'static RequestMetrics {
     &METRICS.request

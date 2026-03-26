@@ -22,6 +22,7 @@ pub use output::{
 };
 pub use request::{Prompt, SamplingParams, TextRequest};
 use vllm_engine_core_client::EngineCoreClient;
+pub use vllm_llm::FinishReason;
 use vllm_llm::Llm;
 
 mod backend;

@@ -8,10 +8,10 @@ use tokio::time::timeout;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
     ChatLlm, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTextBackend, ChatTool,
-    ChatToolChoice, SamplingParams,
+    ChatToolChoice, FinishReason, SamplingParams,
 };
 use vllm_engine_core_client::protocol::{
-    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, Logprobs,
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, Logprobs,
     MaybeWireLogprobs, PositionLogprobs, StopReason, TokenLogprob,
 };
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
@@ -29,7 +29,7 @@ const SPECIAL_STOP_TOKEN_ID: u32 = 256;
 fn request_output(
     request_id: &str,
     new_token_ids: Vec<u32>,
-    finish_reason: Option<FinishReason>,
+    finish_reason: Option<EngineCoreFinishReason>,
     stop_reason: Option<StopReason>,
 ) -> EngineCoreOutput {
     EngineCoreOutput {
@@ -53,7 +53,7 @@ fn request_output(
 fn request_output_with_logprobs(
     request_id: &str,
     new_token_ids: Vec<u32>,
-    finish_reason: Option<FinishReason>,
+    finish_reason: Option<EngineCoreFinishReason>,
     stop_reason: Option<StopReason>,
     new_logprobs: Option<Logprobs>,
     new_prompt_logprobs_tensors: Option<Logprobs>,
@@ -322,7 +322,7 @@ async fn chat_streams_text_events() {
                             request_output(
                                 "chat-1",
                                 vec![b'i' as u32, b'!' as u32],
-                                Some(FinishReason::Stop),
+                                Some(EngineCoreFinishReason::Stop),
                                 Some(StopReason::TokenId(b'!' as u32)),
                             ),
                         ],
@@ -400,7 +400,10 @@ async fn chat_streams_text_events() {
         })) => {
             assert_eq!(message.text(), "Hi");
             assert_eq!(token_ids, vec![b'H' as u32, b'i' as u32, b'!' as u32]);
-            assert_eq!(finish_reason, Some(FinishReason::Stop));
+            assert_eq!(
+                finish_reason,
+                FinishReason::Stop(Some(StopReason::TokenId(b'!' as u32)))
+            );
         }
         other => panic!("unexpected final event: {other:?}"),
     }
@@ -431,7 +434,7 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
                             request_output(
                                 "chat-utf8",
                                 bytes_to_token_ids(&[0xbd, 0xa0, b'!']),
-                                Some(FinishReason::Stop),
+                                Some(EngineCoreFinishReason::Stop),
                                 Some(StopReason::TokenId(b'!' as u32)),
                             ),
                         ],
@@ -519,7 +522,7 @@ async fn chat_stream_flushes_held_text_on_finish() {
                         outputs: vec![request_output(
                             "chat-final-flush",
                             bytes_to_token_ids(b"ok st"),
-                            Some(FinishReason::Length),
+                            Some(EngineCoreFinishReason::Length),
                             None,
                         )],
                         finished_requests: Some(BTreeSet::from(["chat-final-flush".to_string()])),
@@ -582,7 +585,7 @@ async fn chat_stream_flushes_held_text_on_finish() {
         })) => {
             assert_eq!(message.text(), "ok st");
             assert_eq!(token_ids, bytes_to_token_ids(b"ok st"));
-            assert_eq!(finish_reason, Some(FinishReason::Length));
+            assert_eq!(finish_reason, FinishReason::Length);
         }
         other => panic!("unexpected final event: {other:?}"),
     }
@@ -689,7 +692,7 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
                         outputs: vec![request_output(
                             "chat-include-stop",
                             vec![b'H' as u32, b'i' as u32, b'!' as u32],
-                            Some(FinishReason::Stop),
+                            Some(EngineCoreFinishReason::Stop),
                             Some(StopReason::TokenId(b'!' as u32)),
                         )],
                         finished_requests: Some(BTreeSet::from(["chat-include-stop".to_string()])),
@@ -797,7 +800,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
                             request_output(
                                 "chat-reasoning",
                                 bytes_to_token_ids(b"answer"),
-                                Some(FinishReason::Length),
+                                Some(EngineCoreFinishReason::Length),
                                 None,
                             ),
                         ],
@@ -893,7 +896,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
         })) => {
             assert_eq!(message.reasoning().unwrap(), "reason more");
             assert_eq!(message.text(), "answer");
-            assert_eq!(finish_reason, Some(FinishReason::Length));
+            assert_eq!(finish_reason, FinishReason::Length);
         }
         other => panic!("unexpected final event: {other:?}"),
     }
@@ -921,7 +924,7 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
                         outputs: vec![request_output(
                             "chat-collect",
                             bytes_to_token_ids(b"<think>inner</think>outer"),
-                            Some(FinishReason::Length),
+                            Some(EngineCoreFinishReason::Length),
                             None,
                         )],
                         finished_requests: Some(BTreeSet::from(["chat-collect".to_string()])),
@@ -951,7 +954,7 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
         .unwrap();
     assert_eq!(message.message.reasoning().unwrap(), "inner");
     assert_eq!(message.message.text(), "outer");
-    assert_eq!(message.finish_reason, Some(FinishReason::Length));
+    assert_eq!(message.finish_reason, FinishReason::Length);
     assert_eq!(
         message.prompt_token_count,
         "system: You are terse.\nuser: Say hi\nassistant:".len()
@@ -993,8 +996,8 @@ async fn chat_stream_parses_tool_calls_automatically() {
                                 bytes_to_token_ids(
                                     b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>",
                                 ),
-                                Some(FinishReason::Stop),
-                                None,
+                                Some(EngineCoreFinishReason::Stop),
+                                Some(StopReason::TokenId(SPECIAL_STOP_TOKEN_ID)),
                             ),
                         ],
                         finished_requests: Some(BTreeSet::from(["chat-tool".to_string()])),
@@ -1042,7 +1045,10 @@ async fn chat_stream_parses_tool_calls_automatically() {
                 finish_reason,
                 ..
             } => {
-                assert_eq!(finish_reason, Some(FinishReason::Stop));
+                assert_eq!(
+                    finish_reason,
+                    FinishReason::Stop(Some(StopReason::TokenId(SPECIAL_STOP_TOKEN_ID)))
+                );
                 assert_eq!(message.text(), "");
                 let tool_calls = message.tool_calls().collect::<Vec<_>>();
                 assert_eq!(tool_calls.len(), 1);
@@ -1092,7 +1098,7 @@ async fn chat_collect_message_preserves_tool_call_arguments_in_final_only_mode()
                                 bytes_with_special_stop_token(
                                     b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>",
                                 ),
-                                Some(FinishReason::Stop),
+                                Some(EngineCoreFinishReason::Stop),
                                 Some(StopReason::TokenId(SPECIAL_STOP_TOKEN_ID)),
                             ),
                         ],
@@ -1126,7 +1132,10 @@ async fn chat_collect_message_preserves_tool_call_arguments_in_final_only_mode()
         .await
         .unwrap();
 
-    assert_eq!(message.finish_reason, Some(FinishReason::Stop));
+    assert_eq!(
+        message.finish_reason,
+        FinishReason::Stop(Some(StopReason::TokenId(SPECIAL_STOP_TOKEN_ID)))
+    );
     assert_eq!(message.message.tool_calls().count(), 1);
     assert_eq!(
         message.message.tool_calls().next().unwrap().arguments,
@@ -1167,7 +1176,7 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
                                 request_output_with_logprobs(
                                     &request.request_id,
                                     vec![b'i' as u32],
-                                    Some(FinishReason::Length),
+                                    Some(EngineCoreFinishReason::Length),
                                     None,
                                     Some(sample_logprobs_for_token(b'i' as u32, b'I' as u32)),
                                     None,
