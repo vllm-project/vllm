@@ -246,10 +246,9 @@ def build_attn_metadata(
                 slot_mapping=slot_mappings[i],
             )
         if encoder_seq_lens is not None and i in encoder_seq_lens:
-            (
-                common_attn_metadata.encoder_seq_lens,
-                common_attn_metadata.encoder_seq_lens_cpu,
-            ) = encoder_seq_lens[i]
+            encoder_seq_lens_gpu, encoder_seq_lens_cpu = encoder_seq_lens[i]
+            common_attn_metadata.encoder_seq_lens = encoder_seq_lens_gpu
+            common_attn_metadata.encoder_seq_lens_cpu = encoder_seq_lens_cpu
 
         for attn_group in attn_groups[i]:
             metadata = attn_group.get_metadata_builder(0).build(
