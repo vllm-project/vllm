@@ -11,7 +11,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.v1.simple_kv_offload.copy_ops import (
+from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     BatchMemcpyParams,
     build_params,
     copy_blocks,

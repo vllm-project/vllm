@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GPU kernels for efficient GPU<->CPU block transfers."""
+"""Low-level CUDA memory helpers: pinning and batch DMA transfers."""
 
 import ctypes
 from typing import Any, NamedTuple
@@ -11,6 +11,18 @@ import torch
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+def pin_tensor(tensor: torch.Tensor) -> None:
+    """Pin a CPU tensor via cudaHostRegister.
+
+    This bypasses PyTorch's CUDACachingHostAllocator which rounds
+    every ``pin_memory=True`` allocation up to the next power of 2
+    (e.g. 100 GB becomes 128 GB).
+    """
+    err = torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.nbytes, 0)
+    if err.value != 0:
+        raise RuntimeError(f"cudaHostRegister failed: {err}")
 
 
 class _CUmemLocation(ctypes.Structure):
@@ -38,7 +50,6 @@ _BATCH_MEMCPY_FUNC_TYPE = ctypes.CFUNCTYPE(
     ctypes.c_void_p,
     ctypes.c_void_p,
 )
-
 
 # Resolved lazily on first use.
 _batch_memcpy_fn: Any = None

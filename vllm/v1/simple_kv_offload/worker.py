@@ -10,6 +10,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
+from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 
 if TYPE_CHECKING:
@@ -154,9 +155,13 @@ class SimpleCPUOffloadWorker:
         self.cpu_kv_caches = {}
         for name, gpu_tensor in unique_gpu_caches.items():
             cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
-            self.cpu_kv_caches[name] = torch.zeros(
-                cpu_shape, dtype=gpu_tensor.dtype, device="cpu", pin_memory=pin_memory
-            )
+            # Allocate non-pinned first, then pin via cudaHostRegister to
+            # bypass PyTorch's CUDACachingHostAllocator which rounds up to
+            # the next power of 2 (e.g. 100 GB -> 128 GB).
+            tensor = torch.zeros(cpu_shape, dtype=gpu_tensor.dtype, device="cpu")
+            if pin_memory:
+                pin_tensor(tensor)
+            self.cpu_kv_caches[name] = tensor
 
         # Use lowest priority so KV cache I/O yields to compute streams.
         low_pri, _ = torch.cuda.Stream.priority_range()
