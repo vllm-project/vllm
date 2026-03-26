@@ -62,7 +62,10 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.midashenglm import DashengConfig
+from vllm.transformers_utils.configs.midashenglm import (
+    DashengConfig,
+    DashengTokenizerConfig,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -96,6 +99,21 @@ def calculate_mel_frames_dasheng(
         int(1 + ((audio_length_samples - n_fft) / hop_size))
         // dasheng_subsampling
         // model_subsampling
+    )
+
+
+def calculate_audio_tokens_midashenglm(
+    audio_length_samples: int,
+    *,
+    audio_encoder_config: DashengConfig,
+    model_subsampling: int,
+) -> int:
+    return calculate_mel_frames_dasheng(
+        audio_length_samples,
+        n_fft=audio_encoder_config.n_fft,
+        hop_size=audio_encoder_config.hop_length,
+        center=audio_encoder_config.center,
+        model_subsampling=model_subsampling,
     )
 
 
@@ -458,6 +476,267 @@ class DashengAudioTransformer(nn.Module):
         return x, mask
 
 
+class DashengTokenizerSemanticAudioTransformer(nn.Module):
+    def __init__(
+        self,
+        config: DashengTokenizerConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+
+        self.config = config
+        self.target_length = config.target_length
+        self.hop_length = config.hop_length
+
+        self.front_end = DashengFrontend(config)
+        self.init_bn = nn.BatchNorm2d(config.n_mels, momentum=0.01)
+
+        self.patch_embed = AudioPatchEmbed(
+            input_size=(config.n_mels, config.target_length),
+            embed_dim=config.embed_dim,
+            in_chans=config.input_channels,
+            patch_size=config.patch_size,
+            flatten=False,
+            patch_stride=config.patch_stride,
+        )
+
+        self.time_pos_embed = nn.Parameter(
+            torch.empty(1, config.embed_dim, 1, self.patch_embed.grid_size[1])
+        )
+        self.freq_pos_embed = nn.Parameter(
+            torch.empty(1, config.embed_dim, self.patch_embed.grid_size[0], 1)
+        )
+        self.blocks = nn.ModuleList(
+            DashengBlock(
+                dim=config.embed_dim,
+                num_heads=config.num_heads,
+                mlp_ratio=config.mlp_ratio,
+                qkv_bias=config.qkv_bias,
+                init_values=config.init_values,
+                quant_config=quant_config,
+                prefix=f"{prefix}.blocks.{i}",
+            )
+            for i in range(config.depth)
+        )
+        self.norm = nn.LayerNorm(config.embed_dim, eps=1e-6)
+
+    def forward_features(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        t = x.shape[-1]
+        x = x + self.time_pos_embed[:, :, :, :t]
+        x = (
+            x + self.freq_pos_embed[:, :, :, :]
+        )  # Just to support __getitem__ in posembed
+        x = torch.permute(
+            torch.flatten(x, 2, 3), (0, 2, 1)
+        )  # rearrange(x, "b c f t -> b (f t) c")
+        for block in self.blocks:
+            x = block(x, mask)
+        x = self.norm(x)
+        return x
+
+    def _to_mask(self, lengths: torch.Tensor, max_length: int) -> torch.Tensor:
+        batch_size = len(lengths)
+        idx = torch.arange(max_length, device=lengths.device)
+        idx = idx.repeat(batch_size).view(batch_size, max_length)
+        mask = (idx < lengths.unsqueeze(-1)).bool()
+        return mask
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        x_length: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        x = self.front_end(x)
+        x = x.to(self.time_pos_embed.dtype)
+        x = x.unsqueeze(1)
+        x = torch.permute(x, (0, 2, 1, 3))
+        x = self.init_bn(x)
+        x = torch.permute(x, (0, 2, 1, 3))
+
+        if x.shape[-1] > self.target_length:
+            remainder = x.shape[-1] % self.target_length
+            if remainder != 0:
+                x = nn.functional.pad(x, (0, self.target_length - remainder), value=0)
+
+        input_splits = x.split(self.target_length, dim=-1)
+
+        mask: torch.Tensor | None = None
+        if x_length is not None:
+            assert len(x_length) == len(x), (
+                "batchsizes of input x and x_length need to be same"
+            )
+            assert x_length.ndim == 1, "Lengths are of size (B,)"
+            scaled_lengths = ((x_length + self.config.n_fft) / self.hop_length).long()
+            scaled_lengths = ((scaled_lengths - 1) // 4).long()
+            max_length = sum(
+                split.shape[-1] // self.patch_embed.patch_stride[1]
+                for split in input_splits
+            )
+            mask = self._to_mask(max_length=max_length, lengths=scaled_lengths)
+
+        outputs = []
+
+        for split_x in input_splits:
+            split_x = self.patch_embed(split_x)
+            split_x = self.forward_features(split_x, mask=None)
+            outputs.append(split_x)
+
+        x = torch.cat(outputs, dim=1)
+        if mask is not None:
+            x = x[:, : mask.shape[1], :]
+
+        return x, mask
+
+
+class AcousticFrontend(nn.Module):
+    def __init__(
+        self,
+        *,
+        sample_rate: int,
+        hop_length: int,
+        n_mels: int,
+    ):
+        super().__init__()
+        self.sample_rate = int(sample_rate)
+        self.n_fft = 1024
+        self.hop_length = int(hop_length)
+        self.n_mels = int(n_mels)
+        self.win_length = self.n_fft
+        self.center = True
+
+        spectrogram_window = torch.hann_window(self.win_length)
+        self.register_buffer(
+            "spectrogram_window",
+            spectrogram_window,
+            persistent=False,
+        )
+        self.spectrogram_window: torch.Tensor
+
+        melscale_fbanks = F.melscale_fbanks(
+            n_freqs=self.n_fft // 2 + 1,
+            f_min=0.0,
+            f_max=float(self.sample_rate) / 2.0,
+            n_mels=self.n_mels,
+            sample_rate=self.sample_rate,
+        )
+        self.register_buffer("melscale_fbanks", melscale_fbanks, persistent=False)
+        self.melscale_fbanks: torch.Tensor
+
+    def forward(self, audio: torch.Tensor) -> torch.Tensor:
+        spectrogram = F.spectrogram(
+            waveform=audio.to(torch.float32),
+            pad=0,
+            window=self.spectrogram_window,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            win_length=self.win_length,
+            power=1,
+            normalized=False,
+            center=self.center,
+        )
+        mel = (spectrogram.mT @ self.melscale_fbanks.to(torch.float32)).mT
+        return torch.log(torch.clip(mel, min=1e-7))
+
+
+class DashengTokenizerAcousticAudioTransformer(nn.Module):
+    def __init__(
+        self,
+        config: DashengTokenizerConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        del quant_config
+        del prefix
+
+        self.embed_dim = int(config.embed_dim)
+        self.hop_length = int(config.hop_length)
+        self.n_fft = int(config.n_fft)
+        self.n_mels_acoustic = int(config.n_mels_acoustic)
+
+        self.front_end = AcousticFrontend(
+            sample_rate=int(config.sample_rate),
+            hop_length=self.hop_length,
+            n_mels=self.n_mels_acoustic,
+        )
+        self.patch_embed = Conv2dLayer(
+            1,
+            self.embed_dim,
+            kernel_size=(self.n_mels_acoustic, 4),
+            stride=(self.n_mels_acoustic, 4),
+        )
+        self.norm = nn.LayerNorm(self.embed_dim)
+
+    def _to_mask(self, lengths: torch.Tensor, max_length: int) -> torch.Tensor:
+        batch_size = len(lengths)
+        idx = torch.arange(max_length, device=lengths.device)
+        idx = idx.repeat(batch_size).view(batch_size, max_length)
+        return (idx < lengths.unsqueeze(-1)).bool()
+
+    def _acoustic_lengths(self, x_length: torch.Tensor) -> torch.Tensor:
+        input_length = x_length + self.n_fft
+        return ((1 + (input_length - self.n_fft) / self.hop_length) // 4).long()
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        x_length: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        mel = self.front_end(x).unsqueeze(1)
+        mel = mel.to(self.norm.weight.dtype)
+        mel_emb = self.patch_embed(mel)
+        acoustic_emb = torch.permute(torch.flatten(mel_emb, 2, 3), (0, 2, 1))
+        acoustic_emb = self.norm(acoustic_emb)
+
+        if x_length is None:
+            return acoustic_emb, None
+
+        scaled_lengths = self._acoustic_lengths(x_length)
+        max_length = int(torch.max(scaled_lengths).item())
+        mask = self._to_mask(max_length=max_length, lengths=scaled_lengths)
+        acoustic_emb = acoustic_emb[:, :max_length, :]
+        return acoustic_emb, mask
+
+
+class DashengTokenizerAudioTransformer(nn.Module):
+    def __init__(
+        self,
+        config: DashengTokenizerConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+
+        self.model = DashengTokenizerSemanticAudioTransformer(
+            config,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+        self.embed_dim = self.model.config.embed_dim
+        self.acoustic_model = DashengTokenizerAcousticAudioTransformer(
+            config,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        x_length: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        semantic_emb, _ = self.model(x, x_length=None)
+        acoustic_emb, mask = self.acoustic_model(x, x_length=x_length)
+
+        semantic_emb = semantic_emb[:, : acoustic_emb.shape[1], :]
+        emb = semantic_emb + acoustic_emb
+        return emb, mask
+
+
 class AudioProjectorSubsample(nn.Module):
     def __init__(
         self,
@@ -653,13 +932,23 @@ class MiDashengLMMultiModalProcessor(
         if audio_length is None:
             audio_output_lengths = []
         else:
+            model_config = self.info.get_hf_config()
+            audio_encoder_config = model_config.audio_encoder_config
+            model_subsampling = model_config.subsample_factor
             audio_length_np = (
                 audio_length.cpu().numpy()
                 if isinstance(audio_length, torch.Tensor)
                 else audio_length
             )
             audio_output_lengths = [
-                max(1, calculate_mel_frames_dasheng(int(length)))  # at least one frame
+                max(
+                    1,
+                    calculate_audio_tokens_midashenglm(
+                        int(length),
+                        audio_encoder_config=audio_encoder_config,
+                        model_subsampling=model_subsampling,
+                    ),
+                )
                 for length in audio_length_np
             ]
 
@@ -713,12 +1002,33 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.config = config
         self.quant_config = quant_config
 
+        audio_encoder_model_type = getattr(
+            config.audio_encoder_config,
+            "model_type",
+            DashengConfig.model_type,
+        )
+
         with self._mark_tower_model(vllm_config, "audio"):
-            self.audio_encoder = DashengAudioTransformer(
-                config.audio_encoder_config,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "audio_encoder"),
-            )
+            if audio_encoder_model_type == DashengTokenizerConfig.model_type:
+                self.audio_encoder = DashengTokenizerAudioTransformer(
+                    config.audio_encoder_config,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "audio_encoder"),
+                )
+            elif audio_encoder_model_type == DashengConfig.model_type:
+                self.audio_encoder = DashengAudioTransformer(
+                    config.audio_encoder_config,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "audio_encoder"),
+                )
+            else:
+                raise ValueError(
+                    "Unsupported audio encoder model_type "
+                    f"{audio_encoder_model_type!r}. "
+                    f"Expected one of: {DashengConfig.model_type!r}, "
+                    f"{DashengTokenizerConfig.model_type!r}."
+                )
+
             self.audio_projector = AudioProjectorSubsample(
                 in_dim=config.audio_encoder_config.embed_dim,
                 out_dim=config.text_config.hidden_size,
@@ -765,20 +1075,36 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
         # Process audio through encoder and projector
         input_values = audio_input["input_values"]
         audio_length = audio_input["audio_length"]
+        if audio_length is None:
+            raise ValueError("audio_length is required when input_values is provided.")
 
         encoder_out, encoder_atts = self.audio_encoder(input_values, audio_length)
-        audio_embeddings, _ = self.audio_projector(encoder_out, encoder_atts)
+        audio_embeddings, projector_mask = self.audio_projector(
+            encoder_out,
+            encoder_atts,
+        )
         audio_embeddings = audio_embeddings.to(audio_input["input_values"].dtype)
         batch_size, max_audio_tokens, embed_dim = audio_embeddings.shape
 
-        audio_output_lengths = [
-            max(1, calculate_mel_frames_dasheng(int(length)))  # at least one frame
-            for length in audio_length.tolist()
-        ]
-        audio_output_lengths = torch.tensor(
-            audio_output_lengths,
-            device=audio_embeddings.device,
-        )
+        if projector_mask is not None:
+            audio_output_lengths = projector_mask.sum(dim=-1).to(dtype=torch.long)
+        else:
+            audio_output_lengths_list = [
+                max(
+                    1,
+                    calculate_audio_tokens_midashenglm(
+                        int(length),
+                        audio_encoder_config=self.config.audio_encoder_config,
+                        model_subsampling=self.config.subsample_factor,
+                    ),
+                )
+                for length in audio_length.tolist()
+            ]
+            audio_output_lengths = torch.tensor(
+                audio_output_lengths_list,
+                device=audio_embeddings.device,
+            )
+        audio_output_lengths = audio_output_lengths.clamp_max(max_audio_tokens)
 
         audio_feature_mask = torch.arange(
             max_audio_tokens, device=audio_embeddings.device

@@ -80,6 +80,18 @@ class DashengConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
 
+class DashengTokenizerConfig(DashengConfig):
+    model_type = "midashenglm_dasheng_tokenizer_encoder"
+
+    def __init__(
+        self,
+        n_mels_acoustic: int = 100,
+        **kwargs,
+    ):
+        self.n_mels_acoustic = n_mels_acoustic
+        super().__init__(**kwargs)
+
+
 class MiDashengLMConfig(PretrainedConfig):
     model_type = "midashenglm"
 
@@ -91,7 +103,29 @@ class MiDashengLMConfig(PretrainedConfig):
         audio_token_id: int | None = None,
         **kwargs,
     ):
-        self.audio_encoder_config = DashengConfig(**(audio_encoder_config or {}))
+        audio_encoder_config = dict(audio_encoder_config or {})
+        audio_encoder_model_type = audio_encoder_config.pop(
+            "model_type", DashengConfig.model_type
+        )
+
+        if audio_encoder_model_type == DashengTokenizerConfig.model_type:
+            self.audio_encoder_config = DashengTokenizerConfig(
+                model_type=audio_encoder_model_type,
+                **audio_encoder_config,
+            )
+        elif audio_encoder_model_type == DashengConfig.model_type:
+            self.audio_encoder_config = DashengConfig(
+                model_type=audio_encoder_model_type,
+                **audio_encoder_config,
+            )
+        else:
+            raise ValueError(
+                "Unsupported audio encoder model_type "
+                f"{audio_encoder_model_type!r}. "
+                f"Expected one of: {DashengConfig.model_type!r}, "
+                f"{DashengTokenizerConfig.model_type!r}."
+            )
+
         self.subsample_factor = subsample_factor
         text_model_type = (
             text_config.pop("model_type", None) if text_config is not None else None
