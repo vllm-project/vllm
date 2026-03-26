@@ -70,7 +70,6 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
 
 def select_unquantized_moe_backend(
     moe_config: FusedMoEConfig,
-    use_ep: bool,
     use_dp: bool,
 ) -> UnquantizedMoeBackend:
     """
@@ -96,7 +95,6 @@ def select_unquantized_moe_backend(
     # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
     flashinfer_cutlass_available = (
         has_flashinfer_cutlass_fused_moe()
-        and use_ep
         and (not use_dp)
         and current_platform.has_device_capability(90)
     )
@@ -161,7 +159,7 @@ def select_unquantized_moe_backend(
                     "to enable it for better performance.",
                     scope="local",
                 )
-            elif use_ep and (not use_dp):
+            elif (not use_dp):
                 logger.info_once(
                     "FlashInfer MoE is available for EP"
                     " but not enabled, consider setting"
