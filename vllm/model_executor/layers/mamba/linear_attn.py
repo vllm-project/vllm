@@ -34,9 +34,8 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 
+@CustomOp.register("MiniMaxText01RMSNormTP")
 class MiniMaxText01RMSNormTP(CustomOp):
-    name = "MiniMaxText01RMSNormTP"
-
     def __init__(
         self,
         hidden_size: int,
@@ -53,9 +52,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
             self.tp_rank if weight_shard_rank is None else weight_shard_rank
         )
 
-        self.weight = nn.Parameter(
-            torch.ones(hidden_size // self.weight_shard_world)
-        )
+        self.weight = nn.Parameter(torch.ones(hidden_size // self.weight_shard_world))
         self.weight.weight_loader = partial(
             self.weight_loader,
             shard_world_size=self.weight_shard_world,
