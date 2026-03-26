@@ -275,7 +275,7 @@ def assert_verification_synced(local_ok: bool, msg: str) -> None:
     assert bool(ok_tensor.item()), msg
 
 
-def create_eplb_communicator_or_skip(*, group_coordinator, backend, expert_weights):
+def create_eplb_communicator_or_raise(*, group_coordinator, backend, expert_weights):
     try:
         return create_eplb_communicator(
             group_coordinator=group_coordinator,
@@ -350,7 +350,7 @@ def _test_async_transfer_layer_without_mtp_worker(
         expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
         cuda_stream = torch.cuda.Stream(device=device)
 
-        communicator = create_eplb_communicator_or_skip(
+        communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
             backend=eplb_communicator,
             expert_weights=expert_weights[0],
@@ -462,7 +462,7 @@ def _test_rearrange_expert_weights_with_redundancy(
             num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
         )
 
-        communicator = create_eplb_communicator_or_skip(
+        communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
             backend=eplb_communicator,
             expert_weights=expert_weights[0],
@@ -591,7 +591,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
                 layer_copy.append(weight.clone())
             original_weights.append(layer_copy)
 
-        communicator = create_eplb_communicator_or_skip(
+        communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
             backend="torch_nccl",
             expert_weights=expert_weights[0],
@@ -720,7 +720,7 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
                 layer_copy.append(weight.clone())
             original_weights.append(layer_copy)
 
-        communicator = create_eplb_communicator_or_skip(
+        communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
             backend="torch_nccl",
             expert_weights=expert_weights[0],

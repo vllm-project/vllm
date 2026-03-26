@@ -116,54 +116,53 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
         if not self._ops:
             return
 
-        try:
-            p2p_ops: list[P2POp] = []
-            recv_staging: list[tuple[torch.Tensor, torch.Tensor]] = []
+        p2p_ops: list[P2POp] = []
+        recv_staging: list[tuple[torch.Tensor, torch.Tensor]] = []
 
-            def build_ops() -> None:
-                for op, tensor, peer_rank in self._ops:
-                    if op == "send":
-                        cpu_tensor = tensor.to(device="cpu", non_blocking=True)
-                        p2p_ops.append(
-                            P2POp(
-                                torch.distributed.isend,
-                                cpu_tensor,
-                                peer_rank,
-                                self._cpu_group,
-                            )
-                        )
-                        continue
-                    cpu_tensor = torch.empty_like(tensor, device="cpu")
+        def build_ops() -> None:
+            for op, tensor, peer_rank in self._ops:
+                if op == "send":
+                    cpu_tensor = tensor.to(device="cpu", non_blocking=True)
                     p2p_ops.append(
                         P2POp(
-                            torch.distributed.irecv,
+                            torch.distributed.isend,
                             cpu_tensor,
                             peer_rank,
                             self._cpu_group,
                         )
                     )
-                    recv_staging.append((tensor, cpu_tensor))
+                    continue
+                cpu_tensor = torch.empty_like(tensor, device="cpu")
+                p2p_ops.append(
+                    P2POp(
+                        torch.distributed.irecv,
+                        cpu_tensor,
+                        peer_rank,
+                        self._cpu_group,
+                    )
+                )
+                recv_staging.append((tensor, cpu_tensor))
 
+        try:
             with torch.cuda.stream(self._cuda_stream):
                 build_ops()
-            if self._cuda_stream is not None:
-                self._cuda_stream.synchronize()
-            else:
-                torch.cuda.current_stream().synchronize()
-
-            reqs = batch_isend_irecv(p2p_ops)
-            for req in reqs:
-                req.wait()
-
-            if not recv_staging:
-                return
-            with torch.cuda.stream(self._cuda_stream):
-                for dst_tensor, cpu_tensor in recv_staging:
-                    dst_tensor.copy_(
-                        cpu_tensor, non_blocking=self._cuda_stream is not None
-                    )
         finally:
             self._ops.clear()
+
+        if self._cuda_stream is not None:
+            self._cuda_stream.synchronize()
+        else:
+            torch.cuda.current_stream().synchronize()
+
+        reqs = batch_isend_irecv(p2p_ops)
+        for req in reqs:
+            req.wait()
+
+        if not recv_staging:
+            return
+        with torch.cuda.stream(self._cuda_stream):
+            for dst_tensor, cpu_tensor in recv_staging:
+                dst_tensor.copy_(cpu_tensor, non_blocking=True)
 
 
 class PyNcclEplbCommunicator(EplbCommunicator):
@@ -252,9 +251,11 @@ def create_eplb_communicator(
 
     is_stateless = isinstance(group_coordinator, StatelessGroupCoordinator)
     if is_stateless:
-        assert backend in ("torch_nccl", "pynccl"), (
-            f"Elastic EP requires NCCL/PyNCCL backend (got backend={backend})."
-        )
+        if backend not in ("torch_nccl", "pynccl"):
+            raise ValueError(
+                f"Elastic EP requires 'torch_nccl' or 'pynccl' EPLB communicator "
+                f"(got '{backend}'). torch_gloo is not supported with stateless groups."
+            )
         if backend == "torch_nccl":
             logger.warning(
                 "Stateless elastic EP requires PyNCCL backend. "

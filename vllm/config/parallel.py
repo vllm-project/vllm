@@ -770,9 +770,17 @@ class ParallelConfig:
             )
 
         if self.enable_eplb and self.eplb_config.communicator is None:
-            self.eplb_config.communicator = (
-                "torch_gloo" if self.eplb_config.use_async else "torch_nccl"
-            )
+            if self.enable_elastic_ep:
+                # Elastic EP requires stateless mode
+                # (torch.distributed.batch_isend_irecv doesn't
+                # support stateless mode), so we use PyNCCL backend
+                self.eplb_config.communicator = "pynccl"
+            elif self.eplb_config.use_async:
+                # Torch Gloo is a backend that allows avoiding hangs
+                # due to NCCL multi-thread conflicts in async EPLB
+                self.eplb_config.communicator = "torch_gloo"
+            else:
+                self.eplb_config.communicator = "torch_nccl"
 
     @property
     def use_ray(self) -> bool:
