@@ -32,6 +32,7 @@ from openai.types.responses import (
     ResponseTextDoneEvent,
     response_text_delta_event,
 )
+from openai.types.responses.response import ResponseError
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
@@ -86,6 +87,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     OutputTokensDetails,
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseFailedEvent,
     ResponseInProgressEvent,
     ResponseInputOutputItem,
     ResponseInputOutputMessage,
@@ -496,6 +498,47 @@ class OpenAIServingResponses(OpenAIServing):
         if request.store:
             self.msg_store[request.request_id] = messages
 
+        try:
+            return await self._create_response_with_result_generator(
+                request,
+                result_generator,
+                sampling_params=sampling_params,
+                context=context,
+                model_name=model_name,
+                tokenizer=tokenizer,
+                request_metadata=request_metadata,
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to create response for request %s", request.request_id
+            )
+            created_time = int(time.time())
+            failed_response = ResponsesResponse.from_request(
+                request,
+                sampling_params,
+                model_name=model_name,
+                created_time=created_time,
+                output=[],
+                status="failed",
+                usage=None,
+                error=ResponseError(
+                    code="server_error",
+                    message=str(e),
+                ),
+            )
+            return failed_response
+
+    async def _create_response_with_result_generator(
+        self,
+        request: ResponsesRequest,
+        result_generator: AsyncGenerator[ConversationContext, None],
+        *,
+        sampling_params: SamplingParams,
+        context: ConversationContext,
+        model_name: str,
+        tokenizer: Any,
+        request_metadata: RequestResponseMetadata,
+    ) -> AsyncGenerator[StreamingResponsesResponse, None] | ResponsesResponse:
         if request.background:
             created_time = int(time.time())
             response = ResponsesResponse.from_request(
