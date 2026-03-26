@@ -543,6 +543,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     # ==============================
     # Scheduler-side methods
     # ==============================
+    def get_timed_out_loads(self) -> set[str]:
+        """Aggregate timed-out loads from all child connectors."""
+        result: set[str] = set()
+        for c in self._connectors:
+            if hasattr(c, "get_timed_out_loads"):
+                result.update(c.get_timed_out_loads())
+        return result
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",

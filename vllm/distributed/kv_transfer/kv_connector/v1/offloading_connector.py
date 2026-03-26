@@ -140,6 +140,12 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished(finished_req_ids)
 
+    def get_timed_out_loads(self) -> set[str]:
+        """Return req IDs whose loads exceeded the timeout."""
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_timed_out_loads()
+        return set()
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:

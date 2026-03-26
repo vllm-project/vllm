@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections import defaultdict
 from collections.abc import Iterable
 from itertools import islice
@@ -82,6 +83,14 @@ class OffloadingConnectorScheduler:
         # across scheduler steps so RequestBlockHashList lazily caches computed
         # group-level hashes instead of recomputing them from scratch each step.
         self._hybrid_hash_lists: dict[ReqId, HybridChunkBlockHashList] = {}
+
+        # Load timeout: if a load takes longer than this, cancel it and
+        # fall back to recompute.  Prevents requests from stalling
+        # indefinitely on slow NFS or hung storage.
+        self._load_timeout_seconds = float(
+            spec.extra_config.get("load_timeout_seconds", 30.0)
+        )
+        self._load_start_times: dict[ReqId, float] = {}
 
     def _chunk_prefix_tokens(self, chunk_count: int) -> int:
         if not self.hybrid_offload_enabled:
@@ -384,6 +393,7 @@ class OffloadingConnectorScheduler:
         self._reqs_to_load[request.request_id] = (src_spec, dst_spec)
         req_blocks_being_loaded = self._reqs_being_loaded[request.request_id]
         req_blocks_being_loaded.update(block_hashes)
+        self._load_start_times[request.request_id] = time.monotonic()
         self._next_stored_block_idx[request.request_id] = num_blocks
 
         if self._blocks_being_loaded is not None:
@@ -531,6 +541,40 @@ class OffloadingConnectorScheduler:
 
         return reqs_to_store
 
+    def get_timed_out_loads(self) -> set[ReqId]:
+        """Return request IDs whose loads have exceeded the timeout.
+
+        Timed-out loads are removed from ``_reqs_being_loaded`` and
+        their block hashes are released, so the scheduler can treat
+        them as failed and fall back to recompute.
+        """
+        if not self._load_start_times:
+            return set()
+
+        now = time.monotonic()
+        timed_out: set[ReqId] = set()
+        for req_id, start in list(self._load_start_times.items()):
+            if now - start > self._load_timeout_seconds:
+                elapsed = now - start
+                logger.warning(
+                    "Load timeout: req_id=%s exceeded %.0fs "
+                    "(elapsed %.1fs). Falling back to recompute.",
+                    req_id,
+                    self._load_timeout_seconds,
+                    elapsed,
+                )
+                timed_out.add(req_id)
+                self._load_start_times.pop(req_id)
+                block_hashes = self._reqs_being_loaded.pop(
+                    req_id, None
+                )
+                if block_hashes and self._blocks_being_loaded:
+                    self._blocks_being_loaded.difference_update(
+                        block_hashes
+                    )
+
+        return timed_out
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
@@ -565,6 +609,7 @@ class OffloadingConnectorScheduler:
                 self.manager.complete_store(block_hashes)
 
         for req_id in connector_output.finished_recving or []:
+            self._load_start_times.pop(req_id, None)
             block_hashes = self._reqs_being_loaded.pop(req_id, None)
             if block_hashes:
                 if self._blocks_being_loaded:
@@ -590,6 +635,7 @@ class OffloadingConnectorScheduler:
         self._requests.pop(req_id, None)
         self._request_block_ids.pop(req_id, None)
         self._hybrid_hash_lists.pop(req_id, None)
+        self._load_start_times.pop(req_id, None)
 
         # TODO(orozery): possibly kickoff offload for last block
         # which may have been deferred due to async scheduling
