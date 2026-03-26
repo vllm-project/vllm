@@ -338,17 +338,24 @@ class Scheduler(SchedulerInterface):
             # Marconi cache admission optimization:
             # Create cache entries at divergence points of common prefixes.
             # 
-            # Implementation:
-            # If mamba cache "lags" behind the KVCache hits for >= block_size,
-            # there is a common shared prefix that wasn't cached.
-            if mamba_tokens_lag >= block_size:
-                # If num_new_tokens is longer than lag, 
-                # the prefix normally still wouldn't be cached
-                if num_new_tokens > mamba_tokens_lag:
-                    # So we force caching at mamba_tokens_lag
-                    num_new_tokens = mamba_tokens_lag
-                    assert mamba_tokens_lag % block_size == 0 #TODO?
-                    #num_new_tokens = num_new_tokens // block_size * block_size
+            # Implementation:            
+            # If uncached common prefix (mamba_tokens_lag) is long enough            
+            # to justify its caching ( >= block_size) 
+            #   AND
+            # currently scheduled token count is longer than the common prefix
+            if mamba_tokens_lag >= block_size and \
+                num_new_tokens > mamba_tokens_lag:
+                # Then force to cache at the end of the common prefix
+                # by limiting the num_new_tokens to the length of that prefix:
+                num_new_tokens = mamba_tokens_lag
+                # This should be still block aligned as:
+                #  - token hit counts are block aligned
+                #  - thus mamba_tokens_lag is block aligned
+                #  - attention and mamba block sizes are equal
+                # Optionally, we can verify this:
+                assert mamba_tokens_lag % block_size == 0
+                # Or force block re-alignment:
+                # num_new_tokens = num_new_tokens // block_size * block_size
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
@@ -627,12 +634,15 @@ class Scheduler(SchedulerInterface):
                     if self.has_mamba_layers:
                         # HybridKVCacheCoordinator returns the longest hit:
                         longest_hit_length = num_new_local_computed_tokens
-                        # Obtain the shortest cached prefix from the blocks:
-                        num_new_local_computed_tokens = \
+                        # HybridKVCacheCoordinator returns the blocks of
+                        # the common hit, from which we obtain the hit length:
+                        common_hit_length = \
                             len(new_computed_blocks.blocks[0]) * self.block_size
-                        # Mamba tokens "lag" - how far it's behind longest hit:
+                        # How many tokens mamba cache is behind the longest hit:
                         mamba_tokens_lag = \
-                            longest_hit_length - num_new_local_computed_tokens
+                            longest_hit_length - common_hit_length                        
+                        # Resume default scheduler logic based on the common hit
+                        num_new_local_computed_tokens = common_hit_length
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
