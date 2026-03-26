@@ -500,7 +500,7 @@ else
   # Detect the actual GPU architecture on the host so that runtime JIT
   # compilation (e.g. Quark kernels) only targets the present hardware
   # instead of every architecture baked into the Docker image.
-  RUNTIME_ROCM_ARCH=$(/opt/rocm/bin/rocm_agent_enumerator 2>/dev/null | grep -v 'gfx000' | sort -u | paste -sd ';')
+  RUNTIME_ROCM_ARCH=$(/opt/rocm/bin/rocm_agent_enumerator 2>/dev/null | (grep -v 'gfx000' || true) | sort -u | paste -sd ';')
   if [[ -n "$RUNTIME_ROCM_ARCH" ]]; then
     echo "Detected runtime GPU architecture: $RUNTIME_ROCM_ARCH"
   else
