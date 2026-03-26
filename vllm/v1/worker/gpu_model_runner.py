@@ -6394,6 +6394,7 @@ class GPUModelRunner(
                 kv_cache_spec.head_size,
                 cache_dtype_str=self.cache_config.cache_dtype,
             )
+            # block_dim: 0 means (num_blocks, 2, ...); 1 means (2, num_blocks, ...).
             if block_dim == 0:
                 continue
             assert block_dim == 1
