@@ -35,14 +35,16 @@ def _physical_head_range(tp_size: int, num_heads: int, rank: int) -> range:
     """Physical KV head range stored in a rank's KV cache tensor.
 
     When ``tp_size <= num_heads``: sharded, K/TP contiguous heads per rank.
-    When ``tp_size > num_heads``: 1 physical head per rank, ``rank % K``.
+    When ``tp_size > num_heads``: 1 physical head per rank.  Heads are
+    distributed **contiguously** (matching vLLM's GQA weight partitioning):
+    consecutive ranks share a head before moving to the next one.
     """
     if tp_size <= num_heads:
         assert num_heads % tp_size == 0
         per_rank = num_heads // tp_size
         return range(rank * per_rank, (rank + 1) * per_rank)
     else:
-        h = rank % num_heads
+        h = rank * num_heads // tp_size
         return range(h, h + 1)
 
 

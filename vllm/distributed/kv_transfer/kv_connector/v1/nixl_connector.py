@@ -2140,6 +2140,29 @@ class NixlConnectorWorker:
                     handle = self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
                     self.src_xfer_handles_by_tp_ratio[tp_ratio].append(handle)
 
+                    if p_idx < 4:
+                        fa_samples = [(h[0], h[1]) for h in handle_data[:3]]
+                        mamba_start = self.num_descs
+                        mamba_samples = [
+                            (h[0], h[1])
+                            for h in handle_data[mamba_start : mamba_start + 3]
+                        ]
+                        logger.info(
+                            "DBG local handle p_idx=%d p_rank=%d: "
+                            "skip_fa=%s fa_slot=%d "
+                            "fa_samples(addr,len)=%s "
+                            "mamba_samples(addr,len)=%s "
+                            "total_entries=%d num_descs=%d",
+                            p_idx,
+                            p_rank,
+                            _skip,
+                            fa_slot,
+                            fa_samples,
+                            mamba_samples,
+                            len(handle_data),
+                            self.num_descs,
+                        )
+
                 logger.info(
                     "HMA split handles: targets=%s, fa_reads=%s, "
                     "fa_entry=%s, mamba_reads=%s, num_descs=%s",
@@ -2148,6 +2171,21 @@ class NixlConnectorWorker:
                     cfg.fa_entry_size,
                     cfg.mamba_num_reads,
                     self.num_descs,
+                )
+                fa_lens = set()
+                mamba_lens = set()
+                for j, (_, length, _) in enumerate(self.src_blocks_data):
+                    if j < self.num_descs:
+                        fa_lens.add(length)
+                    else:
+                        mamba_lens.add(length)
+                logger.info(
+                    "DBG src_blocks_data: total=%d, num_descs(FA)=%d, "
+                    "FA unique lens=%s, mamba unique lens=%s",
+                    len(self.src_blocks_data),
+                    self.num_descs,
+                    sorted(fa_lens),
+                    sorted(mamba_lens),
                 )
             else:
                 # ---- Original path: uniform divide by abs_tp ----
@@ -2252,6 +2290,25 @@ class NixlConnectorWorker:
                 remote_tp_rank,
                 self.tp_rank,
             )
+            if blocks_data:
+                logger.info(
+                    "DBG register_remote_blocks(mamba=%s): "
+                    "local_block_len=%s rank_offset=%s "
+                    "indexes_into_remote=%s "
+                    "first_desc(addr_off,len)=(%s,%s) "
+                    "total=%d tp_ratio=%d remote_rank=%d",
+                    mamba,
+                    local_block_len if "local_block_len" in dir() else "?",
+                    rank_offset if "rank_offset" in dir() else "?",
+                    indexes_into_remote,
+                    blocks_data[0][0] - nixl_agent_meta.kv_caches_base_addr[0]
+                    if nixl_agent_meta.kv_caches_base_addr
+                    else "?",
+                    blocks_data[0][1],
+                    len(blocks_data),
+                    tp_ratio,
+                    remote_tp_rank,
+                )
 
         # NOTE (ZhanqiuHu): same as above - mamba=True path in
         # register_remote_blocks is unused; _register_mamba_remote handles it.
@@ -2817,6 +2874,22 @@ class NixlConnectorWorker:
             # contribute mamba data.  Empty FA groups so NIXL skips them.
             hma_cfg = self._transfer_configs.get(meta.remote.engine_id)
             skip_fa = should_skip_fa(hma_cfg, remote_rank)
+            if i == 0 or skip_fa:
+                grp_lens = [len(g) for g in meta.local_physical_block_ids]
+                logger.info(
+                    "DBG _read_blocks_for_req: i=%d remote_rank=%d "
+                    "skip_fa=%s handle_idx=%d "
+                    "local_grp_lens=%s remote_grp_lens=%s "
+                    "is_mamba_groups=%s tp_ratio=%d",
+                    i,
+                    remote_rank,
+                    skip_fa,
+                    i,
+                    grp_lens,
+                    [len(g) for g in meta.remote.block_ids],
+                    self._is_mamba_group,
+                    tp_ratio,
+                )
             if skip_fa:
                 num_groups = len(meta.local_physical_block_ids)
                 local_ids: BlockIds = [

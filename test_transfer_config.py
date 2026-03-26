@@ -100,18 +100,37 @@ def test_config(
     return cfg
 
 
+def assert_eq(label, actual, expected):
+    if actual != expected:
+        raise AssertionError(f"{label}: got {actual}, expected {expected}")
+
+
 print("Nemotron-Nano-30B parameters: K=2, head_dim=128, page_size=16, dtype=bf16")
 print("  D block_len=8192 (2 heads), P block_len=4096 (1 head) when P_TP≥K")
 
 # 2p1d: D_TP=1, P_TP=2  (the known-good baseline)
-test_config("2p1d", d_tp=1, p_tp=2, d_rank=0, d_block_len=8192, p_block_len=4096)
+c = test_config("2p1d", d_tp=1, p_tp=2, d_rank=0, d_block_len=8192, p_block_len=4096)
+assert_eq("2p1d fa_read_targets", c.fa_read_targets, [0, 1])
+assert_eq("2p1d transfer_targets", c.transfer_targets, [0, 1])
 
 # 4p1d: D_TP=1, P_TP=4  (the main bug target)
-test_config("4p1d", d_tp=1, p_tp=4, d_rank=0, d_block_len=8192, p_block_len=4096)
+c = test_config("4p1d", d_tp=1, p_tp=4, d_rank=0, d_block_len=8192, p_block_len=4096)
+assert_eq("4p1d fa_read_targets", c.fa_read_targets, [0, 2])
+assert_eq("4p1d transfer_targets", c.transfer_targets, [0, 1, 2, 3])
+assert_eq("4p1d skip_fa rank0", c.should_skip_fa(0), False)
+assert_eq("4p1d skip_fa rank1", c.should_skip_fa(1), True)
+assert_eq("4p1d skip_fa rank2", c.should_skip_fa(2), False)
+assert_eq("4p1d skip_fa rank3", c.should_skip_fa(3), True)
+assert_eq("4p1d fa_slot rank0", c.fa_head_slot(0), 0)
+assert_eq("4p1d fa_slot rank2", c.fa_head_slot(2), 1)
 
 # 4p2d: D_TP=2, P_TP=4
-test_config("4p2d", d_tp=2, p_tp=4, d_rank=0, d_block_len=4096, p_block_len=4096)
-test_config("4p2d", d_tp=2, p_tp=4, d_rank=1, d_block_len=4096, p_block_len=4096)
+c0 = test_config("4p2d", d_tp=2, p_tp=4, d_rank=0, d_block_len=4096, p_block_len=4096)
+assert_eq("4p2d d0 fa_read_targets", c0.fa_read_targets, [0])
+assert_eq("4p2d d0 transfer_targets", c0.transfer_targets, [0, 1])
+c1 = test_config("4p2d", d_tp=2, p_tp=4, d_rank=1, d_block_len=4096, p_block_len=4096)
+assert_eq("4p2d d1 fa_read_targets", c1.fa_read_targets, [2])
+assert_eq("4p2d d1 transfer_targets", c1.transfer_targets, [2, 3])
 
 # 1p4d: D_TP=4, P_TP=1  (tp_ratio > 0)
 test_config("1p4d", d_tp=4, p_tp=1, d_rank=0, d_block_len=4096, p_block_len=8192)
@@ -119,12 +138,24 @@ test_config("1p4d", d_tp=4, p_tp=1, d_rank=1, d_block_len=4096, p_block_len=8192
 
 # 1p1d: D_TP=1, P_TP=1  (trivial)
 test_config(
-    "1p1d", d_tp=1, p_tp=1, d_rank=0, tp_ratio=0, d_block_len=8192, p_block_len=8192
+    "1p1d",
+    d_tp=1,
+    p_tp=1,
+    d_rank=0,
+    tp_ratio=0,
+    d_block_len=8192,
+    p_block_len=8192,
 )
 
 # 2p2d: D_TP=2, P_TP=2  (equal TP)
 test_config(
-    "2p2d", d_tp=2, p_tp=2, d_rank=0, tp_ratio=0, d_block_len=4096, p_block_len=4096
+    "2p2d",
+    d_tp=2,
+    p_tp=2,
+    d_rank=0,
+    tp_ratio=0,
+    d_block_len=4096,
+    p_block_len=4096,
 )
 
-print("\n\nDone. Check for any MISMATCH above.")
+print("\n\nAll assertions passed. Done.")
