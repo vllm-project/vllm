@@ -1126,8 +1126,8 @@ def _test_body_eplb(
     )
 
     # Necessary?
-    if moe_layer._expert_map is not None:
-        moe_layer._expert_map = moe_layer._expert_map.to(device)
+    # if moe_layer._expert_map is not None:
+    #    moe_layer._expert_map = moe_layer._expert_map.to(device)
 
     # All ranks must generate the same permutation
     initial_indices = torch.arange(num_experts, dtype=torch.long)
@@ -1303,8 +1303,8 @@ def _run_one_config(
             )
 
             # Necessary?
-            if moe_layer._expert_map is not None:
-                moe_layer._expert_map = moe_layer._expert_map.to(device)
+            # if moe_layer._expert_map is not None:
+            #    moe_layer._expert_map = moe_layer._expert_map.to(device)
 
             num_tokens = m
             num_tokens_across_dp = torch.tensor(
