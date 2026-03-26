@@ -403,12 +403,26 @@ class INCConfig(QuantizationConfig):
         return None
 
     def apply_ipex_quant_layer(self, layer, prefix: str):
+        if prefix and self.extra_config:
+            for layer_name in self.extra_config:
+                if (
+                    layer_name == prefix or layer_name == f"model.{prefix}"
+                ) and self.extra_config[layer_name].get("bits", 16) >= 16:
+                    return UnquantizedLinearMethod()
+
         weight_bits, group_size, sym = self.get_layer_config(layer, prefix)
+
         if not self.check_quantized(weight_bits):
             if isinstance(layer, (LinearBase, ParallelLMHead)):
                 return UnquantizedLinearMethod()
             else:
                 return None
+
+        is_gptq_packed = "gptq" in self.packing_format.lower() or "gptq" in self.backend.lower()
+        if current_platform.is_cpu() and weight_bits == 4 and is_gptq_packed:
+            logger.debug(f"Routing AutoRound INT4 layer '{prefix}' to CPU GPTQ kernel.")
+            return self.apply_gptq_quant_layer(layer, prefix)
+
         raise NotImplementedError(
             "INC quantization is not supported during xpu kernel migration."
         )
