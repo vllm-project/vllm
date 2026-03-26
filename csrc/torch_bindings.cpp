@@ -6,6 +6,28 @@
 #include <torch/library.h>
 #include <torch/version.h>
 
+// Forward declarations for per-SM NVFP4 GEMM and quantization entry points.
+// Defined in nvfp4_scaled_mm_kernels.cu / nvfp4_quant_entry.cu and only
+// compiled when ENABLE_NVFP4_SM100 is set.
+#if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
+void cutlass_scaled_fp4_mm_sm100a(torch::Tensor& D, torch::Tensor const& A,
+                                  torch::Tensor const& B,
+                                  torch::Tensor const& A_sf,
+                                  torch::Tensor const& B_sf,
+                                  torch::Tensor const& alpha);
+void cutlass_scaled_fp4_mm_sm103a(torch::Tensor& D, torch::Tensor const& A,
+                                  torch::Tensor const& B,
+                                  torch::Tensor const& A_sf,
+                                  torch::Tensor const& B_sf,
+                                  torch::Tensor const& alpha);
+std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_sm103a_func(
+    torch::Tensor const& input, torch::Tensor const& input_sf);
+void scaled_fp4_quant_sm103a_out(torch::Tensor const& input,
+                                 torch::Tensor const& input_sf,
+                                 torch::Tensor& output,
+                                 torch::Tensor& output_sf);
+#endif
+
 // Note on op signatures:
 // The X_meta signatures are for the meta functions corresponding to op X.
 // They must be kept in sync with the signature for X. Generally, only
@@ -416,6 +438,38 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                      Tensor alpha) -> ()");
   ops.impl("cutlass_scaled_fp4_mm", torch::kCUDA, &cutlass_scaled_fp4_mm);
 
+#if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
+  // SM100-specific entry point (B200 / Blackwell, SM100 SF layout)
+  ops.def(
+      "cutlass_scaled_fp4_mm_sm100a(Tensor! out, Tensor a, Tensor b,"
+      "                             Tensor block_scale_a, Tensor block_scale_b,"
+      "                             Tensor alpha) -> ()");
+  ops.impl("cutlass_scaled_fp4_mm_sm100a", torch::kCUDA,
+           &cutlass_scaled_fp4_mm_sm100a);
+
+  // SM103-specific entry point (B300 / Blackwell Ultra, SM103 SF layout)
+  ops.def(
+      "cutlass_scaled_fp4_mm_sm103a(Tensor! out, Tensor a, Tensor b,"
+      "                             Tensor block_scale_a, Tensor block_scale_b,"
+      "                             Tensor alpha) -> ()");
+  ops.impl("cutlass_scaled_fp4_mm_sm103a", torch::kCUDA,
+           &cutlass_scaled_fp4_mm_sm103a);
+
+  // SM103-native quantization: produces SM103-layout scale factors directly.
+  ops.def(
+      "scaled_fp4_quant_sm103(Tensor input,"
+      "                       Tensor input_scale) -> (Tensor, Tensor)");
+  ops.impl("scaled_fp4_quant_sm103", torch::kCUDA, &scaled_fp4_quant_sm103a_func);
+
+  ops.def(
+      "scaled_fp4_quant_sm103.out(Tensor input,"
+      "                           Tensor input_scale,"
+      "                           *, Tensor(a!) output, Tensor(b!) output_scale)"
+      " -> ()");
+  ops.impl("scaled_fp4_quant_sm103.out", torch::kCUDA,
+           &scaled_fp4_quant_sm103a_out);
+#endif
+
   // cutlass nvfp4 block scaled group GEMM
   ops.def(
       "cutlass_fp4_group_mm(Tensor! out, Tensor a, Tensor b,"
@@ -572,6 +626,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor output_scale_offset_by_experts) -> ()");
   ops.impl("silu_and_mul_scaled_fp4_experts_quant", torch::kCUDA,
            &silu_and_mul_scaled_fp4_experts_quant);
+
+  // SM100 <-> SM103 scale factor layout conversion (B300 / Blackwell Ultra)
+  ops.def(
+      "convert_sf_layout_sm100_to_sm103(Tensor(a!) dst, Tensor src) -> ()");
+  ops.impl("convert_sf_layout_sm100_to_sm103", torch::kCUDA,
+           &convert_sf_layout_sm100_to_sm103);
+  ops.def(
+      "convert_sf_layout_sm103_to_sm100(Tensor(a!) dst, Tensor src) -> ()");
+  ops.impl("convert_sf_layout_sm103_to_sm100", torch::kCUDA,
+           &convert_sf_layout_sm103_to_sm100);
 
   // Check if cutlass_scaled_mm_fp4 is supported for CUDA devices
   // of the given capability

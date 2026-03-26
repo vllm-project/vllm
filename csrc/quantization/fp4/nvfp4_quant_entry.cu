@@ -27,6 +27,13 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
                              bool is_sf_swizzled_layout);
 #endif
 
+#if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
+void scaled_fp4_quant_sm103a(torch::Tensor const& output,
+                             torch::Tensor const& input,
+                             torch::Tensor const& output_sf,
+                             torch::Tensor const& input_sf);
+#endif
+
 #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
     (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
 void scaled_fp4_experts_quant_sm1xxa(
@@ -131,4 +138,40 @@ void silu_and_mul_scaled_fp4_experts_quant(
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(
       false, "No compiled silu_and_mul nvfp4 experts quantization kernel");
+}
+
+// SM103-native quantization: writes SM103-layout scale factors directly,
+// eliminating the SM100->SM103 conversion step on the critical path.
+std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_sm103a_func(
+    torch::Tensor const& input, torch::Tensor const& input_sf) {
+  int64_t n = input.size(-1);
+  int64_t m = input.numel() / n;
+  auto device = input.device();
+
+  auto output = torch::empty(
+      {m, n / 2}, torch::TensorOptions().device(device).dtype(torch::kUInt8));
+
+  auto [sf_m, sf_n] = vllm::computeSwizzledSFShape(m, n);
+  auto output_sf = torch::empty(
+      {sf_m, sf_n},
+      torch::TensorOptions().device(device).dtype(torch::kInt32));
+
+#if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
+  scaled_fp4_quant_sm103a(output, input, output_sf, input_sf);
+  return {output, output_sf};
+#endif
+  TORCH_CHECK_NOT_IMPLEMENTED(false,
+                              "No compiled SM103 nvfp4 quantization kernel");
+}
+
+void scaled_fp4_quant_sm103a_out(torch::Tensor const& input,
+                                 torch::Tensor const& input_sf,
+                                 torch::Tensor& output,
+                                 torch::Tensor& output_sf) {
+#if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
+  scaled_fp4_quant_sm103a(output, input, output_sf, input_sf);
+  return;
+#endif
+  TORCH_CHECK_NOT_IMPLEMENTED(false,
+                              "No compiled SM103 nvfp4 quantization kernel");
 }

@@ -237,6 +237,7 @@ void cutlass_scaled_fp4_mm(torch::Tensor& D, torch::Tensor const& A,
                            torch::Tensor const& B_sf,
                            torch::Tensor const& alpha);
 
+
 void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
                        torch::Tensor const& b_scales,
@@ -305,6 +306,11 @@ void silu_and_mul_scaled_fp4_experts_quant(
     torch::Tensor const& input, torch::Tensor const& input_global_scale,
     torch::Tensor const& input_offset_by_experts,
     torch::Tensor const& output_scale_offset_by_experts);
+
+void convert_sf_layout_sm100_to_sm103(torch::Tensor& dst,
+                                      torch::Tensor const& src);
+void convert_sf_layout_sm103_to_sm100(torch::Tensor& dst,
+                                      torch::Tensor const& src);
 
 void per_token_group_quant_fp8(const torch::Tensor& input,
                                torch::Tensor& output_q, torch::Tensor& output_s,

@@ -3,8 +3,8 @@ Benchmark: SM103 (B300) FP4 Ultra GEMM vs SM100 (B200) NVFP4 GEMM
 ===================================================================
 
 This benchmark compares the performance of the SM103-optimized FP4 Ultra
-GEMM kernel against the default SM100 NVFP4 GEMM kernel, both running on
-B300 hardware.
+GEMM kernel against the SM100 NVFP4 GEMM kernel, both running on B300
+hardware.
 
 SM103 kernels use:
   - K=768 tile (vs K=256 on SM100)
@@ -26,6 +26,7 @@ import time
 from typing import Optional
 
 import torch
+import vllm._C  # noqa: F401 - registers ops into torch.ops._C
 
 # ============================================================================
 # Helpers
@@ -50,8 +51,8 @@ def create_nvfp4_tensors(
 
     A: [m, k/2] uint8 (packed FP4)
     B: [n, k/2] uint8 (packed FP4, column-major)
-    A_sf: [round_up(m,128), round_up(k/16,4)] float8_e4m3fn (swizzled)
-    B_sf: [round_up(n,128), round_up(k/16,4)] float8_e4m3fn (swizzled)
+    A_sf: [round_up(m,128), round_up(k/16,4)] float8_e4m3fn (SM100 swizzled)
+    B_sf: [round_up(n,128), round_up(k/16,4)] float8_e4m3fn (SM100 swizzled)
     alpha: [1] float32
     D: [m, n] output
     """
@@ -59,18 +60,23 @@ def create_nvfp4_tensors(
     A = torch.randint(0, 256, (m, k // 2), dtype=torch.uint8, device="cuda")
     B = torch.randint(0, 256, (n, k // 2), dtype=torch.uint8, device="cuda")
 
-    # Scale factors (padded, will be swizzled separately for SM100/SM103)
+    # Scale factors (SM100 swizzled layout)
     sf_m = round_up(m, 128)
     sf_n = round_up(n, 128)
     sf_k = round_up(k // 16, 4)
 
-    # Create as int32 (raw bytes, same shape as expected by CUTLASS)
-    A_sf = torch.randint(
+    A_sf_sm100 = torch.randint(
         0, 256, (sf_m, sf_k), dtype=torch.uint8, device="cuda"
     ).view(torch.float8_e4m3fn)
-    B_sf = torch.randint(
+    B_sf_sm100 = torch.randint(
         0, 256, (sf_n, sf_k), dtype=torch.uint8, device="cuda"
     ).view(torch.float8_e4m3fn)
+
+    # SM103 layout: convert from SM100 layout
+    A_sf_sm103 = torch.empty_like(A_sf_sm100)
+    B_sf_sm103 = torch.empty_like(B_sf_sm100)
+    torch.ops._C.convert_sf_layout_sm100_to_sm103(A_sf_sm103, A_sf_sm100)
+    torch.ops._C.convert_sf_layout_sm100_to_sm103(B_sf_sm103, B_sf_sm100)
 
     # Global alpha
     alpha = torch.tensor([1.0], dtype=torch.float32, device="cuda")
@@ -81,8 +87,10 @@ def create_nvfp4_tensors(
     return {
         "A": A,
         "B": B,
-        "A_sf": A_sf,
-        "B_sf": B_sf,
+        "A_sf_sm100": A_sf_sm100,
+        "B_sf_sm100": B_sf_sm100,
+        "A_sf_sm103": A_sf_sm103,
+        "B_sf_sm103": B_sf_sm103,
         "alpha": alpha,
         "D": D,
     }
@@ -139,53 +147,69 @@ def benchmark_gemm(
     dtype: torch.dtype = torch.bfloat16,
 ) -> list[dict]:
     """
-    Benchmark SM100 vs SM103 NVFP4 GEMM kernels.
+    Benchmark SM100 vs SM103 NVFP4 GEMM kernels side by side.
 
-    Since we can't call internal CUTLASS kernels directly from Python,
-    this benchmark uses the top-level cutlass_scaled_fp4_mm dispatch.
-    On B300, the dispatcher routes to sm103a; we also time the sm100a
-    path by calling it directly if available.
+    Calls cutlass_scaled_fp4_mm_sm100a and cutlass_scaled_fp4_mm_sm103a
+    directly, bypassing the top-level dispatch, so both kernels run on
+    the same hardware regardless of SM version.
+
+    Scale factors are prepared in the correct layout for each kernel:
+      - SM100 kernel: SM100 swizzled layout (direct)
+      - SM103 kernel: SM103 layout (converted via convert_sf_layout_sm100_to_sm103)
     """
-    try:
-        from vllm._C import ops as vllm_ops  # type: ignore
-    except ImportError:
-        print("ERROR: vLLM C extensions not built. Build with: pip install -e .")
+    vllm_ops = torch.ops._C
+
+    has_sm100a = hasattr(vllm_ops, "cutlass_scaled_fp4_mm_sm100a")
+    has_sm103a = hasattr(vllm_ops, "cutlass_scaled_fp4_mm_sm103a")
+
+    if not has_sm100a and not has_sm103a:
+        print("WARNING: Neither sm100a nor sm103a ops are available. "
+              "Rebuild with ENABLE_NVFP4_SM100=1.")
         return []
 
     results = []
-    sm = get_sm_version()
 
     for m in m_sizes:
         tensors = create_nvfp4_tensors(m, n, k, dtype)
-        D, A, B = tensors["D"], tensors["A"], tensors["B"]
-        A_sf, B_sf, alpha = tensors["A_sf"], tensors["B_sf"], tensors["alpha"]
+        D = tensors["D"]
+        A, B = tensors["A"], tensors["B"]
+        A_sf_sm100, B_sf_sm100 = tensors["A_sf_sm100"], tensors["B_sf_sm100"]
+        A_sf_sm103, B_sf_sm103 = tensors["A_sf_sm103"], tensors["B_sf_sm103"]
+        alpha = tensors["alpha"]
 
-        # --- SM100 kernel (baseline on B300, runs via forward compatibility) ---
-        # We create SM100-layout scale factors for the SM100 kernel.
-        # The top-level dispatch on SM103 calls sm103a, so for SM100 baseline
-        # we'd need to call cutlass_scaled_fp4_mm_sm100a directly.
-        # Since that's not directly exposed, we measure the default dispatch
-        # and note which path it takes.
-
-        def run_default():
-            vllm_ops.cutlass_scaled_fp4_mm(D, A, B, A_sf, B_sf, alpha)
-
-        time_us = bench_fn(run_default, warmup=20, iters=100)
-
-        # Compute effective TFLOPS
-        # FP4 GEMM: 2*M*N*K FLOPs (multiply-add)
         flops = 2.0 * m * n * k
-        tflops = flops / (time_us * 1e-6) / 1e12
 
-        kernel_name = f"SM{sm} (default dispatch)"
-        results.append({
-            "M": m,
-            "N": n,
-            "K": k,
-            "kernel": kernel_name,
-            "time_us": time_us,
-            "tflops": tflops,
-        })
+        time_sm100 = None
+        time_sm103 = None
+
+        if has_sm100a:
+            def run_sm100():
+                vllm_ops.cutlass_scaled_fp4_mm_sm100a(
+                    D, A, B, A_sf_sm100, B_sf_sm100, alpha
+                )
+            time_sm100 = bench_fn(run_sm100, warmup=20, iters=100)
+
+        if has_sm103a:
+            def run_sm103():
+                vllm_ops.cutlass_scaled_fp4_mm_sm103a(
+                    D, A, B, A_sf_sm103, B_sf_sm103, alpha
+                )
+            time_sm103 = bench_fn(run_sm103, warmup=20, iters=100)
+
+        row: dict = {"M": m, "N": n, "K": k}
+
+        if time_sm100 is not None:
+            row["sm100_us"] = time_sm100
+            row["sm100_tflops"] = flops / (time_sm100 * 1e-6) / 1e12
+
+        if time_sm103 is not None:
+            row["sm103_us"] = time_sm103
+            row["sm103_tflops"] = flops / (time_sm103 * 1e-6) / 1e12
+
+        if time_sm100 is not None and time_sm103 is not None:
+            row["speedup"] = time_sm100 / time_sm103
+
+        results.append(row)
 
     return results
 
@@ -203,12 +227,7 @@ def benchmark_quant(
     """
     Benchmark SM100 vs SM103 activation quantization (BF16 -> NVFP4).
     """
-    try:
-        from vllm._C import ops as vllm_ops  # type: ignore
-    except ImportError:
-        print("ERROR: vLLM C extensions not built.")
-        return []
-
+    vllm_ops = torch.ops._C
     results = []
 
     for m in m_sizes:
@@ -251,12 +270,7 @@ def benchmark_sf_conversion(
     This measures the overhead of converting scale factors between layouts,
     which happens once at model load time for weights.
     """
-    try:
-        from vllm._C import ops as vllm_ops  # type: ignore
-    except ImportError:
-        print("ERROR: vLLM C extensions not built.")
-        return []
-
+    vllm_ops = torch.ops._C
     results = []
 
     for m in m_sizes:
@@ -301,60 +315,91 @@ def benchmark_e2e(
     dtype: torch.dtype = torch.bfloat16,
 ) -> list[dict]:
     """
-    Benchmark the full NVFP4 inference path: quantize activations + GEMM.
+    Benchmark the full NVFP4 inference path: quantize activations + GEMM,
+    comparing SM100 and SM103 kernels.
 
     This measures what a real transformer linear layer does:
     1. Quantize BF16 activations to NVFP4 (with block scales)
     2. NVFP4 x NVFP4 GEMM
+
+    For SM103, after quantizing activations (producing SM100-layout SFs),
+    we additionally convert the activation SFs to SM103 layout before GEMM.
+    Weight SFs are pre-converted once outside the timed loop.
     """
-    try:
-        from vllm._C import ops as vllm_ops  # type: ignore
-    except ImportError:
-        print("ERROR: vLLM C extensions not built.")
+    vllm_ops = torch.ops._C
+
+    has_sm100a = hasattr(vllm_ops, "cutlass_scaled_fp4_mm_sm100a")
+    has_sm103a = hasattr(vllm_ops, "cutlass_scaled_fp4_mm_sm103a")
+
+    if not has_sm100a and not has_sm103a:
+        print("WARNING: Neither sm100a nor sm103a ops are available. "
+              "Rebuild with ENABLE_NVFP4_SM100=1.")
         return []
 
     results = []
-    sm = get_sm_version()
 
     for m in m_sizes:
         # Create activation input
         activation = torch.randn(m, k, dtype=dtype, device="cuda")
         global_scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")
 
-        # Create weight (pre-quantized, SM100 layout for default)
+        # Create weight (pre-quantized)
         B = torch.randint(0, 256, (n, k // 2), dtype=torch.uint8, device="cuda")
         sf_n = round_up(n, 128)
         sf_k = round_up(k // 16, 4)
-        B_sf = torch.randint(
+
+        # Weight SFs in SM100 layout (for SM100 kernel)
+        B_sf_sm100 = torch.randint(
             0, 256, (sf_n, sf_k), dtype=torch.uint8, device="cuda"
         ).view(torch.float8_e4m3fn)
         alpha = torch.tensor([1.0], dtype=torch.float32, device="cuda")
 
+        # Weight SFs in SM103 layout (pre-converted at load time)
+        B_sf_sm103 = torch.empty_like(B_sf_sm100)
+        vllm_ops.convert_sf_layout_sm100_to_sm103(B_sf_sm103, B_sf_sm100)
+
         D = torch.empty(m, n, dtype=dtype, device="cuda")
 
-        # Pre-allocate quant output
-        A_packed = torch.empty(m, k // 2, dtype=torch.uint8, device="cuda")
-
-        def run_e2e():
-            # Step 1: Quantize activations
-            A_q, A_sf = vllm_ops.scaled_fp4_quant(
-                activation, global_scale, True
-            )
-            # Step 2: GEMM
-            vllm_ops.cutlass_scaled_fp4_mm(D, A_q, B, A_sf, B_sf, alpha)
-
-        time_us = bench_fn(run_e2e, warmup=10, iters=50)
+        has_sm103_quant = hasattr(vllm_ops, "scaled_fp4_quant_sm103")
         flops = 2.0 * m * n * k
-        tflops = flops / (time_us * 1e-6) / 1e12
+        row: dict = {"M": m, "N": n, "K": k}
 
-        results.append({
-            "M": m,
-            "N": n,
-            "K": k,
-            "kernel": f"SM{sm} E2E (quant+GEMM)",
-            "time_us": time_us,
-            "tflops": tflops,
-        })
+        if has_sm100a:
+            def run_e2e_sm100():
+                A_q, A_sf = vllm_ops.scaled_fp4_quant(
+                    activation, global_scale, True
+                )
+                A_sf = A_sf.view(torch.float8_e4m3fn)
+                vllm_ops.cutlass_scaled_fp4_mm_sm100a(
+                    D, A_q, B, A_sf, B_sf_sm100, alpha
+                )
+
+            time_sm100 = bench_fn(run_e2e_sm100, warmup=10, iters=50)
+            row["sm100_us"] = time_sm100
+            row["sm100_tflops"] = flops / (time_sm100 * 1e-6) / 1e12
+
+        if has_sm103a and has_sm103_quant:
+            def run_e2e_sm103():
+                # Native SM103 quantization: produces SM103-layout SFs directly.
+                A_q, A_sf = vllm_ops.scaled_fp4_quant_sm103(
+                    activation, global_scale
+                )
+                A_sf = A_sf.view(torch.float8_e4m3fn)
+                vllm_ops.cutlass_scaled_fp4_mm_sm103a(
+                    D, A_q, B, A_sf, B_sf_sm103, alpha
+                )
+
+            time_sm103 = bench_fn(run_e2e_sm103, warmup=10, iters=50)
+            row["sm103_us"] = time_sm103
+            row["sm103_tflops"] = flops / (time_sm103 * 1e-6) / 1e12
+        elif has_sm103a:
+            row["sm103_us"] = float("nan")
+            row["sm103_tflops"] = float("nan")
+
+        if "sm100_us" in row and "sm103_us" in row:
+            row["speedup"] = row["sm100_us"] / row["sm103_us"]
+
+        results.append(row)
 
     return results
 
@@ -420,9 +465,10 @@ def main():
         return
 
     if sm == 103:
-        print("NOTE: Running on SM103 (B300) -- SM103 kernels will be used.")
+        print("NOTE: Running on SM103 (B300) -- both SM100 and SM103 kernels will run.")
     else:
-        print(f"NOTE: Running on SM{sm} -- SM100 kernels will be used.")
+        print(f"NOTE: Running on SM{sm} -- SM100 kernel is native; "
+              "SM103 kernel runs via forward compat (may be slower).")
 
     # Problem sizes typical for LLM inference
     # Small M = decode, large M = prefill
@@ -430,7 +476,11 @@ def main():
 
     if args.mode in ("gemm", "all"):
         results = benchmark_gemm(m_sizes, n=args.n, k=args.k)
-        print_results(results, f"NVFP4 GEMM Benchmark (N={args.n}, K={args.k})")
+        print_results(
+            results,
+            f"NVFP4 GEMM: SM100 vs SM103 (N={args.n}, K={args.k})"
+            " | sm100_us/sm103_us | tflops | speedup=sm100_us/sm103_us",
+        )
 
     if args.mode in ("quant", "all"):
         results = benchmark_quant(m_sizes, n=args.k)
@@ -446,7 +496,13 @@ def main():
         results = benchmark_e2e(m_sizes, n=args.n, k=args.k)
         print_results(
             results,
-            f"End-to-End NVFP4 (Quant+GEMM, N={args.n}, K={args.k})",
+            f"E2E NVFP4 (Quant+GEMM): SM100 vs SM103 (N={args.n}, K={args.k})"
+            " | speedup=sm100_us/sm103_us",
+        )
+        print(
+            "NOTE: SM103 E2E uses scaled_fp4_quant_sm103 which writes SM103-layout\n"
+            "      scale factors directly, eliminating the SM100->SM103 conversion\n"
+            "      step. Weight SFs are pre-converted once at model load time."
         )
 
 

@@ -664,6 +664,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
+    set(VLLM_NVFP4_SM100_ENABLED TRUE)
     message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
   else()
     message(STATUS "Not building NVFP4 as no compatible archs were found.")
@@ -958,6 +959,12 @@ define_extension_target(
 # driver API. This causes problems when linking with earlier versions of CUDA.
 # Setting this variable sidesteps the issue by calling the driver directly.
 target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+
+# Propagate ENABLE_NVFP4_SM100 to all languages (including C++ files such as
+# torch_bindings.cpp) so that per-SM op registrations are compiled in.
+if(VLLM_NVFP4_SM100_ENABLED)
+  target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM100=1)
+endif()
 
 # add OR VLLM_GPU_LANG STREQUAL "HIP" here once
 # https://github.com/vllm-project/vllm/issues/35163 is resolved

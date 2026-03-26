@@ -81,28 +81,28 @@ struct sm100_fp4_config_M16 {
 // SM103 configuration for M in (256, inf) -- 2SM cooperative execution
 struct sm103_fp4_config_default {
   // 2SM schedule: two SMs cooperate on one tile for higher throughput
-  using KernelSchedule = cutlass::gemm::collective::
+  using KernelSchedule = cutlass::gemm::
       KernelTmaWarpSpecialized2SmBlockScaledMxNvf4UltraVs16Sm103;
   using EpilogueSchedule = cutlass::epilogue::NoSmemWarpSpecialized2Sm;
-  using TileShape = Shape<_128, _256, Int<768>>;
+  using TileShape = Shape<_256, _256, Int<768>>;
   using ClusterShape = Shape<_2, _2, _1>;
   using PerSmTileShape_MNK = Shape<_128, _256, Int<768>>;
 };
 
 // SM103 configuration for M in (16, 256] -- 2SM with smaller N tile
 struct sm103_fp4_config_M256 {
-  using KernelSchedule = cutlass::gemm::collective::
+  using KernelSchedule = cutlass::gemm::
       KernelTmaWarpSpecialized2SmBlockScaledMxNvf4UltraVs16Sm103;
   using EpilogueSchedule = cutlass::epilogue::NoSmemWarpSpecialized2Sm;
-  using TileShape = Shape<_128, _128, Int<768>>;
-  using ClusterShape = Shape<_1, _2, _1>;
+  using TileShape = Shape<_256, _128, Int<768>>;
+  using ClusterShape = Shape<_2, _1, _1>;
   using PerSmTileShape_MNK = Shape<_128, _128, Int<768>>;
 };
 
 // SM103 configuration for M in [1, 16] -- 1SM (decode / small batch)
 struct sm103_fp4_config_M16 {
   // 1SM schedule: single SM per tile, lower latency for small problems
-  using KernelSchedule = cutlass::gemm::collective::
+  using KernelSchedule = cutlass::gemm::
       KernelTmaWarpSpecialized1SmBlockScaledMxNvf4UltraVs16Sm103;
   using EpilogueSchedule = cutlass::epilogue::NoSmemWarpSpecialized1Sm;
   using TileShape = Shape<_128, _128, Int<768>>;
@@ -382,11 +382,11 @@ void cutlass_fp4_gemm_sm103_dispatch(torch::Tensor& D, torch::Tensor const& A,
     runGemm<Fp4GemmSm103<sm103_fp4_config_M16, OutType>>(
         D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
   } else if (mp2 <= 256) {
-    // m in (16, 256] -- 2SM with moderate cluster
+    // m in (16, 256] -- 2SM, small tile
     runGemm<Fp4GemmSm103<sm103_fp4_config_M256, OutType>>(
         D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
   } else {
-    // m in (256, inf) -- 2SM with full cluster
+    // m in (256, inf) -- 2SM, large tile
     runGemm<Fp4GemmSm103<sm103_fp4_config_default, OutType>>(
         D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
   }
