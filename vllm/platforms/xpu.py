@@ -12,6 +12,7 @@ import vllm_xpu_kernels._C  # noqa
 import vllm_xpu_kernels._moe_C  # noqa
 import vllm_xpu_kernels._xpu_C  # noqa
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import supports_xpu_graph
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -181,6 +182,12 @@ class XPUPlatform(Platform):
                 "XPU Graph is not supported in the current PyTorch version, "
                 "disabling cudagraph_mode."
             )
+        elif not envs.VLLM_XPU_ENABLE_XPU_GRAPH:
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning(
+                "XPU Graph is disabled by environment variable, "
+                "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
+            )
         elif parallel_config.world_size_across_dp > 1:
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             logger.warning(
@@ -236,6 +243,7 @@ class XPUPlatform(Platform):
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
+        torch.xpu.empty_cache()
         torch.xpu.reset_peak_memory_stats(device)
         return torch.xpu.max_memory_allocated(device)
 
