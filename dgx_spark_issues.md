@@ -224,3 +224,53 @@ PyTorch only supports compute capabilities 8.0-9.0.
 - 真实 GB10 硬件可测试
 - 社区 DGX Spark 用户少，贡献易被注意
 - 维护者 (johnnynunez, ProExpertProg) 明确需要 DGX Spark 改进
+
+---
+
+## 2026-03-26 13:45 Cron 检查摘要
+
+**PR #37959 (我的 Helm chart 修复):**
+- 状态：Open ~57h
+- Labels: `bug`, `documentation` (仍无 `ready`)
+- 人类 review: 0
+- 下一步：在 Slack #pr-reviews 礼貌求助
+
+**PR #38126 (NVIDIA DGX Spark 修复):**
+- 状态：Open，~16h 无更新
+- 作者：johnnynunez (NVIDIA maintainer)
+- Labels: `ready`, `ci/build`, `nvidia`
+- 等待 merge 后检查代码是否覆盖 SM 12.1 Marlin 自动检测
+
+**izhuhaoran 动态:**
+- 5 open PRs，无新 merge
+- 专注 Model Runner V2、HMA、Blackwell 方向
+- 节奏稳定，非批量提交
+
+**本地环境:**
+- GPU: NVIDIA GB10 (SM 12.1)
+- Driver: 580.95.05
+- 分支：fix/helm-chart-selector-labels
+- 工作区：干净
+
+**待办事项:**
+1. Slack #pr-reviews 求助 PR #37959 加 `ready` label
+2. 等 #38126 merge 后检查代码
+3. 如 #38126 未覆盖 SM 12.1 Marlin 检测 → 准备 #37141 PR
+
+---
+
+## 2026-03-26 14:49 更新
+
+**PR #38126 状态：** 仍未 merge，最后更新 ~17h 前
+- 等待 NVIDIA maintainer johnnynunez 推进
+- merge 后将检查代码是否覆盖 SM 12.1 Marlin 自动检测
+- 如未覆盖，继续推进 #37141
+
+**PR #37959 状态：** 58h 无人类 review
+- 考虑在 Slack #pr-reviews 礼貌求助
+- 请求加 `ready` label 跑 CI
+
+**DGX Spark 环境稳定：**
+- GPU: NVIDIA GB10 (SM 12.1)
+- Driver: 580.95.05
+- 无新问题发现
