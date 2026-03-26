@@ -534,6 +534,7 @@ class Qwen3_VisionTransformer(nn.Module):
         grid_thw_list: list[list[int]],
         *,
         max_batch_size: int | None = None,
+        max_frames_per_batch: int | None = None,
         max_seqlen_override: int | None = None,
         device: torch.device | None = None,
     ) -> dict[str, torch.Tensor | None]:
@@ -544,8 +545,12 @@ class Qwen3_VisionTransformer(nn.Module):
 
         Args:
             grid_thw_list: Grid configurations as list of [t, h, w].
-            max_batch_size: If set, pad cu_seqlens to this size
+            max_batch_size: If set, pad cu_seqlens to at least this size
                 (needed for CUDA graph capture/replay).
+            max_frames_per_batch: If set, overrides max_batch_size for
+                cu_seqlens padding. For video inputs each item contributes
+                T attention sequences (frames); this sizes the buffer to
+                the total frame budget so video replays never overflow.
             max_seqlen_override: If set, use this value for max_seqlen
                 instead of computing from cu_seqlens (needed for CUDA
                 graph capture to cover worst-case replay scenarios).
@@ -570,15 +575,21 @@ class Qwen3_VisionTransformer(nn.Module):
         )
         cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
 
-        # Pad cu_seqlens if max_batch_size specified
-        if max_batch_size is not None:
+        # Pad cu_seqlens to the required number of sequences.
+        # For videos each item contributes T frames = T attention sequences,
+        # so the total can exceed max_batch_size. max_frames_per_batch
+        # overrides the pad target when set.
+        pad_to = (
+            max_frames_per_batch if max_frames_per_batch is not None else max_batch_size
+        )
+        if pad_to is not None:
             num_seqs = len(cu_seqlens) - 1
-            if num_seqs < max_batch_size:
+            if num_seqs < pad_to:
                 cu_seqlens = np.concatenate(
                     [
                         cu_seqlens,
                         np.full(
-                            max_batch_size - num_seqs,
+                            pad_to - num_seqs,
                             cu_seqlens[-1],
                             dtype=np.int32,
                         ),
@@ -1578,7 +1589,7 @@ class Qwen3VLForConditionalGeneration(
     # -- SupportsEncoderCudaGraph protocol methods --
 
     def get_encoder_cudagraph_config(self):
-        from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+        from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphConfig,
         )
 
@@ -1736,22 +1747,51 @@ class Qwen3VLForConditionalGeneration(
         self,
         token_budget: int,
         max_batch_size: int,
+        max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
     ):
-        from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+        from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
         )
 
         spatial_merge_size = self.visual.spatial_merge_size
         per_image_output = token_budget // max_batch_size
 
-        # Synthetic rectangular grid: [1, merge, per_image_output * merge]
-        # produces exactly per_image_output tokens per image.
-        grid_config = [
-            [1, spatial_merge_size, per_image_output * spatial_merge_size]
-            for _ in range(max_batch_size)
-        ]
+        # Build the capture grid using a video-format layout so that
+        # cu_seqlens is sized for video replays from the start.
+        # cu_seqlens has one entry per attention sequence (= one per frame),
+        # so using T > 1 per item makes the buffer large enough without
+        # relying solely on padding.
+        #
+        # frames_per_item: frames distributed evenly across max_batch_size slots.
+        # tokens_per_frame: spatial tokens per frame (ceiling so total patches
+        #   >= original, keeping pixel_values buffer large enough for replay).
+        frames_per_item = max_frames_per_batch // max_batch_size
+        if frames_per_item > 1:
+            # Video-format: each item has frames_per_item temporal frames with
+            # minimal-but-sufficient spatial size.
+            # ceil ensures frames_per_item * tokens_per_frame >= per_image_output
+            # so the pixel_values buffer covers any valid single-item replay.
+            tokens_per_frame = (
+                per_image_output + frames_per_item - 1
+            ) // frames_per_item
+            grid_config = [
+                [
+                    frames_per_item,
+                    spatial_merge_size,
+                    tokens_per_frame * spatial_merge_size,
+                ]
+                for _ in range(max_batch_size)
+            ]
+        else:
+            # Image-format fallback (T=1): happens when max_frames_per_batch
+            # is at most max_batch_size (rare for auto-infer, possible for
+            # user-specified very small values).
+            grid_config = [
+                [1, spatial_merge_size, per_image_output * spatial_merge_size]
+                for _ in range(max_batch_size)
+            ]
 
         # Create dummy pixel_values
         patch_embed = self.visual.patch_embed
@@ -1769,11 +1809,16 @@ class Qwen3VLForConditionalGeneration(
         # Override max_seqlen with a safe upper bound for capture.
         # max_seqlen.item() gets baked into the CUDA graph (not replayed),
         # so the capture value must cover any replay scenario.
-        # Worst case: 1 image consuming the full budget ->
+        # Worst case: 1 item consuming the full budget ->
         # seq_len = token_budget * spatial_merge_size^2.
+        #
+        # Also pass max_frames_per_batch to prepare_encoder_metadata so the
+        # cu_seqlens buffer is padded to cover the remainder when
+        # max_frames_per_batch % max_batch_size != 0.
         buffers = self.visual.prepare_encoder_metadata(
             grid_config,
             max_batch_size=max_batch_size,
+            max_frames_per_batch=max_frames_per_batch,
             max_seqlen_override=token_budget * (spatial_merge_size**2),
             device=device,
         )
@@ -1792,17 +1837,24 @@ class Qwen3VLForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
+        max_frames_per_batch: int,
     ):
-        from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+        from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphReplayBuffers,
         )
 
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs, to_list=True)
 
-        buffers = self.visual.prepare_encoder_metadata(
-            grid_thw_list,
-            max_batch_size=max_batch_size,
-        )
+        if self.is_image_inputs(mm_kwargs):
+            buffers = self.visual.prepare_encoder_metadata(
+                grid_thw_list,
+                max_batch_size=max_batch_size,
+            )
+        else:
+            buffers = self.visual.prepare_encoder_metadata(
+                grid_thw_list,
+                max_frames_per_batch=max_frames_per_batch,
+            )
 
         return EncoderCudaGraphReplayBuffers(buffers=buffers)
 

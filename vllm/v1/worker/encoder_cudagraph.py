@@ -16,7 +16,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.model_executor.models.vision import get_load_balance_assignment
-from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphConfig,
 )
 
@@ -67,6 +67,7 @@ class EncoderCudaGraphManager:
         comp_config = vllm_config.compilation_config
         user_budgets = comp_config.encoder_cudagraph_token_budgets
         user_max_images = comp_config.encoder_cudagraph_max_images_per_batch
+        user_max_frames = comp_config.encoder_cudagraph_max_frames_per_batch
 
         if user_budgets and user_max_images > 0:
             # Fully user-specified
@@ -86,6 +87,9 @@ class EncoderCudaGraphManager:
                 user_max_images if user_max_images > 0 else max_budget // min_budget
             )
 
+        # 0 = auto-infer per budget level at capture time (= token_budget).
+        self.max_frames_per_batch = user_max_frames
+
         mm_config = vllm_config.model_config.multimodal_config
         self.use_dp = (
             mm_config is not None
@@ -100,9 +104,10 @@ class EncoderCudaGraphManager:
 
         logger.info(
             "EncoderCudaGraphManager initialized with "
-            "budgets=%s, max_batch_size=%d, use_dp=%s",
+            "budgets=%s, max_batch_size=%d, max_frames_per_batch=%s, use_dp=%s",
             self.token_budgets,
             self.max_batch_size,
+            self.max_frames_per_batch if self.max_frames_per_batch > 0 else "auto",
             self.use_dp,
         )
 
@@ -135,14 +140,21 @@ class EncoderCudaGraphManager:
 
     def _capture_budget_graph(self, token_budget: int):
         """Capture CUDA graph for a single token budget."""
+        # Auto-infer: worst case = token_budget frames (each frame yields
+        # >= 1 output token, so sum(T_i) <= token_budget by packing).
+        max_frames = (
+            self.max_frames_per_batch if self.max_frames_per_batch > 0 else token_budget
+        )
         logger.debug(
-            "Capturing encoder cudagraph for budget=%d, max_batch_size=%d",
+            "Capturing encoder cudagraph for budget=%d, max_batch_size=%d, "
+            "max_frames_per_batch=%d",
             token_budget,
             self.max_batch_size,
+            max_frames,
         )
 
         capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
-            token_budget, self.max_batch_size, self.device, self.dtype
+            token_budget, self.max_batch_size, max_frames, self.device, self.dtype
         )
 
         mm_kwargs = capture_inputs.mm_kwargs
@@ -373,7 +385,9 @@ class EncoderCudaGraphManager:
                     (token_budget - batch_out_tokens) / token_budget * 100,
                 )
                 replay = self.model.prepare_encoder_cudagraph_replay_buffers(
-                    batch_mm_kwargs, self.max_batch_size
+                    batch_mm_kwargs,
+                    self.max_batch_size,
+                    self.max_frames_per_batch,
                 )
 
                 # graph_hits counted inside _run_budget_graph after replay.
