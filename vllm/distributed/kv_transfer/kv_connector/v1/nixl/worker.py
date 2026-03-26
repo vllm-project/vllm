@@ -32,7 +32,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
-    RemoteMeta,
     ReqId,
     ReqMeta,
     compute_nixl_compatibility_hash,
@@ -41,8 +40,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
-    GET_META_MSG,
     _NIXL_SUPPORTED_DEVICE,
+    GET_META_MSG,
     NixlWrapper,
     nixl_agent_config,
     zmq_ctx,
@@ -63,8 +62,6 @@ from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
 
 if TYPE_CHECKING:
-    import zmq
-
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 TransferHandle = int

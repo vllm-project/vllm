@@ -46,7 +46,10 @@ class NixlConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
     def __init__(
-        self, vllm_config: "VllmConfig", engine_id: str, kv_cache_config: "KVCacheConfig"
+        self,
+        vllm_config: "VllmConfig",
+        engine_id: str,
+        kv_cache_config: "KVCacheConfig",
     ):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -297,8 +300,6 @@ class NixlConnectorScheduler:
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-
         params = request.kv_transfer_params
         logger.debug(
             "NIXLConnector update_state_after_alloc: "
@@ -364,7 +365,6 @@ class NixlConnectorScheduler:
         scheduler_output: "SchedulerOutput",
     ) -> None:
         from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
-        from vllm.v1.core.sched.output import SchedulerOutput
 
         # only called when use_host_buffer is True to build the save metadata
 
@@ -400,8 +400,6 @@ class NixlConnectorScheduler:
         self,
         scheduler_output: "SchedulerOutput",
     ) -> KVConnectorMetadata:
-        from vllm.v1.core.sched.output import SchedulerOutput
-
         meta = NixlConnectorMetadata()
 
         # Loop through scheduled reqs and convert to ReqMeta.

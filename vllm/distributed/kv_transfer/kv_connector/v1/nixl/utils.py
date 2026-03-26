@@ -12,7 +12,7 @@ import zmq
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
+from vllm.utils.network_utils import make_zmq_socket
 
 logger = init_logger(__name__)
 

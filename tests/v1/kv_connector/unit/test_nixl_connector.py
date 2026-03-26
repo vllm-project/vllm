@@ -1756,9 +1756,7 @@ def test_kv_buffer_to_nixl_memory_types(
     _NIXL_SUPPORTED_DEVICE.update(FakePlatform.get_nixl_supported_devices())
 
     with (
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils.NixlWrapper"
-        ),
+        patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils.NixlWrapper"),
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.threading.Event"
         ),
