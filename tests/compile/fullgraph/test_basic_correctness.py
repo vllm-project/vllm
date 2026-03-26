@@ -137,6 +137,7 @@ def test_compile_correctness(
             all_args.append(
                 final_args + [f"-cc.mode={mode.name}", "-cc.backend=inductor"]
             )
+            all_envs.append({})
 
         # inductor will change the output, so we only compare if the output
         # is close, not exactly the same.
@@ -157,6 +158,5 @@ def test_compile_correctness(
     ]:
         all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
         all_envs.append({})
-        all_envs.append({})
 
-    compare_all_settings(model, all_args * 3, all_envs, method=method)
+    compare_all_settings(model, all_args, all_envs, method=method)
