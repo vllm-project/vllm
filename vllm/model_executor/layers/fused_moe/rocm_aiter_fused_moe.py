@@ -367,7 +367,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         activation_key,
         activation_format,
     ):
-        supported, reason = super(AiterExperts, AiterExperts).is_supported_config(
+        supported, reason = mk.FusedMoEExpertsModular.is_supported_config(
             cls, moe_config, weight_key, activation_key, activation_format
         )
         if not supported:
