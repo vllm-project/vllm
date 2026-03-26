@@ -30,12 +30,16 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     DeltaToolCall,
+    StructuralTagResponseFormat,
 )
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
+from vllm.tool_parsers.mistral_tool_parser import (
+    _DEFAULT_JSON_SCHEMA,
+    MistralToolParser,
+)
 
 
 @pytest.fixture(scope="module")
@@ -1090,28 +1094,7 @@ def test_adjust_request_grammar_factory(
     assert len(result.structured_outputs.grammar) > 0
 
 
-@pytest.mark.parametrize(
-    "request_kwargs",
-    [
-        {"structured_outputs": StructuredOutputsParams(json='{"type": "object"}')},
-        {"response_format": {"type": "json_object"}},
-    ],
-    ids=["existing_structured_outputs", "response_format_json_object"],
-)
-def test_user_grammar(
-    mistral_tool_parser: MistralToolParser, request_kwargs: dict
-) -> None:
-    original_so = request_kwargs.get("structured_outputs")
-    request = _make_request(**request_kwargs)
-    result = mistral_tool_parser.adjust_request(request)
-
-    if original_so is not None:
-        assert result.structured_outputs is original_so
-    else:
-        assert result.structured_outputs is None
-
-
-def test_unsupported_grammar_for_tokenizer(mistral_tokenizer) -> None:
+def test_adjust_request_unsupported_grammar_for_tokenizer(mistral_tokenizer) -> None:
     with patch.object(
         type(mistral_tokenizer),
         "supports_grammar",
@@ -1129,7 +1112,7 @@ def test_unsupported_grammar_for_tokenizer(mistral_tokenizer) -> None:
     [("auto", False), ("none", True)],
     ids=["auto_skip_false", "none_skip_true"],
 )
-def test_non_mistral_tokenizer(
+def test_adjust_request_non_mistral_tokenizer(
     non_mistral_parser: MistralToolParser,
     tool_choice: str,
     expected_skip: bool,
@@ -1138,3 +1121,188 @@ def test_non_mistral_tokenizer(
     result = non_mistral_parser.adjust_request(request)
 
     assert result.skip_special_tokens is expected_skip
+
+
+@pytest.mark.parametrize(
+    "so_kwargs",
+    [
+        {"regex": r"\d+"},
+        {"choice": ["a", "b"]},
+        {"structural_tag": '{"key": "value"}'},
+        {"grammar": "start: 'hello'"},
+    ],
+    ids=["regex", "choice", "structural_tag", "grammar"],
+)
+def test_adjust_request_unsupported_structured_outputs(
+    mistral_tool_parser: MistralToolParser,
+    so_kwargs: dict,
+) -> None:
+    request = _make_request(
+        structured_outputs=StructuredOutputsParams(**so_kwargs),
+    )
+    result = mistral_tool_parser.adjust_request(request)
+
+    assert result.structured_outputs == request.structured_outputs
+
+
+def test_adjust_request_unsupported_response_format(
+    mistral_tool_parser: MistralToolParser,
+) -> None:
+    request = _make_request(
+        response_format=StructuralTagResponseFormat(
+            type="structural_tag", format={"some": "config"}
+        ),
+    )
+    result = mistral_tool_parser.adjust_request(request)
+    assert result.structured_outputs is None
+    assert result.response_format == request.response_format
+
+
+@pytest.mark.parametrize(
+    "so_kwargs,expected_json_schema",
+    [
+        ({"json_object": True}, _DEFAULT_JSON_SCHEMA),
+        ({"json": '{"type": "object"}'}, '{"type": "object"}'),
+        (
+            {"json": {"type": "object", "properties": {"x": {"type": "integer"}}}},
+            json.dumps(
+                {"type": "object", "properties": {"x": {"type": "integer"}}},
+                ensure_ascii=False,
+            ),
+        ),
+    ],
+    ids=["json_object", "json_str", "json_dict"],
+)
+def test_adjust_request_structured_outputs_generates_grammar(
+    mistral_tool_parser: MistralToolParser,
+    so_kwargs: dict,
+    expected_json_schema: str,
+) -> None:
+    request = _make_request(
+        structured_outputs=StructuredOutputsParams(**so_kwargs),
+    )
+    factory = mistral_tool_parser.model_tokenizer.grammar_factory
+
+    with patch.object(
+        factory,
+        "get_lark_from_jinja",
+        wraps=factory.get_lark_from_jinja,
+    ) as mock_get_lark:
+        result = mistral_tool_parser.adjust_request(request)
+
+        mock_get_lark.assert_called_once()
+        assert mock_get_lark.call_args.kwargs["json_schema"] == expected_json_schema
+
+    assert result.structured_outputs is not None
+    assert isinstance(result.structured_outputs.grammar, str)
+    assert len(result.structured_outputs.grammar) > 0
+
+
+@pytest.mark.parametrize(
+    "response_format_kwargs,expected_json_schema",
+    [
+        ({"type": "json_object"}, _DEFAULT_JSON_SCHEMA),
+        (
+            {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "my_schema",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"x": {"type": "integer"}},
+                    },
+                },
+            },
+            json.dumps(
+                {"type": "object", "properties": {"x": {"type": "integer"}}},
+                ensure_ascii=False,
+            ),
+        ),
+    ],
+    ids=["json_object", "json_schema_with_schema"],
+)
+def test_adjust_request_response_format_generates_grammar(
+    mistral_tool_parser: MistralToolParser,
+    response_format_kwargs: dict,
+    expected_json_schema: str,
+) -> None:
+    request = _make_request(response_format=response_format_kwargs)
+    factory = mistral_tool_parser.model_tokenizer.grammar_factory
+
+    with patch.object(
+        factory,
+        "get_lark_from_jinja",
+        wraps=factory.get_lark_from_jinja,
+    ) as mock_get_lark:
+        result = mistral_tool_parser.adjust_request(request)
+
+        mock_get_lark.assert_called_once()
+        assert mock_get_lark.call_args.kwargs["json_schema"] == expected_json_schema
+
+    assert result.structured_outputs is not None
+    assert isinstance(result.structured_outputs.grammar, str)
+    assert len(result.structured_outputs.grammar) > 0
+
+
+def test_adjust_request_tool_choice_none_with_json_schema_uses_json_schema_factory(
+    mistral_tool_parser: MistralToolParser,
+) -> None:
+    request = _make_request(
+        tool_choice="none",
+        structured_outputs=StructuredOutputsParams(json='{"type": "object"}'),
+    )
+    factory = mistral_tool_parser.model_tokenizer.grammar_factory
+
+    with (
+        patch.object(
+            factory,
+            "get_lark_for_json_schema",
+            wraps=factory.get_lark_for_json_schema,
+        ) as mock_json_schema,
+        patch.object(
+            factory,
+            "get_lark_from_jinja",
+            wraps=factory.get_lark_from_jinja,
+        ) as mock_jinja,
+    ):
+        result = mistral_tool_parser.adjust_request(request)
+
+        mock_json_schema.assert_called_once()
+        assert mock_json_schema.call_args.kwargs["json_schema"] == '{"type": "object"}'
+        mock_jinja.assert_not_called()
+
+    assert result.structured_outputs is not None
+    assert isinstance(result.structured_outputs.grammar, str)
+    assert len(result.structured_outputs.grammar) > 0
+
+
+def test_adjust_request_tool_choice_auto_with_json_schema_uses_jinja_factory(
+    mistral_tool_parser: MistralToolParser,
+) -> None:
+    request = _make_request(
+        tool_choice="auto",
+        structured_outputs=StructuredOutputsParams(json='{"type": "object"}'),
+    )
+    factory = mistral_tool_parser.model_tokenizer.grammar_factory
+
+    with (
+        patch.object(
+            factory,
+            "get_lark_for_json_schema",
+            wraps=factory.get_lark_for_json_schema,
+        ) as mock_json_schema,
+        patch.object(
+            factory,
+            "get_lark_from_jinja",
+            wraps=factory.get_lark_from_jinja,
+        ) as mock_jinja,
+    ):
+        result = mistral_tool_parser.adjust_request(request)
+
+        mock_jinja.assert_called_once()
+        assert mock_jinja.call_args.kwargs["json_schema"] == '{"type": "object"}'
+        mock_json_schema.assert_not_called()
+
+    assert result.structured_outputs is not None
+    assert isinstance(result.structured_outputs.grammar, str)
+    assert len(result.structured_outputs.grammar) > 0

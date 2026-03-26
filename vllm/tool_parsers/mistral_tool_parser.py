@@ -49,6 +49,10 @@ logger = init_logger(__name__)
 
 ALPHANUMERIC = ascii_letters + digits
 
+_DEFAULT_JSON_SCHEMA = json.dumps(
+    {"anyOf": [{"type": "object"}, {"type": "array"}]}, ensure_ascii=False
+)
+
 
 class StreamingState(Enum):
     """Enum for tracking the current streaming parsing state."""
@@ -131,7 +135,31 @@ class MistralToolParser(ToolParser):
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        if not is_mistral_tokenizer(self.model_tokenizer):
+        so_non_supported_attributes = [
+            "regex",
+            "choice",
+            "grammar",
+            # whitespace_pattern is not a constraint type but an option;
+            # Mistral grammar factory does not support it.
+            "whitespace_pattern",
+            "structural_tag",
+        ]
+        structured_outputs = request.structured_outputs
+        response_format = request.response_format
+        any_so_non_supported_active = structured_outputs is not None and any(
+            getattr(structured_outputs, attribute) is not None
+            for attribute in so_non_supported_attributes
+        )
+        response_format_non_supported_active = (
+            response_format is not None and response_format.type == "structural_tag"
+        )
+
+        if (
+            not is_mistral_tokenizer(self.model_tokenizer)
+            or not self.model_tokenizer.supports_grammar
+            or any_so_non_supported_active
+            or response_format_non_supported_active
+        ):
             request = super().adjust_request(request)
             if request.tools and request.tool_choice != "none":
                 # Do not skip special tokens when using chat template
@@ -142,15 +170,40 @@ class MistralToolParser(ToolParser):
                 request.skip_special_tokens = False
             return request
 
-        if (
-            not self.model_tokenizer.supports_grammar
-            or request.structured_outputs is not None
-            or (
-                request.response_format is not None
-                and request.response_format.type != "text"
-            )
-        ):
-            return request
+        json_schema: str | None = None
+        if structured_outputs is not None:
+            if structured_outputs.json_object is not None:
+                json_schema = _DEFAULT_JSON_SCHEMA
+            elif structured_outputs.json is not None:
+                if isinstance(structured_outputs.json, str):
+                    json_schema = structured_outputs.json
+                else:
+                    json_schema = json.dumps(
+                        structured_outputs.json, ensure_ascii=False
+                    )
+            else:
+                raise ValueError(
+                    "Unsupported request.structured_outputs for MistralToolParser. "
+                    "Only `json` and `json_object` are supported."
+                )
+        elif response_format is not None and response_format.type != "text":
+            if response_format.type == "json_object":
+                json_schema = _DEFAULT_JSON_SCHEMA
+            elif response_format.type == "json_schema":
+                if response_format.json_schema is not None:
+                    json_schema = json.dumps(
+                        response_format.json_schema.json_schema,
+                        ensure_ascii=False,
+                    )
+                else:
+                    json_schema = _DEFAULT_JSON_SCHEMA
+            else:
+                raise ValueError(
+                    "MistralToolParser only accepts `text`, `json_object` or "
+                    f"`json_schema` for request.response_format, got {response_format=}"
+                )
+            # Structured Outputs will be defined.
+            request.response_format = None
 
         grammar_factory = self.model_tokenizer.grammar_factory
 
@@ -187,13 +240,19 @@ class MistralToolParser(ToolParser):
                 )
 
         # Rendering grammar is cached in mistral-common given tools, template and mode.
-        lark_grammar = grammar_factory.get_lark_from_jinja(
-            template=template,
-            mode=tool_choice,
-            tools=tools,
-            json_schema=None,
-            parallel_tool_calls=request.parallel_tool_calls,
-        )
+        match tool_choice, json_schema is not None:
+            case MistralToolChoiceEnum.none, True:
+                lark_grammar = grammar_factory.get_lark_for_json_schema(
+                    json_schema=json_schema
+                )
+            case _, _:
+                lark_grammar = grammar_factory.get_lark_from_jinja(
+                    template=template,
+                    mode=tool_choice,
+                    tools=tools,
+                    json_schema=json_schema,
+                    parallel_tool_calls=request.parallel_tool_calls,
+                )
 
         request.structured_outputs = StructuredOutputsParams(grammar=lark_grammar)
         return request
