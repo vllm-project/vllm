@@ -425,28 +425,11 @@ class Platform:
         pass
 
     @classmethod
-    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Ensure block_size is compatible with the attention backend.
-        For hybrid models, also aligns block_size with mamba page sizes.
-        """
-        from vllm.config.cache import CacheConfig
-
-        cache_config = vllm_config.cache_config
-        if cache_config.user_specified_block_size:
-            assert cache_config.block_size, "block_size must be positive."
-
-        model_config = vllm_config.model_config
-        # model_config may be None during testing.
-        if model_config is None:
-            if not cache_config.user_specified_block_size:
-                cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
-            return
-
-        from vllm.config.vllm import (
-            get_layers_from_vllm_config,
-            set_current_vllm_config,
-        )
+    def _find_non_ssm_backend(
+        cls, vllm_config: "VllmConfig"
+    ) -> "type[AttentionBackend] | None":
+        """Find the first non-SSM attention backend from model layers."""
+        from vllm.config.vllm import get_layers_from_vllm_config
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
         )
@@ -455,39 +438,54 @@ class Platform:
             vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        if not attn_layers:
-            if not cache_config.user_specified_block_size:
-                cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
-            return
-
-        backend_cls = None
         for layer in attn_layers.values():
             b = layer.get_attn_backend()
             if not b.is_ssm():
-                backend_cls = b
-                break
+                return b
+        return None
 
-        if backend_cls is None:
+    @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Ensure block_size is compatible with the attention backend.
+        For hybrid models, also aligns block_size with mamba page sizes.
+        """
+        from vllm.config.cache import CacheConfig
+        from vllm.config.vllm import set_current_vllm_config
+
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+
+        # model_config may be None during testing.
+        if not model_config:
             if not cache_config.user_specified_block_size:
                 cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             return
 
-        assert backend_cls is not None
+        backend_cls = cls._find_non_ssm_backend(vllm_config)
 
+        # Phase 1: Pick block size from backend (skip if user set --block-size)
         if not cache_config.user_specified_block_size:
-            with set_current_vllm_config(vllm_config):
-                preferred = backend_cls.get_preferred_block_size(
-                    CacheConfig.DEFAULT_BLOCK_SIZE
-                )
-            if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
-                logger.info(
-                    "Setting kv cache block size to %d for %s backend.",
-                    preferred,
-                    backend_cls.get_name(),
-                )
-            cache_config.block_size = preferred
+            if backend_cls:
+                with set_current_vllm_config(vllm_config):
+                    preferred = backend_cls.get_preferred_block_size(
+                        CacheConfig.DEFAULT_BLOCK_SIZE
+                    )
+                if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
+                    logger.info(
+                        "Setting kv cache block size to %d for %s backend.",
+                        preferred,
+                        backend_cls.get_name(),
+                    )
+                cache_config.block_size = preferred
+            else:
+                cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
 
+        # Phase 2: Align for hybrid models (always runs, may increase block_size)
         if model_config.is_hybrid:
+            assert backend_cls, (
+                "Hybrid model must have at least one non-SSM attention backend"
+            )
             cls._align_hybrid_block_size(vllm_config, backend_cls)
 
     @classmethod
