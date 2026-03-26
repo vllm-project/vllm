@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     convert_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
+    mxfp4_round_up_hidden_size_and_intermediate_size,
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -29,9 +30,6 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
-)
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    maybe_roundup_mxfp4_fused_moe_sizes,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
@@ -133,14 +131,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
-        rounded_hidden_size, rounded_intermediate_size_per_partition = (
-            maybe_roundup_mxfp4_fused_moe_sizes(
-                hidden_size=hidden_size,
-                intermediate_size_per_partition=intermediate_size_per_partition,
-                mxfp4_backend=self.mxfp4_backend,
-            )
+        return mxfp4_round_up_hidden_size_and_intermediate_size(
+            self.mxfp4_backend, hidden_size, intermediate_size_per_partition
         )
-        return rounded_hidden_size, rounded_intermediate_size_per_partition
 
     def create_weights(
         self,

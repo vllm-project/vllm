@@ -28,14 +28,15 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
+    mxfp4_round_up_hidden_size_and_intermediate_size,
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    CK_MXFP4_MOE_DIM_ALIGNMENT,
     _swizzle_mxfp4,
-    maybe_roundup_mxfp4_fused_moe_sizes,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
@@ -50,6 +51,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -800,10 +802,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         )
         if self.mxfp4_backend is not None:
             hidden_size, intermediate_size_per_partition = (
-                maybe_roundup_mxfp4_fused_moe_sizes(
-                    hidden_size=hidden_size,
-                    intermediate_size_per_partition=intermediate_size_per_partition,
-                    mxfp4_backend=self.mxfp4_backend,
+                mxfp4_round_up_hidden_size_and_intermediate_size(
+                    self.mxfp4_backend, hidden_size, intermediate_size_per_partition
                 )
             )
         return hidden_size, intermediate_size_per_partition

@@ -84,34 +84,6 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     return quant_tensor, InFlexData(), scale
 
 
-def get_padding_alignment():
-    """Get padding alignment for MXFP4 MoE based on platform."""
-    if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx950
-
-        return 256 if on_gfx950() else 128
-    return 128
-
-
-def maybe_roundup_mxfp4_fused_moe_sizes(
-    hidden_size: int,
-    intermediate_size_per_partition: int,
-    mxfp4_backend,
-) -> tuple[int, int]:
-    """Delegate to the canonical implementation in oracle/mxfp4.py."""
-    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-        Mxfp4MoeBackend,
-        mxfp4_round_up_hidden_size_and_intermediate_size,
-    )
-
-    if not isinstance(mxfp4_backend, Mxfp4MoeBackend):
-        raise ValueError(f"Invalid mxfp4_backend: {mxfp4_backend}")
-
-    return mxfp4_round_up_hidden_size_and_intermediate_size(
-        mxfp4_backend, hidden_size, intermediate_size_per_partition
-    )
-
-
 def _dequant_mxfp4(
     x: torch.Tensor, scale: torch.Tensor, float_dtype: torch.dtype
 ) -> torch.Tensor:
