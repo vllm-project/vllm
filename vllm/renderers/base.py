@@ -69,15 +69,6 @@ _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 
 
 class BaseRenderer(ABC, Generic[_T]):
-    @classmethod
-    @abstractmethod
-    def from_config(
-        cls,
-        config: "VllmConfig",
-        tokenizer_kwargs: dict[str, Any],
-    ) -> "BaseRenderer":
-        raise NotImplementedError
-
     def __init__(self, config: "VllmConfig", tokenizer: _T | None) -> None:
         super().__init__()
 

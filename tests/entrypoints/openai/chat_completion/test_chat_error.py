@@ -16,7 +16,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
-from vllm.tokenizers.registry import tokenizer_args_from_config
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
@@ -72,11 +72,9 @@ class MockVllmConfig:
 
 
 def _build_renderer(model_config: MockModelConfig):
-    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
-
-    return HfRenderer.from_config(
+    return HfRenderer(
         MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
-        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+        cached_tokenizer_from_config(model_config),
     )
 
 
