@@ -1598,9 +1598,9 @@ class VllmConfig:
         if architecture is None:
             return
 
-        from vllm.model_executor.layers.config import AttentionConfig
+        from vllm.model_executor.layers.config import AttentionVerifyAndUpdateConfig
 
-        AttentionConfig.verify_and_update_config(self)
+        AttentionVerifyAndUpdateConfig.verify_and_update_config(self)
 
         from vllm.model_executor.models.config import (
             MODELS_CONFIG_MAP,

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class AttentionConfig(VerifyAndUpdateConfig):
+class AttentionVerifyAndUpdateConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
@@ -64,7 +64,10 @@ class AttentionConfig(VerifyAndUpdateConfig):
         cache_config.mamba_alignment_kernel_block_size = kernel_block_alignment_size
         if cache_config.block_size is None:
             cache_config.block_size = kernel_block_alignment_size
-        else:
+        elif cache_config.user_specified_block_size:
+            # Only validate block_size when the user explicitly set it via
+            # --block-size. Otherwise block_size is still the default and will
+            # be overwritten later by Platform.update_block_size_for_backend().
             is_valid_block_size = any(
                 (cache_config.block_size % kernel_block_size.base == 0)
                 if isinstance(kernel_block_size, MultipleOf)
