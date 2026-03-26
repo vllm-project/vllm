@@ -303,10 +303,12 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         # Check if thinking is enabled
         self.is_enabled = reasoning_config is not None
 
-        self.think_start_token_ids = getattr(
-            reasoning_config, "think_start_token_ids", []
+        self.reasoning_start_token_ids = getattr(
+            reasoning_config, "reasoning_start_token_ids", []
         )
-        self.think_end_token_ids = getattr(reasoning_config, "think_end_token_ids", [])
+        self.reasoning_end_token_ids = getattr(
+            reasoning_config, "reasoning_end_token_ids", []
+        )
 
         self.pin_memory = is_pin_memory
         self.device = device
@@ -357,15 +359,15 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             think_count = 0
         else:
             last_start = self._find_last_sequence_index(
-                prompt_tok_ids, self.think_start_token_ids
+                prompt_tok_ids, self.reasoning_start_token_ids
             )
             last_end = self._find_last_sequence_index(
-                prompt_tok_ids, self.think_end_token_ids
+                prompt_tok_ids, self.reasoning_end_token_ids
             )
             in_think = last_start > last_end
             if in_think:
                 think_count = len(prompt_tok_ids) - (
-                    last_start + len(self.think_start_token_ids)
+                    last_start + len(self.reasoning_start_token_ids)
                 )
             else:
                 think_count = 0
