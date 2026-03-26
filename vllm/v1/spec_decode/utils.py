@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.config import VllmConfig, replace
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
@@ -257,34 +257,6 @@ def compute_new_slot_mapping(
     return new_slot_mapping
 
 
-def create_vllm_config_for_draft_model(
-    target_model_vllm_config: VllmConfig,
-) -> VllmConfig:
-    """The vllm_config is configured for the target model, e.g.
-    its quant_config and parallel_config. But the draft model is potentially
-    quantized differently, and has potentially different tensor_parallel_size.
-    This function creates a new vllm_config configured for the drafter.
-    The vllm_config is useful when loading the draft model with get_model().
-    """
-    old = target_model_vllm_config
-    assert old.speculative_config is not None, "speculative_config is not set"
-    old_spec_config = old.speculative_config
-    new_parallel_config = replace(
-        old_spec_config.draft_parallel_config, rank=old.parallel_config.rank
-    )
-    # Shallow-copy cache_config so the draft model's config initialization
-    # does not mutate the target model's cache settings.
-    new_cache_config = replace(old.cache_config)
-    new: VllmConfig = replace(
-        old,
-        quant_config=None,
-        parallel_config=new_parallel_config,
-        model_config=old_spec_config.draft_model_config,
-        cache_config=new_cache_config,
-    )
-    return new
-
-
 def extend_all_queries_by_N(
     common_attn_metadata: CommonAttentionMetadata,
     N: int,
@@ -466,4 +438,37 @@ def copy_and_expand_eagle_inputs_kernel(
         out_new_token_indices_ptr + new_token_out_idx,
         out_idx,
         mask=is_new_token_region & in_bounds,
+    )
+
+
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+def update_num_computed_tokens_for_batch_change(
+    num_computed_tokens: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    prev_positions: torch.Tensor,
+    valid_sampled_token_count: torch.Tensor,
+    prev_num_draft_tokens: torch.Tensor,
+    cpu_num_computed_tokens: torch.Tensor,
+) -> None:
+    """Correct num_computed_tokens for async spec decode drift.
+
+    Requests that had drafts: corrected = prev_gpu + valid_count.
+    New requests or non-draft (e.g. prefills): use CPU value directly.
+    """
+    # Clamp because prev_positions can be -1 for new requests
+    gather_indices = prev_positions.clamp(min=0)
+
+    valid_counts = valid_sampled_token_count[gather_indices]
+    prev_computed = num_computed_tokens[gather_indices]
+    prev_drafts = prev_num_draft_tokens[gather_indices]
+
+    participating = (prev_positions >= 0) & (prev_drafts > 0)
+    corrected = prev_computed + valid_counts.int()
+
+    n = prev_positions.shape[0]
+    num_computed_tokens[:n].copy_(
+        torch.where(participating, corrected, cpu_num_computed_tokens)
+    )
+    num_accepted_tokens.copy_(
+        torch.where(participating, valid_counts, num_accepted_tokens)
     )

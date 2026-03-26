@@ -8,7 +8,6 @@ using the chat template defined by the model.
 
 import os
 from argparse import Namespace
-from dataclasses import asdict
 from typing import NamedTuple
 
 from huggingface_hub import snapshot_download
@@ -1481,10 +1480,11 @@ def run_generate(
 ):
     req_data = model_example_map[model](question, image_urls)
 
-    engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    engine_args = req_data.engine_args
+    engine_args.seed = seed
     if tensor_parallel_size is not None:
-        engine_args["tensor_parallel_size"] = tensor_parallel_size
-    llm = LLM(**engine_args)
+        engine_args.tensor_parallel_size = tensor_parallel_size
+    llm = LLM.from_engine_args(engine_args)
 
     sampling_params = SamplingParams(
         temperature=0.0, max_tokens=256, stop_token_ids=req_data.stop_token_ids
@@ -1521,10 +1521,11 @@ def run_chat(
         req_data.engine_args.limit_mm_per_prompt or {}
     )
 
-    engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    engine_args = req_data.engine_args
+    engine_args.seed = seed
     if tensor_parallel_size is not None:
-        engine_args["tensor_parallel_size"] = tensor_parallel_size
-    llm = LLM(**engine_args)
+        engine_args.tensor_parallel_size = tensor_parallel_size
+    llm = LLM.from_engine_args(engine_args)
 
     sampling_params = (
         SamplingParams(
