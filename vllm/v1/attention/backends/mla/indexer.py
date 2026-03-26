@@ -10,7 +10,6 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
     has_deep_gemm,
-    is_deep_gemm_supported,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
@@ -216,12 +215,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        if not is_deep_gemm_supported():
-            logger.warning_once(
-                "DeepGEMM is not available. Disabling CUDA graph support "
-                "for sparse attention indexer. This may reduce performance.",
-            )
-            return AttentionCGSupport.NEVER
         return AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, *args, **kwargs):
