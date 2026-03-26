@@ -11,7 +11,11 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.v1.simple_kv_offload.copy_ops import BatchMemcpyParams
+from vllm.v1.simple_kv_offload.copy_ops import (
+    BatchMemcpyParams,
+    build_params,
+    copy_blocks,
+)
 
 logger = init_logger(__name__)
 
@@ -36,23 +40,11 @@ class DmaCopyBackend:
         load_stream: torch.cuda.Stream,
         store_stream: torch.cuda.Stream,
     ) -> None:
-        from vllm.v1.simple_kv_offload import copy_ops
-
         self._load_stream = load_stream
         self._store_stream = store_stream
 
-        # Store direction: gpu -> cpu (on store_stream)
-        self._store_params = copy_ops.build_params(
-            gpu_caches,
-            cpu_caches,
-            stream=store_stream,
-        )
-        # Load direction: cpu -> gpu (on load_stream)
-        self._load_params = copy_ops.build_params(
-            cpu_caches,
-            gpu_caches,
-            stream=load_stream,
-        )
+        self._store_params = build_params(gpu_caches, cpu_caches, store_stream)
+        self._load_params = build_params(cpu_caches, gpu_caches, load_stream)
 
         self._queue = queue.SimpleQueue()
         self._thread = threading.Thread(
@@ -92,15 +84,13 @@ class DmaCopyBackend:
         load_stream: torch.cuda.Stream,
         store_stream: torch.cuda.Stream,
     ) -> None:
-        from vllm.v1.simple_kv_offload import copy_ops
-
         current_platform.set_device(device)
         while True:
             item = q.get()
             if item is None:
                 return
             src_blocks, dst_blocks, params, is_store, event_idx, events_list = item
-            copy_ops.copy_blocks(src_blocks, dst_blocks, params)
+            copy_blocks(src_blocks, dst_blocks, params)
             stream = store_stream if is_store else load_stream
             event = torch.Event()
             event.record(stream)

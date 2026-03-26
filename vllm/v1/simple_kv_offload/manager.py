@@ -18,7 +18,11 @@ from vllm.v1.core.kv_cache_coordinator import (
     get_kv_cache_coordinator,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    MambaSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 
@@ -81,6 +85,13 @@ class SimpleCPUOffloadScheduler:
             kv_cache_config, cpu_capacity_bytes
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
+        # Find the full attention kv group for prefix cache matching.
+        self.fa_gidx = -1
+        for g_idx, g in enumerate(self.cpu_kv_cache_config.kv_cache_groups):
+            if isinstance(g.kv_cache_spec, FullAttentionSpec):
+                self.fa_gidx = g_idx
+                break
+        assert 0 <= self.fa_gidx < len(self.cpu_kv_cache_config.kv_cache_groups)
 
         logger.info(
             "SimpleCPUOffloadScheduler: Allocating %d CPU blocks (%.2f GB, mode=%s)",
@@ -213,7 +224,6 @@ class SimpleCPUOffloadScheduler:
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
     ) -> None:
-        """Prepare load metadata after GPU block allocation."""
         req_id = request.request_id
         block_ids_by_group = blocks.get_block_ids()
         num_groups = len(block_ids_by_group)
@@ -234,9 +244,7 @@ class SimpleCPUOffloadScheduler:
         num_blocks_to_load = num_external_tokens // self.block_size
         assert num_blocks_to_load > 0
 
-        # NOTE: here we assume the first group is always FullAttention.
-        # Skip blocks already locally computed on GPU, essentially num_computed_blocks
-        skipped = sum(blk.block_hash is not None for blk in blocks.blocks[0])
+        skipped = sum(blk.block_hash is not None for blk in blocks.blocks[self.fa_gidx])
         num_computed_tokens = skipped * self.block_size
         hashes_to_load = request.block_hashes[skipped : skipped + num_blocks_to_load]
 
@@ -288,9 +296,7 @@ class SimpleCPUOffloadScheduler:
             [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
         )
 
-        # Clean up stale state if the request was preempted and re-scheduled.
-        if req_id in self._reqs_to_load:
-            self._cleanup_load_request(req_id)
+        assert self._reqs_to_load.get(req_id) is None
         self._reqs_to_load[req_id] = LoadRequestState(
             request=request, transfer_meta=TransferMeta(gpu_block_ids, cpu_block_ids)
         )
@@ -299,7 +305,11 @@ class SimpleCPUOffloadScheduler:
         self,
         scheduler_output: SchedulerOutput,
     ) -> SimpleCPUOffloadMetadata:
-        """Build metadata for worker to execute transfers this step."""
+        # Preempted reqs may have pending loads whose GPU/CPU blocks are still touched
+        for req_id in scheduler_output.preempted_req_ids:
+            if req_id in self._reqs_to_load:
+                self._cleanup_load_request(req_id)
+
         # --- Stores ---
         store_event = -1
         store_gpu, store_cpu, store_req_ids = self.prepare_store_specs(scheduler_output)
@@ -709,7 +719,7 @@ class SimpleCPUOffloadScheduler:
     def _cleanup_store_request(self, req_id: str) -> None:
         """Release store metadata for a request.
 
-        Metadata-only cleanup — no block freeing. Job completion handles
+        Metadata-only cleanup but no block freeing. Job completion handles
         block caching and GPU ref freeing via _process_store_completion().
         """
         state = self._reqs_to_store.pop(req_id, None)
@@ -724,5 +734,4 @@ class SimpleCPUOffloadScheduler:
         state.store_events.clear()
 
     def take_events(self) -> Iterable[KVCacheEvent]:
-        """Return KV cache events for telemetry."""
         return self.cpu_block_pool.take_events()

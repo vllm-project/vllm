@@ -37,7 +37,7 @@ def _make_llm(model: str, lazy: bool, cpu_bytes_to_use: int) -> LLM:
     )
     return LLM(
         model=model,
-        gpu_memory_utilization=0.4,
+        gpu_memory_utilization=0.6,
         disable_hybrid_kv_cache_manager=False,
         enable_prefix_caching=True,
         kv_transfer_config=kv_transfer_config,
@@ -74,7 +74,7 @@ def _flush_gpu_cache(llm: LLM, sampling_params: SamplingParams, seed: int = 0):
 def _accuracy_test(llm: LLM, lazy: bool = False):
     """Verify that CPU-loaded KV produces correct output."""
     sampling_params = SamplingParams(max_tokens=1, temperature=0)
-    prompt = "hi " * 200 + "Let's count to ten. One, two, three, "
+    prompt = "hi " * 2000 + "Let's count to ten. One, two, three, "
 
     # Cold run — populate GPU cache and trigger CPU offload
     cold_output = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
@@ -93,8 +93,6 @@ def _accuracy_test(llm: LLM, lazy: bool = False):
         output = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
         if output.outputs[0].text == expected:
             success_count += 1
-        else:
-            print(f"{output.outputs[0].text} != {expected}")
 
     assert success_count >= 0.5 * test_count, (
         f"Accuracy too low: {success_count}/{test_count} matched '{expected}'"
@@ -133,7 +131,6 @@ def _latency_test(llm: LLM, lazy: bool = False):
 
         if cpu_time < cold_time:
             num_times_cpu_better += 1
-        print(f"CPU time: {cpu_time}, Cold time: {cold_time}")
 
     assert num_times_cpu_better >= 0.8 * num_tests, (
         f"CPU hit only faster {num_times_cpu_better}/{num_tests} times"

@@ -57,10 +57,6 @@ class SimpleCPUOffloadWorker:
         self._pending_load_event_indices: set[int] = set()
         self._pending_store_event_indices: set[int] = set()
 
-    @property
-    def _is_initialized(self) -> bool:
-        return self.gpu_kv_caches is not None and self.cpu_kv_caches is not None
-
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
@@ -118,19 +114,17 @@ class SimpleCPUOffloadWorker:
                 d for d in range(tensor.ndim) if tensor.shape[d] == num_blocks
             )
             el = tensor.element_size()
-            block_stride_bytes = tensor.stride(block_dim) * el
+            b_stride_bytes = tensor.stride(block_dim) * el
             # Dims before block_dim with larger stride are "outer" (e.g. K/V).
             outer_dims = [
-                d
-                for d in range(block_dim)
-                if tensor.stride(d) * el > block_stride_bytes
+                d for d in range(block_dim) if tensor.stride(d) * el > b_stride_bytes
             ]
             if not outer_dims:  # no outer dimensions, so all blocks are contiguous
                 unique_gpu_caches[name] = raw.view(num_blocks, -1)
             else:  # outer dimensions exist, so blocks are segmented
                 for idx in range(tensor.shape[outer_dims[0]]):
                     offset = idx * tensor.stride(outer_dims[0]) * el
-                    chunk = raw[offset : offset + num_blocks * block_stride_bytes]
+                    chunk = raw[offset : offset + num_blocks * b_stride_bytes]
                     unique_gpu_caches[f"{name}.{idx}"] = chunk.view(num_blocks, -1)
 
         # Compute per-tensor bytes_per_block. Tensors may have different
@@ -215,23 +209,25 @@ class SimpleCPUOffloadWorker:
         """
         # (1) Submit transfers
         metadata = self._connector_metadata
-        if self._is_initialized and metadata is not None:
-            # Launch loads (CPU→GPU).
-            self._launch_copy_kernel(
-                metadata.load_cpu_blocks,
-                metadata.load_gpu_blocks,
-                metadata.load_event,
-                is_store=False,
-            )
-            # Launch stores (GPU→CPU). Safe because the manager only includes
-            # blocks with confirmed-computed KV data, and the implicit GPU→CPU
-            # sync from sampling guarantees visibility across streams.
-            self._launch_copy_kernel(
-                metadata.store_gpu_blocks,
-                metadata.store_cpu_blocks,
-                metadata.store_event,
-                is_store=True,
-            )
+        if metadata is not None:
+            # Launch loads (CPU->GPU).
+            if metadata.load_cpu_blocks:
+                self._backend.launch_copy(
+                    metadata.load_cpu_blocks,
+                    metadata.load_gpu_blocks,
+                    is_store=False,
+                    event_idx=metadata.load_event,
+                    events_list=self._load_events,
+                )
+            # Launch stores (GPU->CPU).
+            if metadata.store_gpu_blocks:
+                self._backend.launch_copy(
+                    metadata.store_gpu_blocks,
+                    metadata.store_cpu_blocks,
+                    is_store=True,
+                    event_idx=metadata.store_event,
+                    events_list=self._store_events,
+                )
 
         # (2) Track completed transfer events
         finished_recving: set[str] = set()
@@ -273,25 +269,6 @@ class SimpleCPUOffloadWorker:
         self._flush_and_sync_all()
         self._pending_store_event_indices -= pending
         return {f"__store_done_{idx}" for idx in pending}
-
-    def _launch_copy_kernel(
-        self,
-        src_blocks: list[int],
-        dst_blocks: list[int],
-        event_idx: int,
-        is_store: bool,
-    ) -> None:
-        if not src_blocks:
-            return
-
-        events = self._store_events if is_store else self._load_events
-        self._backend.launch_copy(
-            src_blocks,
-            dst_blocks,
-            is_store,
-            event_idx,
-            events,
-        )
 
     def _flush_and_sync_all(self) -> None:
         """Synchronize all in-flight transfer events."""
