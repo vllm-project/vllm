@@ -1032,87 +1032,6 @@ def _node_count_with_rank_mapping(
     return next_node_id
 
 
-def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
-    src_padding = dst.shape[-1] - src.shape[-1]
-    assert src_padding >= 0
-    new_src = torch.nn.functional.pad(src, (0, src_padding), value=-1)
-    dst.copy_(new_src)
-
-
-def _commit_eplb_maps_for_layer(
-    model_state: EplbModelState,
-    new_physical_to_logical_map: torch.Tensor,
-    layer: int,
-) -> None:
-    """
-    Per-layer version of _commit_eplb_maps that's used by the sync portion of EPLB
-    when running async EPLB. Copies all of the new_* maps into model_state. After this
-    function completes, the new mappings will become the current mappings and will be
-    visible to the model.
-    """
-
-    # Commit physical_to_logical_map
-    src = new_physical_to_logical_map[layer]
-    dst = model_state.physical_to_logical_map[layer]
-    assert src.shape == dst.shape, (
-        "The number of physical experts must stay the same while running Async EPLB. "
-        f"Current number of physical experts: {dst.shape[0]}. New number of physical "
-        f"experts {src.shape[0]}."
-    )
-    dst.copy_(src, non_blocking=True)
-
-    num_logical_experts = model_state.logical_to_physical_map.shape[1]
-    new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
-    # Commit logical_to_physical_map
-    _pad_out_tensor(
-        src=new_logical,
-        dst=model_state.logical_to_physical_map[layer],
-    )
-
-    # Commit logical_replica_count
-    src = new_replica_count
-    dst = model_state.logical_replica_count[layer]
-    assert src.shape == dst.shape
-    dst.copy_(src, non_blocking=True)
-
-
-def _commit_eplb_maps(
-    model_state: EplbModelState,
-    new_physical_to_logical_map: torch.Tensor,
-) -> None:
-    """
-    Copies all of the new_* maps into model_state. After this function completes,
-    the new mappings will become the current mappings and will be visible to the
-    model.
-    """
-
-    # Commit physical_to_logical_map
-    src = new_physical_to_logical_map
-    dst = model_state.physical_to_logical_map
-
-    # Rare Case: When the number of physical experts has changed, discard the old
-    # physical to logical expert map and use the new one. Otherwise copy the new
-    # map into the old one
-    if src.shape[1] != dst.shape[1]:
-        model_state.physical_to_logical_map = src.to(dst.device)
-    else:
-        dst.copy_(src, non_blocking=True)
-
-    # Commit logical_to_physical_map
-    num_logical_experts = model_state.logical_to_physical_map.shape[1]
-    new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
-    # Commit logical_to_physical_map
-    _pad_out_tensor(
-        src=new_logical,
-        dst=model_state.logical_to_physical_map,
-    )
-
-    # Commit logical_replica_count
-    src = new_replica_count
-    dst = model_state.logical_replica_count
-    dst.copy_(src, non_blocking=True)
-
-
 def compute_logical_maps(
     physical_to_logical_map: torch.Tensor,
     num_logical_experts: int,
@@ -1190,3 +1109,84 @@ def compute_logical_maps(
     if per_layer:
         return logical_to_physical_map_out.squeeze(0), logical_replica_count.squeeze(0)
     return logical_to_physical_map_out, logical_replica_count
+
+
+def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
+    src_padding = dst.shape[-1] - src.shape[-1]
+    assert src_padding >= 0
+    new_src = torch.nn.functional.pad(src, (0, src_padding), value=-1)
+    dst.copy_(new_src)
+
+
+def _commit_eplb_maps_for_layer(
+    model_state: EplbModelState,
+    new_physical_to_logical_map: torch.Tensor,
+    layer: int,
+) -> None:
+    """
+    Per-layer version of _commit_eplb_maps that's used by the sync portion of EPLB
+    when running async EPLB. Copies all of the new_* maps into model_state. After this
+    function completes, the new mappings will become the current mappings and will be
+    visible to the model.
+    """
+
+    # Commit physical_to_logical_map
+    src = new_physical_to_logical_map[layer]
+    dst = model_state.physical_to_logical_map[layer]
+    assert src.shape == dst.shape, (
+        "The number of physical experts must stay the same while running Async EPLB. "
+        f"Current number of physical experts: {dst.shape[0]}. New number of physical "
+        f"experts {src.shape[0]}."
+    )
+    dst.copy_(src, non_blocking=True)
+
+    num_logical_experts = model_state.logical_to_physical_map.shape[1]
+    new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
+    # Commit logical_to_physical_map
+    _pad_out_tensor(
+        src=new_logical,
+        dst=model_state.logical_to_physical_map[layer],
+    )
+
+    # Commit logical_replica_count
+    src = new_replica_count
+    dst = model_state.logical_replica_count[layer]
+    assert src.shape == dst.shape
+    dst.copy_(src, non_blocking=True)
+
+
+def _commit_eplb_maps(
+    model_state: EplbModelState,
+    new_physical_to_logical_map: torch.Tensor,
+) -> None:
+    """
+    Copies all of the new_* maps into model_state. After this function completes,
+    the new mappings will become the current mappings and will be visible to the
+    model.
+    """
+
+    # Commit physical_to_logical_map
+    src = new_physical_to_logical_map
+    dst = model_state.physical_to_logical_map
+
+    # Rare Case: When the number of physical experts has changed, discard the old
+    # physical to logical expert map and use the new one. This only happens when the
+    # number of GPUs available to vLLM changes while vLLM is running. Otherwise copy the
+    # new map into the old one.
+    if src.shape[1] != dst.shape[1]:
+        model_state.physical_to_logical_map = src.to(dst.device)
+    else:
+        dst.copy_(src, non_blocking=True)
+
+    num_logical_experts = model_state.logical_to_physical_map.shape[1]
+    new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
+    # Commit logical_to_physical_map
+    _pad_out_tensor(
+        src=new_logical,
+        dst=model_state.logical_to_physical_map,
+    )
+
+    # Commit logical_replica_count
+    src = new_replica_count
+    dst = model_state.logical_replica_count
+    dst.copy_(src, non_blocking=True)
