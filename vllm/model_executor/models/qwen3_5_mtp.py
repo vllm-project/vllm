@@ -59,7 +59,6 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         super().__init__()
 
         model_config = vllm_config.model_config
-        quant_config = vllm_config.quant_config
 
         config: Qwen3_5TextConfig | Qwen3_5MoeTextConfig = model_config.hf_text_config
 
@@ -75,13 +74,17 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             config.hidden_size,
         )
 
+        # The fc layer is not quantized in NVFP4 checkpoints (e.g.,
+        # nvidia/Qwen3.5-397B-A17B-NVFP4), even though it's not listed in
+        # exclude_modules. Pass quant_config=None to avoid shape mismatch
+        # when loading unquantized weights into a quantized parameter.
         self.fc = ColumnParallelLinear(
             self.config.hidden_size * 2,
             self.config.hidden_size,
             gather_output=True,
             bias=False,
             return_bias=False,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=f"{prefix}.fc",
         )
 
