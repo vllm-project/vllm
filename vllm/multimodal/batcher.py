@@ -10,17 +10,17 @@ from .utils import group_and_batch_mm_items
 
 class MultiModalBatcher(Protocol):
     """
-    Interface defining how to collate and uncollate model inputs to/from batches.
+    Interface defining how to batch and unbatch model inputs.
 
     The following invariants must hold:
     ```
-    for modality, num_items, batch in iter_collate(x):
-        assert len(uncollate(batch)) == num_items
-        assert sum(1 for _ in iter_collate(batch)) == 1
+    for modality, num_items, batch in group_batches(x):
+        assert len(split_batch(batch)) == num_items
+        assert sum(1 for _ in group_batches(batch)) == 1
     ```
     """
 
-    def iter_collate(
+    def group_batches(
         self,
         items: Iterable[dict[str, NestedTensors]],
     ) -> Iterable[tuple[str, int, dict[str, NestedTensors]]]:
@@ -39,7 +39,7 @@ class MultiModalBatcher(Protocol):
         """
         raise NotImplementedError
 
-    def uncollate(
+    def split_batch(
         self,
         batch: dict[str, NestedTensors],
     ) -> list[dict[str, NestedTensors]]:
@@ -64,7 +64,7 @@ class MultiModalFieldBatcher(MultiModalBatcher):
 
         self.config_by_key = config_by_key
 
-    def iter_collate(
+    def group_batches(
         self,
         items: Iterable[dict[str, NestedTensors]],
     ) -> Iterable[tuple[str, int, dict[str, NestedTensors]]]:
@@ -84,7 +84,7 @@ class MultiModalFieldBatcher(MultiModalBatcher):
             for num_items, batch in group_and_batch_mm_items(parsed_items):
                 yield modality, num_items, batch
 
-    def uncollate(
+    def split_batch(
         self,
         batch: dict[str, NestedTensors],
     ) -> list[dict[str, NestedTensors]]:
