@@ -5803,7 +5803,7 @@ class GPUModelRunner(
         )
         self.cache_config.num_gpu_blocks_override = saved_override
 
-        self.initialize_kv_cache(minimal_config)
+        self.initialize_kv_cache(minimal_config, is_profiling=True)
         self.cache_config.num_gpu_blocks = minimal_config.num_blocks
 
         logger.debug("Initialized minimal KV cache for CUDA graph profiling")
@@ -6126,7 +6126,11 @@ class GPUModelRunner(
             torch.accelerator.synchronize()
         self.maybe_remove_all_loras(self.lora_config)
 
-    def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_attn_backend(
+        self,
+        kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
+    ) -> None:
         """
         Initialize the attention backends and attention metadata builders.
         """
@@ -6198,7 +6202,9 @@ class GPUModelRunner(
 
         # Resolve cudagraph_mode before actually initialize metadata_builders
         self._check_and_update_cudagraph_mode(
-            attention_backend_list, kv_cache_config.kv_cache_groups
+            attention_backend_list,
+            kv_cache_config.kv_cache_groups,
+            is_profiling=is_profiling,
         )
 
         # Check if attention backend supports PCP&DCP and related features.
@@ -6242,6 +6248,7 @@ class GPUModelRunner(
         self,
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
+        is_profiling: bool = False,
     ) -> None:
         """
         Resolve the cudagraph_mode when there are multiple attention
@@ -6389,7 +6396,7 @@ class GPUModelRunner(
         # of silently capping cudagraph_capture_sizes avoids unintended
         # restrictions on PIECEWISE (prefill) cudagraphs.
         # See: https://github.com/vllm-project/vllm/issues/34094
-        if cudagraph_mode.has_full_cudagraphs():
+        if cudagraph_mode.has_full_cudagraphs() and not is_profiling:
             has_mamba = any(
                 isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_groups
             )
@@ -6765,7 +6772,11 @@ class GPUModelRunner(
                 else:
                     break
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
+    ) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
@@ -6777,7 +6788,7 @@ class GPUModelRunner(
         self._mamba_copy_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
-        self.initialize_attn_backend(kv_cache_config)
+        self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
         # The kernel block size for all KV cache groups. For example, if
         # kv_cache_manager uses block_size 256 for a given group, but the attention
         # backends for that group only supports block_size 64, we will return
