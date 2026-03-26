@@ -783,13 +783,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def set_include_reasoning_for_none_effort(cls, data: Any) -> Any:
-        if data.get("reasoning_effort") == "none":
-            data["include_reasoning"] = False
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
     def set_enable_thinking_for_none_effort(cls, data: Any) -> Any:
         """Map reasoning_effort='none' to enable_thinking=False.
 

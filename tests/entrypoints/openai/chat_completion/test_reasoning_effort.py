@@ -65,10 +65,11 @@ class TestReasoningEffortEnableThinking:
         params = request.build_chat_params(None, "auto")
         assert params.chat_template_kwargs["enable_thinking"] is True
 
-    def test_none_also_sets_include_reasoning_false(self):
-        """Verify the existing validator still works alongside our change."""
+    def test_none_does_not_override_include_reasoning(self):
+        """include_reasoning should stay True (default) — reasoning_effort='none'
+        disables thinking via enable_thinking, not by dropping tokens."""
         request = _build_request(reasoning_effort="none")
-        assert request.include_reasoning is False
+        assert request.include_reasoning is True
 
     def test_existing_chat_template_kwargs_preserved(self):
         """Other user-provided chat_template_kwargs should be preserved."""
