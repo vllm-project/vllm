@@ -375,6 +375,10 @@ class SpecDecodeBaseProposer:
 
         self.cudagraph_dispatcher.initialize_cudagraph_keys(eagle_cudagraph_mode)
 
+    def _prepare_draft_input_ids(self, token_ids: torch.Tensor) -> torch.Tensor:
+        """Convert token IDs for draft model input. Override for vocab mapping."""
+        return token_ids
+        
     def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Greedy-sample draft tokens from hidden states."""
         if self.use_local_argmax_reduction:

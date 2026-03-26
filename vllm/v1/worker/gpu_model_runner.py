@@ -161,6 +161,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
+from vllm.v1.spec_decode.universal_draft_model import UniversalDraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
@@ -516,6 +517,7 @@ class GPUModelRunner(
                 | SuffixDecodingProposer
                 | EagleProposer
                 | DraftModelProposer
+                | UniversalDraftModelProposer
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
             )
@@ -523,6 +525,14 @@ class GPUModelRunner(
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
                 self.drafter = NgramProposer(self.vllm_config)
+            
+            elif self.speculative_config.uses_universal_draft():
+                self.drafter = UniversalDraftModelProposer(
+                    vllm_config=self.vllm_config,
+                    device=self.device,
+                    runner=self,
+                )
+            
             elif self.speculative_config.uses_draft_model():
                 self.drafter = DraftModelProposer(
                     vllm_config=self.vllm_config,
@@ -4194,7 +4204,7 @@ class GPUModelRunner(
             )
             use_gpu_toks = (
                 spec_config.use_eagle()
-                or spec_config.uses_draft_model()
+                or spec_config.uses_draft_model() or spec_config.uses_universal_draft()
                 or spec_config.uses_extract_hidden_states()
             ) and not spec_config.disable_padded_drafter_batch
             if use_gpu_toks:
@@ -4202,7 +4212,7 @@ class GPUModelRunner(
                 # as inputs, and does not need to wait for bookkeeping to finish.
                 assert isinstance(
                     self.drafter,
-                    EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
+                    EagleProposer | DraftModelProposer | UniversalDraftModelProposer | ExtractHiddenStatesProposer,
                 )
                 sampled_token_ids = sampler_output.sampled_token_ids
                 if input_fits_in_drafter:
@@ -4589,8 +4599,8 @@ class GPUModelRunner(
                 next_token_ids, valid_sampled_tokens_count
             )
 
-        elif spec_config.use_eagle() or spec_config.uses_draft_model():
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+        elif spec_config.use_eagle() or spec_config.uses_draft_model() or spec_config.uses_universal_draft():
+            assert isinstance(self.drafter, EagleProposer | DraftModelProposer | UniversalDraftModelProposer)
 
             if spec_config.disable_padded_drafter_batch:
                 # When padded-batch is disabled, the sampled_token_ids should be
@@ -5479,11 +5489,12 @@ class GPUModelRunner(
             if self.speculative_config and (
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
+                or self.speculative_config.uses_universal_draft()
                 or self.speculative_config.uses_extract_hidden_states()
             ):
                 assert isinstance(
                     self.drafter,
-                    EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
+                    EagleProposer | DraftModelProposer | UniversalDraftModelProposer | ExtractHiddenStatesProposer,
                 )
                 assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
@@ -6234,8 +6245,9 @@ class GPUModelRunner(
         if self.speculative_config and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
+            or self.speculative_config.uses_universal_draft()
         ):
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
+            assert isinstance(self.drafter, EagleProposer | DraftModelProposer | UniversalDraftModelProposer)
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
     def _check_and_update_cudagraph_mode(
