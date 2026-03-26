@@ -701,6 +701,25 @@ class VllmConfig:
                 self.model_config, self.load_config
             )
 
+        if (
+            self.quant_config is not None
+            and self.model_config is not None
+            and hasattr(self.quant_config, "use_deep_gemm")
+            and self.quant_config.use_deep_gemm is None
+        ):
+            from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
+
+            model_type = getattr(self.model_config.hf_text_config, "model_type", None)
+            if should_auto_disable_deep_gemm(model_type):
+                self.quant_config.use_deep_gemm = False
+                logger.warning_once(
+                    "Auto-disabled DeepGemm for model_type=%s on Blackwell. "
+                    "DeepGemm E8M0 scale format causes accuracy degradation "
+                    "for this architecture. Falling back to CUTLASS. "
+                    "To disable DeepGemm globally, set VLLM_USE_DEEP_GEMM=0.",
+                    model_type,
+                )
+
         from vllm.v1.executor.abstract import Executor
 
         executor_backend = self.parallel_config.distributed_executor_backend
