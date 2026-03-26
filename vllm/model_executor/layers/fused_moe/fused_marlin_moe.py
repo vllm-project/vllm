@@ -30,6 +30,8 @@ from vllm.model_executor.layers.fused_moe.utils import (
     disable_inplace,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    GPTQ_MARLIN_MIN_THREAD_K,
+    GPTQ_MARLIN_MIN_THREAD_N,
     get_marlin_input_dtype,
     marlin_make_workspace_new,
     marlin_moe_intermediate_size,
@@ -606,6 +608,41 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
+
+    @staticmethod
+    def _supports_shape(hidden_dim: int) -> bool:
+        # The Marlin GEMM kernel requires K divisible by MIN_THREAD_K (128)
+        # and N divisible by MIN_THREAD_N (64).  In MoE the hidden_dim
+        # appears as K in the gate/up projection and as N in the down
+        # projection, so it must satisfy both constraints.
+        return (
+            hidden_dim % GPTQ_MARLIN_MIN_THREAD_K == 0
+            and hidden_dim % GPTQ_MARLIN_MIN_THREAD_N == 0
+        )
+
+    @staticmethod
+    def is_supported_config(
+        cls: type["mk.FusedMoEExpertsModular"],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        supported, reason = mk.FusedMoEExpertsModular.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if not supported:
+            return supported, reason
+
+        # The intermediate_size appears as N in the gate/up GEMM and as K
+        # in the down GEMM, so it has the same alignment requirements.
+        inter = moe_config.intermediate_size_per_partition
+        if inter % GPTQ_MARLIN_MIN_THREAD_K != 0:
+            return False, (
+                f"kernel does not support intermediate_size_per_partition"
+                f"={inter} (not divisible by {GPTQ_MARLIN_MIN_THREAD_K})"
+            )
+        return True, None
 
     @property
     def quant_type_id(self) -> int:
