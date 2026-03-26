@@ -101,6 +101,7 @@ steps:
 
 - label: "Arm CPU Test"
   depends_on: []
+  soft_fail: false
   device: arm_cpu
   no_plugin: true
   commands: 
