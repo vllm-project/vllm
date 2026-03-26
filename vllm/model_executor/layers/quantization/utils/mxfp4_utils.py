@@ -6,6 +6,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
@@ -82,6 +83,14 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     )
     scale = convert_layout(wrap_torch_tensor(scale), scale_layout, **scale_layout_opts)
     return quant_tensor, InFlexData(), scale
+
+
+def get_padding_alignment():
+    return (
+        256
+        if triton.runtime.driver.active.get_current_target().arch in ("gfx950",)
+        else 128
+    )
 
 
 def _dequant_mxfp4(
