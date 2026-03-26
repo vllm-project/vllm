@@ -720,7 +720,7 @@ class OpenAIServing:
                     f"This model's maximum context length is "
                     f"{max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the input for {operation}. "
-                    f"Please reduce the length of the input.",
+                    f"Please reduce the length of the input prompt.",
                     parameter="input_tokens",
                     value=token_num,
                 )

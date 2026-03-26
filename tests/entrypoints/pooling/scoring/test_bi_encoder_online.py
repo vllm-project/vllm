@@ -43,7 +43,10 @@ def hf_model(hf_runner):
     return EncoderScoringHfRunner(MODEL_NAME)
 
 
-def test_score_api_queries_str_1_documents_str_1(hf_model, server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_score_api_queries_str_1_documents_str_1(
+    hf_model, server: RemoteOpenAIServer
+):
     score_response = requests.post(
         server.url_for("score"),
         json={
@@ -66,7 +69,10 @@ def test_score_api_queries_str_1_documents_str_1(hf_model, server: RemoteOpenAIS
         assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
 
-def test_score_api_queries_str_1_documents_str_n(hf_model, server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_score_api_queries_str_1_documents_str_n(
+    hf_model, server: RemoteOpenAIServer
+):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[0], TEXTS_2[1]],
@@ -94,7 +100,10 @@ def test_score_api_queries_str_1_documents_str_n(hf_model, server: RemoteOpenAIS
         assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
 
-def test_score_api_queries_str_n_documents_str_n(hf_model, server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_score_api_queries_str_n_documents_str_n(
+    hf_model, server: RemoteOpenAIServer
+):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[1], TEXTS_2[1]],
@@ -122,7 +131,8 @@ def test_score_api_queries_str_n_documents_str_n(hf_model, server: RemoteOpenAIS
         assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
 
-def test_score_api_queries_vs_documents(hf_model, server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_score_api_queries_vs_documents(hf_model, server: RemoteOpenAIServer):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[1], TEXTS_2[1]],
@@ -150,7 +160,8 @@ def test_score_api_queries_vs_documents(hf_model, server: RemoteOpenAIServer):
         assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
 
-def test_score_api_queries_vs_items(hf_model, server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_score_api_queries_vs_items(hf_model, server: RemoteOpenAIServer):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[1], TEXTS_2[1]],
@@ -178,7 +189,8 @@ def test_score_api_queries_vs_items(hf_model, server: RemoteOpenAIServer):
         assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
 
-def test_score_api_text_1_vs_text_2(hf_model, server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_score_api_text_1_vs_text_2(hf_model, server: RemoteOpenAIServer):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[1], TEXTS_2[1]],
@@ -206,7 +218,8 @@ def test_score_api_text_1_vs_text_2(hf_model, server: RemoteOpenAIServer):
         assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
 
-def test_score_api_data_1_vs_data_2(hf_model, server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_score_api_data_1_vs_data_2(hf_model, server: RemoteOpenAIServer):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[1], TEXTS_2[1]],
@@ -234,7 +247,8 @@ def test_score_api_data_1_vs_data_2(hf_model, server: RemoteOpenAIServer):
         assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
 
-def test_rerank_api_texts(server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_rerank_api_texts(server: RemoteOpenAIServer):
     query = "What is the capital of France?"
     documents = [
         "The capital of Brazil is Brasilia.",
@@ -259,7 +273,8 @@ def test_rerank_api_texts(server: RemoteOpenAIServer):
     assert rerank.results[1].relevance_score <= 0.01
 
 
-def test_rerank_api_top_n(server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_rerank_api_top_n(server: RemoteOpenAIServer):
     query = "What is the capital of France?"
     documents = [
         "The capital of Brazil is Brasilia.",
@@ -281,7 +296,8 @@ def test_rerank_api_top_n(server: RemoteOpenAIServer):
     assert rerank.results[1].relevance_score <= 0.01
 
 
-def test_rerank_api_max_model_len(server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_rerank_api_max_model_len(server: RemoteOpenAIServer):
     query = "What is the capital of France?" * 100
     documents = [
         "The capital of Brazil is Brasilia.",
@@ -294,10 +310,11 @@ def test_rerank_api_max_model_len(server: RemoteOpenAIServer):
     )
     assert rerank_response.status_code == 400
     # Assert just a small fragments of the response
-    assert "Please reduce the length of the input." in rerank_response.text
+    assert "Please reduce the length of the input prompt" in rerank_response.text
 
 
-def test_score_api_max_model_len(server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_score_api_max_model_len(server: RemoteOpenAIServer):
     queries = "What is the capital of France?" * 20
     documents = [
         "The capital of Brazil is Brasilia.",
@@ -314,7 +331,7 @@ def test_score_api_max_model_len(server: RemoteOpenAIServer):
     )
     assert score_response.status_code == 400
     # Assert just a small fragments of the response
-    assert "Please reduce the length of the input." in score_response.text
+    assert "Please reduce the length of the input prompt" in score_response.text
 
     # Test truncation
     score_response = requests.post(
@@ -327,10 +344,11 @@ def test_score_api_max_model_len(server: RemoteOpenAIServer):
         },
     )
     assert score_response.status_code == 400
-    assert "Please request a smaller truncation size." in score_response.text
+    assert "Please, select a smaller truncation size." in score_response.text
 
 
-def test_invocations(server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_invocations(server: RemoteOpenAIServer):
     query = "What is the capital of France?"
     documents = [
         "The capital of Brazil is Brasilia.",
@@ -362,6 +380,7 @@ def test_invocations(server: RemoteOpenAIServer):
         assert rerank_result["relevance_score"] == pytest.approx(
             invocations_result["relevance_score"], rel=0.01
         )
+
 
 @pytest.mark.asyncio
 async def test_pooling_embed(server: RemoteOpenAIServer):

@@ -44,7 +44,10 @@ def hf_model(hf_runner):
     )
 
 
-def test_score_api_queries_str_1_documents_str_1(hf_model, server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_score_api_queries_str_1_documents_str_1(
+    hf_model, server: RemoteOpenAIServer
+):
     score_response = requests.post(
         server.url_for("score"),
         json={
@@ -67,7 +70,10 @@ def test_score_api_queries_str_1_documents_str_1(hf_model, server: RemoteOpenAIS
         assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
 
-def test_score_api_queries_str_1_documents_str_n(hf_model, server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_score_api_queries_str_1_documents_str_n(
+    hf_model, server: RemoteOpenAIServer
+):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[0], TEXTS_2[1]],
@@ -95,7 +101,10 @@ def test_score_api_queries_str_1_documents_str_n(hf_model, server: RemoteOpenAIS
         assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
 
-def test_score_api_queries_str_n_documents_str_n(hf_model, server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_score_api_queries_str_n_documents_str_n(
+    hf_model, server: RemoteOpenAIServer
+):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[1], TEXTS_2[1]],
@@ -123,7 +132,8 @@ def test_score_api_queries_str_n_documents_str_n(hf_model, server: RemoteOpenAIS
         assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
 
-def test_rerank_api_texts(server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_rerank_api_texts(server: RemoteOpenAIServer):
     """Test ColBERT rerank endpoint."""
     query = "What is the capital of France?"
     documents = [
@@ -152,7 +162,8 @@ def test_rerank_api_texts(server: RemoteOpenAIServer):
     assert paris_result.relevance_score > brazil_result.relevance_score
 
 
-def test_rerank_api_top_n(server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_rerank_api_top_n(server: RemoteOpenAIServer):
     """Test ColBERT rerank with top_n parameter."""
     query = "What is the capital of France?"
     documents = [
@@ -177,7 +188,8 @@ def test_rerank_api_top_n(server: RemoteOpenAIServer):
     assert rerank.results[0].index == 1
 
 
-def test_token_embed(server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_token_embed(server: RemoteOpenAIServer):
     """Test ColBERT token_embed task via pooling endpoint."""
     text = "What is the capital of France?"
 
@@ -201,7 +213,8 @@ def test_token_embed(server: RemoteOpenAIServer):
     assert len(embeddings[0]) == COLBERT_DIM
 
 
-def test_embed_not_supported(server: RemoteOpenAIServer):
+@pytest.mark.asyncio
+async def test_embed_not_supported(server: RemoteOpenAIServer):
     """Test that ColBERT model does not support 'embed' task."""
     task = "embed"
     text = "What is the capital of France?"

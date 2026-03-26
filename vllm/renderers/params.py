@@ -221,7 +221,7 @@ class TokenizeParams:
                 f"{self.truncate_prompt_tokens_param}={truncate_prompt_tokens} "
                 f"cannot be greater than {self.max_total_tokens_param} - "
                 f"{self.max_output_tokens_param} = {max_input_tokens}. "
-                f"Please request a smaller truncation size.",
+                f"Please, select a smaller truncation size.",
                 parameter=self.truncate_prompt_tokens_param,
                 value=truncate_prompt_tokens,
             )
