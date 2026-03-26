@@ -58,11 +58,13 @@ def setup_eplb_state(enable_eplb: bool, global_num_experts: int) -> EplbLayerSta
     logical_replica_count = torch.ones(
         global_num_experts, dtype=torch.int64, device="cuda"
     )
+    should_record_tensor = torch.ones((), dtype=torch.bool, device="cuda")
 
     return EplbLayerState(
         expert_load_view=expert_load_view,
         logical_to_physical_map=logical_to_physical_map,
         logical_replica_count=logical_replica_count,
+        should_record_tensor=should_record_tensor,
     )
 
 
