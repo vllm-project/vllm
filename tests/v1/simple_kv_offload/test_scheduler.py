@@ -255,6 +255,7 @@ def make_scheduler_output(
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=[],
+        preempted_req_ids=set(),
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
