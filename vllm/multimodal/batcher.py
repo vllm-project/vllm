@@ -16,7 +16,13 @@ class MultiModalBatcher(Protocol):
     ```
     for modality, num_items, batch in group_batches(x):
         assert len(split_batch(batch)) == num_items
-        assert sum(1 for _ in group_batches(batch)) == 1
+
+        subbatches = list(group_batches(batch))
+        assert len(subbatches) == 1
+
+        m, n, b = subbatches[0]
+        assert (m, n) == (modality, num_items)
+        assert nested_tensors_equal(b, batch)
     ```
     """
 
