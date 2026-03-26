@@ -25,6 +25,9 @@ def _get_env_var(worker, name):
 
 @ray.remote(num_cpus=0)
 class AsyncLLMActor:
+    async def __init__(self):
+        self.engine: AsyncLLM
+
     async def start(self, pg, bundle_indices=None, ray_runtime_env=None):
         os.environ["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] = "1"
         # VLLM_ALLOW_INSECURE_SERIALIZATION is needed so collective_rpc can
