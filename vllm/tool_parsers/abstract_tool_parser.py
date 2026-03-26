@@ -5,13 +5,18 @@ import importlib
 import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
+from typing import TypeAlias
 
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
     ResponseTextConfig,
 )
+from openai.types.responses.tool import Tool as ResponsesTool
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
@@ -30,6 +35,8 @@ from vllm.utils.import_utils import import_from_path
 
 logger = init_logger(__name__)
 
+Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
+
 
 class ToolParser:
     """
@@ -38,7 +45,11 @@ class ToolParser:
     derived classes.
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[Tool] | None = None,
+    ):
         self.prev_tool_call_arr: list[dict] = []
         # the index of the tool call that is currently being parsed
         self.current_tool_id: int = -1
@@ -46,6 +57,7 @@ class ToolParser:
         self.streamed_args_for_tool: list[str] = []
 
         self.model_tokenizer = tokenizer
+        self.tools = tools
 
     @cached_property
     def vocab(self) -> dict[str, int]:

@@ -22,7 +22,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import extract_intermediate_diff
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -30,8 +30,8 @@ logger = init_logger(__name__)
 
 
 class JambaToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         if is_mistral_tokenizer(self.model_tokenizer):
             raise ValueError(

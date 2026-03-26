@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 
@@ -43,8 +44,8 @@ FuncT = TypeVar("FuncT", bound=_FunctionCallCtor)
 
 
 class Granite4ToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1

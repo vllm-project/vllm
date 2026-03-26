@@ -10,7 +10,6 @@ import regex as re
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -23,6 +22,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 
@@ -30,8 +30,8 @@ logger = init_logger(__name__)
 
 
 class Qwen3CoderToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
@@ -109,9 +109,7 @@ class Qwen3CoderToolParser(ToolParser):
         self.accumulated_params = {}
         self.streaming_request = None
 
-    def _get_arguments_config(
-        self, func_name: str, tools: list[ChatCompletionToolsParam] | None
-    ) -> dict:
+    def _get_arguments_config(self, func_name: str, tools: list[Tool] | None) -> dict:
         """Extract argument configuration for a function."""
         if tools is None:
             return {}
@@ -246,7 +244,7 @@ class Qwen3CoderToolParser(ToolParser):
             return param_value
 
     def _parse_xml_function_call(
-        self, function_call_str: str, tools: list[ChatCompletionToolsParam] | None
+        self, function_call_str: str, tools: list[Tool] | None
     ) -> ToolCall | None:
         # Extract function name
         end_index = function_call_str.find(">")
