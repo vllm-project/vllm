@@ -327,6 +327,7 @@ class UBatchWrapper:
         dp_metadata,
         batch_descriptor,
         cudagraph_runtime_mode,
+        num_unpadded_tokens: int | None = None,
     ) -> list[UbatchMetadata]:
         # Create one forward context per ubatch
         forward_contexts = []
@@ -334,6 +335,12 @@ class UBatchWrapper:
         # converting None to {}), or a list of dicts (one per ubatch)
         has_slot_mapping = slot_mapping and isinstance(slot_mapping, list)
         for i, ubatch_slice in enumerate(ubatch_slices):
+            ubatch_num_unpadded: int | None = None
+            if num_unpadded_tokens is not None:
+                ts = ubatch_slice.token_slice
+                ubatch_num_unpadded = max(
+                    0, min(num_unpadded_tokens, ts.stop) - ts.start
+                )
             forward_contexts.append(
                 create_forward_context(
                     attn_metadata[i] if attn_metadata is not None else None,
@@ -342,6 +349,7 @@ class UBatchWrapper:
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     slot_mapping=slot_mapping[i] if has_slot_mapping else None,
+                    num_unpadded_tokens=ubatch_num_unpadded,
                 )
             )
 
@@ -464,6 +472,8 @@ class UBatchWrapper:
                 )
             )
 
+        num_unpadded_tokens = forward_context.num_unpadded_tokens
+
         if (
             num_tokens not in self.cudagraphs
             and cudagraph_runtime_mode is CUDAGraphMode.FULL
@@ -480,6 +490,7 @@ class UBatchWrapper:
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                num_unpadded_tokens=num_unpadded_tokens,
             )
             with self.sm_control:
                 return self._capture_ubatches(ubatch_metadata, self.runnable)
@@ -506,6 +517,7 @@ class UBatchWrapper:
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                num_unpadded_tokens=num_unpadded_tokens,
             )
             with self.sm_control:
                 return self._run_ubatches(ubatch_metadata, self.runnable)
