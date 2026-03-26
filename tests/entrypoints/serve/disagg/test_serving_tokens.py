@@ -344,3 +344,34 @@ async def test_generate_with_lora_adapter(client, tokenizer, messages):
     completions_res = completions_data["choices"][0]["message"]["content"]
 
     assert generate_res == completions_res
+
+
+@pytest.mark.asyncio
+async def test_generate_with_kv_transfer_params(client):
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5},
+        "kv_transfer_params": {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+        },
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    data = resp.json()
+    assert "choices" in data
+
+
+@pytest.mark.asyncio
+async def test_generate_without_sampling_params(client):
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    data = resp.json()
+    assert "choices" in data

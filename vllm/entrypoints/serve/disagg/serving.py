@@ -109,7 +109,7 @@ class ServingTokens(OpenAIServing):
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
-        sampling_params = request.sampling_params
+        sampling_params = request.to_sampling_params()
         if self.force_no_detokenize:
             sampling_params.detokenize = False
 
