@@ -65,10 +65,10 @@ class ReasoningConfig:
                 self.reasoning_parser
             )
             reasoning_parser = parser_cls(tokenizer)
-            if getattr(reasoning_parser, "start_token", None) is not None:
-                think_start_str = reasoning_parser.start_token
-            if getattr(reasoning_parser, "end_token", None) is not None:
-                think_end_str = reasoning_parser.end_token
+            if start_token := getattr(reasoning_parser, "start_token", None):
+                think_start_str = start_token
+            if end_token := getattr(reasoning_parser, "end_token", None):
+                think_end_str = end_token
 
         if not think_start_str or not think_end_str:
             # If we don't have valid strings to tokenize,
