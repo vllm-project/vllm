@@ -40,15 +40,15 @@ class ReasoningParser:
         return self.model_tokenizer.get_vocab()
 
     @property
-    def think_start_str(self) -> str | None:
-        """Set `think_start_str` to the strings that delimit
+    def reasoning_start_str(self) -> str | None:
+        """Set `reasoning_start_str` to the strings that delimit
         the reasoning block (e.g. `""<seed:think>""` and `"<think>"`).
         """
         return None
 
     @property
-    def think_end_str(self) -> str | None:
-        """Set `think_end_str` to the strings that delimit
+    def reasoning_end_str(self) -> str | None:
+        """Set `reasoning_end_str` to the strings that delimit
         the reasoning block (e.g. `""</seed:think>""` and `"</think>"`).
         """
         return None

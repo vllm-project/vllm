@@ -65,11 +65,11 @@ class ReasoningConfig:
                 self.reasoning_parser
             )
             reasoning_parser = parser_cls(tokenizer)
-            start_token = reasoning_parser.think_start_str
+            start_token = reasoning_parser.reasoning_start_str
             if start_token and not think_start_str:
                 think_start_str = start_token
 
-            end_token = reasoning_parser.think_end_str
+            end_token = reasoning_parser.reasoning_end_str
             if end_token and not think_end_str:
                 think_end_str = end_token
 
