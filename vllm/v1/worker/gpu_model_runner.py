@@ -3912,6 +3912,7 @@ class GPUModelRunner(
             num_reqs_padded = (
                 batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
             )
+            self.input_batch.num_reqs_padded = num_reqs_padded
             ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
                 should_ubatch,
                 num_scheduled_tokens_np,
@@ -4250,7 +4251,6 @@ class GPUModelRunner(
                             self.requests,
                             self.input_batch,
                             self.discard_request_mask.gpu,
-                            spec_decode_common_attn_metadata.num_reqs,
                         )
                     )
                     self._copy_valid_sampled_token_count(

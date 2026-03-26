@@ -868,7 +868,6 @@ class SpecDecodeBaseProposer:
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
         discard_request_mask: torch.Tensor,
-        batch_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding.
@@ -879,6 +878,7 @@ class SpecDecodeBaseProposer:
         """
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
+        batch_size = gpu_input_batch.num_reqs_padded
         seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
         self.backup_next_token_ids.np[:num_reqs] = np.array(
             [
@@ -900,7 +900,6 @@ class SpecDecodeBaseProposer:
         valid_sampled_tokens_count = next_token_ids.new_zeros(batch_size)
 
         # Kernel grid: one program per request (row)
-        # NOTE: For CUDA Graph, we need the `batch_size` to be `num_reqs_padded` here
         grid = (batch_size,)
 
         # Find the next power of 2 for block sizes
@@ -913,7 +912,7 @@ class SpecDecodeBaseProposer:
             valid_sampled_tokens_count,
             gpu_input_batch.vocab_size,
             num_tokens,
-            batch_size,
+            num_reqs,
             sampled_token_ids.stride(0),
             BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
         )
@@ -943,14 +942,6 @@ class SpecDecodeBaseProposer:
         )
         num_rejected_tokens_gpu = torch.empty(
             (num_reqs,), dtype=torch.int32, device=device
-        )
-
-        actual_num_reqs = gpu_input_batch.num_reqs
-        spec_decode_metadata.cu_num_draft_tokens = nn.functional.pad(
-            spec_decode_metadata.cu_num_draft_tokens,
-            (0, num_reqs - actual_num_reqs),
-            mode="constant",
-            value=spec_decode_metadata.cu_num_draft_tokens[-1],
         )
 
         grid = (num_reqs,)
