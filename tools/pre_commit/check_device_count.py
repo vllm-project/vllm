@@ -11,7 +11,11 @@ _DEVICE_COUNT_PATTERNS = [
     r"\bcuda_device_count_stateless\b",
 ]
 
-ALLOWED_FILES = {"vllm/platforms/", "vllm/utils/torch_utils.py", "tests/distributed/test_utils.py"}
+ALLOWED_FILES = {
+    "vllm/platforms/",
+    "vllm/utils/torch_utils.py",
+    "tests/distributed/test_utils.py",
+}
 
 
 def scan_file(path: str) -> int:
