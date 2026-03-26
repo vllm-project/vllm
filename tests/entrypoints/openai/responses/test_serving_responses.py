@@ -1083,13 +1083,13 @@ class TestContentBeforeToolCall:
         assert len(item_done_events) == 1
         # When tool call is first, the done event is for the function_call item
         assert item_done_events[0].item.type == "function_call"
-        # 3. Output‑item‑added event – the function call appears as an in‑progress item.
+        # 3. Output-item-added event - the function call appears as an in-progress item.
         added = [e for e in events if isinstance(e, ResponseOutputItemAddedEvent)]
         assert len(added) == 1
         assert added[0].item.type == "function_call"
         # The SSE spec uses the string "in_progress" for the status field.
         assert getattr(added[0].item, "status", None) == "in_progress"
-        # 4. Output‑item‑done event – already asserted above (function_call).
+        # 4. Output-item-done event - already asserted above (function_call).
 
 
 class TestContentAndReasoningBeforeToolCall:
