@@ -1496,8 +1496,13 @@ def large_gpu_test(*, min_gb: int):
 def multi_gpu_marks(*, num_gpus: int):
     """Get a collection of pytest marks to apply for `@multi_gpu_test`."""
     test_selector = pytest.mark.distributed(num_gpus=num_gpus)
+    device_count = (
+        cuda_device_count_stateless()
+        if current_platform.is_cuda_alike()
+        else torch.accelerator.device_count()
+    )
     test_skipif = pytest.mark.skipif(
-        cuda_device_count_stateless() < num_gpus,
+        device_count < num_gpus,
         reason=f"Need at least {num_gpus} GPUs to run the test.",
     )
 
