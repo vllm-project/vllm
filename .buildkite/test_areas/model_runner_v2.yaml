@@ -11,7 +11,7 @@ steps:
   - vllm/v1/attention/
   - tests/v1/engine/test_llm_engine.py
   - tests/v1/e2e/
-  - tests/v1/entrypoints/llm/test_struct_output_generate.py
+  - tests/entrypoints/llm/test_struct_output_generate.py
   commands:
   - set -x
   - export VLLM_USE_V2_MODEL_RUNNER=1
@@ -22,7 +22,7 @@ steps:
   - pytest -v -s v1/e2e/general/test_context_length.py
   - pytest -v -s v1/e2e/general/test_min_tokens.py
   # Temporary hack filter to exclude ngram spec decoding based tests.
-  - pytest -v -s v1/entrypoints/llm/test_struct_output_generate.py -k "xgrammar and not speculative_config6 and not speculative_config7 and not speculative_config8 and not speculative_config0"
+  - pytest -v -s entrypoints/llm/test_struct_output_generate.py -k "xgrammar and not speculative_config6 and not speculative_config7 and not speculative_config8 and not speculative_config0"
 
 - label: Model Runner V2 Examples
   timeout_in_minutes: 45
@@ -87,13 +87,12 @@ steps:
     - vllm/v1/worker/gpu/
     - vllm/v1/worker/gpu_worker.py
     - tests/distributed/test_pipeline_parallel.py
-    #- tests/distributed/test_pp_cudagraph.py
+    - tests/distributed/test_pp_cudagraph.py
   commands:
     - set -x
     - export VLLM_USE_V2_MODEL_RUNNER=1
     - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray and not Jamba"
-    # TODO: Uncomment once https://github.com/vllm-project/vllm/pull/35162 is merged.
-    #- pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
+    - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
 
 - label: Model Runner V2 Spec Decode
   timeout_in_minutes: 30

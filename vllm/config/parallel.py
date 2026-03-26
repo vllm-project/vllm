@@ -14,9 +14,6 @@ from typing_extensions import Self
 import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_ports_list
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -162,7 +159,6 @@ class ParallelConfig:
     all2all_backend: All2AllBackend = "allgather_reducescatter"
     """All2All backend for MoE expert parallel communication. Available options:
 
-    - "naive": Naive all2all implementation using broadcasts\n
     - "allgather_reducescatter": All2all based on allgather and reducescatter\n
     - "deepep_high_throughput": Use deepep high-throughput kernels\n
     - "deepep_low_latency": Use deepep low-latency kernels\n
@@ -198,7 +194,7 @@ class ParallelConfig:
     threshold, microbatching will be used. Otherwise, the request will be
     processed in a single batch."""
 
-    disable_nccl_for_dp_synchronization: bool | None = Field(default=None)
+    disable_nccl_for_dp_synchronization: bool | None = None
     """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
     to use Gloo instead of NCCL for its all reduce.
 
@@ -344,10 +340,11 @@ class ParallelConfig:
                 f"but found: {self._api_process_rank}"
             )
 
-        if self.all2all_backend == "pplx":
+        if self.all2all_backend in ["pplx", "naive"]:
             logger.warning(
-                "The 'pplx' all2all backend has been removed. "
-                "Falling back to 'allgather_reducescatter'."
+                "The '%s' all2all backend has been removed. "
+                "Falling back to 'allgather_reducescatter'.",
+                self.all2all_backend,
             )
             self.all2all_backend = "allgather_reducescatter"
 
@@ -534,7 +531,6 @@ class ParallelConfig:
             self.all2all_backend
             in (
                 "allgather_reducescatter",
-                "naive",
                 "deepep_high_throughput",
                 "deepep_low_latency",
                 "mori",
@@ -764,7 +760,7 @@ class ParallelConfig:
             )
 
         if (
-            self.all2all_backend in ("allgather_reducescatter", "naive")
+            self.all2all_backend in ("allgather_reducescatter")
             and self.eplb_config.use_async
         ):
             logger.warning(
@@ -787,7 +783,7 @@ class ParallelConfig:
         from vllm.v1.executor import Executor
 
         # Enable batch invariance settings if requested
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             self.disable_custom_all_reduce = True
 
         if (
