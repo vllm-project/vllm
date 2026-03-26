@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-class EPLBEvent:
+class EplbEvent:
     def __init__(self):
         self._event = torch.cuda.Event()
         self._recorded = threading.Event()

@@ -19,7 +19,7 @@ from torch.distributed import (
     get_global_rank,
 )
 
-from vllm.distributed.eplb.eplb_utils import EPLBEvent
+from vllm.distributed.eplb.eplb_utils import EplbEvent
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
@@ -64,7 +64,7 @@ class AsyncEPLBLayerResult:
     """Per-physical-expert flag: weight was received on this rank."""
     recv_metadata: RecvMetadata
     """Metadata describing what was received during transfer_layer."""
-    consumed_event: EPLBEvent
+    consumed_event: EplbEvent
     """
     Created by the async worker before publishing this result. The main thread
     calls consumed_event.record() after move_from_buffer() completes, which

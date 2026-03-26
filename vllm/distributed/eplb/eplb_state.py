@@ -45,7 +45,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .async_worker import start_async_worker
-from .eplb_utils import EPLBEvent
+from .eplb_utils import EplbEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     AsyncEPLBLayerResult,
@@ -241,7 +241,7 @@ class EplbState:
         """
         The flag indicates whether the EPLB is running in async mode.
         """
-        self.rearrange_event: EPLBEvent = EPLBEvent()
+        self.rearrange_event: EplbEvent = EplbEvent()
         """
         Event to signal when a new rearrangement is needed for the async thread.
         """

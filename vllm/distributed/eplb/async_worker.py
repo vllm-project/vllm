@@ -14,7 +14,7 @@ from torch.distributed import ProcessGroup
 from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
 
-from .eplb_utils import EPLBEvent
+from .eplb_utils import EplbEvent
 from .rebalance_execute import AsyncEPLBLayerResult, transfer_layer
 
 if TYPE_CHECKING:
@@ -116,6 +116,10 @@ async def transfer_run_periodically(
                 model_state.model_name,
             )
 
+            # Execute one EPLB layer transfer per model forward pass. Each iteration
+            # of this loop will copy the new set of expert weights into
+            # model_state.expert_buffer, which will be consumed by the main thread in
+            # EplbState.step()
             while model_state.rebalanced and layer_idx < current_num_layers:
                 (
                     is_unchanged,
@@ -138,7 +142,7 @@ async def transfer_run_periodically(
                 # This event guarantees that expert_buffer will not be overwritten by
                 # subsequent iterations of this loop until the main thread has consumed
                 # it. Record is called by the main thread after move_from_buffer().
-                consumed_event = EPLBEvent()
+                consumed_event = EplbEvent()
 
                 model_state.pending_result = AsyncEPLBLayerResult(
                     layer_idx=layer_idx,
@@ -149,5 +153,8 @@ async def transfer_run_periodically(
                     consumed_event=consumed_event,
                 )
 
+                # Block the this thread until the main thread finishes copying
+                # model_state.expert_buffer into
+                # model_state.model.expert_weights[layer_idx]
                 consumed_event.wait(stream=cuda_stream)
                 layer_idx += 1
