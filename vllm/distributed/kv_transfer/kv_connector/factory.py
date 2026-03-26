@@ -175,7 +175,7 @@ KVConnectorFactory.register_connector(
 
 KVConnectorFactory.register_connector(
     "NixlConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl",
     "NixlConnector",
 )
 
