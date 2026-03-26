@@ -458,30 +458,25 @@ class Platform:
 
         # model_config may be None during testing.
         if not model_config:
-            if not cache_config.user_specified_block_size:
-                cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             return
 
         backend_cls = cls._find_non_ssm_backend(vllm_config)
 
-        # 1. Pick block size from backend (skip if user set --block-size)
-        if not cache_config.user_specified_block_size:
-            if backend_cls:
-                with set_current_vllm_config(vllm_config):
-                    preferred = backend_cls.get_preferred_block_size(
-                        CacheConfig.DEFAULT_BLOCK_SIZE
-                    )
-                if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
-                    logger.info(
-                        "Setting kv cache block size to %d for %s backend.",
-                        preferred,
-                        backend_cls.get_name(),
-                    )
-                cache_config.block_size = preferred
-            else:
-                cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
+        # Phase 1: Pick block size from backend (skip if user set --block-size)
+        if not cache_config.user_specified_block_size and backend_cls:
+            with set_current_vllm_config(vllm_config):
+                preferred = backend_cls.get_preferred_block_size(
+                    CacheConfig.DEFAULT_BLOCK_SIZE
+                )
+            if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
+                logger.info(
+                    "Setting kv cache block size to %d for %s backend.",
+                    preferred,
+                    backend_cls.get_name(),
+                )
+            cache_config.block_size = preferred
 
-        # 2. Align for hybrid models (may change block_size even if user specified it)
+        # Phase 2: Align for hybrid models (always runs, may increase block_size)
         if model_config.is_hybrid:
             assert backend_cls, (
                 "Hybrid model must have at least one non-SSM attention backend"
