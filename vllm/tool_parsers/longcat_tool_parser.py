@@ -4,12 +4,13 @@
 import regex as re
 
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.abstract_tool_parser import Tool
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
 
 class LongcatFlashToolParser(Hermes2ProToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         self.tool_call_start_token: str = "<longcat_tool_call>"
         self.tool_call_end_token: str = "</longcat_tool_call>"
