@@ -406,7 +406,6 @@ class EagleSpeculator:
             block_tables = [
                 x[:num_reqs_padded] for x in self.block_tables.input_block_tables
             ]
-            # Build attention metadata for decode (1 token per request).
             attn_metadata_updated = build_attn_metadata(
                 AttentionBatch(
                     num_reqs=num_reqs_padded,
@@ -418,7 +417,6 @@ class EagleSpeculator:
                     seq_lens=self.input_buffers.seq_lens,
                     num_scheduled_tokens=self.decode_num_scheduled_tokens_np,
                 ),
-                include_padding=False,
                 attn_groups=self.attn_groups,
                 max_seq_len=self.max_model_len,
                 block_tables=block_tables,

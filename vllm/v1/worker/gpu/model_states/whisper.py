@@ -110,13 +110,13 @@ class WhisperModelState(ModelState):
         )
         return build_attn_metadata(
             input_batch=input_batch,
-            include_padding=cudagraph_mode == CUDAGraphMode.FULL,
             attn_groups=attn_groups,
             max_seq_len=self.max_model_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             encoder_seq_lens=encoder_seq_lens,
+            include_padding=cudagraph_mode == CUDAGraphMode.FULL,
         )
 
     def _get_encoder_seq_lens(

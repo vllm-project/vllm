@@ -209,13 +209,13 @@ def build_slot_mappings_by_layer(
 
 def build_attn_metadata(
     input_batch: AttentionBatchProtocol,
-    include_padding: bool,
     attn_groups: list[list[AttentionGroup]],
     max_seq_len: int,
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
     encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]] | None = None,
+    include_padding: bool = True,
 ) -> dict[str, Any]:
     num_groups = len(kv_cache_config.kv_cache_groups)
     if num_groups == 0:
@@ -256,8 +256,10 @@ def build_attn_metadata(
                 slot_mapping=slot_mappings[i],
             )
         if encoder_seq_lens is not None and i in encoder_seq_lens:
-            common_attn_metadata.encoder_seq_lens = encoder_seq_lens[i][0]
-            common_attn_metadata.encoder_seq_lens_cpu = encoder_seq_lens[i][1]
+            (
+                common_attn_metadata.encoder_seq_lens,
+                common_attn_metadata.encoder_seq_lens_cpu,
+            ) = encoder_seq_lens[i]
 
         for attn_group in attn_groups[i]:
             metadata = attn_group.get_metadata_builder(0).build(

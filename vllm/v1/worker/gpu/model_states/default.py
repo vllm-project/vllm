@@ -165,10 +165,10 @@ class DefaultModelState(ModelState):
     ) -> dict[str, Any]:
         return build_attn_metadata(
             input_batch=input_batch,
-            include_padding=cudagraph_mode == CUDAGraphMode.FULL,
             attn_groups=attn_groups,
             max_seq_len=self.max_model_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
+            include_padding=cudagraph_mode == CUDAGraphMode.FULL,
         )
