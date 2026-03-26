@@ -1,0 +1,14 @@
+# Common dependencies
+-r common.txt
+
+# Dependencies for TPU
+cmake>=3.26.1
+packaging>=24.2
+setuptools-scm>=8
+wheel
+jinja2>=3.1.6
+ray[default]
+ray[data]
+setuptools==78.1.0
+nixl==0.3.0
+tpu-inference==0.12.0
