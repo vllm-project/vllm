@@ -1,5 +1,6 @@
 #![feature(coroutines)]
 #![feature(trait_alias)]
+#![feature(iterator_try_collect)]
 
 //! Shared text-generation support used by chat and future raw completions.
 //!

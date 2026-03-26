@@ -52,15 +52,33 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request.logprobs.is_some() {
-        bail_invalid_request!(param = "logprobs", "logprobs are not supported.");
+    if let Some(logprobs) = request.logprobs
+        && logprobs > i32::MAX as u32
+    {
+        bail_invalid_request!(
+            param = "logprobs",
+            "`logprobs` must fit within a signed 32-bit integer."
+        );
     }
 
-    if request.prompt_logprobs.is_some() {
-        bail_invalid_request!(
-            param = "prompt_logprobs",
-            "prompt_logprobs are not supported."
-        );
+    if let Some(prompt_logprobs) = request.prompt_logprobs {
+        if request.stream && (prompt_logprobs > 0 || prompt_logprobs == -1) {
+            bail_invalid_request!(
+                param = "prompt_logprobs",
+                "`prompt_logprobs` are not available when `stream=true`."
+            );
+        }
+
+        if prompt_logprobs < 0 && prompt_logprobs != -1 {
+            bail_invalid_request!(
+                param = "prompt_logprobs",
+                "`prompt_logprobs` must be a non-negative value or -1."
+            );
+        }
+    }
+
+    if request.logit_bias.is_some() {
+        bail_invalid_request!(param = "logit_bias", "logit_bias is not supported.");
     }
 
     if request.seed.is_some() {
@@ -68,10 +86,6 @@ pub(super) fn validate_request_compat(
             param = "seed",
             "seed is not supported, use sampling_seed instead."
         );
-    }
-
-    if request.logit_bias.is_some() {
-        bail_invalid_request!(param = "logit_bias", "logit_bias is not supported.");
     }
 
     if request.regex.is_some() {
@@ -132,17 +146,30 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_compat_rejects_logprobs_fields() {
+    fn validate_request_compat_accepts_logprobs() {
         let request = CompletionRequest {
             logprobs: Some(1),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_ok());
+    }
 
+    #[test]
+    fn validate_request_compat_rejects_streaming_prompt_logprobs() {
         let request = CompletionRequest {
             prompt_logprobs: Some(1),
             ..base_request()
         };
         assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_non_stream_prompt_logprobs() {
+        let request = CompletionRequest {
+            stream: false,
+            prompt_logprobs: Some(-1),
+            ..base_request()
+        };
+        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_ok());
     }
 }

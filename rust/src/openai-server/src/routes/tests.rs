@@ -16,8 +16,9 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use vllm_engine_core_client::protocol::{
-    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, StopReason,
-    UtilityOutput, UtilityResultEnvelope, decode_value,
+    EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, FinishReason, Logprobs,
+    MaybeWireLogprobs, PositionLogprobs, StopReason, TokenLogprob, UtilityOutput,
+    UtilityResultEnvelope, decode_value,
 };
 use vllm_engine_core_client::test_utils::IpcNamespace;
 use vllm_engine_core_client::{
@@ -77,6 +78,32 @@ fn request_output_with_stop_reason(
     }
 }
 
+fn request_output_with_logprobs(
+    request_id: &str,
+    new_token_ids: Vec<u32>,
+    finish_reason: Option<FinishReason>,
+    stop_reason: Option<StopReason>,
+    new_logprobs: Option<Logprobs>,
+    new_prompt_logprobs_tensors: Option<Logprobs>,
+) -> EngineCoreOutput {
+    EngineCoreOutput {
+        request_id: request_id.to_string(),
+        new_token_ids,
+        new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
+        new_prompt_logprobs_tensors: new_prompt_logprobs_tensors.map(MaybeWireLogprobs::Direct),
+        pooling_output: None,
+        finish_reason,
+        stop_reason,
+        events: None,
+        kv_transfer_params: None,
+        trace_headers: None,
+        num_cached_tokens: 0,
+        num_external_computed_tokens: 0,
+        routed_experts: None,
+        num_nans_in_logits: 0,
+    }
+}
+
 fn bytes_to_token_ids(bytes: &[u8]) -> Vec<u32> {
     bytes.iter().map(|byte| u32::from(*byte)).collect()
 }
@@ -111,6 +138,88 @@ fn engine_outputs_for_request(
         finished_requests: None,
         wave_complete: None,
         start_wave: None,
+    }
+}
+
+fn sample_logprobs_for_token(token_id: u32, alternate_token_id: u32) -> Logprobs {
+    Logprobs {
+        positions: vec![PositionLogprobs {
+            entries: vec![
+                TokenLogprob {
+                    token_id,
+                    logprob: -0.1,
+                    rank: 1,
+                },
+                TokenLogprob {
+                    token_id: alternate_token_id,
+                    logprob: -0.2,
+                    rank: 1,
+                },
+            ],
+        }],
+    }
+}
+
+fn prompt_logprobs_for_hello() -> Logprobs {
+    Logprobs {
+        positions: vec![
+            PositionLogprobs {
+                entries: vec![
+                    TokenLogprob {
+                        token_id: b'e' as u32,
+                        logprob: -0.3,
+                        rank: 1,
+                    },
+                    TokenLogprob {
+                        token_id: b'a' as u32,
+                        logprob: -0.5,
+                        rank: 1,
+                    },
+                ],
+            },
+            PositionLogprobs {
+                entries: vec![
+                    TokenLogprob {
+                        token_id: b'l' as u32,
+                        logprob: -0.4,
+                        rank: 1,
+                    },
+                    TokenLogprob {
+                        token_id: b'r' as u32,
+                        logprob: -0.6,
+                        rank: 1,
+                    },
+                ],
+            },
+            PositionLogprobs {
+                entries: vec![
+                    TokenLogprob {
+                        token_id: b'l' as u32,
+                        logprob: -0.45,
+                        rank: 1,
+                    },
+                    TokenLogprob {
+                        token_id: b'i' as u32,
+                        logprob: -0.65,
+                        rank: 1,
+                    },
+                ],
+            },
+            PositionLogprobs {
+                entries: vec![
+                    TokenLogprob {
+                        token_id: b'o' as u32,
+                        logprob: -0.5,
+                        rank: 1,
+                    },
+                    TokenLogprob {
+                        token_id: b'u' as u32,
+                        logprob: -0.7,
+                        rank: 1,
+                    },
+                ],
+            },
+        ],
     }
 }
 
@@ -1307,6 +1416,225 @@ async fn non_stream_completions_echo_prepends_prompt_text() {
     assert_eq!(json["choices"][0]["text"], "hellohi");
     assert_eq!(json["usage"]["prompt_tokens"], 5);
     assert_eq!(json["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_include_logprobs() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_identity = b"engine-openai-completion-logprobs".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let add = recv_engine_message(&mut dealer).await;
+            let request: EngineCoreRequest =
+                rmp_serde::from_slice(&add[1]).expect("decode request");
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    engine_index: 0,
+                    outputs: vec![
+                        request_output_with_logprobs(
+                            &request.request_id,
+                            vec![b'h' as u32],
+                            None,
+                            None,
+                            Some(sample_logprobs_for_token(b'h' as u32, b'H' as u32)),
+                            None,
+                        ),
+                        request_output_with_logprobs(
+                            &request.request_id,
+                            vec![b'i' as u32],
+                            Some(FinishReason::Stop),
+                            None,
+                            Some(sample_logprobs_for_token(b'i' as u32, b'I' as u32)),
+                            None,
+                        ),
+                    ],
+                    scheduler_stats: None,
+                    timestamp: 0.0,
+                    utility_output: None,
+                    finished_requests: None,
+                    wave_complete: None,
+                    start_wave: None,
+                },
+            )
+            .await;
+        }
+    });
+
+    let client = EngineCoreClient::connect_with_input_output_addresses(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        Some(ipc.input_endpoint()),
+        Some(ipc.output_endpoint()),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": false,
+                        "logprobs": 1
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["choices"][0]["logprobs"]["tokens"], json!(["h", "i"]));
+    assert_eq!(
+        json["choices"][0]["logprobs"]["token_logprobs"],
+        json!([-0.1, -0.1])
+    );
+    assert_eq!(json["choices"][0]["logprobs"]["text_offset"], json!([0, 1]));
+    assert_eq!(
+        json["choices"][0]["logprobs"]["top_logprobs"][0],
+        json!({"h": -0.1, "H": -0.2})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_include_prompt_logprobs() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_identity = b"engine-openai-completion-prompt-logprobs".to_vec();
+
+    let engine_task = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_identity = engine_identity.clone();
+        async move {
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let add = recv_engine_message(&mut dealer).await;
+            let request: EngineCoreRequest =
+                rmp_serde::from_slice(&add[1]).expect("decode request");
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    engine_index: 0,
+                    outputs: vec![request_output_with_logprobs(
+                        &request.request_id,
+                        vec![b'h' as u32, b'i' as u32, b'!' as u32],
+                        Some(FinishReason::Stop),
+                        None,
+                        Some(Logprobs {
+                            positions: vec![
+                                sample_logprobs_for_token(b'h' as u32, b'H' as u32).positions[0]
+                                    .clone(),
+                                sample_logprobs_for_token(b'i' as u32, b'I' as u32).positions[0]
+                                    .clone(),
+                                sample_logprobs_for_token(b'!' as u32, b'?' as u32).positions[0]
+                                    .clone(),
+                            ],
+                        }),
+                        Some(prompt_logprobs_for_hello()),
+                    )],
+                    scheduler_stats: None,
+                    timestamp: 0.0,
+                    utility_output: None,
+                    finished_requests: None,
+                    wave_complete: None,
+                    start_wave: None,
+                },
+            )
+            .await;
+        }
+    });
+
+    let client = EngineCoreClient::connect_with_input_output_addresses(
+        EngineCoreClientConfig {
+            handshake_address,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        Some(ipc.input_endpoint()),
+        Some(ipc.output_endpoint()),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": false,
+                        "echo": true,
+                        "logprobs": 1
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["choices"][0]["text"], "hellohi");
+    assert_eq!(
+        json["choices"][0]["logprobs"]["tokens"],
+        json!(["h", "e", "l", "l", "o", "h", "i", "!"])
+    );
+    assert_eq!(
+        json["choices"][0]["logprobs"]["text_offset"],
+        json!([0, 1, 2, 3, 4, 5, 6, 7])
+    );
+    assert_eq!(
+        json["choices"][0]["logprobs"]["token_logprobs"],
+        json!([null, -0.3, -0.4, -0.45, -0.5, -0.1, -0.1, -0.1])
+    );
+    assert_eq!(
+        json["choices"][0]["prompt_logprobs"][0],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        json["choices"][0]["prompt_logprobs"][1],
+        json!({"a": -0.5, "e": -0.3})
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

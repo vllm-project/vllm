@@ -47,11 +47,11 @@ where
         ScalarType::I32 => decode_i32_vec(&bytes, endianness, field)?
             .into_iter()
             .map(|value| convert_to_u32(value, field))
-            .collect::<Result<Vec<_>>>()?,
+            .try_collect()?,
         ScalarType::I64 => decode_i64_vec(&bytes, endianness, field)?
             .into_iter()
             .map(|value| convert_to_u32(value, field))
-            .collect::<Result<Vec<_>>>()?,
+            .try_collect()?,
         ScalarType::F32 => unreachable!("scalar validation should reject f32"),
     };
     Ok(DecodedArray2 {
@@ -82,11 +82,11 @@ where
         ScalarType::I32 => decode_i32_vec(&bytes, endianness, field)?
             .into_iter()
             .map(|value| convert_to_u32(value, field))
-            .collect::<Result<Vec<_>>>()?,
+            .try_collect()?,
         ScalarType::I64 => decode_i64_vec(&bytes, endianness, field)?
             .into_iter()
             .map(|value| convert_to_u32(value, field))
-            .collect::<Result<Vec<_>>>()?,
+            .try_collect()?,
         ScalarType::F32 => unreachable!("scalar validation should reject f32"),
     };
     Ok(data)

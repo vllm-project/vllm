@@ -27,6 +27,23 @@ pub fn prepare_completion_request(
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(request, configured_model)?;
 
+    let logprobs = match request.logprobs {
+        Some(logprobs) => Some(i32::try_from(logprobs).map_err(|_| {
+            ApiError::invalid_request(
+                "`logprobs` must fit within a signed 32-bit integer.".to_string(),
+                Some("logprobs"),
+            )
+        })?),
+        None => None,
+    };
+    let prompt_logprobs = request
+        .prompt_logprobs
+        .or(if request.echo && !request.stream {
+            logprobs
+        } else {
+            None
+        });
+
     let response_id = format!("cmpl-{}", Uuid::new_v4());
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
@@ -46,8 +63,8 @@ pub fn prepare_completion_request(
             seed: request.sampling_seed,
             max_tokens: request.max_tokens,
             min_tokens: request.min_tokens,
-            logprobs: None,
-            prompt_logprobs: None,
+            logprobs,
+            prompt_logprobs,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
@@ -122,6 +139,7 @@ mod tests {
             "stream": true,
             "stream_options": {"include_usage": true},
             "max_tokens": 7,
+            "logprobs": 2,
             "top_p": 0.9,
             "top_k": 42,
             "min_p": 0.1,
@@ -142,6 +160,7 @@ mod tests {
             Prompt::TokenIds(vec![11, 22, 33])
         );
         assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(7));
+        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(2));
         assert_eq!(prepared.text_request.sampling_params.top_p, Some(0.9));
         assert_eq!(prepared.text_request.sampling_params.top_k, Some(42));
         assert_eq!(prepared.text_request.sampling_params.min_p, Some(0.1));
@@ -180,6 +199,27 @@ mod tests {
     }
 
     #[test]
+    fn prepare_completion_request_enables_prompt_logprobs_for_non_stream_echo() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "echo": true,
+            "stream": false,
+            "logprobs": 3
+        }))
+        .expect("parse request");
+
+        let prepared =
+            prepare_completion_request(&request, "Qwen/Qwen1.5-0.5B-Chat").expect("prepare");
+
+        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(3));
+        assert_eq!(
+            prepared.text_request.sampling_params.prompt_logprobs,
+            Some(3)
+        );
+    }
+
+    #[test]
     fn prepare_completion_request_rejects_token_id_prompt_echo() {
         let request: CompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
@@ -193,15 +233,22 @@ mod tests {
     }
 
     #[test]
-    fn prepare_completion_request_rejects_unsupported_fields() {
+    fn prepare_completion_request_accepts_logprobs_fields() {
         let request: CompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
             "prompt": "hello",
-            "stream": true,
-            "logprobs": 1
+            "stream": false,
+            "logprobs": 1,
+            "prompt_logprobs": 2
         }))
         .expect("parse request");
 
-        assert!(prepare_completion_request(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        let prepared =
+            prepare_completion_request(&request, "Qwen/Qwen1.5-0.5B-Chat").expect("prepare");
+        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(1));
+        assert_eq!(
+            prepared.text_request.sampling_params.prompt_logprobs,
+            Some(2)
+        );
     }
 }

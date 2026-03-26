@@ -32,11 +32,15 @@ pub struct DecodedLogprobs {
 /// Decoded prompt logprobs for prompt token positions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecodedPromptLogprobs {
-    /// Prompt positions covered by this payload.
+    /// Best-effort decoded string for the first prompt token.
     ///
-    /// The first prompt position is always `None`, matching vLLM's prompt-logprobs semantics:
-    /// the first prompt token has no left context to score against.
-    pub positions: Vec<Option<DecodedPositionLogprobs>>,
+    /// The first prompt token has no left context to score against, so it is stored separately
+    /// instead of appearing in `scored_positions`.
+    pub first_token: String,
+    /// Scored prompt positions after the first prompt token.
+    ///
+    /// `scored_positions[i]` corresponds to the prompt token at position `i + 1`.
+    pub scored_positions: Vec<DecodedPositionLogprobs>,
 }
 
 /// Decode generated-token logprobs from the raw `llm` token-ID shape into the text-layer
@@ -53,32 +57,36 @@ pub(super) fn decode_logprobs<B: TextBackend + ?Sized>(
             .positions
             .iter()
             .map(|position| decode_position_logprobs(backend, position, skip_special_tokens))
-            .collect::<Result<Vec<_>, _>>()?,
+            .try_collect()?,
     })
 }
 
 /// Decode prompt logprobs from the raw `llm` token-ID shape into the text-layer decoded-token
 /// representation.
 ///
-/// The returned payload always prepends one leading `None` entry so the first prompt token remains
-/// unscored, matching vLLM's northbound prompt-logprobs semantics.
+/// The returned payload stores the first prompt token separately and decodes the remaining scored
+/// prompt positions into `scored_positions`, matching vLLM's prompt-logprobs semantics.
 pub(super) fn decode_prompt_logprobs<B: TextBackend + ?Sized>(
     backend: &B,
+    prompt_token_ids: &[u32],
     logprobs: &Logprobs,
     skip_special_tokens: bool,
 ) -> Result<DecodedPromptLogprobs, Error> {
-    let mut positions = Vec::with_capacity(logprobs.positions.len() + 1);
-    positions.push(None);
-    positions.extend(
-        logprobs
-            .positions
-            .iter()
-            .map(|position| {
-                decode_position_logprobs(backend, position, skip_special_tokens).map(Some)
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-    );
-    Ok(DecodedPromptLogprobs { positions })
+    let first_token_id = prompt_token_ids
+        .first()
+        .copied()
+        .expect("prompt logprobs require at least one prompt token");
+    let first_token = backend.decode(&[first_token_id], skip_special_tokens)?;
+    let scored_positions = logprobs
+        .positions
+        .iter()
+        .map(|position| decode_position_logprobs(backend, position, skip_special_tokens))
+        .try_collect()?;
+
+    Ok(DecodedPromptLogprobs {
+        first_token,
+        scored_positions,
+    })
 }
 
 /// Decode one token position's raw candidate set into decoded token strings plus logprob metadata.
@@ -94,13 +102,15 @@ fn decode_position_logprobs<B: TextBackend + ?Sized>(
             .entries
             .iter()
             .map(|entry| {
-                Ok(DecodedTokenLogprob {
-                    token: backend.decode(&[entry.token_id], skip_special_tokens)?,
-                    logprob: entry.logprob,
-                    rank: entry.rank,
-                })
+                backend
+                    .decode(&[entry.token_id], skip_special_tokens)
+                    .map(|token| DecodedTokenLogprob {
+                        token,
+                        logprob: entry.logprob,
+                        rank: entry.rank,
+                    })
             })
-            .collect::<Result<Vec<_>, Error>>()?,
+            .try_collect()?,
     })
 }
 
@@ -171,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_prompt_logprobs_prepends_leading_none() {
+    fn decode_prompt_logprobs_separates_first_prompt_token() {
         let backend = ByteBackend;
         let logprobs = Logprobs {
             positions: vec![PositionLogprobs {
@@ -184,18 +194,17 @@ mod tests {
         };
 
         assert_eq!(
-            decode_prompt_logprobs(&backend, &logprobs, false).unwrap(),
+            decode_prompt_logprobs(&backend, &[b'p' as u32, b'x' as u32], &logprobs, false)
+                .unwrap(),
             DecodedPromptLogprobs {
-                positions: vec![
-                    None,
-                    Some(DecodedPositionLogprobs {
-                        entries: vec![DecodedTokenLogprob {
-                            token: "x".to_string(),
-                            logprob: -0.4,
-                            rank: 1,
-                        }],
-                    }),
-                ],
+                first_token: "p".to_string(),
+                scored_positions: vec![DecodedPositionLogprobs {
+                    entries: vec![DecodedTokenLogprob {
+                        token: "x".to_string(),
+                        logprob: -0.4,
+                        rank: 1,
+                    }],
+                }],
             }
         );
     }

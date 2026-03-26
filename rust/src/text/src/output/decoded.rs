@@ -37,7 +37,8 @@ pub enum DecodedTextEvent {
         prompt_token_count: usize,
         /// Once-only prompt logprobs metadata, when requested.
         ///
-        /// The first prompt position is always `None`, matching vLLM prompt-logprobs semantics.
+        /// The first prompt token is carried separately because it has no left context to score
+        /// against; `scored_positions` covers the remaining prompt positions.
         prompt_logprobs: Option<DecodedPromptLogprobs>,
     },
     /// A delta of text has been decoded, optionally alongside token-position logprobs.
@@ -104,6 +105,9 @@ pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
                     .map(|logprobs| {
                         decode_prompt_logprobs(
                             backend.as_ref(),
+                            output
+                                .prompt_token_ids()
+                                .expect("first llm output must carry prompt token ids"),
                             logprobs,
                             decode_options.skip_special_tokens,
                         )

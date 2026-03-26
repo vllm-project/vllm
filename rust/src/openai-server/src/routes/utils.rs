@@ -1,3 +1,5 @@
+pub mod logprobs;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror_ext::AsReport;

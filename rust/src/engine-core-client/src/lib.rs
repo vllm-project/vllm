@@ -1,3 +1,5 @@
+#![feature(iterator_try_collect)]
+
 mod client;
 mod error;
 mod metrics;

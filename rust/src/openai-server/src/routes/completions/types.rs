@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use openai_protocol::common::{StreamOptions, StringOrArray, default_true};
+use openai_protocol::common::{LogProbs, StreamOptions, StringOrArray, Usage, default_true};
 use openai_protocol::validated::Normalizable;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -134,3 +134,71 @@ pub struct CompletionRequest {
 }
 
 impl Normalizable for CompletionRequest {}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct CompletionResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<CompletionChoice>,
+    pub usage: Option<Usage>,
+    pub system_fingerprint: Option<String>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct CompletionChoice {
+    pub text: String,
+    pub index: u32,
+    pub logprobs: Option<LogProbs>,
+    pub finish_reason: Option<String>,
+    pub matched_stop: Option<Value>,
+    pub prompt_logprobs: Option<Vec<Option<HashMap<String, f32>>>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct CompletionStreamResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub choices: Vec<CompletionStreamChoice>,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct CompletionStreamChoice {
+    pub text: String,
+    pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<LogProbs>,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub(super) enum CompletionSseChunk {
+    /// Ordinary OpenAI completions delta/final chunk.
+    Chunk(CompletionStreamResponse),
+    /// Final usage chunk emitted before `[DONE]` when `include_usage=true`.
+    Usage(CompletionUsageChunk),
+}
+
+/// Minimal JSON shape for the extra streamed usage chunk used by `vllm-bench`.
+///
+/// The streamed completion chunk DTO does not include a `usage` field, so the Rust server emits
+/// this thin local wrapper for the terminal accounting event.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct CompletionUsageChunk {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub choices: Vec<CompletionStreamChoice>,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
+    pub usage: Usage,
+}

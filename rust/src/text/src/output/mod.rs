@@ -93,16 +93,14 @@ mod tests {
             Ok(DecodedTextEvent::Start {
                 prompt_token_count: 2,
                 prompt_logprobs: Some(DecodedPromptLogprobs {
-                    positions: vec![
-                        None,
-                        Some(DecodedPositionLogprobs {
-                            entries: vec![DecodedTokenLogprob {
-                                token: "p".to_string(),
-                                logprob: -0.1,
-                                rank: 1,
-                            }],
-                        }),
-                    ],
+                    first_token: "o".to_string(),
+                    scored_positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token: "p".to_string(),
+                            logprob: -0.1,
+                            rank: 1,
+                        }],
+                    }],
                 }),
             }),
             Ok(DecodedTextEvent::TextDelta {
@@ -146,16 +144,14 @@ mod tests {
         assert_eq!(
             collected.prompt_logprobs,
             Some(DecodedPromptLogprobs {
-                positions: vec![
-                    None,
-                    Some(DecodedPositionLogprobs {
-                        entries: vec![DecodedTokenLogprob {
-                            token: "p".to_string(),
-                            logprob: -0.1,
-                            rank: 1,
-                        }],
-                    }),
-                ],
+                first_token: "o".to_string(),
+                scored_positions: vec![DecodedPositionLogprobs {
+                    entries: vec![DecodedTokenLogprob {
+                        token: "p".to_string(),
+                        logprob: -0.1,
+                        rank: 1,
+                    }],
+                }],
             })
         );
         assert_eq!(

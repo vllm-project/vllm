@@ -11,21 +11,24 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
-use openai_protocol::common::Usage;
-use openai_protocol::completion::{
-    CompletionChoice, CompletionResponse, CompletionStreamChoice, CompletionStreamResponse,
-};
+use openai_protocol::common::{LogProbs, Usage};
 use openai_protocol::validated::ValidatedJson;
-use serde::Serialize;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info};
 use vllm_engine_core_client::protocol::FinishReason;
 use vllm_text::{DecodedTextEvent, TextOutputStream, TextOutputStreamExt as _};
 
+use super::utils::logprobs::{
+    collected_logprobs_to_openai, decoded_logprobs_to_openai, decoded_prompt_logprobs_to_maps,
+    text_len,
+};
 use super::utils::unix_timestamp;
 use crate::error::{ApiError, bail_server_error, server_error};
 use crate::routes::completions::convert::prepare_completion_request;
-use crate::routes::completions::types::CompletionRequest;
+use crate::routes::completions::types::{
+    CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
+    CompletionStreamChoice, CompletionStreamResponse, CompletionUsageChunk,
+};
 use crate::state::AppState;
 
 /// Validate one completions request and proxy it into the shared `vllm-text` stack.
@@ -42,6 +45,11 @@ pub(super) async fn completions(
     let response_model = prepared.response_model.clone();
     let created = unix_timestamp();
     let echo = prepared.echo.clone();
+    let include_prompt_logprobs = prepared
+        .text_request
+        .sampling_params
+        .prompt_logprobs
+        .is_some();
     info!(
         request_id = %response_id,
         model = %response_model,
@@ -68,6 +76,7 @@ pub(super) async fn completions(
             created,
             prepared.include_usage,
             echo,
+            body.logprobs,
         );
         let sse_stream = completion_sse_stream(chunk_stream);
 
@@ -75,12 +84,20 @@ pub(super) async fn completions(
             .keep_alive(KeepAlive::default())
             .into_response()
     } else {
-        let response =
-            match collect_completion(text_stream, response_id, response_model, created, echo).await
-            {
-                Ok(response) => response,
-                Err(error) => return error.into_response(),
-            };
+        let response = match collect_completion(
+            text_stream,
+            response_id,
+            response_model,
+            created,
+            echo,
+            body.logprobs,
+            include_prompt_logprobs,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => return error.into_response(),
+        };
 
         Json(response).into_response()
     }
@@ -92,6 +109,8 @@ async fn collect_completion(
     response_model: String,
     created: u64,
     echo: Option<String>,
+    requested_logprobs: Option<u32>,
+    include_prompt_logprobs: bool,
 ) -> Result<CompletionResponse, ApiError> {
     let collected = stream
         .collect_output()
@@ -101,7 +120,31 @@ async fn collect_completion(
         server_error!("completion stream terminated without a terminal finish reason")
     })?;
 
-    let text = match echo {
+    let prompt_char_count = echo
+        .as_ref()
+        .map(|prompt| text_len(prompt))
+        .unwrap_or_default();
+    let prompt_logprobs = if include_prompt_logprobs {
+        let prompt_logprobs = collected.prompt_logprobs.as_ref().ok_or_else(|| {
+            server_error!(
+                "completion response requested prompt_logprobs but generation returned none"
+            )
+        })?;
+        Some(prompt_logprobs)
+    } else {
+        None
+    };
+    let logprobs = if requested_logprobs.is_some() {
+        Some(collected_logprobs_to_openai(
+            &collected,
+            echo.is_some(),
+            prompt_char_count,
+        )?)
+    } else {
+        None
+    };
+    let prompt_logprobs = prompt_logprobs.map(decoded_prompt_logprobs_to_maps);
+    let text = match &echo {
         None => collected.text,
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
@@ -114,9 +157,10 @@ async fn collect_completion(
         choices: vec![CompletionChoice {
             text,
             index: 0,
-            logprobs: None,
+            logprobs,
             finish_reason: Some(completion_finish_reason_to_openai(finish_reason)?.into()),
             matched_stop: None,
+            prompt_logprobs,
         }],
         usage: Some(Usage::from_counts(
             collected.prompt_token_count as u32,
@@ -124,31 +168,6 @@ async fn collect_completion(
         )),
         system_fingerprint: None,
     })
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-enum CompletionSseChunk {
-    /// Ordinary OpenAI completions delta/final chunk.
-    Chunk(CompletionStreamResponse),
-    /// Final usage chunk emitted before `[DONE]` when `include_usage=true`.
-    Usage(CompletionUsageChunk),
-}
-
-/// Minimal JSON shape for the extra streamed usage chunk used by `vllm-bench`.
-///
-/// `openai_protocol::completion::CompletionStreamResponse` does not currently include a `usage`
-/// field, so the Rust server emits this thin local wrapper for the terminal accounting event.
-#[derive(Debug, Clone, Serialize)]
-struct CompletionUsageChunk {
-    id: String,
-    object: String,
-    created: u64,
-    choices: Vec<CompletionStreamChoice>,
-    model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system_fingerprint: Option<String>,
-    usage: Usage,
 }
 
 /// Convert one internal decoded-text stream into OpenAI completions chunks.
@@ -160,29 +179,51 @@ async fn completion_chunk_stream(
     created: u64,
     include_usage: bool,
     echo: Option<String>,
+    requested_logprobs: Option<u32>,
 ) {
     pin_mut!(stream);
+    let mut visible_text_len = 0_u32;
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(DecodedTextEvent::Start { .. }) => {
                 debug!(request_id = %response_id, "completion stream started");
                 if let Some(prompt) = echo.as_ref() {
+                    visible_text_len = text_len(prompt);
                     yield CompletionSseChunk::Chunk(delta_chunk(
                         &response_id,
                         &response_model,
                         created,
                         prompt.clone(),
+                        None,
                     ));
                 }
             }
-            Ok(DecodedTextEvent::TextDelta { delta, .. }) => {
+            Ok(DecodedTextEvent::TextDelta {
+                delta, logprobs, ..
+            }) => {
+                let delta_text_len = text_len(&delta);
+                let logprobs = if requested_logprobs.is_some() {
+                    let decoded_logprobs = logprobs.as_ref().ok_or_else(|| {
+                        server_error!(
+                            "completion stream requested logprobs but generation returned none"
+                        )
+                    })?;
+                    Some(decoded_logprobs_to_openai(
+                        decoded_logprobs,
+                        visible_text_len,
+                    )?)
+                } else {
+                    None
+                };
                 yield CompletionSseChunk::Chunk(delta_chunk(
                     &response_id,
                     &response_model,
                     created,
                     delta,
+                    logprobs,
                 ));
+                visible_text_len = visible_text_len.saturating_add(delta_text_len);
             }
             Ok(DecodedTextEvent::Done {
                 prompt_token_count,
@@ -229,6 +270,7 @@ fn delta_chunk(
     response_model: &str,
     created: u64,
     text: String,
+    logprobs: Option<LogProbs>,
 ) -> CompletionStreamResponse {
     CompletionStreamResponse {
         id: response_id.to_string(),
@@ -239,7 +281,7 @@ fn delta_chunk(
         choices: vec![CompletionStreamChoice {
             text,
             index: 0,
-            logprobs: None,
+            logprobs,
             finish_reason: None,
         }],
     }
@@ -341,9 +383,13 @@ fn done_sse_event() -> Event {
 
 #[cfg(test)]
 mod tests {
+    use futures::{StreamExt as _, stream};
     use vllm_engine_core_client::protocol::FinishReason;
+    use vllm_text::{
+        DecodedLogprobs, DecodedPositionLogprobs, DecodedTextEvent, DecodedTokenLogprob,
+    };
 
-    use super::final_chunk;
+    use super::{CompletionSseChunk, completion_chunk_stream, final_chunk};
 
     #[test]
     fn final_chunk_maps_stop_finish_reason() {
@@ -364,5 +410,117 @@ mod tests {
     fn final_chunk_rejects_abort_and_error_finish_reasons() {
         assert!(final_chunk("cmpl-1", "model", 1, FinishReason::Abort).is_err());
         assert!(final_chunk("cmpl-1", "model", 1, FinishReason::Error).is_err());
+    }
+
+    #[tokio::test]
+    async fn completion_chunk_stream_maps_streaming_logprobs() {
+        let stream = stream::iter(vec![
+            Ok(DecodedTextEvent::Start {
+                prompt_token_count: 5,
+                prompt_logprobs: None,
+            }),
+            Ok(DecodedTextEvent::TextDelta {
+                delta: "h".to_string(),
+                text: "h".to_string(),
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![
+                            DecodedTokenLogprob {
+                                token: "h".to_string(),
+                                logprob: -0.1,
+                                rank: 1,
+                            },
+                            DecodedTokenLogprob {
+                                token: "H".to_string(),
+                                logprob: -0.2,
+                                rank: 1,
+                            },
+                        ],
+                    }],
+                }),
+            }),
+            Ok(DecodedTextEvent::TextDelta {
+                delta: String::new(),
+                text: "h".to_string(),
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![
+                            DecodedTokenLogprob {
+                                token: "!".to_string(),
+                                logprob: -0.3,
+                                rank: 1,
+                            },
+                            DecodedTokenLogprob {
+                                token: "?".to_string(),
+                                logprob: -0.4,
+                                rank: 1,
+                            },
+                        ],
+                    }],
+                }),
+            }),
+            Ok(DecodedTextEvent::Done {
+                text: "h".to_string(),
+                prompt_token_count: 5,
+                token_ids: vec![b'h' as u32, b'!' as u32],
+                finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
+            }),
+        ]);
+
+        let chunks = completion_chunk_stream(
+            stream,
+            "cmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            false,
+            None,
+            Some(1),
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let chunks = chunks
+            .into_iter()
+            .try_collect::<Vec<_>>()
+            .expect("stream should succeed");
+
+        match &chunks[0] {
+            CompletionSseChunk::Chunk(chunk) => {
+                assert_eq!(chunk.choices[0].text, "h");
+                assert_eq!(
+                    chunk.choices[0].logprobs.as_ref().expect("logprobs").tokens,
+                    vec!["h".to_string()]
+                );
+                assert_eq!(
+                    chunk.choices[0]
+                        .logprobs
+                        .as_ref()
+                        .expect("logprobs")
+                        .text_offset,
+                    vec![0]
+                );
+            }
+            CompletionSseChunk::Usage(_) => panic!("expected regular chunk"),
+        }
+
+        match &chunks[1] {
+            CompletionSseChunk::Chunk(chunk) => {
+                assert_eq!(chunk.choices[0].text, "");
+                assert_eq!(
+                    chunk.choices[0].logprobs.as_ref().expect("logprobs").tokens,
+                    vec!["!".to_string()]
+                );
+                assert_eq!(
+                    chunk.choices[0]
+                        .logprobs
+                        .as_ref()
+                        .expect("logprobs")
+                        .text_offset,
+                    vec![1]
+                );
+            }
+            CompletionSseChunk::Usage(_) => panic!("expected regular chunk"),
+        }
     }
 }
