@@ -53,7 +53,7 @@ def enable_pickle(monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("kv_cache_dtype", ["float16", "fp8"])
 @pytest.mark.parametrize("tp", [1])
 def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
     model_path = "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test"

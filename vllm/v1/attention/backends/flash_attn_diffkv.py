@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -49,7 +50,7 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_dtype_str: str = "auto",
+        cache_dtype_str: str,
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
@@ -184,7 +185,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                 layer._v_scale,
             )
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             # queries are quantized in the attention layer
             dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
                 self.kv_cache_dtype

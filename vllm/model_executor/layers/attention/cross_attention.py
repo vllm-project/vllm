@@ -189,7 +189,7 @@ class CrossAttention(Attention):
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
         else:
-            kv_cache_dtype = "auto"
+            kv_cache_dtype = "bfloat16"
 
         if attn_type is not None:
             assert attn_type == AttentionType.ENCODER_DECODER, (

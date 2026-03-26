@@ -209,7 +209,7 @@ def create_vllm_config(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        cache_dtype="auto",
+        cache_dtype="bfloat16",
         enable_prefix_caching=True,
     )
     kv_transfer_config = KVTransferConfig(

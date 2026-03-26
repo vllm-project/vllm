@@ -10,6 +10,8 @@ import numpy as np
 import torch
 from typing_extensions import deprecated
 
+from vllm.utils.torch_utils import is_quantized_kv_cache as is_quantized_kv_cache
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
@@ -52,7 +54,6 @@ class AttentionBackend(ABC):
     accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = [
-        "auto",
         "float16",
         "bfloat16",
     ]
@@ -86,7 +87,7 @@ class AttentionBackend(ABC):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_dtype_str: str = "auto",
+        cache_dtype_str: str,
     ) -> tuple[int, ...]:
         raise NotImplementedError
 
@@ -96,7 +97,7 @@ class AttentionBackend(ABC):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_dtype_str: str = "auto",
+        cache_dtype_str: str,
     ) -> int:
         """Discover which tensor dim is the block index, since different
         backends lay out dims differently."""
@@ -731,7 +732,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         num_kv_heads: int | None = None,
         alibi_slopes: list[float] | None = None,
         sliding_window: int | None = None,
-        kv_cache_dtype: str = "auto",
+        kv_cache_dtype: str = "bfloat16",
         logits_soft_cap: float | None = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
@@ -934,10 +935,6 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
         )
-
-
-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype.startswith("fp8")
 
 
 def subclass_attention_backend(

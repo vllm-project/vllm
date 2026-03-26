@@ -32,7 +32,7 @@ DEFAULT_KWARGS = dict(
     num_tokens=128,
     max_seq_len=4096,
     dcp_world_size=1,
-    kv_cache_dtype="auto",
+    kv_cache_dtype="bfloat16",
     q_dtype=torch.bfloat16,
     is_prefill=False,
     force_use_trtllm=None,
@@ -173,7 +173,7 @@ def test_use_sinks_force_trtllm(_mock):
 
 @patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=True)
 def test_use_auto_prefill_kv_auto(_mock):
-    assert _call(is_prefill=True, kv_cache_dtype="auto") is True
+    assert _call(is_prefill=True, kv_cache_dtype="bfloat16") is True
 
 
 @patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=True)
@@ -183,12 +183,12 @@ def test_use_auto_prefill_kv_fp8(_mock):
 
 @patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=True)
 def test_use_auto_decode_small_batch(_mock):
-    assert _call(is_prefill=False, num_tokens=128, kv_cache_dtype="auto") is True
+    assert _call(is_prefill=False, num_tokens=128, kv_cache_dtype="bfloat16") is True
 
 
 @patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=True)
 def test_use_auto_decode_large_batch(_mock):
-    assert _call(is_prefill=False, num_tokens=512, kv_cache_dtype="auto") is False
+    assert _call(is_prefill=False, num_tokens=512, kv_cache_dtype="bfloat16") is False
 
 
 @patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=True)

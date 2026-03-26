@@ -286,7 +286,7 @@ def run_attention_backend(
         alibi_slopes=None,
         sliding_window=sliding_window,
         attn_type=attn_type,
-        kv_cache_dtype="auto",
+        kv_cache_dtype="bfloat16",
     )
 
     # Create mock layer and output buffer

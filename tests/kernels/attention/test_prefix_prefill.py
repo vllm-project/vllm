@@ -25,7 +25,7 @@ CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
 ]
 SLIDING_WINDOW = [0, 16, 2048]
-KV_CACHE_DTYPES = ["auto", "fp8", "fp8_e5m2"]
+KV_CACHE_DTYPES = ["float16", "fp8", "fp8_e5m2"]
 
 OPS = [chunked_prefill_paged_decode, context_attention_fwd]
 
@@ -161,7 +161,7 @@ def test_contexted_kv_attention(
     kv.uniform_(-1e-3, 1e-3)
     key, value = kv.unbind(dim=1)
 
-    if kv_cache_dtype == "auto":
+    if kv_cache_dtype == "float16":
         cache_dtype = dtype
     else:
         cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
@@ -404,7 +404,7 @@ def test_contexted_kv_attention_alibi(
     kv = torch.empty(sum(seq_lens), 2, num_kv_heads, head_size, dtype=dtype)
     kv.uniform_(-1e-3, 1e-3)
     key, value = kv.unbind(dim=1)
-    if kv_cache_dtype == "auto":
+    if kv_cache_dtype == "float16":
         cache_dtype = dtype
     else:
         cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
@@ -668,7 +668,7 @@ def test_qwen3_nonstandard_block_size(
         block_size=544,
         sliding_window=0,
         dtype=dtype,
-        kv_cache_dtype="auto",
+        kv_cache_dtype="float16",
         device=device,
         op=op,
     )

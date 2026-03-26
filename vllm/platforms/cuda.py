@@ -22,7 +22,10 @@ import vllm._C  # noqa
 import vllm._C_stable_libtorch  # noqa
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import (
+    cuda_device_count_stateless,
+    is_quantized_kv_cache,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -60,7 +63,7 @@ def _get_backend_priorities(
             # Sparse MLA backend priorities
             # See https://github.com/vllm-project/vllm/issues/35807 for
             # benchmark results
-            if kv_cache_dtype is not None and kv_cache_dtype.startswith("fp8"):
+            if kv_cache_dtype is not None and is_quantized_kv_cache(kv_cache_dtype):
                 # Prefer FlashInfer for fp8 kv cache
                 sparse_backends = [
                     AttentionBackendEnum.FLASHINFER_MLA_SPARSE,

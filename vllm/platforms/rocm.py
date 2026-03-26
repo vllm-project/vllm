@@ -13,7 +13,10 @@ from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import (
+    cuda_device_count_stateless,
+    is_quantized_kv_cache,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -278,7 +281,7 @@ def use_rocm_custom_paged_attention(
             and (gqa_ratio >= 3 and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
             and alibi_slopes is None
-            and kv_cache_dtype == "auto"
+            and not is_quantized_kv_cache(kv_cache_dtype)
             and sinks is None
         )
 

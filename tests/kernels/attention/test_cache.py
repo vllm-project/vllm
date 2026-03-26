@@ -40,7 +40,7 @@ CUDA_DEVICES = [
 ]
 
 # We assume fp8 is always enabled for testing.
-KV_CACHE_DTYPE = ["auto", "fp8"]
+KV_CACHE_DTYPE = ["float16", "fp8"]
 
 RESHAPE_FLASH_IMPLEMENTATIONS = ["cuda", "triton"]
 
@@ -796,7 +796,7 @@ def test_swap_blocks_mla(
 @pytest.mark.parametrize("max_seq_len", [512])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("kv_cache_dtype", ["float16", "fp8"])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_gather_and_maybe_dequant_cache_mla(
@@ -908,7 +908,7 @@ def test_gather_and_maybe_dequant_cache_mla(
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize(
-    "kv_cache_dtype", ["auto"]
+    "kv_cache_dtype", ["float16"]
 )  # You can also test "fp8" if needed.
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
@@ -996,7 +996,7 @@ def test_concat_and_cache_mla_cpu(
     seed: int,
 ) -> None:
     device = "cpu"
-    kv_cache_dtype = "auto"
+    kv_cache_dtype = "float16"
     set_random_seed(seed)
     torch.set_default_device(device)
 

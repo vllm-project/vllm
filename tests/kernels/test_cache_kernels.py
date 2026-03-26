@@ -52,7 +52,7 @@ def test_gather_cache_oob():
         block_table,
         cu_seq_lens,
         batch_size,
-        "auto",  # kv_cache_dtype
+        "float16",  # kv_cache_dtype
         scale,
         seq_starts,
     )

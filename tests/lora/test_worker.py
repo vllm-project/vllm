@@ -64,7 +64,7 @@ def test_worker_apply_lora(qwen3_lora_files):
         device_config=DeviceConfig("cuda"),
         cache_config=CacheConfig(
             block_size=16,
-            cache_dtype="auto",
+            cache_dtype="float16",
         ),
         lora_config=LoRAConfig(
             max_lora_rank=8, max_cpu_loras=NUM_LORAS, max_loras=NUM_LORAS

@@ -98,7 +98,7 @@ def _get_platform_default_backend() -> AttentionBackendEnum:
 
     config = AttentionSelectorConfig(
         block_size=32,
-        kv_cache_dtype="auto",
+        kv_cache_dtype="bfloat16",
         use_mla=False,
         use_sparse=False,
         head_size=128,
@@ -266,7 +266,7 @@ def forward_attention(
         num_kv_heads=num_kv_heads,
         alibi_slopes=None,
         sliding_window=None,
-        kv_cache_dtype="auto",
+        kv_cache_dtype="bfloat16",
     )
 
     # Adapt KV cache layout for this backend.

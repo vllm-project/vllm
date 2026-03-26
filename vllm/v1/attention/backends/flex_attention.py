@@ -80,7 +80,6 @@ class FlexAttentionBackend(AttentionBackend):
         torch.float32,
     ]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "auto",
         "float16",
         "bfloat16",
     ]
@@ -111,7 +110,7 @@ class FlexAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_dtype_str: str = "auto",
+        cache_dtype_str: str,
     ) -> tuple[int, ...]:
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 

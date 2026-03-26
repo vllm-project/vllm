@@ -129,7 +129,7 @@ def test_kv_cache_model_load_and_run(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("kv_cache_dtype", ["float16", "fp8"])
 @pytest.mark.parametrize(
     "force_marlin", [False] if current_platform.is_rocm() else [False, True]
 )

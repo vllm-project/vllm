@@ -311,7 +311,7 @@ def _run_trtllm_integration(batch_spec):
                 num_kv_heads=num_kv_heads,
                 alibi_slopes=None,
                 sliding_window=None,
-                kv_cache_dtype="auto",
+                kv_cache_dtype="float16",
             )
 
             mock_layer = MockAttentionLayer(device)

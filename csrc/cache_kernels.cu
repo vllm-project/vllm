@@ -1,3 +1,5 @@
+#include <type_traits>
+
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -127,12 +129,12 @@ __global__ void copy_blocks_mla_kernel(
 namespace vllm {
 
 // Used to copy/convert one element
-template <typename OutT, typename InT, Fp8KVCacheDataType kv_dt>
+template <typename OutT, typename InT, at::ScalarType kv_dt>
 struct CopyWithScaleOp {
   float scale;
 
   __device__ __forceinline__ void operator()(OutT& dst, const InT src) const {
-    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+    if constexpr (std::is_same_v<OutT, InT>) {
       dst = static_cast<OutT>(src);
     } else {
       dst = fp8::scaled_convert<OutT, InT, kv_dt>(src, scale);
@@ -140,7 +142,7 @@ struct CopyWithScaleOp {
   }
 };
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+template <typename scalar_t, typename cache_t, at::ScalarType kv_dt>
 __global__ void reshape_and_cache_kernel(
     const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
     const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
@@ -185,9 +187,9 @@ __global__ void reshape_and_cache_kernel(
       block_offset;
 
   constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
-  float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
+  float k_scale_val = (std::is_same_v<cache_t, scalar_t>) ? 0.f : *k_scale;
   CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
-  float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
+  float v_scale_val = (std::is_same_v<cache_t, scalar_t>) ? 0.f : *v_scale;
   CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
 
   vectorize_with_alignment<VEC_SIZE>(key_src, key_dst, x, 0, 1, k_op);
@@ -200,7 +202,7 @@ __global__ void reshape_and_cache_kernel(
   }
 }
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+template <typename scalar_t, typename cache_t, at::ScalarType kv_dt>
 __global__ void reshape_and_cache_flash_kernel(
     const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
     const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
@@ -240,8 +242,8 @@ __global__ void reshape_and_cache_flash_kernel(
   if (is_contiguous_heads && kv_scale_stride == 0) {
     // NHD layout and k/v_scales are [1] (i.e. single scale for all heads)
     // kv cache: [num_blocks, block_size, num_heads, head_size]
-    float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
-    float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
+    float k_scale_val = (std::is_same_v<cache_t, scalar_t>) ? 0.f : *k_scale;
+    float v_scale_val = (std::is_same_v<cache_t, scalar_t>) ? 0.f : *v_scale;
 
     CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
     CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
@@ -267,10 +269,10 @@ __global__ void reshape_and_cache_flash_kernel(
       cache_t* __restrict__ v_dst_h =
           value_dst + static_cast<int64_t>(head) * head_stride;
 
-      float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto)
+      float k_scale_val = (std::is_same_v<cache_t, scalar_t>)
                               ? 0.f
                               : k_scale[head * kv_scale_stride];
-      float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto)
+      float v_scale_val = (std::is_same_v<cache_t, scalar_t>)
                               ? 0.f
                               : v_scale[head * kv_scale_stride];
 
@@ -288,7 +290,7 @@ __global__ void reshape_and_cache_flash_kernel(
   }
 }
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+template <typename scalar_t, typename cache_t, at::ScalarType kv_dt>
 __global__ void concat_and_cache_mla_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
     const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
@@ -319,7 +321,7 @@ __global__ void concat_and_cache_mla_kernel(
       const int64_t src_idx = token_idx * src_stride + i;
       const int64_t dst_idx =
           block_idx * block_stride + block_offset * entry_stride + i + offset;
-      if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+      if constexpr (std::is_same_v<cache_t, scalar_t>) {
         dst[dst_idx] = src[src_idx];
       } else {
         dst[dst_idx] =
@@ -332,7 +334,7 @@ __global__ void concat_and_cache_mla_kernel(
   copy(k_pe, kv_cache, k_pe_stride, block_stride, pe_dim, kv_lora_rank);
 }
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+template <typename scalar_t, typename cache_t, at::ScalarType kv_dt>
 __global__ void concat_and_cache_ds_mla_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
     const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
@@ -426,7 +428,7 @@ __global__ void concat_and_cache_ds_mla_kernel(
 #pragma unroll
   for (int i = 0; i < 8; i++) {
     result[i] =
-        fp8::scaled_convert<uint8_t, scalar_t, Fp8KVCacheDataType::kFp8E4M3>(
+        fp8::scaled_convert<uint8_t, scalar_t, at::ScalarType::Float8_e4m3fn>(
             vals[i], tile_scale);
   }
 
@@ -435,7 +437,7 @@ __global__ void concat_and_cache_ds_mla_kernel(
       *reinterpret_cast<const uint64_t*>(result);
 }
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+template <typename scalar_t, typename cache_t, at::ScalarType kv_dt>
 __global__ void indexer_k_quant_and_cache_kernel(
     const scalar_t* __restrict__ k,  // [num_tokens, head_dim]
     cache_t* __restrict__ kv_cache,  // [num_blocks, block_size, cache_stride]
@@ -760,7 +762,7 @@ void concat_and_cache_mla(
 
 namespace vllm {
 
-template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
+template <typename Tout, typename Tin, at::ScalarType kv_dt>
 __global__ void convert_fp8_kernel(const Tin* __restrict__ src_cache,
                                    Tout* __restrict__ dst_cache,
                                    const float scale,
@@ -798,45 +800,52 @@ void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
   dim3 block(std::min(block_stride, int64_t(512)));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  if (kv_cache_dtype == "auto") {
-    if (src_cache.dtype() == at::ScalarType::Float) {
-      CALL_CONVERT_FP8(uint8_t, float, vllm::Fp8KVCacheDataType::kAuto);
-    } else if (src_cache.dtype() == at::ScalarType::Half) {
-      CALL_CONVERT_FP8(uint8_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto);
-    } else if (src_cache.dtype() == at::ScalarType::BFloat16) {
-      CALL_CONVERT_FP8(uint8_t, __nv_bfloat16, vllm::Fp8KVCacheDataType::kAuto);
-    } else if (dst_cache.dtype() == at::ScalarType::Float) {
-      CALL_CONVERT_FP8(float, uint8_t, vllm::Fp8KVCacheDataType::kAuto);
-    } else if (dst_cache.dtype() == at::ScalarType::Half) {
-      CALL_CONVERT_FP8(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kAuto);
-    } else if (dst_cache.dtype() == at::ScalarType::BFloat16) {
-      CALL_CONVERT_FP8(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kAuto);
+  // Exactly one of src/dst must be uint8 (fp8).
+  bool src_is_fp8 = src_cache.dtype() == at::ScalarType::Byte;
+  bool dst_is_fp8 = dst_cache.dtype() == at::ScalarType::Byte;
+  TORCH_CHECK(src_is_fp8 != dst_is_fp8,
+              "convert_fp8 requires exactly one of src/dst to be fp8 (uint8), "
+              "got src=",
+              src_cache.dtype(), " dst=", dst_cache.dtype());
+
+  // Determine the non-fp8 dtype.
+  auto other_dtype = src_is_fp8 ? dst_cache.dtype() : src_cache.dtype();
+
+  TORCH_CHECK(
+      kv_cache_dtype != "float16" && kv_cache_dtype != "bfloat16" &&
+          kv_cache_dtype != "float32",
+      "convert_fp8 requires a quantized kv_cache_dtype, got: ", kv_cache_dtype);
+
+  TORCH_CHECK(kv_cache_dtype == "fp8" || kv_cache_dtype == "fp8_e4m3",
+              "Unsupported kv_cache_dtype: ", kv_cache_dtype);
+
+  if (other_dtype == at::ScalarType::Float) {
+    if (src_is_fp8) {
+      CALL_CONVERT_FP8(float, uint8_t, at::ScalarType::Float8_e4m3fn);
+    } else {
+      CALL_CONVERT_FP8(uint8_t, float, at::ScalarType::Float8_e4m3fn);
     }
-  } else if (kv_cache_dtype == "fp8" || kv_cache_dtype == "fp8_e4m3") {
-    if (src_cache.dtype() == at::ScalarType::Float) {
-      CALL_CONVERT_FP8(uint8_t, float, vllm::Fp8KVCacheDataType::kFp8E4M3);
-    } else if (src_cache.dtype() == at::ScalarType::Half) {
-      CALL_CONVERT_FP8(uint8_t, uint16_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
-    } else if (src_cache.dtype() == at::ScalarType::BFloat16) {
-      CALL_CONVERT_FP8(uint8_t, __nv_bfloat16,
-                       vllm::Fp8KVCacheDataType::kFp8E4M3);
-    } else if (dst_cache.dtype() == at::ScalarType::Float) {
-      CALL_CONVERT_FP8(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
-    } else if (dst_cache.dtype() == at::ScalarType::Half) {
-      CALL_CONVERT_FP8(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
-    } else if (dst_cache.dtype() == at::ScalarType::BFloat16) {
-      CALL_CONVERT_FP8(__nv_bfloat16, uint8_t,
-                       vllm::Fp8KVCacheDataType::kFp8E4M3);
+  } else if (other_dtype == at::ScalarType::Half) {
+    if (src_is_fp8) {
+      CALL_CONVERT_FP8(uint16_t, uint8_t, at::ScalarType::Float8_e4m3fn);
+    } else {
+      CALL_CONVERT_FP8(uint8_t, uint16_t, at::ScalarType::Float8_e4m3fn);
+    }
+  } else if (other_dtype == at::ScalarType::BFloat16) {
+    if (src_is_fp8) {
+      CALL_CONVERT_FP8(__nv_bfloat16, uint8_t, at::ScalarType::Float8_e4m3fn);
+    } else {
+      CALL_CONVERT_FP8(uint8_t, __nv_bfloat16, at::ScalarType::Float8_e4m3fn);
     }
   } else {
-    TORCH_CHECK(false, "Unsupported data type: ", kv_cache_dtype);
+    TORCH_CHECK(false, "Unsupported native dtype: ", other_dtype);
   }
 }
 
 namespace vllm {
 
 // grid is launched with dimensions (batch, num_splits)
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
+template <typename scalar_t, typename cache_t, at::ScalarType kv_dt,
           int ENTRY_SIZE, int CTA_SIZE>
 __global__ void gather_and_maybe_dequant_cache(
     const cache_t* __restrict__ src_cache,     // [NUM_BLOCKS, BLOCK_SIZE,
@@ -884,7 +893,7 @@ __global__ void gather_and_maybe_dequant_cache(
 
 #pragma unroll
     for (int idx = threadIdx.x; idx < vec_iter_cnt; idx += CTA_SIZE) {
-      if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+      if constexpr (std::is_same_v<cache_t, scalar_t>) {
         reinterpret_cast<stype*>(dst_)[idx] =
             static_cast<stype>(reinterpret_cast<ltype*>(src_)[idx]);
       } else {
@@ -904,7 +913,7 @@ __global__ void gather_and_maybe_dequant_cache(
     src_ = src_ + ENTRY_SIZE - tail_cnt;
 #pragma unroll
     for (int idx = threadIdx.x; idx < tail_cnt; idx += CTA_SIZE) {
-      if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+      if constexpr (std::is_same_v<cache_t, scalar_t>) {
         dst_[idx] = static_cast<scalar_t>(src_[idx]);
       } else {
         dst_[idx] =

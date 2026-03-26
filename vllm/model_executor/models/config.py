@@ -38,7 +38,6 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
 
         cache_config = vllm_config.cache_config
         if cache_config.cache_dtype == "bfloat16":
-            cache_config.cache_dtype = "auto"
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
 
@@ -139,10 +138,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
 
-        if cache_config.cache_dtype == "auto":
-            kv_cache_dtype = model_config.dtype
-        else:
-            kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+        kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         # get attention page size (for 1 token)
         # Attention backend constraints:

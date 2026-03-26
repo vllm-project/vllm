@@ -96,7 +96,7 @@ class ChunkedLocalAttention(Attention):
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
         else:
-            kv_cache_dtype = "auto"
+            kv_cache_dtype = "bfloat16"
 
         underlying_attn_backend = get_attn_backend(head_size, dtype, kv_cache_dtype)
         attn_backend = create_chunked_local_attention_backend(
