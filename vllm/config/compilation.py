@@ -116,29 +116,29 @@ class PassConfig:
     """
 
     # New flags
-    fuse_norm_quant: bool | None = Field(default=None)
+    fuse_norm_quant: bool = None  # type: ignore[assignment]
     """Fuse the custom RMSNorm + quant ops."""
-    fuse_act_quant: bool | None = Field(default=None)
+    fuse_act_quant: bool = None  # type: ignore[assignment]
     """Fuse the custom SiluMul + quant ops."""
-    fuse_attn_quant: bool | None = Field(default=None)
+    fuse_attn_quant: bool = None  # type: ignore[assignment]
     """Fuse the custom attention + quant ops."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
-    enable_sp: bool | None = Field(default=None)
+    enable_sp: bool = None  # type: ignore[assignment]
     """Enable sequence parallelism. Requires TP>1. Automatically disabled
     if the model's hidden_size is too small for SP to be beneficial
     (threshold is device-capability dependent)."""
-    fuse_gemm_comms: bool | None = Field(default=None)
+    fuse_gemm_comms: bool = None  # type: ignore[assignment]
     """Enable async TP."""
-    fuse_allreduce_rms: bool | None = Field(default=None)
+    fuse_allreduce_rms: bool = None  # type: ignore[assignment]
     """Enable flashinfer allreduce fusion."""
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
 
     # ROCm/AITER specific fusions
-    fuse_act_padding: bool | None = Field(default=None)
+    fuse_act_padding: bool = None  # type: ignore[assignment]
     """Fuse the custom RMSNorm + padding ops."""
-    fuse_rope_kvcache: bool | None = Field(default=None)
+    fuse_rope_kvcache: bool = None  # type: ignore[assignment]
     """Fuse the QK rope + KV cache ops."""
 
     rope_kvcache_fusion_max_token_num: int = 256
@@ -405,7 +405,7 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    mode: CompilationMode = Field(default=None)  # type: ignore[assignment]
+    mode: CompilationMode = None  # type: ignore[assignment]
     """The compilation approach used for torch.compile-based compilation of the
     model.
 
@@ -545,7 +545,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: CUDAGraphMode = Field(default=None)  # type: ignore[assignment]
+    cudagraph_mode: CUDAGraphMode = None  # type: ignore[assignment]
     """
     The mode of the cudagraph:
 
@@ -586,7 +586,7 @@ class CompilationConfig:
     It means the first several runs will be treated as warmup runs.
     Only after that, the execution will be recorded, and the recorded
     cudagraph will be used for subsequent runs."""
-    cudagraph_capture_sizes: list[int] | None = None
+    cudagraph_capture_sizes: list[int] = None  # type: ignore[assignment]
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
@@ -607,7 +607,7 @@ class CompilationConfig:
     When `enable_lora` is False, this option has no effect.
     """
 
-    use_inductor_graph_partition: bool = Field(default=None)  # type: ignore[assignment]
+    use_inductor_graph_partition: bool = None  # type: ignore[assignment]
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
@@ -630,7 +630,7 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    max_cudagraph_capture_size: int | None = field(default=None)
+    max_cudagraph_capture_size: int = None  # type: ignore[assignment]
     """The maximum cudagraph capture size.
 
     If cudagraph_capture_sizes is specified, this will be set to the largest
@@ -750,7 +750,7 @@ class CompilationConfig:
         return hash_factors(factors)
 
     def __repr__(self) -> str:
-        exclude = {
+        exclude: dict[str, bool | dict[str, bool]] = {
             "static_forward_context": True,
             "enabled_custom_ops": True,
             "disabled_custom_ops": True,
@@ -770,9 +770,7 @@ class CompilationConfig:
             exclude["pass_config"] = pass_config_exclude
 
         config = TypeAdapter(CompilationConfig).dump_python(
-            self,
-            exclude=exclude,  # type: ignore[arg-type]
-            exclude_unset=True,
+            self, exclude=exclude, exclude_unset=True
         )
 
         return str(config)
@@ -1023,7 +1021,6 @@ class CompilationConfig:
                         "Unrecognized size type in compile_sizes, "
                         f"expect 'cudagraph_capture_sizes', got {x}"
                     )
-                    assert self.cudagraph_capture_sizes is not None
                     computed_compile_sizes.extend(self.cudagraph_capture_sizes)
                 else:
                     assert isinstance(x, int)
@@ -1031,7 +1028,6 @@ class CompilationConfig:
         self.compile_sizes = computed_compile_sizes  # type: ignore
 
         # make sure the sizes are in ascending order
-        assert self.cudagraph_capture_sizes is not None
         self.cudagraph_capture_sizes.sort()
         if self.cudagraph_capture_sizes:
             assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
@@ -1045,13 +1041,6 @@ class CompilationConfig:
             if self.splitting_ops is None:
                 self.splitting_ops = []
             return
-
-        # NOTE: this function needs to be called only when mode is
-        # CompilationMode.VLLM_COMPILE
-        assert self.mode == CompilationMode.VLLM_COMPILE, (
-            "set_splitting_ops_for_v1 should only be called when "
-            "mode is CompilationMode.VLLM_COMPILE"
-        )
 
         if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
             self.set_splitting_ops_for_attn_fusion()
@@ -1073,6 +1062,16 @@ class CompilationConfig:
                 # that doesn't seem to affect performance.
                 # https://github.com/vllm-project/vllm/issues/33267
                 if not self.use_inductor_graph_partition:
+                    if self.pass_config.fuse_rope_kvcache:
+                        logger.warning_once(
+                            "fuse_rope_kvcache is enabled, but splitting_ops is None "
+                            "and Inductor graph partition is not enabled."
+                            "Disabling fuse_rope_kvcache."
+                            "Please either set splitting_ops to an empty list []"
+                            "or set use_inductor_graph_partition to True "
+                            "to enable RoPE+KV cache fusion."
+                        )
+                        self.pass_config.fuse_rope_kvcache = False
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
@@ -1123,7 +1122,6 @@ class CompilationConfig:
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.fuse_attn_quant
-        assert self.cudagraph_mode is not None
         if self.splitting_ops is None:
             self.splitting_ops = []
             if self.cudagraph_mode.has_piecewise_cudagraphs():
@@ -1145,6 +1143,29 @@ class CompilationConfig:
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and all(
             op in self.splitting_ops for op in self._attention_ops
+        )
+
+    def splitting_ops_contain_kv_cache_update(self) -> bool:
+        # when using Dynamo partition while splitting ops is None
+        # and attn+quant fusion disabled, the kv_cache_update_ops are
+        # appended to splitting_ops in set_splitting_ops_for_v1 due to
+        # https://github.com/vllm-project/vllm/issues/33267
+        # In this case, we return True if the kv_cache_update_ops
+        # are not in the splitting_ops yet, but will subsequently
+        # be added to splitting_ops.
+        if (
+            not self.use_inductor_graph_partition
+            and self.splitting_ops is None
+            and not self.pass_config.fuse_attn_quant
+        ):
+            return True
+
+        kv_cache_update_ops = [
+            "vllm::unified_kv_cache_update",
+            "vllm::unified_mla_kv_cache_update",
+        ]
+        return self.splitting_ops is not None and all(
+            op in self.splitting_ops for op in kv_cache_update_ops
         )
 
     def is_attention_compiled_piecewise(self) -> bool:
