@@ -761,6 +761,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
+            assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
@@ -776,6 +777,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 metadata=attn_metadata,
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
+            assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
                 conv_state,
