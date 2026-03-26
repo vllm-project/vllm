@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast, runtime_checkable
 
 import numpy as np
@@ -21,8 +21,6 @@ from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
 
 @runtime_checkable
 class AttentionBatchProtocol(Protocol):
-    """Protocol for batches used by build_attn_metadata."""
-
     num_reqs: int
     num_reqs_after_padding: int
     num_tokens: int
@@ -32,6 +30,21 @@ class AttentionBatchProtocol(Protocol):
     seq_lens: torch.Tensor
     num_scheduled_tokens: np.ndarray
     dcp_local_seq_lens: torch.Tensor | None
+
+
+@dataclass
+class AttentionBatch:
+    """Minimal batch implementing AttentionBatchProtocol."""
+
+    num_reqs: int
+    num_reqs_after_padding: int
+    num_tokens: int
+    num_tokens_after_padding: int
+    query_start_loc: torch.Tensor
+    query_start_loc_np: np.ndarray
+    seq_lens: torch.Tensor
+    num_scheduled_tokens: np.ndarray
+    dcp_local_seq_lens: torch.Tensor | None = None
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
