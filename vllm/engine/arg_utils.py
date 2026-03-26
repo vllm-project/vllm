@@ -508,7 +508,7 @@ class EngineArgs:
         MultiModalConfig.mm_encoder_attn_backend
     )
     io_processor_plugin: str | None = None
-    preprocessing_thread_pool_workers: int = 1
+    renderer_num_workers: int = 1
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
@@ -769,8 +769,8 @@ class EngineArgs:
             "--io-processor-plugin", **model_kwargs["io_processor_plugin"]
         )
         model_group.add_argument(
-            "--preprocessing-thread-pool-workers",
-            **model_kwargs["preprocessing_thread_pool_workers"],
+            "--renderer-num-workers",
+            **model_kwargs["renderer_num_workers"],
         )
 
         # Model loading arguments
@@ -1443,7 +1443,7 @@ class EngineArgs:
             video_pruning_rate=self.video_pruning_rate,
             mm_tensor_ipc=self.mm_tensor_ipc,
             io_processor_plugin=self.io_processor_plugin,
-            preprocessing_thread_pool_workers=self.preprocessing_thread_pool_workers,
+            renderer_num_workers=self.renderer_num_workers,
         )
 
     def validate_tensorizer_args(self):

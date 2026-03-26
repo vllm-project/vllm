@@ -95,7 +95,7 @@ class BaseRenderer(ABC, Generic[_T]):
         # multimodal preprocessing operations.  The multimodal processor
         # receives a deep-copied tokenizer (see #36557) so it is safe to
         # run tokenization and MM preprocessing concurrently.
-        pool_workers = config.model_config.preprocessing_thread_pool_workers
+        pool_workers = config.model_config.renderer_num_workers
         self._executor = ThreadPoolExecutor(max_workers=pool_workers)
 
         # Multimodal preprocessing is always offloaded to the thread pool

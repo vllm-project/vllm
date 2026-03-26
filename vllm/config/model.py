@@ -291,10 +291,10 @@ class ModelConfig:
     definitions"""
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
-    preprocessing_thread_pool_workers: int = 1
-    """Number of worker threads in the shared preprocessing thread pool
-    on BaseRenderer. This pool handles async tokenization, chat template
-    rendering, and multimodal preprocessing."""
+    renderer_num_workers: int = 1
+    """Number of worker threads in the renderer thread pool. This pool
+    handles async tokenization, chat template rendering, and multimodal
+    preprocessing."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None
