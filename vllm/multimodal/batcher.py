@@ -10,7 +10,7 @@ from .utils import group_and_batch_mm_items
 
 class MultiModalBatcher(Protocol):
     """
-    Interface defining how to batch model inputs.
+    Interface defining how to collate and uncollate model inputs to/from batches.
 
     The following invariants must hold:
     ```
