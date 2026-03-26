@@ -677,7 +677,13 @@ class OpenAIServingResponses(OpenAIServing):
                 token_ids = context.render_for_completion()
                 engine_input = tokens_input(token_ids)
 
-                sampling_params.max_tokens = max_model_len - len(token_ids)
+                sampling_params.max_tokens = get_max_tokens(
+                    max_model_len,
+                    context.request.max_output_tokens,
+                    len(token_ids),
+                    self.default_sampling_params,  # type: ignore
+                    self.override_max_tokens,  # type: ignore
+                )
             elif isinstance(context, ParsableContext):
                 (engine_input,) = await self._render_next_turn(
                     context.request,
