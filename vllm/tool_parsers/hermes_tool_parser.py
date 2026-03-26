@@ -21,6 +21,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -50,8 +51,8 @@ def _is_valid_json(text: str) -> bool:
 
 
 class Hermes2ProToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         if is_mistral_tokenizer(tokenizer):
             logger.error("Detected Mistral tokenizer when using a Hermes model")
