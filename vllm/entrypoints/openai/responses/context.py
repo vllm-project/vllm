@@ -140,11 +140,16 @@ class ConversationContext(ABC):
         raise NotImplementedError("Should not be called.")
 
 
-def _extract_content_text(msg: "Message") -> str:
-    """Safely extract text from the first content item of a Harmony message.
+def _extract_content_text(msg: Any) -> str:
+    """Safely extract text from the first content item.
+
+    Works with both Harmony ``Message`` objects and MCP ``CallToolResult``
+    objects — any object whose ``.content`` is a list of items with a
+    ``.text`` attribute.
 
     Returns an empty string if the content list is empty, preventing
-    IndexError crashes when the model generates a tool call with no content.
+    IndexError crashes when the model generates a tool call with no
+    content or a tool server returns an empty result.
     """
     if not msg.content:
         return ""
@@ -737,7 +742,7 @@ class HarmonyContext(ConversationContext):
         else:
             args = json.loads(_extract_content_text(last_msg))
         result = await tool_session.call_tool(tool_name, args)
-        result_str = result.content[0].text
+        result_str = _extract_content_text(result)
         content = TextContent(text=result_str)
         author = Author(role=Role.TOOL, name=last_msg.recipient)
         return [
@@ -759,7 +764,7 @@ class HarmonyContext(ConversationContext):
             "code": _extract_content_text(last_msg),
         }
         result = await tool_session.call_tool("python", param)
-        result_str = result.content[0].text
+        result_str = _extract_content_text(result)
 
         content = TextContent(text=result_str)
         author = Author(role=Role.TOOL, name="python")
@@ -824,7 +829,7 @@ class HarmonyContext(ConversationContext):
         else:
             args = json.loads(_extract_content_text(last_msg))
         result = await tool_session.call_tool(tool_name, args)
-        result_str = result.content[0].text
+        result_str = _extract_content_text(result)
         content = TextContent(text=result_str)
         author = Author(role=Role.TOOL, name=last_msg.recipient)
         return [

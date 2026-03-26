@@ -1,4 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test that _extract_content_text handles empty content safely."""
+
 import pytest
 
 from vllm.entrypoints.openai.responses.context import _extract_content_text
@@ -29,6 +32,19 @@ def test_extract_content_text_none_like():
     msg = FakeMessage(content=None)
     # content=None → not msg.content is True → returns ""
     assert _extract_content_text(msg) == ""
+
+
+def test_extract_content_text_tool_result():
+    """Helper also works with MCP CallToolResult-like objects."""
+    # MCP CallToolResult has the same .content[0].text pattern
+    result = FakeMessage(content=[FakeContent("tool output")])
+    assert _extract_content_text(result) == "tool output"
+
+
+def test_extract_content_text_empty_tool_result():
+    """Empty tool result content should return empty string, not crash."""
+    result = FakeMessage(content=[])
+    assert _extract_content_text(result) == ""
 
 
 def test_original_code_would_crash():
