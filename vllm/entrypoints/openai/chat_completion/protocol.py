@@ -822,13 +822,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         return data
 
-    @model_validator(mode="before")
-    @classmethod
-    def set_include_reasoning_for_none_effort(cls, data: Any) -> Any:
-        if data.get("reasoning_effort") == "none":
-            data["include_reasoning"] = False
-        return data
-
 
 class BatchChatCompletionRequest(OpenAIBaseModel):
     """Request model for the /v1/chat/completions/batch endpoint.

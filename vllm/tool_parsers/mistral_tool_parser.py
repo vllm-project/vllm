@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from enum import Enum, auto
 from random import choices
 from string import ascii_letters, digits
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import ijson
 import regex as re
@@ -37,13 +40,18 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.reasoning.mistral_reasoning_parser import MistralReasoningParser
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
 from vllm.utils.mistral import is_mistral_tokenizer
+
+if TYPE_CHECKING:
+    from vllm.reasoning import ReasoningParser
 
 logger = init_logger(__name__)
 
@@ -86,17 +94,41 @@ def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
     return not (is_mistral_tokenizer(model_tokenizer) and model_tokenizer.version >= 11)
 
 
-class MistralToolParser(ToolParser):
+@dataclass
+class MistralStreamingResult:
+    r"""Encapsulates the mutable state returned from
+    `MistralToolParser.extract_maybe_reasoning_and_tool_streaming`.
     """
-    Tool call parser for Mistral 7B Instruct v0.3, intended for use with
-    - [`mistral_common`](https://github.com/mistralai/mistral-common/)
-    - the examples/tool_chat_template_mistral.jinja template.
 
-    Used when --enable-auto-tool-choice --tool-call-parser mistral are all set
+    delta_message: DeltaMessage | None
+    reasoning_ended: bool
+    added_content_delta: bool
+    tools_called: bool
+    current_text: str
+    current_token_ids: list[int]
+
+
+class MistralToolParser(ToolParser):
+    r"""Tool call parser for Mistral models, intended for use with either:
+
+    - `mistral_common <https://github.com/mistralai/mistral-common/>`_
+      (recommended)
+    - the `examples/tool_chat_template_mistral.jinja` template.
+
+    Used when `--enable-auto-tool-choice --tool-call-parser mistral` are all
+    set.
     """
 
     # Used to generate correct grammar in `adjust_request`
     model_can_reason: bool = False
+
+    @staticmethod
+    def is_mistral_grammar_path(request: ChatCompletionRequest) -> bool:
+        r"""Check if the request was adjusted via the Mistral grammar factory path."""
+        return (
+            request.structured_outputs is not None
+            and request.structured_outputs._from_tool_parser
+        )
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
@@ -251,7 +283,152 @@ class MistralToolParser(ToolParser):
                 )
 
         request.structured_outputs = StructuredOutputsParams(grammar=lark_grammar)
+        request.structured_outputs._from_tool_parser = True
         return request
+
+    def extract_maybe_reasoning_and_tool_streaming(
+        self,
+        *,
+        reasoning_parser: ReasoningParser | None,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: list[int],
+        current_token_ids: list[int],
+        output_token_ids: Sequence[int],
+        reasoning_ended: bool,
+        added_content_delta: bool,
+        prompt_is_reasoning_end: bool | None,
+        request: ChatCompletionRequest,
+    ) -> MistralStreamingResult:
+        r"""Streaming extraction with reasoning followed by tool-call parsing.
+
+        This method encapsulates the combined reasoning extraction and
+        tool-call streaming logic so that the serving layer only needs a
+        thin routing branch.
+
+        The flow is:
+
+        1. If a *reasoning_parser* is present and reasoning has **not** ended,
+           extract reasoning tokens.  Pre-v15 models may have pre-filled
+           `[THINK]...[/THINK]` in system prompts, so we skip the
+           prompt-level reasoning-end check for those.
+        2. Once reasoning ends (or if there is no reasoning parser), delegate
+           to `extract_tool_calls_streaming` and track whether tools were
+           called.
+
+        Args:
+            reasoning_parser: Optional reasoning parser instance.
+            previous_text: Accumulated text from prior chunks.
+            current_text: Full accumulated text including current chunk.
+            delta_text: New text in this chunk.
+            previous_token_ids: Token ids from prior chunks.
+            current_token_ids: Full token ids including current chunk.
+            output_token_ids: Raw output token ids from the engine.
+            reasoning_ended: Whether reasoning has already ended.
+            added_content_delta: Whether the first content delta after
+                reasoning has been emitted.
+            prompt_is_reasoning_end: Whether the prompt itself ends reasoning.
+            request: The originating chat completion request.
+        """
+        delta_message: DeltaMessage | None = None
+        tools_called = False
+
+        # For MistralReasoningParser, only enter the reasoning block when
+        # the model has actually emitted a [THINK] token.  Other reasoning
+        # parsers always expect thinking to be present.
+        expect_thinking = (
+            not isinstance(reasoning_parser, MistralReasoningParser)
+            or reasoning_parser.start_token_id in current_token_ids
+        )
+        if reasoning_parser is not None and not reasoning_ended and expect_thinking:
+            # Pre-v15 models may have pre-filled [THINK]...[/THINK] in
+            # system prompts, so skip the prompt-level reasoning-end
+            # check and wait for the output's own end-of-think.
+            is_pre_v15 = (
+                isinstance(self.model_tokenizer, MistralTokenizer)
+                and self.model_tokenizer.version < 15
+            )
+
+            if not is_pre_v15 and prompt_is_reasoning_end:
+                reasoning_ended = True
+                current_token_ids = list(output_token_ids)
+            else:
+                delta_message = reasoning_parser.extract_reasoning_streaming(
+                    previous_text,
+                    current_text,
+                    delta_text,
+                    previous_token_ids,
+                    current_token_ids,
+                    output_token_ids,
+                )
+                if reasoning_parser.is_reasoning_end_streaming(
+                    current_token_ids, output_token_ids
+                ):
+                    reasoning_ended = True
+                    current_token_ids = reasoning_parser.extract_content_ids(
+                        output_token_ids
+                    )
+                    if delta_message and delta_message.content:
+                        current_text = delta_message.content
+                        delta_message.content = None
+                    else:
+                        current_text = ""
+
+            if not reasoning_ended:
+                return MistralStreamingResult(
+                    delta_message=delta_message,
+                    reasoning_ended=False,
+                    added_content_delta=added_content_delta,
+                    tools_called=False,
+                    current_text=current_text,
+                    current_token_ids=current_token_ids,
+                )
+
+        delta_token_ids = list(output_token_ids)
+        if reasoning_parser is not None and not added_content_delta:
+            # First chunk after reasoning ended: reset text state.
+            added_content_delta = True
+            previous_text = ""
+            previous_token_ids = []
+            delta_text = current_text
+            delta_token_ids = current_token_ids
+
+        delta_message = self.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=previous_token_ids,
+            current_token_ids=current_token_ids,
+            delta_token_ids=delta_token_ids,
+            request=request,
+        )
+        if delta_message and delta_message.tool_calls:
+            tools_called = True
+
+        return MistralStreamingResult(
+            delta_message=delta_message,
+            reasoning_ended=reasoning_ended,
+            added_content_delta=added_content_delta,
+            tools_called=tools_called,
+            current_text=current_text,
+            current_token_ids=current_token_ids,
+        )
+
+    @staticmethod
+    def build_non_streaming_tool_calls(
+        tool_calls: list[FunctionCall] | None,
+    ) -> list[ToolCall]:
+        r"""Build `MistralToolCall` items for non-streaming responses."""
+        if not tool_calls:
+            return []
+
+        return [
+            MistralToolCall(id=tc.id, function=tc)
+            if tc.id
+            else MistralToolCall(function=tc)
+            for tc in tool_calls
+        ]
 
     def extract_tool_calls(
         self,
@@ -323,7 +500,7 @@ class MistralToolParser(ToolParser):
                     )[0]
                     tool_calls = json.loads(raw_tool_call)
                 except (IndexError, json.JSONDecodeError):
-                    logger.exception("Error in extracting tool call from response: {e}")
+                    logger.exception("Error in extracting tool call from response.")
                     # If raw decoding and decoding post regex rule fails, then just
                     # return content.
                     return ExtractedToolCallInformation(
