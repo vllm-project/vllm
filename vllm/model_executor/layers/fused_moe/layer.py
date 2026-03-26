@@ -71,7 +71,7 @@ class FusedMoeWeightScaleSupported(Enum):
     BLOCK = "block"
 
 
-# Should be method
+# Should be method?  only used in layer
 def determine_expert_placement_strategy(
     expert_placement_strategy: ExpertPlacementStrategy,
     moe_parallel_config: FusedMoEParallelConfig,
