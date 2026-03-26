@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -109,7 +109,7 @@ class BaseRouter(FusedMoERouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
+        eplb_manager: EplbManager,
         enable_eplb: bool = False,
         # TODO(bnell): Once the MK is constructed at layer init time, we
         # can make this a plain value instead of a callback.
@@ -124,10 +124,15 @@ class BaseRouter(FusedMoERouter):
         super().__init__()
         self.top_k = top_k
         self.global_num_experts = global_num_experts
-        self.eplb_state = eplb_state
+        self._eplb_manager = eplb_manager
+        self.eplb_state = eplb_manager.state
         self.enable_eplb = enable_eplb
         self.indices_type_getter = indices_type_getter
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
+
+    @property
+    def eplb_manager(self) -> EplbManager:
+        return self._eplb_manager
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""

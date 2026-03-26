@@ -10,14 +10,10 @@ collection, and expert parameter mapping.
 """
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState, EplbState
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
 
 class EplbManager:
@@ -65,7 +61,7 @@ class EplbManager:
 
     def get_expert_weights(
         self,
-        layer: "FusedMoE",
+        layer: torch.nn.Module,  # FusedMoE
     ) -> Iterable[torch.Tensor]:
         """
         Collect expert weights from the MoE layer for EPLB.

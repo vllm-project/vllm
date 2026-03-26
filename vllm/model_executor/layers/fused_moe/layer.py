@@ -356,12 +356,9 @@ class FusedMoE(CustomOp):
 
         self.global_num_experts = num_experts + num_redundant_experts
         self.logical_num_experts = num_experts
-        self.enable_eplb = enable_eplb
 
-        # Initialize EPLB manager
-        self.eplb_manager = EplbManager(
-            num_redundant_experts=num_redundant_experts,
-        )
+        # Initialize EPLB manager (or None?)
+        eplb_manager = EplbManager(num_redundant_experts=num_redundant_experts)
 
         # Expert mapping used in self.load_weights
         self.expert_mapping = expert_mapping
@@ -404,11 +401,11 @@ class FusedMoE(CustomOp):
         # Determine expert maps
         if self.use_ep:
             # Validate EPLB configuration
-            self.eplb_manager.validate_configuration(
-                self.enable_eplb, self.global_num_experts, self.ep_size
+            eplb_manager.validate_configuration(
+                enable_eplb, self.global_num_experts, self.ep_size
             )
 
-            if not self.enable_eplb:
+            if not enable_eplb:
                 assert num_redundant_experts == 0, (
                     "Redundant experts are only supported with EPLB."
                 )
@@ -418,7 +415,7 @@ class FusedMoE(CustomOp):
                 moe_parallel_config=self.moe_parallel_config,
                 num_expert_group=num_expert_group,
                 num_redundant_experts=num_redundant_experts,
-                enable_eplb=self.enable_eplb,
+                enable_eplb=enable_eplb,
             )
 
             self._expert_map: torch.Tensor | None
@@ -434,19 +431,18 @@ class FusedMoE(CustomOp):
             self.register_buffer("_expert_map", expert_map)
             self.register_buffer("expert_mask", expert_mask)
             self._maybe_init_expert_routing_tables()
-            if False:
-                logger.info_once(
-                    "[EP Rank %s/%s] Expert parallelism is enabled. Expert "
-                    "placement strategy: %s. Local/global"
-                    " number of experts: %s/%s. Experts local to global index map:"
-                    " %s.",
-                    self.ep_rank,
-                    self.ep_size,
-                    self.expert_placement_strategy,
-                    self.local_num_experts,
-                    self.global_num_experts,
-                    get_compressed_expert_map(self._expert_map),
-                )
+            logger.info_once(
+                "[EP Rank %s/%s] Expert parallelism is enabled. Expert "
+                "placement strategy: %s. Local/global"
+                " number of experts: %s/%s. Experts local to global index map:"
+                " %s.",
+                self.ep_rank,
+                self.ep_size,
+                self.expert_placement_strategy,
+                self.local_num_experts,
+                self.global_num_experts,
+                get_compressed_expert_map(self._expert_map),
+            )
         else:
             self.local_num_experts, self._expert_map, self.expert_mask = (
                 self.global_num_experts,
@@ -492,7 +488,7 @@ class FusedMoE(CustomOp):
         router = create_fused_moe_router(
             top_k=top_k,
             global_num_experts=self.global_num_experts,
-            eplb_state=self.eplb_manager.state,
+            eplb_manager=eplb_manager,
             renormalize=renormalize,
             use_grouped_topk=use_grouped_topk,
             num_expert_group=num_expert_group,
@@ -504,7 +500,7 @@ class FusedMoE(CustomOp):
             else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=self.num_fused_shared_experts,
-            enable_eplb=self.enable_eplb,
+            enable_eplb=enable_eplb,
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
             indices_type_getter=lambda: self._runner.quant_method.topk_indices_dtype,
@@ -586,7 +582,7 @@ class FusedMoE(CustomOp):
                 "is_act_and_mul=False is supported only for CUDA and ROCm for now"
             )
 
-        if self.enable_eplb and not quant_method.supports_eplb:
+        if enable_eplb and not quant_method.supports_eplb:
             # TODO: Add support for additional quantization methods.
             # The implementation for other quantization methods does not
             # contain essential differences, but the current quant API
@@ -1379,7 +1375,7 @@ class FusedMoE(CustomOp):
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         """Delegate to EPLB manager."""
-        return self.eplb_manager.get_expert_weights(self)
+        return self._runner.router.eplb_manager.get_expert_weights(self)
 
     def set_eplb_state(
         self,
@@ -1394,7 +1390,7 @@ class FusedMoE(CustomOp):
         This is used later in forward pass, where we get the expert mapping
         and record the load metrics in `expert_load_view`.
         """
-        self.eplb_manager.set_state(
+        self._runner.router.eplb_manager.set_state(
             moe_layer_idx,
             expert_load_view,
             logical_to_physical_map,

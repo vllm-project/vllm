@@ -6,6 +6,7 @@ from collections.abc import Callable
 import torch
 
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 
 
 class FusedMoERouter(ABC):
@@ -24,6 +25,11 @@ class FusedMoERouter(ABC):
     @property
     @abstractmethod
     def routing_method_type(self) -> RoutingMethodType:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def eplb_manager(self) -> EplbManager:
         raise NotImplementedError
 
     @abstractmethod

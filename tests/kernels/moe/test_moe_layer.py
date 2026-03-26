@@ -34,6 +34,7 @@ from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE, fused_experts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
@@ -920,6 +921,7 @@ def make_fake_moe_layer(
     expert_load_view: torch.Tensor | None = None,
     logical_to_physical_map: torch.Tensor | None = None,
     logical_replica_count: torch.Tensor | None = None,
+    num_redundant_experts: int = 0,
     gate: torch.nn.Module | None = None,
     routed_input_transform: torch.nn.Module | None = None,
     routed_output_transform: torch.nn.Module | None = None,
@@ -930,10 +932,12 @@ def make_fake_moe_layer(
 ) -> Callable:
     activation = MoEActivation.from_str(activation)
 
+    eplb_manager = EplbManager(num_redundant_experts=num_redundant_experts)
+
     router = create_fused_moe_router(
         top_k=top_k,
         global_num_experts=global_num_experts,
-        # eplb_state=None, # TODO
+        eplb_manager=eplb_manager,
         renormalize=renormalize,
         use_grouped_topk=use_grouped_topk,
         num_expert_group=num_expert_group,

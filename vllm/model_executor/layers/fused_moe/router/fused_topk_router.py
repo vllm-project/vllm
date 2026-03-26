@@ -6,11 +6,11 @@ import torch
 
 import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
+from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 
@@ -120,7 +120,7 @@ class FusedTopKRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
+        eplb_manager: EplbManager,
         scoring_func: str = "softmax",
         renormalize: bool = True,
         enable_eplb: bool = False,
@@ -129,7 +129,7 @@ class FusedTopKRouter(BaseRouter):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
-            eplb_state=eplb_state,
+            eplb_manager=eplb_manager,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )

@@ -8,7 +8,6 @@ import torch
 from vllm import _custom_ops as ops
 from vllm import envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -17,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
+from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     rocm_aiter_grouped_topk,
 )
@@ -254,7 +254,7 @@ class GroupedTopKRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
+        eplb_manager: EplbManager,
         num_expert_group: int,
         topk_group: int,
         renormalize: bool = True,
@@ -268,7 +268,7 @@ class GroupedTopKRouter(BaseRouter):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
-            eplb_state=eplb_state,
+            eplb_manager=eplb_manager,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
