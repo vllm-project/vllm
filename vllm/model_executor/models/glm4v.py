@@ -5,23 +5,20 @@
 # https://github.com/zai-org/CogAgent
 """Inference-only CogAgent model compatible with THUDM weights."""
 
-import itertools
 from argparse import Namespace
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Annotated, Literal
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import LayerNorm
-from torchvision import transforms
-from torchvision.transforms import InterpolationMode
-from transformers import BatchFeature, PreTrainedTokenizer, TensorType
-from transformers.image_utils import ImageInput
-from transformers.tokenization_utils_base import TextInput
+from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
@@ -36,7 +33,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -50,7 +46,11 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import ChatGLMConfig
+from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
+from vllm.transformers_utils.processors.glm4v import (
+    GLM4VImageProcessorFast,
+    GLM4VProcessor,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .chatglm import ChatGLMBaseModel, ChatGLMModel, GLMTransformer
@@ -136,7 +136,10 @@ class EVA2CLIPAttention(nn.Module):
         )
 
         self.attn = MMEncoderAttention(
-            self.num_heads_per_rank, self.head_dim, self.scale
+            self.num_heads_per_rank,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
         )
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
 
@@ -383,81 +386,24 @@ class GLM4VModel(ChatGLMModel):
         )
 
 
-class GLM4VProcessor:
-    """
-    This model doesn't define its own HF processor,
-    so we implement our own one here.
-    """
-
-    def __init__(
-        self,
-        config: ChatGLMConfig,
-        tokenizer: PreTrainedTokenizer,
-    ) -> None:
-        super().__init__()
-
-        self.config = config
-        self.tokenizer = tokenizer
-
-        vision_config = config.vision_config
-        image_size = vision_config["image_size"]
-
-        self.image_transform = transforms.Compose(
-            [
-                transforms.Resize(
-                    (image_size, image_size),
-                    interpolation=InterpolationMode.BICUBIC,
-                ),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=(0.48145466, 0.4578275, 0.40821073),
-                    std=(0.26862954, 0.26130258, 0.27577711),
-                ),
-            ]
-        )
-
-    def __call__(
-        self,
-        text: TextInput | list[TextInput] | None = None,
-        images: ImageInput | list[ImageInput] | None = None,
-        return_tensors: str | TensorType | None = None,
-    ) -> BatchFeature:
-        if text is None:
-            text = []
-        if not isinstance(text, list):
-            text = [text]
-        if images is None:
-            images = []
-        if not isinstance(images, list):
-            images = [images]
-
-        text_inputs = self.tokenizer(text)
-
-        if len(images) == 0:
-            image_inputs = {}
-        else:
-            pixel_values = [self.image_transform(image) for image in images]
-            image_inputs = {"pixel_values": torch.stack(pixel_values)}
-
-        return BatchFeature(
-            {
-                **text_inputs,
-                **image_inputs,
-            },
-            tensor_type=return_tensors,
-        )
-
-
 class GLM4VProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(ChatGLMConfig)
 
+    def get_image_processor(self, **kwargs):
+        config = self.get_hf_config()
+        vision_config = config.vision_config
+
+        image_size = vision_config["image_size"]
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        kwargs.setdefault("size", {"width": image_size, "height": image_size})
+
+        return GLM4VImageProcessorFast(**kwargs)
+
     def get_hf_processor(self, **kwargs: object) -> GLM4VProcessor:
-        return self.ctx.init_processor(
-            GLM4VProcessor,
-            config=self.get_hf_config(),
+        return GLM4VProcessor(
             tokenizer=self.get_tokenizer(),
-            **kwargs,
+            image_processor=self.get_image_processor(**kwargs),
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -489,7 +435,7 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
@@ -497,7 +443,7 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         target_width = target_height = vision_config["image_size"]
         num_images = mm_counts.get("image", 0)
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -624,138 +570,56 @@ class GLM4VForCausalLM(
 
         return self.transformer.vision(pixel_values)
 
+    def iter_mm_grid_thw(
+        self, mm_features: list[MultiModalFeatureSpec]
+    ) -> Iterator[tuple[int, int, int, int]]:
+        hf_config = self.config
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
+        for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
+            offset = mm_feature.mm_position.offset
+            if mm_feature.modality == "image":
+                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                assert t == 1, f"Image must have 1 frame, got {t}"
+                yield offset, t, h // spatial_merge_size, w // spatial_merge_size
+            else:
+                # glm4v only supports image modality
+                raise ValueError(f"Unsupported modality: {mm_feature.modality}")
+
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        kwargs = MultiModalFeatureSpec.gather_kwargs(
-            mm_features,
-            {"image_grid_thw", "video_grid_thw"},
-        )
-        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
-        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
-
-        hf_config = self.config
-        image_token_id = hf_config.image_token_id
-        video_start_token_id = hf_config.video_start_token_id
-        video_end_token_id = hf_config.video_end_token_id
-        spatial_merge_size = hf_config.vision_config.spatial_merge_size
         llm_pos_ids_list: list = []
+        st = 0
+        for (
+            offset,
+            llm_grid_t,
+            llm_grid_h,
+            llm_grid_w,
+        ) in self.iter_mm_grid_thw(mm_features):
+            text_len = offset - st
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+            )
+            grid_indices = np.indices((llm_grid_t, llm_grid_h, llm_grid_w)).reshape(
+                3, -1
+            )
+            llm_pos_ids_list.append(grid_indices + text_len + st_idx)
+            # EVA2CLIPModel has embeddings for boi and eoi tokens as well
+            st = offset + 1 + llm_grid_t * llm_grid_h * llm_grid_w + 1
 
-        if image_grid_thw or video_grid_thw:
-            input_token_type: list[str] = []
-            video_check_flg = False
-            for token in input_tokens:
-                if token == video_start_token_id:
-                    video_check_flg = True
-                elif token == video_end_token_id:
-                    video_check_flg = False
+        if st < len(input_tokens):
+            text_len = len(input_tokens) - st
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+            )
 
-                if (token == image_token_id) and (video_check_flg is False):
-                    input_token_type.append("image")
-                elif (token == image_token_id) and (video_check_flg is True):
-                    input_token_type.append("video")
-                else:
-                    input_token_type.append("text")
-
-            input_type_group: list[tuple[str, int, int]] = []
-            for key, group_iter in itertools.groupby(
-                enumerate(input_token_type), lambda x: x[1]
-            ):
-                group_list = list(group_iter)
-                start_index = group_list[0][0]
-                end_index = group_list[-1][0] + 1
-                input_type_group.append((key, start_index, end_index))
-
-            video_frame_num = 1
-            mm_data_idx = 0
-            for modality_type, start_idx, end_idx in input_type_group:
-                st_idx = (
-                    llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                )
-                if modality_type == "image":
-                    t, h, w = image_grid_thw[mm_data_idx]
-                    llm_grid_t, llm_grid_h, llm_grid_w = (
-                        t,
-                        h // spatial_merge_size,
-                        w // spatial_merge_size,
-                    )
-
-                    t_index = (
-                        torch.arange(llm_grid_t)
-                        .view(-1, 1)
-                        .expand(-1, llm_grid_h * llm_grid_w)
-                        .flatten()
-                    )
-                    h_index = (
-                        torch.arange(llm_grid_h)
-                        .view(1, -1, 1)
-                        .expand(llm_grid_t, -1, llm_grid_w)
-                        .flatten()
-                    )
-                    w_index = (
-                        torch.arange(llm_grid_w)
-                        .view(1, 1, -1)
-                        .expand(llm_grid_t, llm_grid_h, -1)
-                        .flatten()
-                    )
-                    llm_pos_ids_list.append(
-                        torch.stack([t_index, h_index, w_index]) + st_idx
-                    )
-                    mm_data_idx += 1
-
-                elif modality_type == "video":
-                    t, h, w = (
-                        video_frame_num,
-                        *image_grid_thw[mm_data_idx][1:],
-                    )
-                    llm_grid_t, llm_grid_h, llm_grid_w = (
-                        t,
-                        h // spatial_merge_size,
-                        w // spatial_merge_size,
-                    )
-
-                    for t_idx in range(llm_grid_t):
-                        t_index = (
-                            torch.tensor(t_idx)
-                            .view(-1, 1)
-                            .expand(-1, llm_grid_h * llm_grid_w)
-                            .flatten()
-                        )
-                        h_index = (
-                            torch.arange(llm_grid_h)
-                            .view(1, -1, 1)
-                            .expand(1, -1, llm_grid_w)
-                            .flatten()
-                        )
-                        w_index = (
-                            torch.arange(llm_grid_w)
-                            .view(1, 1, -1)
-                            .expand(1, llm_grid_h, -1)
-                            .flatten()
-                        )
-                        llm_pos_ids_list.append(
-                            torch.stack([t_index, h_index, w_index]) + st_idx
-                        )
-
-                    mm_data_idx += 1
-                    video_frame_num += 1
-
-                else:
-                    text_len = end_idx - start_idx
-                    llm_pos_ids_list.append(
-                        torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
-                    )
-                    video_frame_num = 1
-
-        else:
-            text_len = len(input_tokens)
-            llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1))
-
-        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
-        return llm_positions, mrope_position_delta
+        return torch.from_numpy(llm_positions), mrope_position_delta
 
     embed_input_ids = SupportsMultiModal.embed_input_ids
 

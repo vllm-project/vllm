@@ -255,7 +255,7 @@ def _flashinfer_fp8_blockscale_gemm_impl(
 
     This batch-size-dependent selection is essential for maintaining model accuracy.
     Benchmarks on GSM8K show a significant accuracy gap (88% vs 95%) for DeepSeek-V3.1
-    when using FlashInfer's DeepGEMM on M>=32. The M < 32 strategy fixes the accurracy
+    when using FlashInfer's DeepGEMM on M>=32. The M < 32 strategy fixes the accuracy
     drop.
 
     Args:
@@ -304,6 +304,9 @@ def _flashinfer_fp8_blockscale_gemm_impl(
             is_deep_gemm_e8m0_used=use_deep_gemm_e8m0,
         )
         return output
+
+    if envs.VLLM_BATCH_INVARIANT:
+        return run_deepgemm(input, weight, weight_scale)
 
     condition = input.shape[0] < 32
 
@@ -612,8 +615,8 @@ def _per_token_group_quant_fp8(
     # Avoid to divide zero
     eps,
     # Information for float8
-    fp8_min,
-    fp8_max,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
     use_ue8m0: tl.constexpr,
     # Meta-parameters
     BLOCK: tl.constexpr,
@@ -644,8 +647,12 @@ def _per_token_group_quant_fp8(
 
     y = tl.load(y_ptr + cols, mask=mask, other=0.0).to(tl.float32)
     # Quant
+    # Use multiply-by-reciprocal instead of division to match PyTorch's
+    # tensor/scalar division precision (GPU fast-division for constexpr
+    # divisors can introduce 1-ULP error that flips FP8 quantization at
+    # representable-value boundaries).
     _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
-    scale_raw = _absmax / fp8_max
+    scale_raw = _absmax * (1.0 / fp8_max)
     y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
@@ -664,8 +671,8 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     y_s_col_stride: tl.int64,
     # Information for float8
     eps,
-    fp8_min,
-    fp8_max,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
     use_ue8m0: tl.constexpr,
     # Meta-parameters
     GROUP_SIZE: tl.constexpr,
@@ -706,7 +713,7 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
 
     # quant
     _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
-    scale_raw = _absmax / fp8_max
+    scale_raw = _absmax * (1.0 / fp8_max)
     y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
     y_s = tl.reshape(y_s, (BLOCK_M, 1))
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
@@ -805,8 +812,8 @@ def _per_token_group_quant_fp8_colmajor(
     # Avoid to divide zero
     eps,
     # Information for float8
-    fp8_min,
-    fp8_max,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
     use_ue8m0: tl.constexpr,
     # Meta-parameters
     BLOCK: tl.constexpr,
@@ -846,7 +853,7 @@ def _per_token_group_quant_fp8_colmajor(
     y = tl.load(y_ptr + cols, mask=mask, other=0.0).to(tl.float32)
     # Quant
     _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
-    scale_raw = _absmax / fp8_max
+    scale_raw = _absmax * (1.0 / fp8_max)
     y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
@@ -924,7 +931,16 @@ def per_token_group_quant_fp8(
     # TODO(bnell): this causes some fp8 moe test to fail.
     if current_platform.is_cuda() and x.is_contiguous():
         torch.ops._C.per_token_group_fp8_quant(
-            x, x_q, x_s, group_size, eps, fp8_min, fp8_max, use_ue8m0
+            x,
+            x_q,
+            x_s,
+            group_size,
+            eps,
+            fp8_min,
+            fp8_max,
+            use_ue8m0,
+            column_major_scales,
+            tma_aligned_scales,
         )
         return x_q, x_s
 
@@ -1398,7 +1414,7 @@ def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
         import torch.nn.functional as F
 
         weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
     return weight
 
 

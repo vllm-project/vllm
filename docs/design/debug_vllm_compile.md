@@ -5,12 +5,12 @@ TL;DR:
 - use tlparse to acquire torch.compile logs. Include these logs in bug reports and/or support asks.
 - The vLLM-torch.compile integration is multiple pieces. vLLM exposes flags to turn off each piece:
 
-| Online Flag | Offline Flag   |      Result |
-|----------|----------|-------------|
-| --enforce-eager | enforce_eager=True |  Turn off torch.compile and CUDAGraphs |
-| -cc.mode=0 | mode=CompilationMode.NONE |  Turn off torch.compile only |
-| -cc.cudagraph_mode=NONE | compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE) |  Turn off CUDAGraphs only |
-| -cc.backend=eager | compilation_config=CompilationConfig(backend='eager') |  Turn off TorchInductor |
+| Online Flag | Offline Flag | Result |
+| ----------- | ------------ | ------ |
+| --enforce-eager | enforce_eager=True | Turn off torch.compile and CUDAGraphs |
+| -cc.mode=0 | mode=CompilationMode.NONE | Turn off torch.compile only |
+| -cc.cudagraph_mode=NONE | compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE) | Turn off CUDAGraphs only |
+| -cc.backend=eager | compilation_config=CompilationConfig(backend='eager') | Turn off TorchInductor |
 
 ## vLLM-torch.compile overview
 
@@ -233,6 +233,26 @@ that may call 1+ triton kernels. On rare (but unfortunate) occasions, it may
 produce an incorrect triton kernel. This may manifest as silent incorrectness,
 CUDA illegal memory accesses, or loud errors.
 
+### Inductor runtime assertions
+
+By default (on torch < 2.12), vLLM disables Inductor's runtime assertions
+(`assert_size_stride`, `assert_alignment`) to avoid ~2ms overhead per forward
+pass on large models. Setting `VLLM_LOGGING_LEVEL=DEBUG` automatically
+re-enables them so debugging sessions get full shape/stride validation:
+
+```sh
+VLLM_LOGGING_LEVEL=DEBUG vllm serve <model>
+```
+
+You can also override them explicitly via `--compilation-config`:
+
+```sh
+vllm serve <model> -cc.inductor_compile_config='{"size_asserts": true, "alignment_asserts": true, "scalar_asserts": true}'
+```
+
+On torch >= 2.12, PyTorch uses an efficient assert-once strategy and these
+flags are no longer suppressed by vLLM.
+
 To debug if TorchInductor is at fault, you can disable it by passing `backend='eager'`
 to the compilation config:
 
@@ -281,6 +301,15 @@ the cache key via combining multiple factors (e.g. config flags and model name).
 If vLLM's compile cache is wrong, this usually means that a factor is missing.
 Please see [this example](https://github.com/vllm-project/vllm/blob/18b39828d90413d05d770dfd2e2f48304f4ca0eb/vllm/config/model.py#L310)
 of how vLLM computes part of the cache key.
+
+vLLM's compilation cache requires that the code being compiled ends up being serializable.
+If this is not the case, then it will error out on save. Usually the fixes are to either:
+
+- rewrite the non-serializable pieces (perhaps difficult because it's difficult to
+  tell right now what is serializable and what isn't)
+- file a bug report
+- ignore the error by setting `VLLM_DISABLE_COMPILE_CACHE=1` (note that this will
+  make warm server starts a lot slower).
 
 ## Debugging CUDAGraphs
 

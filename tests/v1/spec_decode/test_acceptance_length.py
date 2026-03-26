@@ -35,7 +35,7 @@ class Eagle3ModelConfig:
     id: str = ""
     # Backends that are incompatible with this model (will be skipped)
     excluded_backends: set[AttentionBackendEnum] = field(default_factory=set)
-    # Pytest marks for this configuration (e.g., pytest.mark.optional)
+    # Pytest marks for this configuration
     marks: list = field(default_factory=list)
     # Custom relative tolerance (defaults to DEFAULT_RTOL if None)
     rtol: float | None = None
@@ -141,7 +141,7 @@ def get_attention_backend_params() -> list[str]:
 
 
 def get_tp_size_params() -> list[pytest.param]:
-    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    num_gpus = torch.accelerator.device_count() if torch.cuda.is_available() else 1
     return [pytest.param(tp, id=f"tp{tp}") for tp in TP_SIZES if tp <= num_gpus]
 
 

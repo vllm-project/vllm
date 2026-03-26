@@ -5,7 +5,7 @@ Minimal Gradio demo for real-time speech transcription using the vLLM Realtime A
 
 Start the vLLM server first:
 
-    vllm serve mistralai/Voxtral-Mini-3B-Realtime-2602 --enforce-eager
+    vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --enforce-eager
 
 Then run this script:
 
@@ -18,13 +18,13 @@ Requirements: websockets, numpy, gradio
 
 import argparse
 import asyncio
-import base64
 import json
 import queue
 import threading
 
 import gradio as gr
 import numpy as np
+import pybase64 as base64
 import websockets
 
 SAMPLE_RATE = 16_000
@@ -166,7 +166,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="mistralai/Voxtral-Mini-3B-Realtime-2602",
+        default="mistralai/Voxtral-Mini-4B-Realtime-2602",
         help="Model that is served and should be pinged.",
     )
     parser.add_argument(

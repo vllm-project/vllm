@@ -4,6 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -31,8 +32,8 @@ class TritonOrDeepGemmExperts(FallbackExperts):
 
     @staticmethod
     def get_clses() -> tuple[
-        type[mk.FusedMoEPermuteExpertsUnpermute],
-        type[mk.FusedMoEPermuteExpertsUnpermute],
+        type[mk.FusedMoEExpertsModular],
+        type[mk.FusedMoEExpertsModular],
     ]:
         return (DeepGemmExperts, TritonExperts)
 
@@ -45,7 +46,7 @@ class TritonOrDeepGemmExperts(FallbackExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
@@ -78,7 +79,7 @@ class TritonOrDeepGemmExperts(FallbackExperts):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+    ) -> mk.FusedMoEExpertsModular:
         if is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2):
             return self.experts
         else:

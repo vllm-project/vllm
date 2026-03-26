@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,6 +18,7 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.config.lora import LoRAConfig
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.platforms import current_platform
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
@@ -47,6 +49,12 @@ def _create_vllm_config(
     mock_config.speculative_config = None  # No speculative decoding
     if not lora_config:
         mock_config.lora_config = None
+    else:
+        # Create a real LoRAConfig with specialize_active_lora enabled
+        mock_config.lora_config = LoRAConfig(
+            max_loras=4,
+            specialize_active_lora=True,
+        )
     # Mimic the behavior of VllmConfig.__post_init__()
     if compilation_config.mode == CompilationMode.VLLM_COMPILE:
         compilation_config.set_splitting_ops_for_v1(
@@ -106,51 +114,58 @@ class TestCudagraphDispatcher:
         )
 
         # Verify the key is initialized correctly
+        # With LoRA specialization (max_loras=4, specialize_active_lora=True):
+        # - lora_cases = [0, 1, 2, 4, 5] (no-lora + powers of 2 up to 4 + max_loras+1)
+        # - capture_sizes = [1, 8]
+        # - Total keys = 2 sizes × 5 lora_cases = 10
         if cudagraph_mode_str in ["FULL_AND_PIECEWISE", "PIECEWISE"]:
             assert len(dispatcher.cudagraph_keys[CUDAGraphMode.PIECEWISE]) == (
-                4 if lora_config else 2
+                10 if lora_config else 2
             )
         else:
             assert len(dispatcher.cudagraph_keys[CUDAGraphMode.PIECEWISE]) == 0
         if cudagraph_mode_str not in ["NONE", "PIECEWISE"]:
             assert len(dispatcher.cudagraph_keys[CUDAGraphMode.FULL]) == (
-                4 if lora_config else 2
+                10 if lora_config else 2
             )
         else:
             assert len(dispatcher.cudagraph_keys[CUDAGraphMode.FULL]) == 0
 
         # Test dispatch logic
         # 1. non-uniform batch, size in cudagraph size list
-        desc_full_exact = BatchDescriptor(
-            num_tokens=8,
-            uniform=False,
-        )
+        # FULL mode uses exact keys with num_reqs set
+        desc_full_with_reqs = BatchDescriptor(num_tokens=8, num_reqs=8, uniform=False)
+        # PIECEWISE mode uses relaxed keys with num_reqs=None
+        desc_piecewise = BatchDescriptor(num_tokens=8, num_reqs=None, uniform=False)
         rt_mode, key = dispatcher.dispatch(
             num_tokens=8, uniform_decode=False, has_lora=False
         )
         if cudagraph_mode_str == "FULL":
             assert rt_mode == CUDAGraphMode.FULL
-            assert key == desc_full_exact
+            assert key == desc_full_with_reqs
         elif cudagraph_mode_str in ["FULL_AND_PIECEWISE", "PIECEWISE"]:
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_full_exact
+            assert key == desc_piecewise
         else:
             assert rt_mode == CUDAGraphMode.NONE
 
         # 2. uniform decode batch, size in cudagraph size list
         desc_uniform_exact = BatchDescriptor(num_tokens=8, num_reqs=8, uniform=True)
+        desc_non_uniform = BatchDescriptor(num_tokens=8, num_reqs=8, uniform=False)
         rt_mode, key = dispatcher.dispatch(
             num_tokens=8, uniform_decode=True, has_lora=False
         )
         if cudagraph_mode_str == "FULL":
+            # Pure FULL mode uses non-uniform keys for all batches
             assert rt_mode == CUDAGraphMode.FULL
-            assert key == desc_uniform_exact.relax_for_mixed_batch_cudagraphs()
+            assert key == desc_non_uniform
         elif cudagraph_mode_str in ["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE"]:
+            # These modes have separate uniform decode keys
             assert rt_mode == CUDAGraphMode.FULL
             assert key == desc_uniform_exact
         elif cudagraph_mode_str == "PIECEWISE":
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_uniform_exact.relax_for_mixed_batch_cudagraphs()
+            assert key == replace(desc_uniform_exact, num_reqs=None, uniform=False)
         else:
             assert rt_mode == CUDAGraphMode.NONE
 
@@ -161,17 +176,31 @@ class TestCudagraphDispatcher:
         assert rt_mode == CUDAGraphMode.NONE
         assert key == BatchDescriptor(num_tokens=15)
 
-        # 4. disable_full should have a fall back mode (e.g., cascade attention)
+        # 4. invalid_modes={FULL} should have a fall back mode
+        #    (e.g., cascade attention)
         desc_full_exact = BatchDescriptor(num_tokens=8, uniform=False)
         rt_mode, key = dispatcher.dispatch(
-            num_tokens=8, uniform_decode=False, has_lora=False, disable_full=True
+            num_tokens=8,
+            uniform_decode=False,
+            has_lora=False,
+            invalid_modes={CUDAGraphMode.FULL},
         )
 
         if "PIECEWISE" in cudagraph_mode_str:  # string contains check
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_full_exact.relax_for_mixed_batch_cudagraphs()
+            assert key == replace(desc_full_exact, num_reqs=None, uniform=False)
         else:
             assert rt_mode == CUDAGraphMode.NONE
+
+        # 5. valid_modes={NONE} always returns NONE even when keys exist
+        rt_mode, key = dispatcher.dispatch(
+            num_tokens=8,
+            uniform_decode=False,
+            has_lora=False,
+            valid_modes={CUDAGraphMode.NONE},
+        )
+        assert rt_mode == CUDAGraphMode.NONE
+        assert key == BatchDescriptor(num_tokens=8)
 
     @pytest.mark.parametrize(
         "cudagraph_mode_str,compilation_mode,expected_modes",

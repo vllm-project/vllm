@@ -2,22 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
-from vllm import PoolingParams
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
-from vllm.logger import init_logger
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, merge_kwargs
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
-
-logger = init_logger(__name__)
 
 
 class PoolingBasicRequestMixin(OpenAIBaseModel):
@@ -28,6 +25,14 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
 
     # --8<-- [start:pooling-common-extra-params]
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    truncation_side: Literal["left", "right"] | None = Field(
+        default=None,
+        description=(
+            "Which side to truncate from when truncate_prompt_tokens is active. "
+            "'right' keeps the first N tokens. "
+            "'left' keeps the last N tokens."
+        ),
+    )
     request_id: str = Field(
         default_factory=random_uuid,
         description=(
@@ -38,10 +43,27 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
+        ge=-(2**63),
+        le=2**63 - 1,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."
+        ),
+    )
+    mm_processor_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description="Additional kwargs to pass to the HF processor.",
+    )
+    cache_salt: str | None = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
         ),
     )
     # --8<-- [end:pooling-common-extra-params]
@@ -113,15 +135,22 @@ class ChatRequestMixin(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
     # --8<-- [end:chat-extra-params]
 
     @model_validator(mode="before")
     @classmethod
     def check_generation_prompt(cls, data):
         if data.get("continue_final_message") and data.get("add_generation_prompt"):
-            raise ValueError(
+            raise VLLMValidationError(
                 "Cannot set both `continue_final_message` and "
-                "`add_generation_prompt` to True."
+                "`add_generation_prompt` to True.",
             )
         return data
 
@@ -140,6 +169,7 @@ class ChatRequestMixin(OpenAIBaseModel):
                     continue_final_message=self.continue_final_message,
                 ),
             ),
+            media_io_kwargs=self.media_io_kwargs,
         )
 
 
@@ -179,25 +209,7 @@ class EmbedRequestMixin(EncodingRequestMixin):
         description="Whether to use activation for the pooler outputs. "
         "`None` uses the pooler's default, which is `True` in most cases.",
     )
-    normalize: bool | None = Field(
-        default=None,
-        description="Deprecated; please pass `use_activation` instead",
-    )
     # --8<-- [end:embed-extra-params]
-
-    def to_pooling_params(self):
-        if self.normalize is not None:
-            logger.warning_once(
-                "`normalize` is deprecated and will be removed in v0.17. "
-                "Please pass `use_activation` instead."
-            )
-            self.use_activation = self.normalize
-
-        return PoolingParams(
-            dimensions=self.dimensions,
-            use_activation=self.use_activation,
-            truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
-        )
 
 
 class ClassifyRequestMixin(OpenAIBaseModel):
@@ -208,9 +220,3 @@ class ClassifyRequestMixin(OpenAIBaseModel):
         "`None` uses the pooler's default, which is `True` in most cases.",
     )
     # --8<-- [end:classify-extra-params]
-
-    def to_pooling_params(self):
-        return PoolingParams(
-            use_activation=self.use_activation,
-            truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
-        )

@@ -206,7 +206,12 @@ async def test_pooling_classify(server: RemoteOpenAIServer, model_name: str):
 async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: str):
     response = requests.post(
         server.url_for("pooling"),
-        json={"model": model_name, "input": input_text, "encoding_format": "float"},
+        json={
+            "model": model_name,
+            "task": "token_classify",
+            "input": input_text,
+            "encoding_format": "float",
+        },
     )
 
     poolings = PoolingResponse.model_validate(response.json())
@@ -232,6 +237,4 @@ async def test_pooling_not_supported(
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
-    assert response.json()["error"]["message"].startswith(
-        f"Task {task} is not supported"
-    )
+    assert response.json()["error"]["message"].startswith(f"Unsupported task: {task!r}")

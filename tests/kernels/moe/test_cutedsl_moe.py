@@ -17,7 +17,7 @@ from flashinfer import fp4_quantize
 from torch.nn import functional as F
 
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
+from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
     flashinfer_cutedsl_moe_masked,
 )
 from vllm.utils.flashinfer import (
@@ -139,7 +139,7 @@ def prepare_inputs(
         masked_m.append(mask.sum())
 
     masked_m = torch.tensor(masked_m, dtype=torch.int32)
-    # Intialize the hidden_states_3d with ones instead of empty to avoid nan
+    # Initialize the hidden_states_3d with ones instead of empty to avoid nan
     # issue.
     hidden_states_3d = torch.ones(
         (num_experts, max(masked_m), hidden_states.shape[1]), dtype=hidden_states.dtype

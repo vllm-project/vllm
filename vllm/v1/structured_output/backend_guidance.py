@@ -93,7 +93,7 @@ class GuidanceBackend(StructuredOutputBackend):
         )
 
         self.ll_tokenizer = llguidance_hf.from_tokenizer(
-            self.tokenizer, self.vocab_size
+            self.tokenizer, max(self.vocab_size, len(self.tokenizer))
         )
 
     def compile_grammar(

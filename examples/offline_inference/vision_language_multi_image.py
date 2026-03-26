@@ -8,7 +8,6 @@ using the chat template defined by the model.
 
 import os
 from argparse import Namespace
-from dataclasses import asdict
 from typing import NamedTuple
 
 from huggingface_hub import snapshot_download
@@ -1283,6 +1282,42 @@ def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+# GLM-4.1V
+def load_glm4_1v(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "zai-org/GLM-4.1V-9B-Thinking"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=45082,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        enforce_eager=True,
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
 # GLM-4.5V
 def load_glm4_5v(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "zai-org/GLM-4.5V"
@@ -1430,6 +1465,7 @@ model_example_map = {
     "stepvl": load_step_vl,
     "tarsier": load_tarsier,
     "tarsier2": load_tarsier2,
+    "glm4_1v": load_glm4_1v,
     "glm4_5v": load_glm4_5v,
     "glm4_5v_fp8": load_glm4_5v_fp8,
 }
@@ -1444,10 +1480,11 @@ def run_generate(
 ):
     req_data = model_example_map[model](question, image_urls)
 
-    engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    engine_args = req_data.engine_args
+    engine_args.seed = seed
     if tensor_parallel_size is not None:
-        engine_args["tensor_parallel_size"] = tensor_parallel_size
-    llm = LLM(**engine_args)
+        engine_args.tensor_parallel_size = tensor_parallel_size
+    llm = LLM.from_engine_args(engine_args)
 
     sampling_params = SamplingParams(
         temperature=0.0, max_tokens=256, stop_token_ids=req_data.stop_token_ids
@@ -1484,10 +1521,11 @@ def run_chat(
         req_data.engine_args.limit_mm_per_prompt or {}
     )
 
-    engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    engine_args = req_data.engine_args
+    engine_args.seed = seed
     if tensor_parallel_size is not None:
-        engine_args["tensor_parallel_size"] = tensor_parallel_size
-    llm = LLM(**engine_args)
+        engine_args.tensor_parallel_size = tensor_parallel_size
+    llm = LLM.from_engine_args(engine_args)
 
     sampling_params = (
         SamplingParams(

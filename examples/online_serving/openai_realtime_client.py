@@ -7,7 +7,7 @@ audio transcription by uploading an audio file.
 Before running this script, you must start the vLLM server with a realtime-capable
 model, for example:
 
-    vllm serve mistralai/Voxtral-Mini-3B-Realtime-2602 --enforce-eager
+    vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --enforce-eager
 
 Requirements:
 - vllm with audio support
@@ -24,11 +24,11 @@ The script:
 
 import argparse
 import asyncio
-import base64
 import json
 
 import librosa
 import numpy as np
+import pybase64 as base64
 import websockets
 
 from vllm.assets.audio import AudioAsset
@@ -126,7 +126,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="mistralai/Voxtral-Mini-3B-Realtime-2602",
+        default="mistralai/Voxtral-Mini-4B-Realtime-2602",
         help="Model that is served and should be pinged.",
     )
     parser.add_argument(

@@ -7,15 +7,17 @@ Refer to each `run_*` function for the command to run the server for that model.
 """
 
 import argparse
-import base64
 import io
 from typing import Literal
 
+import pybase64 as base64
 from openai import OpenAI
 from openai._types import NOT_GIVEN, NotGiven
 from openai.types.chat import ChatCompletionMessageParam
 from openai.types.create_embedding_response import CreateEmbeddingResponse
 from PIL import Image
+
+from vllm.utils.print_utils import print_embeddings
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
@@ -49,11 +51,6 @@ def create_chat_embeddings(
             "add_special_tokens": add_special_tokens,
         },
     )
-
-
-def print_embeddings(embeds):
-    embeds_trimmed = (str(embeds[:4])[:-1] + ", ...]") if len(embeds) > 4 else embeds
-    print(f"Embeddings: {embeds_trimmed} (size={len(embeds)})")
 
 
 def run_clip(client: OpenAI, model: str):
@@ -105,7 +102,7 @@ def run_dse_qwen2_vl(client: OpenAI, model: str):
         --runner pooling \
         --trust-remote-code \
         --max-model-len 8192 \
-        --chat-template examples/template_dse_qwen2_vl.jinja
+        --chat-template examples/pooling/embed/template/dse_qwen2_vl.jinja
     """
     response = create_chat_embeddings(
         client,
@@ -316,7 +313,7 @@ def run_vlm2vec(client: OpenAI, model: str):
         --runner pooling \
         --trust-remote-code \
         --max-model-len 4096 \
-        --chat-template examples/template_vlm2vec_phi3v.jinja
+        --chat-template examples/pooling/embed/template/vlm2vec_phi3v.jinja
     """
 
     response = create_chat_embeddings(

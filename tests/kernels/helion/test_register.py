@@ -4,8 +4,7 @@
 Unit tests for Helion kernel registration.
 
 Tests ConfiguredHelionKernel, HelionKernelWrapper, and PresetConfigSearch
-including config picker registration, custom autotuner integration, and
-PyTorch op registration.
+including config picker registration and custom autotuner integration.
 """
 
 from unittest.mock import Mock, patch
@@ -22,9 +21,12 @@ if not has_helion():
     )
 
 import helion
+import helion.language as hl
 
+from tests.kernels.helion.helpers import dummy_kernel_registry
 from vllm.kernels.helion.config_manager import ConfigManager
 from vllm.kernels.helion.register import (
+    _HOP_AVAILABLE,
     ConfiguredHelionKernel,
     HelionKernelWrapper,
     get_kernel_by_name,
@@ -32,6 +34,13 @@ from vllm.kernels.helion.register import (
     register_kernel,
     validate_helion_settings,
 )
+
+
+def _add_kernel(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    out = torch.empty_like(x)
+    for tile in hl.tile(x.size()):
+        out[tile] = x[tile] + y[tile]
+    return out
 
 
 @pytest.fixture
@@ -90,7 +99,7 @@ def configured_kernel(sample_kernel, sample_configs, config_manager_with_test_co
 
     with (
         patch(
-            "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
+            "vllm.kernels.helion.config_manager.ConfigManager",
             return_value=config_manager_with_test_configs,
         ),
         patch(
@@ -134,14 +143,14 @@ class TestValidateHelionSettings:
             validate_helion_settings(settings, "test_kernel")
 
     def test_warns_on_static_shapes_true(self):
-        """Test that static_shapes=True emits a warning."""
+        """Test that static_shapes=True emits a warning about being overridden."""
         settings = helion.Settings()
         settings.static_shapes = True
 
         with patch("vllm.kernels.helion.register.logger") as mock_logger:
             validate_helion_settings(settings, "test_kernel")
             mock_logger.warning.assert_called_once()
-            assert "static_shapes=True" in mock_logger.warning.call_args[0][0]
+            assert "overridden to False" in mock_logger.warning.call_args[0][0]
 
 
 def create_configured_kernel_with_configs(
@@ -158,7 +167,7 @@ def create_configured_kernel_with_configs(
 
     with (
         patch(
-            "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
+            "vllm.kernels.helion.config_manager.ConfigManager",
             return_value=mock_config_manager,
         ),
         patch(
@@ -189,7 +198,7 @@ class TestConfiguredHelionKernel:
 
         with (
             patch(
-                "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
+                "vllm.kernels.helion.config_manager.ConfigManager",
                 return_value=mock_config_manager,
             ),
             patch(
@@ -259,7 +268,6 @@ class TestConfiguredHelionKernel:
 
         settings = helion.Settings()
         settings.print_output_code = True
-        # Note: helion.Settings() defaults static_shapes to True
 
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
@@ -267,7 +275,7 @@ class TestConfiguredHelionKernel:
         with (
             patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
             patch(
-                "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
+                "vllm.kernels.helion.config_manager.ConfigManager",
                 return_value=mock_config_manager,
             ),
             patch(
@@ -288,46 +296,8 @@ class TestConfiguredHelionKernel:
             call_kwargs = mock_kernel.call_args[1]
             assert "print_output_code" in call_kwargs
             assert call_kwargs["print_output_code"] is True
-            # helion.Settings() defaults to static_shapes=True, so it should remain True
-            assert call_kwargs["static_shapes"] is True
-
-    def test_create_decorated_kernel_preserves_static_shapes_true(
-        self, sample_kernel, sample_configs
-    ):
-        """Test that explicit static_shapes=True is preserved."""
-
-        def default_picker(args, config_keys):
-            return "default"
-
-        settings = helion.Settings()
-        settings.static_shapes = True
-
-        mock_config_manager = Mock(spec=ConfigManager)
-        mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
-
-        with (
-            patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
-            patch(
-                "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
-                return_value=mock_config_manager,
-            ),
-            patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
-                return_value="nvidia_h200",
-            ),
-        ):
-            mock_decorated = Mock()
-            mock_kernel.return_value = Mock(return_value=mock_decorated)
-
-            ConfiguredHelionKernel(
-                op_name="test_kernel",
-                config_picker=default_picker,
-                raw_kernel_func=sample_kernel,
-                helion_settings=settings,
-            )
-
-            call_kwargs = mock_kernel.call_args[1]
-            assert call_kwargs["static_shapes"] is True
+            # static_shapes is always forced to False by vLLM
+            assert call_kwargs["static_shapes"] is False
 
     def test_key_and_config_selector_use_same_logic(
         self, sample_kernel, sample_configs
@@ -349,7 +319,7 @@ class TestConfiguredHelionKernel:
         with (
             patch("vllm.kernels.helion.register.helion.kernel") as mock_helion_kernel,
             patch(
-                "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
+                "vllm.kernels.helion.config_manager.ConfigManager",
                 return_value=mock_config_manager,
             ),
             patch(
@@ -385,22 +355,14 @@ class TestConfiguredHelionKernel:
 class TestHelionKernelWrapper:
     """Test suite for HelionKernelWrapper."""
 
-    def test_get_configured_op_validates_configs_available(self, sample_kernel):
-        """Test get_configured_op validates configs are available."""
+    def test_init_disables_on_missing_configs(self, sample_kernel):
+        """Test __init__ marks wrapper as disabled when configs are missing."""
 
         def fake_impl(*args, **kwargs):
             return torch.zeros_like(args[0])
 
-        wrapper = HelionKernelWrapper(
-            raw_kernel_func=sample_kernel,
-            op_name="test_kernel",
-            fake_impl=fake_impl,
-        )
-
         def default_picker(args, config_keys):
             return "default"
-
-        wrapper._config_picker = default_picker
 
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(
@@ -409,50 +371,29 @@ class TestHelionKernelWrapper:
 
         with (
             patch(
-                "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
+                "vllm.kernels.helion.config_manager.ConfigManager",
                 return_value=mock_config_manager,
             ),
             patch(
                 "vllm.kernels.helion.utils.get_canonical_gpu_name",
                 return_value="nvidia_h200",
             ),
-            pytest.raises(ValueError, match="No configs available"),
+            patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
         ):
-            wrapper.get_configured_op()
+            mock_kernel.return_value = Mock(return_value=sample_kernel)
 
-    def test_get_configured_op_validates_config_picker(
-        self, sample_kernel, sample_configs
-    ):
-        """Test get_configured_op validates config picker."""
+            wrapper = HelionKernelWrapper(
+                raw_kernel_func=sample_kernel,
+                op_name="test_kernel",
+                fake_impl=fake_impl,
+                config_picker=default_picker,
+            )
 
-        def fake_impl(*args, **kwargs):
-            return torch.zeros_like(args[0])
+            assert wrapper._disabled is True
+            assert "No configs available" in wrapper._disabled_reason
 
-        wrapper = HelionKernelWrapper(
-            raw_kernel_func=sample_kernel,
-            op_name="test_kernel",
-            fake_impl=fake_impl,
-        )
-        # Don't set config picker - should raise assertion error
-
-        mock_config_manager = Mock(spec=ConfigManager)
-        mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
-
-        with (
-            patch(
-                "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
-                return_value=mock_config_manager,
-            ),
-            patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
-                return_value="nvidia_h200",
-            ),
-            pytest.raises(AssertionError, match="No config picker registered"),
-        ):
-            wrapper.get_configured_op()
-
-    def test_get_configured_op_returns_cached_op(self, sample_kernel, sample_configs):
-        """Test get_configured_op returns cached op when already registered."""
+    def test_disabled_wrapper_raises_on_call(self, sample_kernel):
+        """Test __call__ raises RuntimeError on a disabled wrapper."""
 
         def fake_impl(*args, **kwargs):
             return torch.zeros_like(args[0])
@@ -460,12 +401,259 @@ class TestHelionKernelWrapper:
         def default_picker(args, config_keys):
             return "default"
 
-        wrapper = HelionKernelWrapper(
-            raw_kernel_func=sample_kernel,
-            op_name="test_kernel",
-            fake_impl=fake_impl,
-        )
-        wrapper._config_picker = default_picker
+        mock_config_manager = Mock(spec=ConfigManager)
+        mock_config_manager.get_platform_configs = Mock(return_value={})
+
+        with (
+            patch(
+                "vllm.kernels.helion.config_manager.ConfigManager",
+                return_value=mock_config_manager,
+            ),
+            patch(
+                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                return_value="nvidia_h200",
+            ),
+            patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
+        ):
+            mock_kernel.return_value = Mock(return_value=sample_kernel)
+
+            wrapper = HelionKernelWrapper(
+                raw_kernel_func=sample_kernel,
+                op_name="test_kernel",
+                fake_impl=fake_impl,
+                config_picker=default_picker,
+            )
+
+        with pytest.raises(RuntimeError, match="is disabled"):
+            wrapper(torch.randn(4, 4), torch.randn(4, 4))
+
+    def test_disabled_wrapper_get_configured_op_raises(self, sample_kernel):
+        """Test get_configured_op raises RuntimeError on a disabled wrapper."""
+
+        def fake_impl(*args, **kwargs):
+            return torch.zeros_like(args[0])
+
+        def default_picker(args, config_keys):
+            return "default"
+
+        mock_config_manager = Mock(spec=ConfigManager)
+        mock_config_manager.get_platform_configs = Mock(return_value={})
+
+        with (
+            patch(
+                "vllm.kernels.helion.config_manager.ConfigManager",
+                return_value=mock_config_manager,
+            ),
+            patch(
+                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                return_value="nvidia_h200",
+            ),
+            patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
+        ):
+            mock_kernel.return_value = Mock(return_value=sample_kernel)
+
+            wrapper = HelionKernelWrapper(
+                raw_kernel_func=sample_kernel,
+                op_name="test_kernel",
+                fake_impl=fake_impl,
+                config_picker=default_picker,
+            )
+
+        with pytest.raises(RuntimeError, match="is disabled"):
+            wrapper.get_configured_op()
+
+    def test_disabled_wrapper_supports_get_inputs(self, sample_kernel):
+        """Test get_inputs works on a disabled wrapper."""
+
+        def fake_impl(*args, **kwargs):
+            return torch.zeros_like(args[0])
+
+        def default_picker(args, config_keys):
+            return "default"
+
+        expected_inputs = {"key1": (torch.randn(4),)}
+        input_gen = Mock(return_value=expected_inputs)
+
+        mock_config_manager = Mock(spec=ConfigManager)
+        mock_config_manager.get_platform_configs = Mock(return_value={})
+
+        with (
+            patch(
+                "vllm.kernels.helion.config_manager.ConfigManager",
+                return_value=mock_config_manager,
+            ),
+            patch(
+                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                return_value="nvidia_h200",
+            ),
+            patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
+        ):
+            mock_kernel.return_value = Mock(return_value=sample_kernel)
+
+            wrapper = HelionKernelWrapper(
+                raw_kernel_func=sample_kernel,
+                op_name="test_kernel",
+                fake_impl=fake_impl,
+                config_picker=default_picker,
+                input_generator=input_gen,
+            )
+
+        assert wrapper._disabled is True
+        result = wrapper.get_inputs()
+        assert result is expected_inputs
+
+    def test_disabled_wrapper_supports_run_autotune(self, sample_kernel):
+        """Test run_autotune works on a disabled wrapper."""
+
+        def fake_impl(*args, **kwargs):
+            return torch.zeros_like(args[0])
+
+        def default_picker(args, config_keys):
+            return "default"
+
+        mock_config_manager = Mock(spec=ConfigManager)
+        mock_config_manager.get_platform_configs = Mock(return_value={})
+
+        mock_config = Mock()
+
+        with (
+            patch(
+                "vllm.kernels.helion.config_manager.ConfigManager",
+                return_value=mock_config_manager,
+            ),
+            patch(
+                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                return_value="nvidia_h200",
+            ),
+            patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
+        ):
+            mock_kernel.return_value = Mock(return_value=sample_kernel)
+
+            wrapper = HelionKernelWrapper(
+                raw_kernel_func=sample_kernel,
+                op_name="test_kernel",
+                fake_impl=fake_impl,
+                config_picker=default_picker,
+            )
+
+        assert wrapper._disabled is True
+
+        with patch(
+            "vllm.kernels.helion.register.create_helion_decorated_kernel"
+        ) as mock_create:
+            mock_autotune_kernel = Mock()
+            mock_autotune_kernel.autotune.return_value = mock_config
+            mock_create.return_value = mock_autotune_kernel
+
+            inputs = (torch.randn(4, 4),)
+            result = wrapper.run_autotune(inputs)
+            assert result is mock_config
+
+    def test_init_caches_configured_kernel(self, sample_kernel, sample_configs):
+        """Test __init__ eagerly builds and caches ConfiguredHelionKernel."""
+
+        def fake_impl(*args, **kwargs):
+            return torch.zeros_like(args[0])
+
+        def default_picker(args, config_keys):
+            return "default"
+
+        mock_config_manager = Mock(spec=ConfigManager)
+        mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
+
+        with (
+            patch(
+                "vllm.kernels.helion.config_manager.ConfigManager",
+                return_value=mock_config_manager,
+            ),
+            patch(
+                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                return_value="nvidia_h200",
+            ),
+            patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
+        ):
+            mock_kernel.return_value = Mock(return_value=sample_kernel)
+
+            wrapper = HelionKernelWrapper(
+                raw_kernel_func=sample_kernel,
+                op_name="test_kernel",
+                fake_impl=fake_impl,
+                config_picker=default_picker,
+            )
+
+            assert wrapper._configured_kernel is not None
+            result1 = wrapper.get_configured_op()
+            result2 = wrapper.get_configured_op()
+            assert result1 is result2
+
+    @pytest.mark.skipif(
+        not _HOP_AVAILABLE, reason="HOP path only used when HOP available"
+    )
+    def test_init_eagerly_initializes_hop_path(self):
+        """Test that register_kernel eagerly builds the configured kernel
+        on the HOP path (no custom op registration needed)."""
+        from vllm.kernels.helion.utils import get_canonical_gpu_name
+
+        configs = {"default": helion.Config(block_sizes=[4, 4])}
+        with (
+            dummy_kernel_registry(configs=configs) as register,
+            patch(
+                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                wraps=get_canonical_gpu_name,
+            ) as mock_gpu,
+        ):
+            wrapper = register(
+                config_picker=lambda args, keys: "default",
+            )(_add_kernel)
+
+            mock_gpu.assert_called_once()
+            assert wrapper._configured_kernel is not None
+
+        with patch(
+            "vllm.kernels.helion.utils.get_canonical_gpu_name",
+            side_effect=AssertionError("get_canonical_gpu_name called during __call__"),
+        ):
+            x = torch.randn(4, 4, device="cuda")
+            y = torch.randn(4, 4, device="cuda")
+            result = wrapper(x, y)
+            expected = x + y
+            assert torch.allclose(result, expected)
+
+    @pytest.mark.skipif(
+        _HOP_AVAILABLE, reason="CustomOp path not used when HOP available"
+    )
+    def test_init_eagerly_initializes(self):
+        """Test that register_kernel eagerly loads configs and detects GPU
+        during construction so __call__ needs no further initialization."""
+        from vllm.kernels.helion.utils import get_canonical_gpu_name
+
+        with (
+            dummy_kernel_registry() as register,
+            patch(
+                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                wraps=get_canonical_gpu_name,
+            ) as mock_gpu,
+        ):
+            wrapper = register(
+                config_picker=lambda args, keys: "default",
+            )(_add_kernel)
+
+            # Init must have detected GPU and built the kernel
+            mock_gpu.assert_called_once()
+            assert wrapper._configured_kernel is not None
+            assert hasattr(torch.ops.vllm_helion, wrapper.op_name)
+
+    @pytest.mark.skipif(
+        _HOP_AVAILABLE, reason="CustomOp path not used when HOP available"
+    )
+    def test_get_or_register_custom_op_returns_cached_op(
+        self, sample_kernel, sample_configs
+    ):
+        def fake_impl(*args, **kwargs):
+            return torch.zeros_like(args[0])
+
+        def default_picker(args, config_keys):
+            return "default"
 
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
@@ -476,7 +664,7 @@ class TestHelionKernelWrapper:
 
         with (
             patch(
-                "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
+                "vllm.kernels.helion.config_manager.ConfigManager",
                 return_value=mock_config_manager,
             ),
             patch(
@@ -488,24 +676,27 @@ class TestHelionKernelWrapper:
         ):
             mock_decorated = Mock()
             mock_kernel.return_value = Mock(return_value=mock_decorated)
-            result = wrapper.get_configured_op()
+
+            wrapper = HelionKernelWrapper(
+                raw_kernel_func=sample_kernel,
+                op_name="test_kernel",
+                fake_impl=fake_impl,
+                config_picker=default_picker,
+            )
+            result = wrapper._get_or_register_custom_op()
             assert result is existing_op
 
-    def test_get_configured_op_registers_new_op(self, sample_kernel, sample_configs):
-        """Test get_configured_op creates and registers new op."""
-
+    @pytest.mark.skipif(
+        _HOP_AVAILABLE, reason="CustomOp path not used when HOP available"
+    )
+    def test_get_or_register_custom_op_registers_new_op(
+        self, sample_kernel, sample_configs
+    ):
         def fake_impl(*args, **kwargs):
             return torch.zeros_like(args[0])
 
         def default_picker(args, config_keys):
             return "default"
-
-        wrapper = HelionKernelWrapper(
-            raw_kernel_func=sample_kernel,
-            op_name="test_kernel",
-            fake_impl=fake_impl,
-        )
-        wrapper._config_picker = default_picker
 
         mock_config_manager = Mock(spec=ConfigManager)
         mock_config_manager.get_platform_configs = Mock(return_value=sample_configs)
@@ -526,7 +717,7 @@ class TestHelionKernelWrapper:
 
         with (
             patch(
-                "vllm.kernels.helion.config_manager.ConfigManager.get_instance",
+                "vllm.kernels.helion.config_manager.ConfigManager",
                 return_value=mock_config_manager,
             ),
             patch(
@@ -542,11 +733,17 @@ class TestHelionKernelWrapper:
         ):
             mock_decorated = Mock()
             mock_kernel.return_value = Mock(return_value=mock_decorated)
-            result = wrapper.get_configured_op()
+
+            wrapper = HelionKernelWrapper(
+                raw_kernel_func=sample_kernel,
+                op_name="test_kernel",
+                fake_impl=fake_impl,
+                config_picker=default_picker,
+            )
+            result = wrapper._get_or_register_custom_op()
 
             mock_register.assert_called_once()
             assert result is new_op
-            # Check that op_func is the decorated kernel, not ConfiguredHelionKernel
             assert mock_register.call_args[1]["op_func"] is mock_decorated
 
 
@@ -554,10 +751,18 @@ class TestKernelRegistry:
     """Test suite for kernel registry functionality."""
 
     def setup_method(self):
-        """Clear the registry before each test."""
+        """Save and clear the registry before each test."""
+        from vllm.kernels.helion.register import _REGISTERED_KERNELS
+
+        self._saved_registry = dict(_REGISTERED_KERNELS)
+        _REGISTERED_KERNELS.clear()
+
+    def teardown_method(self):
+        """Restore the registry after each test."""
         from vllm.kernels.helion.register import _REGISTERED_KERNELS
 
         _REGISTERED_KERNELS.clear()
+        _REGISTERED_KERNELS.update(self._saved_registry)
 
     def test_get_registered_kernels_returns_copy(self):
         """Test get_registered_kernels returns copy of registry."""
@@ -571,11 +776,10 @@ class TestKernelRegistry:
 
     def test_get_kernel_by_name_returns_kernel(self):
         """Test get_kernel_by_name returns registered kernel."""
-        wrapper = HelionKernelWrapper(
-            raw_kernel_func=Mock(),
-            op_name="test_kernel",
-            fake_impl=Mock(),
-        )
+        with dummy_kernel_registry() as register:
+            wrapper = register(
+                "test_kernel", config_picker=lambda args, keys: "default"
+            )(_add_kernel)
 
         from vllm.kernels.helion.register import _REGISTERED_KERNELS
 
@@ -591,112 +795,87 @@ class TestKernelRegistry:
 
     def test_register_kernel_auto_generates_fake_impl(self):
         """Test register_kernel auto-generates fake_impl when not provided."""
-        with patch("vllm.kernels.helion.register.infer_fake_impl") as mock_infer:
+        with (
+            dummy_kernel_registry() as register,
+            patch("vllm.kernels.helion.register.infer_fake_impl") as mock_infer,
+        ):
             mock_fake = Mock()
             mock_infer.return_value = mock_fake
+            wrapper = register(
+                config_picker=lambda args, keys: "default",
+            )(_add_kernel)
 
-            def original_kernel(x):
-                return x
-
-            wrapper = register_kernel(original_kernel)
-
-            mock_infer.assert_called_once_with(original_kernel, None)
-            assert wrapper._fake_impl is mock_fake
+        mock_infer.assert_called_once_with(_add_kernel, None)
+        assert wrapper._fake_impl is mock_fake
 
     def test_register_kernel_creates_wrapper(self):
         """Test register_kernel creates HelionKernelWrapper."""
-
-        def test_kernel(x):
-            return x
-
-        result = register_kernel("test_name")(test_kernel)
+        with dummy_kernel_registry() as register:
+            result = register("test_name", config_picker=lambda args, keys: "default")(
+                _add_kernel
+            )
 
         assert isinstance(result, HelionKernelWrapper)
         assert result.op_name == "test_name"
-        assert result.raw_kernel_func is test_kernel
+        assert result.raw_kernel_func is _add_kernel
 
     def test_register_kernel_auto_detects_name(self):
         """Test register_kernel uses function name when no name provided."""
+        with dummy_kernel_registry() as register:
+            wrapper = register(config_picker=lambda args, keys: "default")(_add_kernel)
 
-        @register_kernel
-        def my_test_kernel(x):
-            return x
-
-        assert my_test_kernel.op_name == "my_test_kernel"
+        assert wrapper.op_name == "_add_kernel"
 
     def test_register_kernel_registers_in_global_registry(self):
         """Test register_kernel adds wrapper to global registry."""
-
-        @register_kernel
-        def test_kernel(x):
-            return x
+        with dummy_kernel_registry() as register:
+            wrapper = register(
+                "test_kernel", config_picker=lambda args, keys: "default"
+            )(_add_kernel)
 
         registered_kernels = get_registered_kernels()
         assert "test_kernel" in registered_kernels
-        assert registered_kernels["test_kernel"] is test_kernel
+        assert registered_kernels["test_kernel"] is wrapper
 
     def test_register_kernel_passes_helion_settings(self):
         """Test register_kernel passes helion_settings to wrapper."""
-        mock_settings = Mock()
-        mock_settings.to_dict.return_value = {"debug": True}
+        settings = helion.Settings()
+        settings.print_output_code = True
 
-        @register_kernel("test_name", helion_settings=mock_settings)
-        def test_kernel(x):
-            return x
+        with dummy_kernel_registry() as register:
+            result = register(
+                "test_name",
+                config_picker=lambda args, keys: "default",
+                helion_settings=settings,
+            )(_add_kernel)
 
-        assert test_kernel.helion_settings is mock_settings
+        assert result.helion_settings is settings
 
     def test_register_kernel_supports_decorator_syntax(self):
         """Test register_kernel works with decorator arguments."""
         mock_fake = Mock()
 
-        wrapper = register_kernel("custom_name", fake_impl=mock_fake)
-
-        def test_kernel(x):
-            return x
-
-        result = wrapper(test_kernel)
+        with dummy_kernel_registry() as register:
+            result = register(
+                "custom_name",
+                config_picker=lambda args, keys: "default",
+                fake_impl=mock_fake,
+            )(_add_kernel)
 
         assert result.op_name == "custom_name"
         assert result._fake_impl is mock_fake
 
-    def test_register_kernel_bare_decorator(self):
-        """Test register_kernel works as bare decorator."""
-
-        @register_kernel
-        def test_kernel(x):
-            return x
-
-        assert isinstance(test_kernel, HelionKernelWrapper)
-        assert test_kernel.op_name == "test_kernel"
-
-    def test_registered_wrapper_can_register_config_picker(self):
-        """Test that registered wrapper can register config picker."""
-
-        @register_kernel
-        def test_kernel(x):
-            return x
-
-        def my_picker(args, config_keys):
-            return "default"
-
-        result = test_kernel.register_config_picker(my_picker)
-
-        assert result is my_picker
-        assert test_kernel._config_picker is my_picker
-
     def test_register_kernel_raises_on_duplicate_registration(self):
         """Test register_kernel raises error on duplicate names."""
+        with dummy_kernel_registry() as register:
+            register("duplicate_name", config_picker=lambda args, keys: "default")(
+                _add_kernel
+            )
 
-        @register_kernel("duplicate_name")
-        def kernel1(x):
-            return x
-
-        with pytest.raises(ValueError, match="already registered"):
-
-            @register_kernel("duplicate_name")
-            def kernel2(x):
-                return x
+            with pytest.raises(ValueError, match="already registered"):
+                register("duplicate_name", config_picker=lambda args, keys: "default")(
+                    _add_kernel
+                )
 
     def test_register_kernel_rejects_autotuner_fn_in_settings(self):
         """Test register_kernel rejects conflicting autotuner_fn."""
@@ -705,34 +884,60 @@ class TestKernelRegistry:
 
         with pytest.raises(ValueError, match="uses a custom autotuner"):
 
-            @register_kernel("test", helion_settings=mock_settings)
+            @register_kernel(
+                "test",
+                config_picker=lambda args, keys: "default",
+                helion_settings=mock_settings,
+            )
             def test_kernel(x):
                 return x
-
-    def test_register_kernel_warns_with_static_shapes_true(self):
-        """Test register_kernel warns when static_shapes=True."""
-        mock_settings = Mock()
-        mock_settings.to_dict.return_value = {"static_shapes": True}
-
-        with patch("vllm.kernels.helion.register.logger") as mock_logger:
-
-            @register_kernel("test", helion_settings=mock_settings)
-            def test_kernel(x):
-                return x
-
-            mock_logger.warning.assert_called_once()
-            assert "static_shapes=True" in mock_logger.warning.call_args[0][0]
 
     def test_register_kernel_no_warning_with_static_shapes_false(self):
         """Test register_kernel doesn't warn with static_shapes=False."""
         mock_settings = Mock()
         mock_settings.to_dict.return_value = {"static_shapes": False}
 
-        with patch("vllm.kernels.helion.register.logger") as mock_logger:
+        with (
+            dummy_kernel_registry() as register,
+            patch("vllm.kernels.helion.register.logger") as mock_logger,
+        ):
+            register(
+                "test",
+                config_picker=lambda args, keys: "default",
+                helion_settings=mock_settings,
+            )(_add_kernel)
 
-            @register_kernel("test", helion_settings=mock_settings)
-            def test_kernel(x):
-                return x
+        mock_logger.warning.assert_not_called()
 
-            # Should not call warning
-            mock_logger.warning.assert_not_called()
+    def test_disabled_kernel_appears_in_registry(self):
+        """Test that a disabled wrapper is still in the global registry."""
+
+        def fake_impl(*args, **kwargs):
+            return torch.zeros_like(args[0])
+
+        mock_config_manager = Mock(spec=ConfigManager)
+        mock_config_manager.get_platform_configs = Mock(return_value={})
+
+        with (
+            patch(
+                "vllm.kernels.helion.config_manager.ConfigManager",
+                return_value=mock_config_manager,
+            ),
+            patch(
+                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                return_value="nvidia_h200",
+            ),
+            patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
+        ):
+            mock_kernel.return_value = Mock(return_value=_add_kernel)
+
+            wrapper = register_kernel(
+                "disabled_kernel",
+                config_picker=lambda args, keys: "default",
+                fake_impl=fake_impl,
+            )(_add_kernel)
+
+        assert wrapper._disabled is True
+        registered = get_registered_kernels()
+        assert "disabled_kernel" in registered
+        assert registered["disabled_kernel"] is wrapper

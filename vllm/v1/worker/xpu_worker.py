@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import os
 from typing import Any
 
 import torch
-import torch.distributed
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -15,7 +15,7 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.workspace import init_workspace_manager
-from vllm.v1.worker.xpu_model_runner import XPUModelRunner
+from vllm.v1.worker.xpu_model_runner import XPUModelRunner, XPUModelRunnerV2
 
 from .utils import request_memory
 
@@ -60,9 +60,9 @@ class XPUWorker(Worker):
             and current_platform.is_xpu()
         ):
             self.device = torch.device(f"xpu:{self.local_rank}")
-            current_platform.set_device(self.device)
+            torch.accelerator.set_device_index(self.device)
             current_platform.check_if_supports_dtype(self.model_config.dtype)
-            torch.xpu.empty_cache()
+            torch.accelerator.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
                 self.local_rank
             ).total_memory
@@ -85,7 +85,17 @@ class XPUWorker(Worker):
             current_platform.dist_backend,
         )
 
-        torch.xpu.empty_cache()
+        # global all_reduce needed for overall oneccl warm up
+        torch.distributed.all_reduce(torch.zeros(1).xpu())
+
+        # Set random seed.
+        set_random_seed(self.model_config.seed)
+
+        # Now take memory snapshot after NCCL is initialized
+        gc.collect()
+        torch.accelerator.empty_cache()
+
+        # take current memory snapshot
         self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
         self.requested_memory = request_memory(init_snapshot, self.cache_config)
         logger.debug("worker init memory snapshot: %r", self.init_snapshot)
@@ -93,15 +103,13 @@ class XPUWorker(Worker):
             "worker requested memory: %sGiB", format_gib(self.requested_memory)
         )
 
-        # Set random seed.
-        set_random_seed(self.model_config.seed)
-
         # Initialize workspace manager
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
         init_workspace_manager(self.device, num_ubatches)
 
         # Construct the model runner
-        self.model_runner = XPUModelRunner(  # type: ignore
+        model_runner = XPUModelRunnerV2 if self.use_v2_model_runner else XPUModelRunner
+        self.model_runner = model_runner(  # type: ignore
             self.vllm_config, self.device
         )
 

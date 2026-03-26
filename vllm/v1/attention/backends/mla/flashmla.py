@@ -6,6 +6,7 @@ from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -17,10 +18,8 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -48,6 +47,7 @@ class FlashMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
         "fp8",
         "fp8_e4m3",
@@ -79,7 +79,7 @@ class FlashMLABackend(MLACommonBackend):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: CacheDType | None,
-        block_size: int,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -130,8 +130,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         self.cg_buf_num_splits = None
         self.is_fp8_kvcache = vllm_config.cache_config.cache_dtype.startswith("fp8")
 
-        device_properties = torch.cuda.get_device_properties(self.device)
-        num_sms = device_properties.multi_processor_count
+        num_sms = num_compute_units(self.device.index)
 
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.cg_buf_tile_scheduler_metadata = torch.zeros(
@@ -255,7 +254,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         q = reshape_query_for_spec_decode(q, num_decodes)
 
         scheduler_metadata = attn_metadata.decode.scheduler_metadata
-        if vllm_is_batch_invariant() and not self.kv_cache_dtype.startswith("fp8"):
+        if envs.VLLM_BATCH_INVARIANT and not self.kv_cache_dtype.startswith("fp8"):
             device = q.device
             dtype = torch.int32
 
