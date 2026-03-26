@@ -1259,7 +1259,7 @@ class StatLoggerManager:
         if custom_stat_loggers is not None:
             stat_logger_factories.extend(custom_stat_loggers)
         if enable_default_loggers and logger.isEnabledFor(logging.INFO):
-            if client_count > 1:
+            if client_count > 1 and not aggregate_engine_logging:
                 logger.warning(
                     "AsyncLLM created with api_server_count more than 1; "
                     "disabling stats logging to avoid incomplete stats."
