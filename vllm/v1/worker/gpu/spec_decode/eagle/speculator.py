@@ -85,9 +85,8 @@ class EagleSpeculator:
                 self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
             )
 
-        cache_draft_logits = self.speculative_config.rejection_sample_method != "strict"
         self.draft_logits: torch.Tensor | None = None
-        if cache_draft_logits:
+        if self.speculative_config.rejection_sample_method == "probabilistic":
             self.draft_logits = torch.zeros(
                 self.max_num_reqs,
                 self.num_speculative_steps,
