@@ -43,73 +43,29 @@ The implementation passes pre-computed steering vectors (e.g., SAE decoder colum
 
 ---
 
-## Phase 1: MVP
+## Phase 1: MVP — DONE
 
 **Goal**: Validate that steering works end-to-end with Gemma 3 using broadcast steering vectors.
+
+**Status**: Implemented with deviations from the original plan noted below.
 
 ### Scope
 
 - **Model**: Gemma 3 only
-- **Intervention point**: Post-MLP only
-- **Phase**: Decode only (no prefix caching interaction)
+- **Intervention point**: Post-MLP only (after `post_feedforward_layernorm`)
+- **Phase**: Decode only
 - **Granularity**: Broadcast — same steering vector applied to all requests in batch
 - **Buffer shape**: `[1, hidden_size]` per steered layer (~7 KB each, negligible memory)
 
-### Implementation
+### What was built
 
-**`Gemma3DecoderLayer` changes** (`vllm/model_executor/models/gemma3.py`):
+The implementation differs from the original plan in two ways:
 
-```python
-class Gemma3DecoderLayer(nn.Module):
-    def __init__(self, config, cache_config, quant_config, prefix):
-        super().__init__()
-        self.layer_idx = extract_layer_index(prefix)
-        # ... existing init ...
+1. **Custom op instead of bare addition**: Instead of `hidden_states = hidden_states + self.steering_post_mlp`, steering uses `torch.ops.vllm.apply_steering` registered via `direct_register_custom_op`. This makes the op opaque to `torch.compile` so it can read `num_decode_tokens` from `ForwardContext` at runtime without baking the value as a constant.
 
-        self.register_buffer(
-            'steering_post_mlp',
-            torch.zeros(1, config.hidden_size),
-            persistent=False,
-      )
+2. **API exposure included**: REST endpoints (`/v1/steering/set`, `/clear`, GET `/v1/steering`) were built in Phase 1 rather than deferred. They use a two-phase validate-then-apply flow via `collective_rpc` for pipeline-parallel safety.
 
-    def forward(self, positions, hidden_states, residual, **kwargs):
-        # ... existing attention + MLP code ...
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = self.post_feedforward_layernorm(hidden_states)
-
-        hidden_states = hidden_states + self.steering_post_mlp
-
-        return hidden_states, residual
-```
-
-**Model runner steering interface** (`vllm/v1/worker/gpu/model_runner.py`):
-
-```python
-# Update steering buffers before forward pass
-def _update_steering(self, steering_config: dict[int, tuple[torch.Tensor, float]]):
-    for module in self.model.modules():
-        if hasattr(module, 'steering_post_mlp'):
-            if module.layer_idx in steering_config:
-                vec, scale = steering_config[module.layer_idx]
-                module.steering_post_mlp.copy_((scale * vec).unsqueeze(0))
-            else:
-                module.steering_post_mlp.zero_()
-```
-
-### Validation
-
-- Load Gemma 3 pretrained SAE decoder columns as steering vectors
-- Apply at known-effective layers and verify behavioral shift in generation
-- Confirm no regression in throughput with zero-vector (no-op) steering
-- Confirm CUDA graph capture and replay works with steering buffers
-
-### Not In Scope
-
-- API exposure (use direct model runner access for testing)
-- Per-request steering
-- Prefill steering
-- Pre/post-attention intervention points
-- Multi-model support
+See [STEERING.md](STEERING.md) for full architecture details and [API.md](API.md) for endpoint documentation.
 
 ---
 
