@@ -389,7 +389,7 @@ steps:
           echo "S3 wheels cache HIT"
         fi
 
-
+        
         # Scenario 1: Both cached (best case)
         if [ "$${IMAGE_EXISTS}" = "true" ] && [ "$${WHEELS_EXIST}" = "true" ]; then
           echo ""
