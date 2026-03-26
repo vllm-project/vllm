@@ -82,6 +82,13 @@ class CacheConfig:
     benefits before turning this on.\n
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
     reproducible hashing. Requires the optional ``xxhash`` package."""
+    deterministic_prefix_caching: bool = False
+    """When enabled alongside prefix caching, forces cache-miss prefills to
+    split at block boundaries so the suffix GEMM shape is identical to the
+    cache-hit path. This eliminates bf16 non-determinism caused by different
+    kernel tilings selecting different fp32 accumulation orders, at the cost
+    of one extra scheduling step per cache-miss prefill. Only has effect when
+    enable_prefix_caching is also True."""
     calculate_kv_scales: bool = False
     """Deprecated: This option is deprecated and will be removed in v0.19.
     It enables dynamic calculation of `k_scale` and `v_scale` when
@@ -150,6 +157,14 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
+    def __post_init__(self) -> None:
+        if self.deterministic_prefix_caching and not self.enable_prefix_caching:
+            logger.warning(
+                "--deterministic-prefix-caching has no effect without "
+                "--enable-prefix-caching; ignoring."
+            )
+            self.deterministic_prefix_caching = False
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -168,6 +183,7 @@ class CacheConfig:
             "is_attention_free",
             "num_gpu_blocks_override",
             "enable_prefix_caching",
+            "deterministic_prefix_caching",
             "prefix_caching_hash_algo",
             "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",
