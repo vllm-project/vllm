@@ -901,7 +901,7 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
 
     @staticmethod
     def from_hf_inputs(
-        hf_inputs: "BatchFeature",
+        hf_inputs: "BatchFeature | Mapping[str, NestedTensors]",
         config_by_key: Mapping[str, MultiModalFieldConfig],
     ):
         # NOTE: This skips fields in `hf_inputs` that are not in `config_by_key`
