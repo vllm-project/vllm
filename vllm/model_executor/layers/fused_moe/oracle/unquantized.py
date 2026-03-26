@@ -159,9 +159,9 @@ def select_unquantized_moe_backend(
                     "to enable it for better performance.",
                     scope="local",
                 )
-            elif (not use_dp):
+            elif not use_dp and flashinfer_cutlass_available:
                 logger.info_once(
-                    "FlashInfer MoE is available for EP"
+                    "FlashInfer CUTLASS MoE is available"
                     " but not enabled, consider setting"
                     " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.",
                     scope="local",
