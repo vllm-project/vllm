@@ -2165,10 +2165,11 @@ class EngineArgs:
             self.enable_prefix_caching = False
 
     def _set_default_reasoning_config_args(self):
-        if self.reasoning_config is None and self.reasoning_parser:
-            self.reasoning_config = ReasoningConfig(
-                reasoning_parser=self.reasoning_parser
-            )
+        if not self.reasoning_parser:
+            return
+        if self.reasoning_config is None:
+            self.reasoning_config = ReasoningConfig()
+        self.reasoning_config.reasoning_parser = self.reasoning_parser
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,
