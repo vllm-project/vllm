@@ -241,12 +241,12 @@ class SimpleCPUOffloadWorker:
         if self._pending_load_event_indices:
             load_wm = self._poll_stream_events(is_store=False)
             for j in [j for j in self._pending_load_event_indices if j <= load_wm]:
+                self._pending_load_event_indices.discard(j)
                 req_ids = (
                     metadata.load_event_to_reqs.get(j) if metadata is not None else None
                 )
                 if req_ids:
                     finished_recving.update(req_ids)
-                    self._pending_load_event_indices.discard(j)
 
         if self._pending_store_event_indices:
             store_wm = self._poll_stream_events(is_store=True)
