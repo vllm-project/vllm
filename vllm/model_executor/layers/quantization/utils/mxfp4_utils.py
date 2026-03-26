@@ -84,6 +84,15 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     return quant_tensor, InFlexData(), scale
 
 
+def get_padding_alignment():
+    """Get padding alignment for MXFP4 MoE based on platform."""
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        return 256 if on_gfx950() else 128
+    return 128
+
+
 def maybe_roundup_mxfp4_fused_moe_sizes(
     hidden_size: int,
     intermediate_size_per_partition: int,
