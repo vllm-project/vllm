@@ -15,6 +15,7 @@ from vllm.v1.kv_offload.abstract import (
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
+from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
 
 
 @dataclass
@@ -547,8 +548,6 @@ def test_filter_reused_manager():
     lru_manager = CPUOffloadingManager(
         block_size=block_size, num_blocks=4, cache_policy="lru", enable_events=True
     )
-
-    from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
 
     manager = FilterReusedOffloadingManager(
         backing=lru_manager, store_threshold=2, max_tracker_size=3
