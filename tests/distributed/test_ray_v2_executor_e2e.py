@@ -10,37 +10,40 @@ import os
 import ray
 
 from tests.distributed.ray_v2_utils import enable_ray_v2_backend  # noqa: F401
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.sampling_params import SamplingParams
-from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.executor.abstract import Executor
 
 MODEL = "facebook/opt-125m"
 
 
 def _get_env_var(worker, name):
-    """Called on RayWorkerProc workers via collective_rpc."""
     return os.environ.get(name)
 
 
-# Follows the same pattern as Ray Serve LLM (LLMServer / VLLMEngine):
-# sync __init__ and start() (AsyncLLM constructor is sync), async methods
-# for generate/collective_rpc.  max_concurrency=1 gives the actor an
-# event loop so async methods work.
-@ray.remote(num_cpus=0, max_concurrency=1)
-class AsyncLLMActor:
-    def __init__(self):
-        self.engine: AsyncLLM
+def _ray_init():
+    """Start Ray with the project root on workers' PYTHONPATH.
 
+    Without this, workers cannot unpickle actor classes defined in the
+    ``tests`` package, causing FunctionActorManager to fall back to
+    TemporaryActor which drops async method signatures."""
+    ray.init(
+        ignore_reinit_error=True,
+        runtime_env={"env_vars": {"PYTHONPATH": os.getcwd()}},
+    )
+
+
+class _AsyncLLMActor:
     def start(self, pg, bundle_indices=None, ray_runtime_env=None):
         os.environ["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] = "1"
-        # VLLM_ALLOW_INSECURE_SERIALIZATION is needed so collective_rpc can
-        # pickle _get_env_var over the AsyncLLM -> EngineCore ZMQ boundary.
+        # Needed so collective_rpc can pickle _get_env_var over the
+        # AsyncLLM -> EngineCore ZMQ boundary.
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
         if bundle_indices is not None:
             os.environ["VLLM_RAY_BUNDLE_INDICES"] = bundle_indices
         else:
             os.environ.pop("VLLM_RAY_BUNDLE_INDICES", None)
+
+        from vllm.engine.arg_utils import AsyncEngineArgs
+        from vllm.v1.engine.async_llm import AsyncLLM
+        from vllm.v1.executor.abstract import Executor
 
         engine_args = AsyncEngineArgs(
             model=MODEL,
@@ -64,6 +67,8 @@ class AsyncLLMActor:
         )
 
     async def generate(self, prompt):
+        from vllm.sampling_params import SamplingParams
+
         params = SamplingParams(max_tokens=16)
         result = None
         async for output in self.engine.generate(
@@ -73,13 +78,25 @@ class AsyncLLMActor:
         assert result is not None
         return result.outputs[0].text
 
-    async def get_worker_env(self, name):
-        results = await self.engine.collective_rpc(
-            _get_env_var,
-            timeout=10,
-            args=(name,),
-        )
-        return results
+    async def generate_and_get_worker_envs(self, prompt, env_names):
+        from vllm.sampling_params import SamplingParams
+
+        params = SamplingParams(max_tokens=16)
+        result = None
+        async for output in self.engine.generate(
+            prompt, params, request_id="test_request_id"
+        ):
+            result = output
+        assert result is not None
+        text = result.outputs[0].text
+
+        env_results = {}
+        for name in env_names:
+            vals = await self.engine.collective_rpc(
+                _get_env_var, timeout=10, args=(name,)
+            )
+            env_results[name] = vals
+        return text, env_results
 
     def shutdown(self):
         if engine := getattr(self, "engine", None):
@@ -88,21 +105,18 @@ class AsyncLLMActor:
             gc.collect()
 
 
-def test_multi_replicas():
-    """Two actors each run AsyncLLM with TP=2 via RayExecutorV2.
+AsyncLLMActor = ray.remote(num_cpus=0, max_concurrency=1)(_AsyncLLMActor)
 
-    Actor 1 starts first and claims 80% of GPU memory.  Without lazy
-    RayWorkerProc init, actor 2 lands on the *same* two GPUs and fails
-    because there is not enough free memory.
-    """
-    ray.init(ignore_reinit_error=True)
+
+def test_multi_replicas():
+    _ray_init()
 
     pg1 = ray.util.placement_group([{"GPU": 1, "CPU": 1}] * 2, strategy="PACK")
     pg2 = ray.util.placement_group([{"GPU": 1, "CPU": 1}] * 2, strategy="PACK")
     ray.get([pg1.ready(), pg2.ready()])
 
-    actor1 = AsyncLLMActor.remote()  # type: ignore[attr-defined]
-    actor2 = AsyncLLMActor.remote()  # type: ignore[attr-defined]
+    actor1 = AsyncLLMActor.remote()
+    actor2 = AsyncLLMActor.remote()
 
     ray.get(actor1.start.remote(pg1))
     ray.get(actor2.start.remote(pg2))
@@ -118,16 +132,13 @@ def test_multi_replicas():
 
 
 def test_multi_replicas_with_bundle_indices():
-    """Two actors share one 4-GPU placement group with out-of-order
-    bundle indices: actor 1 gets bundles [2,1], actor 2 gets [0,3].
-    """
-    ray.init(ignore_reinit_error=True)
+    _ray_init()
 
     pg = ray.util.placement_group([{"GPU": 1, "CPU": 1}] * 4, strategy="PACK")
     ray.get(pg.ready())
 
-    actor1 = AsyncLLMActor.remote()  # type: ignore[attr-defined]
-    actor2 = AsyncLLMActor.remote()  # type: ignore[attr-defined]
+    actor1 = AsyncLLMActor.remote()
+    actor2 = AsyncLLMActor.remote()
 
     ray.get(actor1.start.remote(pg, bundle_indices="2,1"))
     ray.get(actor2.start.remote(pg, bundle_indices="0,3"))
@@ -155,25 +166,29 @@ def test_env_var_and_runtime_env_propagation():
         os.environ[k] = v
 
     try:
-        ray.init(ignore_reinit_error=True)
+        _ray_init()
 
         pg = ray.util.placement_group([{"GPU": 1, "CPU": 1}] * 2, strategy="PACK")
         ray.get(pg.ready())
 
         ray_runtime_env = {
-            "env_vars": {"RAY_RUNTIME_ENV_MARKER": "ray_runtime_env"},
+            "env_vars": {"RAY_RUNTIME_ENV_TEST": "ray_runtime_env"},
         }
 
-        actor = AsyncLLMActor.remote()  # type: ignore[attr-defined]
+        actor = AsyncLLMActor.remote()
         ray.get(actor.start.remote(pg, ray_runtime_env=ray_runtime_env))
 
+        all_env_names = list(sentinel_vars) + ["RAY_RUNTIME_ENV_TEST"]
+        text, env_results = ray.get(
+            actor.generate_and_get_worker_envs.remote("Hello world", all_env_names)
+        )
+        assert len(text) > 0
+
         for name, expected in sentinel_vars.items():
-            results = ray.get(actor.get_worker_env.remote(name))
-            for val in results:
+            for val in env_results[name]:
                 assert val == expected
 
-        results = ray.get(actor.get_worker_env.remote("RAY_RUNTIME_ENV_MARKER"))
-        for val in results:
+        for val in env_results["RAY_RUNTIME_ENV_TEST"]:
             assert val == "ray_runtime_env"
 
     finally:
