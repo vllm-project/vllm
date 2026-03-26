@@ -434,18 +434,19 @@ class FusedMoE(CustomOp):
             self.register_buffer("_expert_map", expert_map)
             self.register_buffer("expert_mask", expert_mask)
             self._maybe_init_expert_routing_tables()
-            logger.info_once(
-                "[EP Rank %s/%s] Expert parallelism is enabled. Expert "
-                "placement strategy: %s. Local/global"
-                " number of experts: %s/%s. Experts local to global index map:"
-                " %s.",
-                self.ep_rank,
-                self.ep_size,
-                self.expert_placement_strategy,
-                self.local_num_experts,
-                self.global_num_experts,
-                get_compressed_expert_map(self._expert_map),
-            )
+            if False:
+                logger.info_once(
+                    "[EP Rank %s/%s] Expert parallelism is enabled. Expert "
+                    "placement strategy: %s. Local/global"
+                    " number of experts: %s/%s. Experts local to global index map:"
+                    " %s.",
+                    self.ep_rank,
+                    self.ep_size,
+                    self.expert_placement_strategy,
+                    self.local_num_experts,
+                    self.global_num_experts,
+                    get_compressed_expert_map(self._expert_map),
+                )
         else:
             self.local_num_experts, self._expert_map, self.expert_mask = (
                 self.global_num_experts,

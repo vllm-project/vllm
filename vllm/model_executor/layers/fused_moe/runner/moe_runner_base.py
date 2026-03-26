@@ -442,7 +442,7 @@ class MoERunnerBase(MoERunner):
         """
         if self._shared_experts is not None:
             assert shared_experts_input is not None
-            self._shared_experts.apply(shared_experts_input, order)
+            self._shared_experts(shared_experts_input, order)
 
     def _apply_quant_method(
         self,

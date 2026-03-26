@@ -136,7 +136,7 @@ class EplbManager:
             weight.is_contiguous()
             for name, weight in weights
             if not (
-                name.startswith("_runner._shared_experts.")  # not correct?
+                name.startswith("_runner._shared_experts._layer")
                 or name.startswith("_runner.gate.")
                 or name.startswith("_runner.routed_input_transform.")
                 or name.startswith("_runner.routed_output_transform.")
@@ -149,7 +149,7 @@ class EplbManager:
             for name, weight in weights
             if name not in NON_EXPERT_WEIGHTS
             and weight.shape != torch.Size([])
-            and not name.startswith("_runner._shared_experts.")  # not correct?
+            and not name.startswith("_runner._shared_experts._layer")
             # exclude parameters from non-expert submodules,
             # e.g. gate/shared/transforms.
             and not name.startswith("_runner.gate.")

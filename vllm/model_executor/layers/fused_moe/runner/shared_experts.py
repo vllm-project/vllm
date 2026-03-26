@@ -37,13 +37,15 @@ class SharedExpertsOrder(IntEnum):
     MULTI_STREAM_OVERLAPPED = (4,)
 
 
-class SharedExperts:
+class SharedExperts(torch.nn.Module):
     def __init__(
         self,
         layer: torch.nn.Module,
         moe_config: FusedMoEConfig,
         mk_owns_shared_expert: bool,
     ):
+        super().__init__()
+
         self._output: torch.Tensor | None = None
         self._layer = layer
         self._moe_config = moe_config
@@ -151,7 +153,7 @@ class SharedExperts:
         self._output = None
         return output
 
-    def apply(
+    def forward(
         self,
         shared_experts_input: torch.Tensor,
         order: SharedExpertsOrder,
@@ -167,3 +169,6 @@ class SharedExperts:
             self._output = self._run_in_aux_stream(shared_experts_input)
         else:
             self._output = self._layer(shared_experts_input)
+
+    # def __call__(self, *args, **kwargs):
+    #    return self.forward(*args, **kwargs)

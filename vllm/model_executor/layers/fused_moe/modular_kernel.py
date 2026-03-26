@@ -1084,7 +1084,7 @@ class FusedMoEKernelModularImpl:
     ):
         if self.shared_experts is not None:
             assert shared_experts_input is not None
-            self.shared_experts.apply(
+            self.shared_experts(
                 shared_experts_input,
                 SharedExpertsOrder.MK_INTERNAL_OVERLAPPED,
             )
