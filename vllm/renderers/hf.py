@@ -25,7 +25,13 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.inputs import (
+    EmbedsPrompt,
+    MultiModalDataDict,
+    MultiModalUUIDDict,
+    TextPrompt,
+    TokensPrompt,
+)
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.hf import CachedHfTokenizer, HfTokenizer
@@ -34,7 +40,7 @@ from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.func_utils import supports_kw
 
 from .base import BaseRenderer
-from .inputs import DictPrompt
+from .inputs import EncoderDecoderDictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
 
@@ -639,7 +645,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-    ) -> tuple[list[ConversationMessage], DictPrompt]:
+    ) -> tuple[
+        list[ConversationMessage],
+        TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt,
+    ]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
 
@@ -695,7 +704,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-    ) -> tuple[list[ConversationMessage], DictPrompt]:
+    ) -> tuple[
+        list[ConversationMessage],
+        TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt,
+    ]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
 

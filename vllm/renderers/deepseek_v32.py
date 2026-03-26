@@ -9,12 +9,13 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
 
 from .base import BaseRenderer
-from .inputs import DictPrompt
+from .inputs import EncoderDecoderDictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
 
@@ -43,7 +44,10 @@ class DeepseekV32Renderer(BaseRenderer[DeepseekV32Tokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-    ) -> tuple[list[ConversationMessage], DictPrompt]:
+    ) -> tuple[
+        list[ConversationMessage],
+        TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt,
+    ]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
@@ -71,7 +75,10 @@ class DeepseekV32Renderer(BaseRenderer[DeepseekV32Tokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-    ) -> tuple[list[ConversationMessage], DictPrompt]:
+    ) -> tuple[
+        list[ConversationMessage],
+        TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt,
+    ]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,

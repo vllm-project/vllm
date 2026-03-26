@@ -38,14 +38,20 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import EncoderDecoderInput, EngineInput
+from vllm.inputs import (
+    EmbedsPrompt,
+    EncoderDecoderInput,
+    EngineInput,
+    TextPrompt,
+    TokensPrompt,
+)
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
 from vllm.multimodal.audio import get_audio_duration, split_audio
 from vllm.multimodal.media.audio import load_audio
 from vllm.outputs import RequestOutput
-from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
+from vllm.renderers.inputs import EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
@@ -227,7 +233,9 @@ class OpenAISpeechToText(OpenAIServing):
             )
             request.language = language
 
-        parsed_prompts: list[DictPrompt] = []
+        parsed_prompts: list[
+            TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt
+        ] = []
         for chunk in chunks:
             # The model has control over the construction, as long as it
             # returns a valid PromptType.
@@ -241,7 +249,9 @@ class OpenAISpeechToText(OpenAIServing):
                 to_language=to_language,
             )
 
-            parsed_prompt: DictPrompt
+            parsed_prompt: (
+                TextPrompt | TokensPrompt | EmbedsPrompt | EncoderDecoderDictPrompt
+            )
             if request.response_format == "verbose_json":
                 parsed_prompt = parse_enc_dec_prompt(prompt)
                 parsed_prompt = self._preprocess_verbose_prompt(parsed_prompt)
