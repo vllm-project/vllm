@@ -560,7 +560,17 @@ class FusedMoE(CustomOp):
                 quant_method = self.quant_config.get_quant_method(self, prefix)
             if quant_method is None:
                 quant_method = UnquantizedFusedMoEMethod(self.moe_config)
-            assert isinstance(quant_method, FusedMoEMethodBase)
+            if not isinstance(quant_method, FusedMoEMethodBase):
+                logger.warning(
+                    "quant_method is %s (not FusedMoEMethodBase) for "
+                    "prefix '%s', falling back to "
+                    "UnquantizedFusedMoEMethod. This typically happens "
+                    "when a speculative decoding draft model has no "
+                    "MoE-aware quantization config.",
+                    type(quant_method).__name__,
+                    prefix,
+                )
+                quant_method = UnquantizedFusedMoEMethod(self.moe_config)
             return quant_method
 
         # Note: get_quant_method will look at the layer's local_num_experts
