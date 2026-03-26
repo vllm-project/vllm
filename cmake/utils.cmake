@@ -173,8 +173,10 @@ print(candidates[0] if candidates else '')
 endfunction()
 
 # Macro for converting a `gencode` version number to a cmake version number.
+# Preserves architecture-specific suffixes (a/f) needed for correct
+# __CUDA_ARCH_FAMILY_SPECIFIC__ definition. E.g. "121a" -> "12.1a".
 macro(string_to_ver OUT_VER IN_STR)
-  string(REGEX REPLACE "\([0-9]+\)\([0-9]\)" "\\1.\\2" ${OUT_VER} ${IN_STR})
+  string(REGEX REPLACE "\([0-9]+\)\([0-9][af]?\)" "\\1.\\2" ${OUT_VER} ${IN_STR})
 endmacro()
 
 #
@@ -211,7 +213,7 @@ endmacro()
 function(extract_unique_cuda_archs_ascending OUT_ARCHES CUDA_ARCH_FLAGS)
   set(_CUDA_ARCHES)
   foreach(_ARCH ${CUDA_ARCH_FLAGS})
-    string(REGEX MATCH "arch=compute_\([0-9]+a?\)" _COMPUTE ${_ARCH})
+    string(REGEX MATCH "arch=compute_\([0-9]+[af]?\)" _COMPUTE ${_ARCH})
     if (_COMPUTE)
       set(_COMPUTE ${CMAKE_MATCH_1})
     endif()
