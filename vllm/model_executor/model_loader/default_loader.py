@@ -68,6 +68,10 @@ class DefaultModelLoader(BaseModelLoader):
         allow_patterns_overrides: list[str] | None = None
         """If defined, weights will load exclusively using these patterns."""
 
+        optional: bool = False
+        """Whether the source is optional. If True, no error is raised if
+        no weights are found."""
+
     counter_before_loading_weights: float = 0.0
     counter_after_loading_weights: float = 0.0
 
@@ -101,6 +105,7 @@ class DefaultModelLoader(BaseModelLoader):
         revision: str | None,
         fall_back_to_pt: bool,
         allow_patterns_overrides: list[str] | None,
+        optional: bool = False,
     ) -> tuple[str, list[str], bool]:
         """Prepare weights for the model.
 
@@ -177,8 +182,7 @@ class DefaultModelLoader(BaseModelLoader):
         for pattern in allow_patterns:
             hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
             if len(hf_weights_files) > 0:
-                if pattern.endswith(".safetensors"):
-                    use_safetensors = True
+                use_safetensors = pattern.endswith(".safetensors")
                 break
 
         if use_safetensors:
@@ -202,9 +206,17 @@ class DefaultModelLoader(BaseModelLoader):
             hf_weights_files = filter_files_not_needed_for_inference(hf_weights_files)
 
         if len(hf_weights_files) == 0:
-            raise RuntimeError(
-                f"Cannot find any model weights with `{model_name_or_path}`"
-            )
+            if optional:
+                logger.warning(
+                    "Optional model weights matching %s not found in `%s` ",
+                    allow_patterns,
+                    model_name_or_path,
+                )
+            else:
+                raise RuntimeError(
+                    f"Cannot find any model weights matching {allow_patterns} "
+                    f"within `{model_name_or_path}`"
+                )
 
         return hf_folder, hf_weights_files, use_safetensors
 
@@ -219,6 +231,7 @@ class DefaultModelLoader(BaseModelLoader):
             source.revision,
             source.fall_back_to_pt,
             source.allow_patterns_overrides,
+            optional=source.optional,
         )
         if self.load_config.load_format == "npcache":
             # Currently np_cache only support *.bin checkpoints
