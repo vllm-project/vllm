@@ -249,7 +249,7 @@ Token counting starts from `think_start_str`. Once the reasoning token count rea
 To use this feature:
 
 - `--reasoning-parser` enables reasoning extraction.
-- `--reasoning-config` defines the reasoning boundary tokens (e.g., `think_start_str`, `think_end_str`).
+- `--reasoning-config` defines the reasoning boundary tokens (e.g., `think_start_str`, `think_end_str`). If not set, vLLM will attempt to automatically initialize these tokens from the reasoning parser.
 - `thinking_token_budget` (a sampling parameter) sets the per-request reasoning token limit.
 
 If `thinking_token_budget` is not specified, no explicit reasoning limit is applied beyond normal generation constraints such as `max_tokens`.

@@ -1182,8 +1182,16 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
-        if self.reasoning_config is not None and self.model_config is not None:
-            self.reasoning_config.initialize_token_ids(self.model_config)
+        if (
+            self.reasoning_config is not None
+            and self.model_config is not None
+            and not self.reasoning_config.initialize_token_ids(self.model_config)
+        ):
+            logger.warning_once(
+                "Auto-initialization of reasoning token IDs failed. "
+                "Please check whether your reasoning parser has implemented "
+                "the `start_token` and `end_token`."
+            )
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
