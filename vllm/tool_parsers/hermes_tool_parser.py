@@ -240,11 +240,8 @@ class Hermes2ProToolParser(ToolParser):
         text preceding any tool call) or one or more ``DeltaToolCall``
         entries, or ``None`` if there is nothing new to send yet."""
         try:
-            # Stream any content before tool calls.
+            # Extract any content before tool calls.
             content = self._extract_content(current_text)
-            if content:
-                return DeltaMessage(content=content)
-
             tool_call_jsons = self._extract_tool_call_jsons(current_text)
             tool_call_deltas: list[DeltaToolCall] = []
 
@@ -283,8 +280,12 @@ class Hermes2ProToolParser(ToolParser):
                         )
                     )
 
-            if tool_call_deltas:
-                return DeltaMessage(tool_calls=tool_call_deltas)
+            if content or tool_call_deltas:
+                return DeltaMessage(
+                    content=content,
+                    tool_calls=tool_call_deltas,
+                )
+
             return None
 
         except Exception:
