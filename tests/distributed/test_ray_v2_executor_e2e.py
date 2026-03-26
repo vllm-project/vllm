@@ -6,6 +6,7 @@ Orchestration-level integration tests for RayExecutorV2.
 
 import gc
 import os
+import pathlib
 
 import ray
 
@@ -24,9 +25,10 @@ def _ray_init():
     Without this, workers cannot unpickle actor classes defined in the
     ``tests`` package, causing FunctionActorManager to fall back to
     TemporaryActor which drops async method signatures."""
+    project_root = str(pathlib.Path(__file__).resolve().parents[2])
     ray.init(
         ignore_reinit_error=True,
-        runtime_env={"env_vars": {"PYTHONPATH": os.getcwd()}},
+        runtime_env={"env_vars": {"PYTHONPATH": project_root}},
     )
 
 
