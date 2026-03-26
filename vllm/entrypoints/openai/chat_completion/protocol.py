@@ -797,7 +797,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "high": 8192,
                 "xhigh": 16384,
             }
-            data["thinking_token_budget"] = buget_map.get(reasoning_effort, 0)
+            data["thinking_token_budget"] = buget_map.get(reasoning_effort)
         return data
 
 
