@@ -1,3 +1,5 @@
+steps:
+
 - label: Distributed Tests (2 GPUs)(H100-MI250) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
