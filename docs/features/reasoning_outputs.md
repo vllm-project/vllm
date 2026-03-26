@@ -298,8 +298,8 @@ from vllm.config import ReasoningConfig
 llm = LLM(
     model="Qwen/Qwen3-0.6B",
     reasoning_config=ReasoningConfig(
-        think_start_str="<think>",
-        think_end_str="I have to give the solution based on the thinking directly now.</think>",
+        reasoning_start_str="<think>",
+        reasoning_end_str="I have to give the solution based on the thinking directly now.</think>",
     ),
 )
 
