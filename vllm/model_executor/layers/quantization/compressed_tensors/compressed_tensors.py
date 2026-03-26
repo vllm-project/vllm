@@ -909,10 +909,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             params_dtype=params_dtype,
             weight_loader=weight_loader,
         )
-
-        from vllm.model_executor.layers.quantization.compressed_tensors.schemes import CompressedTensorsW8A16Fp8
-
-        if isinstance(layer.scheme, CompressedTensorsW8A16Fp8):
+        if isinstance(layer.scheme, CompressedTensorsW8A16Fp8) and current_platform.is_xpu():
             from vllm.model_executor.layers.quantization.utils.quant_utils import kFp8StaticTensorSym
 
             layer.kernel = init_fp8_linear_kernel(
@@ -930,6 +927,12 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ):
+        """
+        Use the output of create_weights and the CompressedTensorsScheme
+        associated with the layer to apply the forward pass with the
+        layer input.  See LinearMethodBase for param details
+
+        """
         if getattr(layer, "kernel", None) is not None:
             return layer.kernel.apply_weights(layer, x, bias)
 
