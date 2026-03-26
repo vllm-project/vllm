@@ -139,13 +139,11 @@ class ServingTokens(OpenAIServing):
                 cache_salt=request.cache_salt,
             )
         else:
-            engine_prompts = await self.openai_serving_render.preprocess_completion(
+            (engine_input,) = await self.openai_serving_render.preprocess_completion(
                 request,
                 prompt_input=request.token_ids,
                 prompt_embeds=None,
             )
-            assert len(engine_prompts) == 1
-            engine_prompt = engine_prompts[0]
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
@@ -155,7 +153,7 @@ class ServingTokens(OpenAIServing):
 
         self._log_inputs(
             request_id,
-            engine_prompt,
+            engine_input,
             params=sampling_params,
             lora_request=lora_request,
         )
@@ -167,7 +165,7 @@ class ServingTokens(OpenAIServing):
         )
 
         result_generator = self.engine_client.generate(
-            engine_prompt,
+            engine_input,
             sampling_params,
             request_id,
             lora_request=lora_request,

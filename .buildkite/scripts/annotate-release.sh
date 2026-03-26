@@ -8,6 +8,8 @@ if [ -z "${RELEASE_VERSION}" ]; then
   RELEASE_VERSION="1.0.0.dev"
 fi
 
+ROCM_BASE_CACHE_KEY=$(.buildkite/scripts/cache-rocm-base-wheels.sh key)
+
 buildkite-agent annotate --style 'info' --context 'release-workflow' << EOF
 To download the wheel (by commit):
 \`\`\`
@@ -33,7 +35,7 @@ docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-x86_64
 docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-aarch64
 docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-x86_64-cu130
 docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-aarch64-cu130
-docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm-base
+docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base
 docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm
 docker pull public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:v${RELEASE_VERSION}
 docker pull public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v${RELEASE_VERSION}
@@ -74,7 +76,7 @@ docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT} vllm/vllm-openai-rocm:v${RE
 docker push vllm/vllm-openai-rocm:latest
 docker push vllm/vllm-openai-rocm:v${RELEASE_VERSION}
 
-docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm-base vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base
+docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base
 docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base vllm/vllm-openai-rocm:latest-base
 docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base vllm/vllm-openai-rocm:v${RELEASE_VERSION}-base
 docker push vllm/vllm-openai-rocm:latest-base
