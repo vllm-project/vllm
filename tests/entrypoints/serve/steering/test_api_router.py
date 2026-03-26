@@ -220,6 +220,16 @@ class TestSetSteering:
         )
         assert resp.status_code == 400
 
+    def test_set_empty_vectors_no_engine_call(self, client, engine):
+        """Empty vectors dict -> immediate 400, engine not contacted."""
+        resp = client.post(
+            "/v1/steering/set",
+            json={"vectors": {}},
+        )
+        assert resp.status_code == 400
+        assert "No vectors provided" in resp.json()["error"]
+        engine.collective_rpc.assert_not_called()
+
 
 # --- POST /v1/steering/clear ---
 

@@ -44,6 +44,17 @@ async def set_steering(
     """
     engine = engine_client(raw_request)
 
+    if not request.vectors:
+        return JSONResponse(
+            content={
+                "error": (
+                    "No vectors provided. Include at least one "
+                    "layer index and vector."
+                ),
+            },
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
+
     # Pre-multiply scales into vectors so the worker only needs to copy.
     scaled: dict[int, list[float]] = {}
     for layer_idx, vec in request.vectors.items():
