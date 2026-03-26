@@ -353,6 +353,40 @@ class KimiK2ToolParser(ToolParser):
                 cur_tool_start_count > cur_tool_end_count
                 and cur_tool_start_count > prev_tool_start_count
             ):
+                # If tool_call_end is also in this delta, finalize the
+                # previous tool's args before switching (speculative
+                # decoding can bundle end+begin in one delta).
+                if (self.tool_call_end_token_id in delta_token_ids
+                        and self.current_tool_id >= 0
+                        and self.prev_tool_call_arr):
+                    parts = current_text.split(self.tool_call_start_token)
+                    cidx = self.current_tool_id + 1
+                    if cidx < len(parts):
+                        raw = parts[cidx].split(
+                            self.tool_call_end_token)[0].rstrip()
+                        m = self.stream_tool_call_portion_regex.match(raw)
+                        if m:
+                            args = m.group("function_arguments")
+                            prev = self.prev_tool_call_arr[
+                                self.current_tool_id].get("arguments", "")
+                            if (args and prev
+                                    and args.startswith(prev)
+                                    and len(args) > len(prev)):
+                                diff = args[len(prev):]
+                                self.streamed_args_for_tool[
+                                    self.current_tool_id] += diff
+                                self.current_tool_id += 1
+                                self.current_tool_name_sent = False
+                                self.streamed_args_for_tool.append("")
+                                return DeltaMessage(tool_calls=[
+                                    DeltaToolCall(
+                                        index=self.current_tool_id - 1,
+                                        function=DeltaFunctionCall(
+                                            arguments=diff,
+                                        ).model_dump(exclude_none=True),
+                                    )
+                                ])
+
                 if len(delta_token_ids) > 1:
                     tool_call_portion = current_text.split(self.tool_call_start_token)[
                         -1
