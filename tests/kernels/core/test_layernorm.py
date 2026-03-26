@@ -7,8 +7,8 @@ import torch
 from tests.kernels.quant_utils import FP8_DTYPE
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.utils.torch_utils import set_random_seed
 from vllm.platforms.rocm import on_gfx90a
+from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing

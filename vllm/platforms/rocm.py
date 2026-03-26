@@ -235,8 +235,10 @@ def on_mi3xx() -> bool:
 def on_gfx9() -> bool:
     return _ON_GFX9
 
+
 def on_gfx90a() -> bool:
     return _ON_GFX90A
+
 
 def on_gfx942() -> bool:
     return _ON_GFX942
