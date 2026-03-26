@@ -188,8 +188,8 @@ RUN cd /opt/rixl && mkdir -p /app/install && \
 FROM base AS build_deep
 ARG ROCSHMEM_BRANCH="ba0bf0f3"
 ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
-ARG DEEPEP_BRANCH="e84464ec"
-ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
+ARG DEEPEP_BRANCH="f25d9b0a"
+ARG DEEPEP_REPO="https://github.com/rjrock/DeepEP"
 ARG DEEPEP_NIC="cx7"
 ENV ROCSHMEM_DIR=/opt/rocshmem
 
@@ -198,11 +198,12 @@ RUN git clone ${ROCSHMEM_REPO} \
  && git checkout ${ROCSHMEM_BRANCH} \
  && mkdir -p projects/rocshmem/build \
  && cd projects/rocshmem/build \
- && cmake .. \
-    -DCMAKE_INSTALL_PREFIX="${ROCSHMEM_DIR}" \
-    -DROCM_PATH=/opt/rocm \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    -DUSE_EXTERNAL_MPI=OFF \
+ && bash ../scripts/build_configs/all_backends \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DCMAKE_INSTALL_PREFIX="${ROCSHMEM_DIR}" \
+  -DROCM_PATH=/opt/rocm \
+  -DGPU_TARGETS="gfx942;gfx950" \
+  -DUSE_EXTERNAL_MPI=OFF \
  && make -j \
  && make install
 
