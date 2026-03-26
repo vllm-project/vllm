@@ -194,13 +194,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         targeting 'Linear' needs to also match
         FusedMoE modules.
         """
-        if "Linear" not in self.target_scheme_map:
-            return
-        if "FusedMoE" not in self.target_scheme_map:
+        if (
+            "Linear" not in self.target_scheme_map
+            or "FusedMoE" in self.target_scheme_map
+        ):
             self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
-        for ds_target in ["DeepseekV2MoE"]:
-            if ds_target not in self.target_scheme_map:
-                self.target_scheme_map[ds_target] = self.target_scheme_map["Linear"]
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
