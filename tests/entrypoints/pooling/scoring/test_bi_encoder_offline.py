@@ -5,17 +5,14 @@ import weakref
 
 import pytest
 
+from tests.entrypoints.pooling.scoring.util import EncoderScoringHfRunner
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 
-from .util import ColBERTScoringHfRunner
-
-MODEL_NAME = "answerdotai/answerai-colbert-small-v1"
-COLBERT_DIM = 96
-
-LINEAR_WEIGHTS_KEY = "linear.weight"
+MODEL_NAME = "intfloat/multilingual-e5-small"
 PROMPT = "The chef prepared a delicious meal."
+EMBEDDING_SIZE = 384
 
 TEXTS_1 = [
     "What is the capital of France?",
@@ -58,10 +55,8 @@ def llm():
 
 
 @pytest.fixture(scope="module")
-def hf_model(hf_runner):
-    return ColBERTScoringHfRunner(
-        model_name=MODEL_NAME, linear_weights_key=LINEAR_WEIGHTS_KEY
-    )
+def hf_model():
+    return EncoderScoringHfRunner(MODEL_NAME)
 
 
 @pytest.mark.skip_global_cleanup
@@ -113,7 +108,7 @@ def test_n_to_n(llm, hf_model):
     assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
 
 
-def test_token_embed(llm):
-    outputs = llm.encode(PROMPT, pooling_task="token_embed", use_tqdm=False)
+def test_embed(llm):
+    outputs = llm.encode(PROMPT, pooling_task="embed", use_tqdm=False)
     assert len(outputs) == 1
-    assert outputs[0].outputs.data.shape == (9, COLBERT_DIM)
+    assert len(outputs[0].outputs.data) == EMBEDDING_SIZE
