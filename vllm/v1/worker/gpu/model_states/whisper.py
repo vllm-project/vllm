@@ -9,7 +9,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata_for_batch
+from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
@@ -108,7 +108,7 @@ class WhisperModelState(ModelState):
         encoder_seq_lens = self._get_encoder_seq_lens(
             input_batch.req_ids, attn_groups, for_capture
         )
-        return build_attn_metadata_for_batch(
+        return build_attn_metadata(
             input_batch=input_batch,
             include_padding=cudagraph_mode == CUDAGraphMode.FULL,
             attn_groups=attn_groups,

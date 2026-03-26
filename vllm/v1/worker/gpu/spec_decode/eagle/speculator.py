@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -27,6 +29,24 @@ from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class EagleBatch:
+    """Minimal batch for EAGLE decode phase (1 token per request).
+
+    Conforms to AttentionBatchProtocol for use with build_attn_metadata.
+    """
+
+    num_reqs: int
+    num_reqs_after_padding: int
+    num_tokens: int
+    num_tokens_after_padding: int
+    query_start_loc: torch.Tensor
+    query_start_loc_np: np.ndarray
+    seq_lens: torch.Tensor
+    num_scheduled_tokens: np.ndarray
+    dcp_local_seq_lens: torch.Tensor | None = None
 
 
 class EagleSpeculator:
@@ -70,6 +90,9 @@ class EagleSpeculator:
             self.max_num_reqs, dtype=torch.float32, device=device
         )
         self.seeds = torch.zeros(self.max_num_reqs, dtype=torch.int64, device=device)
+        # Pre-allocate arrays for EagleBatch (uniform decode: 1 token/req).
+        self.eagle_query_start_loc_np = np.arange(self.max_num_reqs + 1, dtype=np.int32)
+        self.eagle_num_scheduled_tokens_np = np.ones(self.max_num_reqs, dtype=np.int32)
         self.draft_tokens = torch.zeros(
             self.max_num_reqs,
             self.num_speculative_steps,
@@ -397,22 +420,25 @@ class EagleSpeculator:
         attn_metadata_updated = None
         slot_mappings_updated = None
         if not (dummy_run and skip_attn_for_dummy_run):
-            query_start_loc_cpu = torch.arange(
-                num_reqs_padded + 1, dtype=torch.int32, device="cpu"
-            )
             block_tables = [
                 x[:num_reqs_padded] for x in self.block_tables.input_block_tables
             ]
-
-            # FIXME(woosuk): This is UNSAFE!!
-            attn_metadata_updated = build_attn_metadata(
-                attn_groups=self.attn_groups,
+            # Construct minimal decode batch (1 token per request).
+            # build_attn_metadata slices tensors by num_reqs, so pass full tensors.
+            decode_batch = EagleBatch(
                 num_reqs=num_reqs_padded,
+                num_reqs_after_padding=num_reqs_padded,
                 num_tokens=num_reqs_padded,
-                query_start_loc_gpu=query_start_loc,
-                query_start_loc_cpu=query_start_loc_cpu,
-                max_query_len=1,
-                seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
+                num_tokens_after_padding=num_reqs_padded,
+                query_start_loc=self.input_buffers.query_start_loc,
+                query_start_loc_np=self.eagle_query_start_loc_np,
+                seq_lens=self.input_buffers.seq_lens,
+                num_scheduled_tokens=self.eagle_num_scheduled_tokens_np,
+            )
+            attn_metadata_updated = build_attn_metadata(
+                decode_batch,
+                include_padding=False,
+                attn_groups=self.attn_groups,
                 max_seq_len=self.max_model_len,
                 block_tables=block_tables,
                 slot_mappings=slot_mappings,
