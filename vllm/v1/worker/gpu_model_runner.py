@@ -369,6 +369,322 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         return self._model_runner_output
 
 
+# ── Pooler CUDA Graph Optimization ────────────────────────────────────
+# Captures the classify pooler's post-gather tensor operations (dtype cast,
+# classifier matmul, logit_bias subtract, activation) into CUDA graphs,
+# eliminating per-kernel CPU dispatch overhead for short-input workloads.
+
+_DEFAULT_POOL_CUDAGRAPH_BATCH_SIZES = [
+    1,
+    2,
+    4,
+    8,
+    16,
+    24,
+    32,
+    40,
+    48,
+    56,
+    64,
+    72,
+    80,
+    88,
+    96,
+    104,
+    112,
+    120,
+    128,
+]
+
+
+def _parse_pool_cudagraph_batch_sizes() -> list[int]:
+    """Parse batch sizes from env var or return defaults."""
+    env = envs.VLLM_POOL_CUDAGRAPH_BATCH_SIZES
+    if env:
+        sizes = sorted({int(x) for x in env.split(",")})
+        logger.info(
+            "Pooler CUDA graph optimization: using custom capture "
+            "batch sizes from env: %s",
+            sizes,
+        )
+        return sizes
+    return list(_DEFAULT_POOL_CUDAGRAPH_BATCH_SIZES)
+
+
+class FlatClassifyPooler(nn.Module):
+    """Flat nn.Module containing only the post-gather tensor operations
+    from the classify pooler pipeline, with no Python control flow.
+
+    The gather (hidden_states[last_token_indices]) is done outside this
+    module so that CUDA graph capture only needs a small
+    batch_size x hidden_size static buffer instead of the full
+    num_tokens x hidden_size hidden_states.
+    """
+
+    def __init__(
+        self,
+        classifier: nn.Module | None,
+        logit_bias: float | None,
+        activation_fn: nn.Module | None,
+        head_dtype: torch.dtype | None,
+    ):
+        super().__init__()
+        if classifier is not None and head_dtype is not None:
+            classifier = classifier.to(head_dtype)
+        self.classifier = classifier
+        self.has_logit_bias = logit_bias is not None
+        if logit_bias is not None:
+            self.register_buffer(
+                "logit_bias_val",
+                torch.tensor(logit_bias, dtype=torch.float32),
+            )
+        self.activation_fn = activation_fn
+        self.head_dtype = head_dtype
+
+    def forward(self, pooled: torch.Tensor) -> torch.Tensor:
+        """Takes already-gathered pooled hidden states
+        (batch_size x hidden_size)."""
+        if self.head_dtype is not None:
+            pooled = pooled.to(self.head_dtype)
+        if self.classifier is not None:
+            pooled = self.classifier(pooled)
+        if self.has_logit_bias:
+            pooled = pooled - self.logit_bias_val
+        if self.activation_fn is not None:
+            pooled = self.activation_fn(pooled)
+        return pooled
+
+
+class PoolerCUDAGraphRunner:
+    """Manages CUDA graph capture and replay for the post-gather
+    classify pooler ops (dtype cast, classifier mm, bias subtract,
+    activation).
+
+    The gather is done eagerly outside the graph so the static input
+    buffer is only batch_size x hidden_size (tiny), avoiding the
+    expensive copy of the full num_tokens x hidden_size hidden_states
+    tensor.
+    """
+
+    def __init__(
+        self,
+        flat_pooler: FlatClassifyPooler,
+        hidden_size: int,
+        num_labels: int,
+        device: torch.device,
+        input_dtype: torch.dtype,
+        output_dtype: torch.dtype,
+        capture_sizes: list[int],
+    ):
+        from vllm.platforms import current_platform
+
+        self.flat_pooler = flat_pooler
+        self.hidden_size = hidden_size
+        self.num_labels = num_labels
+        self.device = device
+        self.input_dtype = input_dtype
+        self.output_dtype = output_dtype
+
+        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self.static_input: dict[int, torch.Tensor] = {}
+        self.static_output: dict[int, torch.Tensor] = {}
+
+        # Map from any batch size to the next captured size
+        self._size_map: dict[int, int] = {}
+        sorted_sizes = sorted(capture_sizes)
+        for i in range(1, sorted_sizes[-1] + 1):
+            for s in sorted_sizes:
+                if i <= s:
+                    self._size_map[i] = s
+                    break
+
+        self.graph_pool = current_platform.get_global_graph_pool()
+        self._capture_all(sorted_sizes)
+
+    @torch.inference_mode()
+    def _capture_all(self, capture_sizes: list[int]) -> None:
+        """Capture CUDA graphs for all configured batch sizes."""
+        for batch_size in sorted(capture_sizes, reverse=True):
+            self._capture_one(batch_size)
+
+        logger.info(
+            "Pooler CUDA graph optimization: captured %d graphs for batch sizes %s",
+            len(self.graphs),
+            sorted(self.graphs.keys()),
+        )
+
+    def _capture_one(self, batch_size: int) -> None:
+        """Capture a single CUDA graph for the given batch size."""
+        static_in = torch.zeros(
+            batch_size,
+            self.hidden_size,
+            dtype=self.input_dtype,
+            device=self.device,
+        )
+        self.static_input[batch_size] = static_in
+
+        # Warmup run (required before CUDA graph capture)
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                _ = self.flat_pooler(static_in)
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Capture
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, pool=self.graph_pool):
+            static_out = self.flat_pooler(static_in)
+
+        self.graphs[batch_size] = graph
+        self.static_output[batch_size] = static_out
+
+    def get_capture_size(self, batch_size: int) -> int | None:
+        """Return the captured size to use, or None if batch too large."""
+        return self._size_map.get(batch_size)
+
+    @torch.inference_mode()
+    def run(
+        self,
+        pooled: torch.Tensor,
+        batch_size: int,
+        capture_size: int,
+    ) -> torch.Tensor:
+        """Copy pre-gathered pooled input into static buffer, replay
+        the CUDA graph, and return the output slice for the actual
+        batch size.
+        """
+        static_in = self.static_input[capture_size]
+        static_in[:batch_size].copy_(pooled)
+        if batch_size < capture_size:
+            static_in[batch_size:].zero_()
+
+        self.graphs[capture_size].replay()
+
+        return self.static_output[capture_size][:batch_size].clone()
+
+
+def _introspect_classify_pooler(
+    model: VllmModelForPooling,
+) -> tuple[FlatClassifyPooler, PoolerCUDAGraphRunner | None] | None:
+    """Lazily introspect the model's pooler hierarchy, create a
+    FlatClassifyPooler, and capture CUDA graphs.
+
+    Returns (flat_pooler, graph_runner) or None if not applicable.
+    """
+    try:
+        from vllm.model_executor.layers.pooler.seqwise.heads import (
+            ClassifierPoolerHead,
+        )
+        from vllm.model_executor.layers.pooler.seqwise.poolers import (
+            SequencePooler,
+        )
+        from vllm.model_executor.layers.pooler.special import DispatchPooler
+
+        pooler = model.pooler
+        if not isinstance(pooler, DispatchPooler):
+            logger.info(
+                "Pooler CUDA graph optimization: pooler is %s, not "
+                "DispatchPooler; skipping",
+                type(pooler).__name__,
+            )
+            return None
+
+        classify_pooler = pooler.poolers_by_task.get("classify")
+        if classify_pooler is None or not isinstance(classify_pooler, SequencePooler):
+            logger.info(
+                "Pooler CUDA graph optimization: no SequencePooler for "
+                "'classify'; skipping"
+            )
+            return None
+
+        head = classify_pooler.head
+        if not isinstance(head, ClassifierPoolerHead):
+            logger.info(
+                "Pooler CUDA graph optimization: head is %s, not "
+                "ClassifierPoolerHead; skipping",
+                type(head).__name__,
+            )
+            return None
+
+        classifier = head.classifier
+        logit_bias = head.logit_bias
+        activation_fn = head.activation
+        head_dtype = head.head_dtype
+
+        if isinstance(head_dtype, str):
+            torch_dtype = getattr(torch, head_dtype, None)
+            if torch_dtype is None:
+                raise ValueError(
+                    f"Invalid head_dtype string from model config: '{head_dtype}'"
+                )
+            head_dtype = torch_dtype
+
+        flat_pooler = FlatClassifyPooler(
+            classifier=classifier,
+            logit_bias=logit_bias,
+            activation_fn=activation_fn,
+            head_dtype=head_dtype,
+        )
+
+        device = torch.device("cuda")
+        input_dtype = torch.float16
+        if classifier is not None and hasattr(classifier, "weight"):
+            device = classifier.weight.device
+            input_dtype = classifier.weight.dtype
+            num_labels = classifier.weight.shape[0]
+            hidden_size = classifier.weight.shape[1]
+        else:
+            logger.info(
+                "Pooler CUDA graph optimization: no classifier weight; "
+                "using flat pooler without CUDA graphs"
+            )
+            flat_pooler = flat_pooler.to(device)
+            return (flat_pooler, None)
+
+        flat_pooler = flat_pooler.to(device)
+        output_dtype = head_dtype if head_dtype is not None else input_dtype
+
+        capture_sizes = _parse_pool_cudagraph_batch_sizes()
+        graph_runner: PoolerCUDAGraphRunner | None = None
+        try:
+            graph_runner = PoolerCUDAGraphRunner(
+                flat_pooler=flat_pooler,
+                hidden_size=hidden_size,
+                num_labels=num_labels,
+                device=device,
+                input_dtype=input_dtype,
+                output_dtype=output_dtype,
+                capture_sizes=capture_sizes,
+            )
+        except Exception:
+            logger.warning(
+                "Pooler CUDA graph optimization: graph capture failed; "
+                "using flat pooler without graphs",
+                exc_info=True,
+            )
+
+        logger.info(
+            "Pooler CUDA graph optimization: initialized "
+            "(classifier=%s, logit_bias=%s, activation=%s, "
+            "head_dtype=%s, cuda_graphs=%s)",
+            type(classifier).__name__,
+            logit_bias,
+            type(activation_fn).__name__ if activation_fn else None,
+            head_dtype,
+            graph_runner is not None,
+        )
+        return (flat_pooler, graph_runner)
+
+    except Exception:
+        logger.warning(
+            "Pooler CUDA graph optimization: initialization failed; "
+            "falling back to default path",
+            exc_info=True,
+        )
+        return None
+
+
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
@@ -3111,10 +3427,38 @@ class GPUModelRunner(
             "Either all or none of the requests in a batch must be pooling request"
         )
 
+        pooling_metadata = self.input_batch.get_pooling_metadata()
+
+        # ── CUDA graph fast path for classify pooler ──────────────
+        # Check if all tasks are "classify" with activation enabled.
+        all_classify = all(t == "classify" for t in pooling_metadata.tasks)
+        all_use_activation = all_classify and all(
+            p.use_activation is not False for p in pooling_metadata.pooling_params
+        )
+
+        if all_use_activation:
+            model = cast(VllmModelForPooling, self.model)
+
+            # Lazy introspection: cache result on the instance.
+            if not hasattr(self, "_pooler_cudagraph_state"):
+                self._pooler_cudagraph_state = _introspect_classify_pooler(model)
+
+            state = self._pooler_cudagraph_state
+            if state is not None:
+                return self._pool_cudagraph_fast_path(
+                    hidden_states=hidden_states,
+                    num_scheduled_tokens=num_scheduled_tokens,
+                    num_scheduled_tokens_np=num_scheduled_tokens_np,
+                    kv_connector_output=kv_connector_output,
+                    num_reqs=num_reqs,
+                    pooling_metadata=pooling_metadata,
+                    state=state,
+                )
+
+        # ── Default path ──────────────────────────────────────────
         hidden_states = hidden_states[:num_scheduled_tokens]
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs]
 
-        pooling_metadata = self.input_batch.get_pooling_metadata()
         pooling_metadata.build_pooling_cursor(
             num_scheduled_tokens_np,
             seq_lens_cpu,
@@ -3145,6 +3489,76 @@ class GPUModelRunner(
         )
 
         if raw_pooler_output is None or not any(finished_mask):
+            model_runner_output.pooler_output = [None] * num_reqs
+            return model_runner_output
+
+        if self.use_async_scheduling:
+            return AsyncGPUPoolingModelRunnerOutput(
+                model_runner_output=model_runner_output,
+                raw_pooler_output=raw_pooler_output,
+                finished_mask=finished_mask,
+                async_output_copy_stream=self.async_output_copy_stream,
+            )
+
+        model_runner_output.pooler_output = _copy_pooler_output_to_cpu(
+            raw_pooler_output=raw_pooler_output,
+            finished_mask=finished_mask,
+        )
+        self._sync_device()
+
+        return model_runner_output
+
+    def _pool_cudagraph_fast_path(
+        self,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: int,
+        num_scheduled_tokens_np: np.ndarray,
+        kv_connector_output: KVConnectorOutput | None,
+        num_reqs: int,
+        pooling_metadata: "PoolingMetadata",
+        state: tuple[FlatClassifyPooler, PoolerCUDAGraphRunner | None],
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        """Fast path using FlatClassifyPooler with optional CUDA graphs."""
+        hidden_states = hidden_states[:num_scheduled_tokens]
+        seq_lens_cpu = self.seq_lens.cpu[:num_reqs]
+        pooling_metadata.build_pooling_cursor(
+            num_scheduled_tokens_np,
+            seq_lens_cpu,
+            device=hidden_states.device,
+        )
+
+        flat_pooler, graph_runner = state
+        cursor = pooling_metadata.pooling_cursor
+        assert cursor is not None
+        indices = cursor.last_token_indices_gpu
+
+        # Gather eagerly (outside the graph) — one small kernel
+        pooled = hidden_states[indices]
+
+        # Try CUDA graph path for post-gather ops
+        capture_size = None
+        if graph_runner is not None:
+            capture_size = graph_runner.get_capture_size(num_reqs)
+
+        if capture_size is not None:
+            assert graph_runner is not None
+            result = graph_runner.run(pooled, num_reqs, capture_size)
+        else:
+            result = flat_pooler(pooled)
+
+        raw_pooler_output: PoolerOutput = list(result)
+
+        # Vectorized finished_mask
+        finished_mask_tensor = cursor.is_finished()
+        finished_mask = finished_mask_tensor.tolist()
+
+        model_runner_output = ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids.copy(),
+            req_id_to_index=self.input_batch.req_id_to_index.copy(),
+            kv_connector_output=kv_connector_output,
+        )
+
+        if raw_pooler_output is None or not finished_mask_tensor.any().item():
             model_runner_output.pooler_output = [None] * num_reqs
             return model_runner_output
 
