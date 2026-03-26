@@ -728,6 +728,9 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
 
         layer.weight_scale = Parameter(scale.contiguous(), requires_grad=False)
 
+        if hasattr(self, "fp8_linear"):
+            self.fp8_linear.process_weights_after_loading(layer)
+
     def apply(
         self,
         layer: torch.nn.Module,
