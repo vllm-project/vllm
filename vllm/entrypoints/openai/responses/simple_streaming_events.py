@@ -576,7 +576,7 @@ async def process_simple_stream(
             tool_parser=tool_parser,
             state=state,
         )
-        delta_message, current_text, _ = result
+        delta_message, current_text, current_token_ids = result
 
         # Update state
         state.previous_text = current_text
