@@ -29,17 +29,46 @@ static TRACING: Once = Once::new();
 fn expect_sample_logprobs(actual: &MaybeWireLogprobs) {
     expect_test::expect![[r#"
         Logprobs {
-            logprob_token_ids: [[1, 2, 3],
-             [4, 5, 6]], shape=[2, 3], strides=[3, 1], layout=Cc (0x5), const ndim=2,
-            logprobs: [[1.0, 2.0, 3.0],
-             [4.0, 5.0, 6.0]], shape=[2, 3], strides=[3, 1], layout=Cc (0x5), const ndim=2,
-            token_ranks: [1, 2], shape=[2], strides=[1], layout=CFcf (0xf), const ndim=1,
-            cu_num_generated_tokens: Some(
-                [
-                    0,
-                    2,
-                ],
-            ),
+            positions: [
+                PositionLogprobs {
+                    entries: [
+                        TokenLogprob {
+                            token_id: 1,
+                            logprob: 1.0,
+                            rank: 1,
+                        },
+                        TokenLogprob {
+                            token_id: 2,
+                            logprob: 2.0,
+                            rank: 1,
+                        },
+                        TokenLogprob {
+                            token_id: 3,
+                            logprob: 3.0,
+                            rank: 2,
+                        },
+                    ],
+                },
+                PositionLogprobs {
+                    entries: [
+                        TokenLogprob {
+                            token_id: 4,
+                            logprob: 4.0,
+                            rank: 2,
+                        },
+                        TokenLogprob {
+                            token_id: 5,
+                            logprob: 5.0,
+                            rank: 1,
+                        },
+                        TokenLogprob {
+                            token_id: 6,
+                            logprob: 6.0,
+                            rank: 2,
+                        },
+                    ],
+                },
+            ],
         }
     "#]]
     .assert_debug_eq(actual.as_direct().expect("logprobs resolved"));
@@ -48,17 +77,46 @@ fn expect_sample_logprobs(actual: &MaybeWireLogprobs) {
 fn expect_prompt_logprobs(actual: &MaybeWireLogprobs) {
     expect_test::expect![[r#"
         Logprobs {
-            logprob_token_ids: [[10, 11, 12],
-             [13, 14, 15]], shape=[2, 3], strides=[3, 1], layout=Cc (0x5), const ndim=2,
-            logprobs: [[10.0, 11.0, 12.0],
-             [13.0, 14.0, 15.0]], shape=[2, 3], strides=[3, 1], layout=Cc (0x5), const ndim=2,
-            token_ranks: [3, 4], shape=[2], strides=[1], layout=CFcf (0xf), const ndim=1,
-            cu_num_generated_tokens: Some(
-                [
-                    0,
-                    2,
-                ],
-            ),
+            positions: [
+                PositionLogprobs {
+                    entries: [
+                        TokenLogprob {
+                            token_id: 10,
+                            logprob: 10.0,
+                            rank: 3,
+                        },
+                        TokenLogprob {
+                            token_id: 11,
+                            logprob: 11.0,
+                            rank: 1,
+                        },
+                        TokenLogprob {
+                            token_id: 12,
+                            logprob: 12.0,
+                            rank: 2,
+                        },
+                    ],
+                },
+                PositionLogprobs {
+                    entries: [
+                        TokenLogprob {
+                            token_id: 13,
+                            logprob: 13.0,
+                            rank: 4,
+                        },
+                        TokenLogprob {
+                            token_id: 14,
+                            logprob: 14.0,
+                            rank: 1,
+                        },
+                        TokenLogprob {
+                            token_id: 15,
+                            logprob: 15.0,
+                            rank: 2,
+                        },
+                    ],
+                },
+            ],
         }
     "#]]
     .assert_debug_eq(actual.as_direct().expect("prompt logprobs resolved"));
@@ -227,7 +285,7 @@ fn multipart_logprob_output_frames(request_id: &str) -> Vec<bytes::Bytes> {
                 ndarray_value("<i4", &[2, 3], Value::from(1)),
                 ndarray_value("<f4", &[2, 3], Value::from(2)),
                 ndarray_value("<i4", &[2], Value::from(3)),
-                Value::Array(vec![Value::from(0usize), Value::from(2usize)]),
+                Value::Nil,
             ]),
             Value::Nil,
             Value::Nil,

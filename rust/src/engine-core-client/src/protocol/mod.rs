@@ -28,14 +28,16 @@ fn default_opaque_value_nil() -> OpaqueValue {
     Value::Nil
 }
 
-mod aux;
 mod classfied_outputs;
 pub mod handshake;
+mod logprobs;
 pub mod stats;
-pub use aux::{Logprobs, MaybeWireLogprobs, decode_engine_core_outputs};
 pub use classfied_outputs::{
     ClassifiedEngineCoreOutputs, DpControlMessage, OtherEngineCoreOutputs, RequestBatchOutputs,
     UtilityCallOutput,
+};
+pub use logprobs::{
+    Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob, decode_engine_core_outputs,
 };
 
 /// Request types are encoded as single-byte protocol constants so they can be
@@ -348,8 +350,10 @@ impl EngineCoreUtilityRequest {
 pub struct EngineCoreOutput {
     pub request_id: String,
     pub new_token_ids: Vec<u32>,
+    /// Decoded sample logprobs for the newly generated positions in this output.
     #[serde(default)]
     pub new_logprobs: Option<MaybeWireLogprobs>,
+    /// Decoded prompt logprobs for the scored prompt positions emitted in this output.
     #[serde(default)]
     pub new_prompt_logprobs_tensors: Option<MaybeWireLogprobs>,
     #[serde(default)]

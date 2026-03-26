@@ -205,7 +205,7 @@ inline_logprobs = engine_outputs_wire(
             np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int64),
             np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32),
             np.array([1, 2], dtype=np.int64),
-            [0, 2],
+            None,
         ),
     )
 )
@@ -217,7 +217,7 @@ multipart_logprobs = engine_outputs_wire(
             np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int64),
             np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32),
             np.array([1, 2], dtype=np.int64),
-            [0, 2],
+            None,
         ),
     )
 )
@@ -229,7 +229,7 @@ inline_prompt_logprobs = engine_outputs_wire(
             ("int64", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.int64).tobytes()),
             ("float32", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.float32).tobytes()),
             ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
-            [0, 2],
+            None,
         ),
     )
 )
@@ -241,7 +241,7 @@ multipart_prompt_logprobs = engine_outputs_wire(
             ("int64", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.int64).tobytes()),
             ("float32", [2, 3], np.array([[10, 11, 12], [13, 14, 15]], dtype=np.float32).tobytes()),
             ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
-            [0, 2],
+            None,
         ),
     )
 )

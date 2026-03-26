@@ -1,10 +1,9 @@
 use std::io::Cursor;
 
 use byteorder::{BigEndian, LittleEndian, NativeEndian, ReadBytesExt};
-use ndarray::{Array1, Array2};
 
 use crate::error::{Error, Result};
-use crate::protocol::aux::wire::{WireArrayData, WireNdArray};
+use crate::protocol::logprobs::wire::{WireArrayData, WireNdArray};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ScalarType {
@@ -20,11 +19,18 @@ pub(super) enum Endianness {
     Native,
 }
 
-pub(super) fn decode_array2_i64<Frame>(
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct DecodedArray2<T> {
+    pub rows: usize,
+    pub cols: usize,
+    pub data: Vec<T>,
+}
+
+pub(super) fn decode_array2_u32<Frame>(
     value: WireNdArray,
     field: &str,
     frames: &[Frame],
-) -> Result<Array2<i64>>
+) -> Result<DecodedArray2<u32>>
 where
     Frame: AsRef<[u8]>,
 {
@@ -40,20 +46,26 @@ where
     let data = match scalar {
         ScalarType::I32 => decode_i32_vec(&bytes, endianness, field)?
             .into_iter()
-            .map(i64::from)
-            .collect(),
-        ScalarType::I64 => decode_i64_vec(&bytes, endianness, field)?,
+            .map(|value| convert_to_u32(value, field))
+            .collect::<Result<Vec<_>>>()?,
+        ScalarType::I64 => decode_i64_vec(&bytes, endianness, field)?
+            .into_iter()
+            .map(|value| convert_to_u32(value, field))
+            .collect::<Result<Vec<_>>>()?,
         ScalarType::F32 => unreachable!("scalar validation should reject f32"),
     };
-    Array2::from_shape_vec((shape[0], shape[1]), data)
-        .map_err(|error| decode_error(field, &format!("invalid shape: {error}")))
+    Ok(DecodedArray2 {
+        rows: shape[0],
+        cols: shape[1],
+        data,
+    })
 }
 
-pub(super) fn decode_array1_i64<Frame>(
+pub(super) fn decode_array1_u32<Frame>(
     value: WireNdArray,
     field: &str,
     frames: &[Frame],
-) -> Result<Array1<i64>>
+) -> Result<Vec<u32>>
 where
     Frame: AsRef<[u8]>,
 {
@@ -69,19 +81,22 @@ where
     let data = match scalar {
         ScalarType::I32 => decode_i32_vec(&bytes, endianness, field)?
             .into_iter()
-            .map(i64::from)
-            .collect(),
-        ScalarType::I64 => decode_i64_vec(&bytes, endianness, field)?,
+            .map(|value| convert_to_u32(value, field))
+            .collect::<Result<Vec<_>>>()?,
+        ScalarType::I64 => decode_i64_vec(&bytes, endianness, field)?
+            .into_iter()
+            .map(|value| convert_to_u32(value, field))
+            .collect::<Result<Vec<_>>>()?,
         ScalarType::F32 => unreachable!("scalar validation should reject f32"),
     };
-    Ok(Array1::from_vec(data))
+    Ok(data)
 }
 
 pub(super) fn decode_array2_f32<Frame>(
     value: WireNdArray,
     field: &str,
     frames: &[Frame],
-) -> Result<Array2<f32>>
+) -> Result<DecodedArray2<f32>>
 where
     Frame: AsRef<[u8]>,
 {
@@ -95,8 +110,11 @@ where
     }
 
     let data = decode_f32_vec(&bytes, endianness, field)?;
-    Array2::from_shape_vec((shape[0], shape[1]), data)
-        .map_err(|error| decode_error(field, &format!("invalid shape: {error}")))
+    Ok(DecodedArray2 {
+        rows: shape[0],
+        cols: shape[1],
+        data,
+    })
 }
 
 pub(super) fn decode_array_metadata<Frame>(
@@ -269,6 +287,18 @@ pub(super) fn decode_i64_vec(
         values.push(value);
     }
     Ok(values)
+}
+
+fn convert_to_u32<I>(value: I, field: &str) -> Result<u32>
+where
+    I: TryInto<u32> + std::fmt::Display + Copy,
+{
+    value.try_into().map_err(|_| {
+        decode_error(
+            field,
+            &format!("expected non-negative token id/rank that fits in u32, got {value}"),
+        )
+    })
 }
 
 pub(super) fn decode_error(field: &str, reason: &str) -> Error {

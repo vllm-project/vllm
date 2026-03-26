@@ -180,17 +180,17 @@ async fn main() -> Result<()> {
     if token_ids.is_empty() {
         bail!("engine returned no generated token ids");
     }
-    if logprobs.logprob_token_ids.nrows() == 0 || logprobs.token_ranks.is_empty() {
+    if logprobs.is_empty() {
         bail!("decoded logprobs payload is unexpectedly empty");
     }
-    if prompt_logprobs.logprob_token_ids.nrows() == 0 || prompt_logprobs.token_ranks.is_empty() {
+    if prompt_logprobs.is_empty() {
         bail!("decoded prompt logprobs payload is unexpectedly empty");
     }
-    if prompt_logprobs.logprob_token_ids.nrows() + 1 < prompt_token_ids.len() {
+    if prompt_logprobs.len() + 1 < prompt_token_ids.len() {
         bail!(
             "prompt logprobs rows look too short: prompt_len={}, rows={}",
             prompt_token_ids.len(),
-            prompt_logprobs.logprob_token_ids.nrows()
+            prompt_logprobs.len()
         );
     }
 

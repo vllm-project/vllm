@@ -47,5 +47,7 @@ cargo run -p vllm-engine-core-client --example external_engine_logprobs -- \
 
 This smoke requests a small generated-token `logprobs` payload plus prompt logprobs over a much
 longer prompt, so it exercises both the inline and aux-frame decode paths against a real engine.
+The Rust client decodes those payloads into semantic per-position records rather than exposing the
+raw ndarray/tensor wire shape.
 
 IMPORTANT: You must restart `vllm` each time you run the smoke test, as the vLLM engine cannot manage frontend closures and subsequent reconnects. In other words, do not reuse existing `vllm` instances, if any.
