@@ -63,10 +63,15 @@ class QuarkConfig(QuantizationConfig):
         self.pack_method = pack_method
         self.dynamic_mxfp4_quant = False
 
-    def maybe_update_config(self, model_name: str, revision: str | None = None):
+    def maybe_update_config(
+        self,
+        model_name: str,
+        revision: str | None = None,
+        trust_remote_code: bool = False,
+    ):
         self.hf_config = get_config(
             model=model_name,
-            trust_remote_code=False,  # or get from model_config if available
+            trust_remote_code=trust_remote_code,
             revision=revision,
             config_format="auto",
         )

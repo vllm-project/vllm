@@ -528,7 +528,10 @@ class VllmConfig:
                     f"method {model_config.quantization}. Supported dtypes: "
                     f"{supported_dtypes}"
                 )
-            quant_config.maybe_update_config(model_config.model)
+            quant_config.maybe_update_config(
+                model_config.model,
+                trust_remote_code=model_config.trust_remote_code,
+            )
             return quant_config
         return None
 
