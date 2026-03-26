@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -18,23 +18,13 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
 
-
-@runtime_checkable
-class AttentionBatchProtocol(Protocol):
-    num_reqs: int
-    num_reqs_after_padding: int
-    num_tokens: int
-    num_tokens_after_padding: int
-    query_start_loc: torch.Tensor
-    query_start_loc_np: np.ndarray
-    seq_lens: torch.Tensor
-    num_scheduled_tokens: np.ndarray
-    dcp_local_seq_lens: torch.Tensor | None
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 @dataclass
 class AttentionBatch:
-    """Minimal batch implementing AttentionBatchProtocol."""
+    """Minimal batch for build_attn_metadata (e.g., EAGLE decode phase)."""
 
     num_reqs: int
     num_reqs_after_padding: int
@@ -208,7 +198,7 @@ def build_slot_mappings_by_layer(
 
 
 def build_attn_metadata(
-    input_batch: AttentionBatchProtocol,
+    input_batch: "InputBatch | AttentionBatch",
     attn_groups: list[list[AttentionGroup]],
     max_seq_len: int,
     block_tables: Sequence[torch.Tensor],
