@@ -4,6 +4,7 @@
 from collections.abc import Callable
 
 import torch
+from vllm.platforms import current_platform
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -106,6 +107,9 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
             layer.register_parameter("input_scale", input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if current_platform.is_xpu():
+            pass
+
         weight = layer.weight
         weight_scale = layer.weight_scale
         size_k_first = True
@@ -138,6 +142,12 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if current_platform.is_xpu():
+            raise NotImplementedError(
+                "On XPU, this scheme has migrated to the Kernel Abstraction. "
+                "Execution is handled by the ScaledMMLinearKernel."
+            )
+
         return apply_fp8_marlin_linear(
             input=x,
             weight=layer.weight,

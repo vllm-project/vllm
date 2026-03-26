@@ -25,6 +25,9 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.kernels.linear import (
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -874,8 +877,12 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
     def __init__(self, quantization_config: CompressedTensorsConfig):
         self.quantization_config = quantization_config
 
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.scheme.process_weights_after_loading(layer)
+        if getattr(layer, "kernel", None) is not None:
+            layer.kernel.process_weights_after_loading(layer)
+        elif hasattr(layer.scheme, "process_weights_after_loading"):
+            layer.scheme.process_weights_after_loading(layer)
 
     def create_weights(
         self,
@@ -903,18 +910,29 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             weight_loader=weight_loader,
         )
 
+        from vllm.model_executor.layers.quantization.compressed_tensors.schemes import CompressedTensorsW8A16Fp8
+
+        if isinstance(layer.scheme, CompressedTensorsW8A16Fp8):
+            from vllm.model_executor.layers.quantization.utils.quant_utils import kFp8StaticTensorSym
+
+            layer.kernel = init_fp8_linear_kernel(
+                activation_quant_key=kFp8StaticTensorSym, # xpu
+                weight_quant_key=kFp8StaticTensorSym,     # xpu
+                out_dtype=torch.get_default_dtype(),
+                module_name=self.__class__.__name__,
+            )
+        else:
+            layer.kernel = None
+
     def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ):
-        """
-        Use the output of create_weights and the CompressedTensorsScheme
-        associated with the layer to apply the forward pass with the
-        layer input.  See LinearMethodBase for param details
+        if getattr(layer, "kernel", None) is not None:
+            return layer.kernel.apply_weights(layer, x, bias)
 
-        """
         scheme = layer.scheme
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
