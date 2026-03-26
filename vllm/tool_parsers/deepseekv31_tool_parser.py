@@ -49,10 +49,6 @@ class DeepSeekV31ToolParser(ToolParser):
             r"(?P<function_name>.*)<｜tool▁sep｜>(?P<function_arguments>.*)"
         )
 
-        self.stream_tool_call_name_regex = re.compile(
-            r"(?P<function_name>.*)<｜tool▁sep｜>"
-        )
-
         if not self.model_tokenizer:
             raise ValueError(
                 "The model tokenizer must be passed to the ToolParser "
@@ -253,16 +249,8 @@ class DeepSeekV31ToolParser(ToolParser):
                     current_tool_call["name"] = tool_name
                     current_tool_call["arguments"] = tool_args
                 else:
-                    current_tool_call_name_matches = (
-                        self.stream_tool_call_name_regex.match(tool_call_portion)
-                    )
-                    if current_tool_call_name_matches:
-                        tool_name = current_tool_call_name_matches.groups()
-                        current_tool_call["name"] = tool_name
-                        current_tool_call["arguments"] = ""
-                    else:
-                        logger.debug("Not enough token")
-                        return None
+                    logger.debug("Not enough token")
+                    return None
 
             # case - we haven't sent the tool name yet. If it's available, send
             #   it. otherwise, wait until it's available.
