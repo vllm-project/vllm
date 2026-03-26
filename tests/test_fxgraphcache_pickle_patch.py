@@ -83,8 +83,8 @@ class TestApplyFxgraphcachePicklePatch:
 
         _apply_fxgraphcache_pickle_patch(Pickler, _BypassStub)
 
-        assert Pickler.dumps._vllm_patched is True
-        assert Pickler._vllm_fxgraph_dumps_patched is True
+        assert Pickler.dumps._vllm_patched is True  # type: ignore[attr-defined]
+        assert Pickler._vllm_fxgraph_dumps_patched is True  # type: ignore[attr-defined]
 
 
 def test_patch_applied_in_current_environment():
