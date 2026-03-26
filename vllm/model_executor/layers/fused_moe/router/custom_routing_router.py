@@ -16,17 +16,15 @@ class CustomRoutingRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_manager: EplbManager,
         custom_routing_function: Callable,
+        eplb_manager: EplbManager | None = None,
         renormalize: bool = True,
-        enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_manager=eplb_manager,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
         self.custom_routing_function = custom_routing_function

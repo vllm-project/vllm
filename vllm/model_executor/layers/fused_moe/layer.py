@@ -358,7 +358,9 @@ class FusedMoE(CustomOp):
         self.logical_num_experts = num_experts
 
         # Initialize EPLB manager (or None?)
-        eplb_manager = EplbManager(num_redundant_experts=num_redundant_experts)
+        eplb_manager: EplbManager | None = None
+        if enable_eplb:
+            eplb_manager = EplbManager(num_redundant_experts=num_redundant_experts)
 
         # Expert mapping used in self.load_weights
         self.expert_mapping = expert_mapping
@@ -400,12 +402,12 @@ class FusedMoE(CustomOp):
 
         # Determine expert maps
         if self.use_ep:
-            # Validate EPLB configuration
-            eplb_manager.validate_configuration(
-                enable_eplb, self.global_num_experts, self.ep_size
-            )
-
-            if not enable_eplb:
+            if eplb_manager is not None:
+                # Validate EPLB configuration
+                eplb_manager.validate_configuration(
+                    self.global_num_experts, self.ep_size
+                )
+            else:
                 assert num_redundant_experts == 0, (
                     "Redundant experts are only supported with EPLB."
                 )
@@ -415,7 +417,7 @@ class FusedMoE(CustomOp):
                 moe_parallel_config=self.moe_parallel_config,
                 num_expert_group=num_expert_group,
                 num_redundant_experts=num_redundant_experts,
-                enable_eplb=enable_eplb,
+                enable_eplb=eplb_manager is not None,
             )
 
             self._expert_map: torch.Tensor | None
@@ -488,7 +490,6 @@ class FusedMoE(CustomOp):
         router = create_fused_moe_router(
             top_k=top_k,
             global_num_experts=self.global_num_experts,
-            eplb_manager=eplb_manager,
             renormalize=renormalize,
             use_grouped_topk=use_grouped_topk,
             num_expert_group=num_expert_group,
@@ -500,7 +501,7 @@ class FusedMoE(CustomOp):
             else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=self.num_fused_shared_experts,
-            enable_eplb=enable_eplb,
+            eplb_manager=eplb_manager,
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
             indices_type_getter=lambda: self._runner.quant_method.topk_indices_dtype,
@@ -582,7 +583,7 @@ class FusedMoE(CustomOp):
                 "is_act_and_mul=False is supported only for CUDA and ROCm for now"
             )
 
-        if enable_eplb and not quant_method.supports_eplb:
+        if eplb_manager is not None and not quant_method.supports_eplb:
             # TODO: Add support for additional quantization methods.
             # The implementation for other quantization methods does not
             # contain essential differences, but the current quant API
@@ -1375,7 +1376,10 @@ class FusedMoE(CustomOp):
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         """Delegate to EPLB manager."""
-        return self._runner.router.eplb_manager.get_expert_weights(self)
+        if self._runner.router.eplb_manager is not None:
+            return self._runner.router.eplb_manager.get_expert_weights(self)
+        else:
+            return []
 
     def set_eplb_state(
         self,
@@ -1390,12 +1394,13 @@ class FusedMoE(CustomOp):
         This is used later in forward pass, where we get the expert mapping
         and record the load metrics in `expert_load_view`.
         """
-        self._runner.router.eplb_manager.set_state(
-            moe_layer_idx,
-            expert_load_view,
-            logical_to_physical_map,
-            logical_replica_count,
-        )
+        if self._runner.router.eplb_manager is not None:
+            self._runner.router.eplb_manager.set_state(
+                moe_layer_idx,
+                expert_load_view,
+                logical_to_physical_map,
+                logical_replica_count,
+            )
 
     def ensure_moe_quant_config_init(self):
         if self._runner.quant_method.moe_quant_config is None:

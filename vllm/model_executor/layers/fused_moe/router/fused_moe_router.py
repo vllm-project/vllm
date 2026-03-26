@@ -29,7 +29,7 @@ class FusedMoERouter(ABC):
 
     @property
     @abstractmethod
-    def eplb_manager(self) -> EplbManager:
+    def eplb_manager(self) -> EplbManager | None:
         raise NotImplementedError
 
     @abstractmethod

@@ -216,21 +216,19 @@ class EplbManager:
 
     @staticmethod
     def validate_configuration(
-        enabled: bool, global_num_experts: int, ep_size: int
+        global_num_experts: int,
+        ep_size: int,
     ) -> None:
         """
         Validate EPLB configuration.
 
         Args:
-            enabled: Whether EPLB is enabled
             global_num_experts: Total number of experts (including redundant)
             ep_size: Expert parallelism size
 
         Raises:
             AssertionError: If configuration is invalid
         """
-        if not enabled:
-            return
 
         # EPLB currently only supports even distribution of experts across ranks
         assert global_num_experts % ep_size == 0, (

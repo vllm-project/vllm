@@ -932,12 +932,13 @@ def make_fake_moe_layer(
 ) -> Callable:
     activation = MoEActivation.from_str(activation)
 
-    eplb_manager = EplbManager(num_redundant_experts=num_redundant_experts)
+    eplb_manager: EplbManager | None = None
+    if enable_eplb:
+        eplb_manager = EplbManager(num_redundant_experts=num_redundant_experts)
 
     router = create_fused_moe_router(
         top_k=top_k,
         global_num_experts=global_num_experts,
-        eplb_manager=eplb_manager,
         renormalize=renormalize,
         use_grouped_topk=use_grouped_topk,
         num_expert_group=num_expert_group,
@@ -947,7 +948,7 @@ def make_fake_moe_layer(
         routed_scaling_factor=routed_scaling_factor,
         e_score_correction_bias=e_score_correction_bias,
         num_fused_shared_experts=0,  # TODO
-        enable_eplb=enable_eplb,
+        eplb_manager=eplb_manager,
         # TODO(bnell): once we can construct the MK at init time, we
         # can make this a value.
         indices_type_getter=lambda: indices_type,
