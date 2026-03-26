@@ -416,6 +416,7 @@ steps:
             --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
             --build-arg SCCACHE_REGION_NAME=us-west-2 \
             --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+            --push \
             .
           
           # Build wheel extraction stage
