@@ -80,15 +80,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> MediaWithBytes[Image.Image]:
-        with open(filepath, "rb") as f:
-            data = f.read()
-        try:
-            image = Image.open(BytesIO(data))
-            image.load()
-            image = self._convert_image_mode(image)
-        except (OSError, Image.UnidentifiedImageError) as e:
-            raise ValueError(f"Failed to load image: {e}") from e
-        return MediaWithBytes(image, data)
+        return self.load_bytes(filepath.read_bytes())
 
     def encode_base64(
         self,
