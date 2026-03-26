@@ -208,8 +208,8 @@ class SimpleCPUOffloadWorker:
 
         Returns:
             tuple of (finished_sending, finished_recving).
-            - finished_sending: ``__store_done_<idx>`` sentinels for completed
-              store events.
+            - finished_sending: ``__store_done_<idx>`` sentinels for
+                completed store events.
             - finished_recving: req_ids whose loads have completed.
         """
         # (1) Submit transfers

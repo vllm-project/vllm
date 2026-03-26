@@ -571,11 +571,11 @@ class SimpleCPUOffloadScheduler:
         """Handle async transfer completions from worker.
 
         The worker treats load and store differently:
-        - For load which blocks are tightly coupled with requests, the worker reports
-            finished_recving with the request ID.
-        - For store which blocks are not tightly coupled with requests, the worker
-            reports finished_sending with the event index, and the scheduler should
-            update request metadata accordingly.
+        - For load which blocks are tightly coupled with requests,
+                the worker reports finished_recving with the request ID.
+        - For store which blocks are not tightly coupled with requests,
+                the worker reports finished_sending with the event index,
+                and the scheduler should update request metadata accordingly.
 
         The connector emits event-index sentinels (__load_done_N, __store_done_N).
         We translate those back to req_ids using our inverse maps, process completions,
