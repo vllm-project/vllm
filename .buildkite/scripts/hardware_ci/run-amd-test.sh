@@ -496,6 +496,7 @@ if is_multi_node "$commands"; then
 else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+
   docker run \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
@@ -511,6 +512,7 @@ else
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
+    -e "PYTORCH_ROCM_ARCH=" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${commands}"
