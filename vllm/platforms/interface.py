@@ -563,7 +563,7 @@ class Platform:
             # TODO(tdoublep): this constraint can be relaxed fairly
             # easily by changing the way we layout chunks in the
             # mamba2 kernels.
-            base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
+            base_chunk_size = model_config.get_mamba_chunk_size() or mamba_block_size
             assert base_chunk_size is not None
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
