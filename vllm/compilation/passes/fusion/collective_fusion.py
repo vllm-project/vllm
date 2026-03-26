@@ -116,6 +116,23 @@ class HelionAllGatherScaledMMPattern(BasePattern):
         return [x, weight, scale_a, scale_b]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
+        from vllm.kernels.helion.config_manager import ConfigManager
+        from vllm.kernels.helion.utils import get_canonical_gpu_name
+
+        try:
+            config_manager = ConfigManager.get_instance()
+        except RuntimeError:
+            config_manager = ConfigManager()
+
+        # get current GPU platform
+        platform = get_canonical_gpu_name()
+
+        configs = config_manager.get_platform_configs(
+            "helion_matmul_w_progress_fp8", platform
+        )
+        if len(configs) == 0:
+            raise RuntimeError(f"No Helion FP8 configs found for platform {platform}")
+
         def pattern(
             x: torch.Tensor,
             weight: torch.Tensor,

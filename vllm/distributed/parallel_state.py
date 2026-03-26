@@ -426,7 +426,6 @@ class GroupCoordinator:
             scale_a: torch.Tensor,
             scale_b: torch.Tensor,
             a_out: torch.Tensor | None = None,
-            progress: torch.Tensor | None = None,
             SPLITS_PER_RANK: int = 1,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             from vllm.kernels.helion.distributed.all_gather_gemm_fp8 import (
@@ -434,7 +433,7 @@ class GroupCoordinator:
             )
             process_group = self.device_group
             return _helion_all_gather_fp8_gemm_runtime(
-                a_shared, b, scale_a, scale_b, self.world_size, process_group, a_out, progress, SPLITS_PER_RANK
+                a_shared, b, scale_a, scale_b, self.world_size, process_group, a_out, SPLITS_PER_RANK
             )
         
     @property

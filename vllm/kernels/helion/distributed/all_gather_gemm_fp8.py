@@ -3,12 +3,21 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 import helion
 import helion.language as hl
+import triton
+import triton.language as tl
+
+from helion.runtime.triton_helpers import triton_wait_signal
 from vllm.kernels.helion.register import register_kernel
 from typing import Callable, Any
 import logging
 
 logger = logging.getLogger(__name__)
 from vllm.utils.import_utils import has_helion
+
+
+@triton.jit
+def _wait_progress_at_idx(progress: tl.tensor, idx: int) -> None:
+    triton_wait_signal(progress + idx, 1, 0, "acquire", "gpu", "ld", False)
 
 if not has_helion():
     raise ImportError(
@@ -41,10 +50,13 @@ def helion_matmul_w_progress_fp8(
     for tile_m, tile_n in hl.tile([M, N]):
         acc = hl.zeros([tile_m, tile_n], dtype=torch.float32)  # Initialize accumulator in FP32.
         # Once the progress is filled, we can start doing gemm
-        hl.wait(
-            progress,
-            [tile_m.begin // (M_per_rank // SPLITS_PER_RANK)],  # Wait for certain progress signals.
-            signal=1,
+        hl.triton_kernel(
+            _wait_progress_at_idx,
+            args=(
+                progress,
+                tile_m.begin // (M_per_rank // SPLITS_PER_RANK),
+            ),
+            output_like=None,
         )
         # Load scales once per tile
         sa = scale_a[tile_m, :] # [tile_m, 1]
@@ -232,7 +244,6 @@ def _helion_all_gather_fp8_gemm_runtime(
     world_size: int,
     group_name: ProcessGroup,
     a_out: torch.Tensor | None = None,
-    progress: torch.Tensor | None = None,
     SPLITS_PER_RANK: int = 1, 
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -269,14 +280,13 @@ def _helion_all_gather_fp8_gemm_runtime(
 
     if a_out is None:
         a_out = torch.empty(a_shape, dtype=a_shared.dtype, device=a_shared.device)
-    if progress is None:
-        progress = torch.zeros(
-            symm_mem_hdl.world_size * configs["SPLITS_PER_RANK"],
-            dtype=torch.uint32,
-            device=a_shared_symm.device,
-        )
-    else:
-        progress.fill_(0) # Reset progress to 0.
+    
+    progress = torch.zeros(
+        symm_mem_hdl.world_size * configs["SPLITS_PER_RANK"],
+        dtype=torch.uint32,
+        device=a_shared_symm.device,
+    )
+
     backend_stream = copy_engine_all_gather_w_progress(
         a_out, a_shared_symm, progress, group_name, configs["SPLITS_PER_RANK"]
     )
@@ -304,7 +314,6 @@ def helion_all_gather_fp8_gemm_fake(
     world_size: int,
     group_name: ProcessGroup,
     a_out: torch.Tensor | None = None,
-    progress: torch.Tensor | None = None,
     SPLITS_PER_RANK: int = 1,      
 ) -> tuple[torch.Tensor, torch.Tensor]:
 
@@ -327,7 +336,6 @@ def helion_all_gather_fp8_gemm(
     world_size: int,
     group_name: str,
     a_out: torch.Tensor | None = None,
-    progress: torch.Tensor | None = None,
     SPLITS_PER_RANK: int = 1,      
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm.distributed.parallel_state import _groups
@@ -339,7 +347,7 @@ def helion_all_gather_fp8_gemm(
 
     # Call the actual runtime with the group object
     return group._helion_all_gather_fp8_gemm(
-        a_shared, b, scale_a, scale_b, a_out, progress, SPLITS_PER_RANK
+        a_shared, b, scale_a, scale_b, a_out, SPLITS_PER_RANK
     )
 
 from vllm.utils.torch_utils import (
