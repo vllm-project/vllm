@@ -47,10 +47,10 @@ from vllm.entrypoints.openai.responses.serving import (
     _extract_allowed_tools_from_mcp_requests,
     extract_tool_types,
 )
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
 )
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
