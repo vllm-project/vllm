@@ -329,6 +329,11 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
+# Verify that PyTorch is the ROCm build, not CUDA
+RUN python3 -c "import torch; assert torch.version.hip is not None, \
+    f'Expected ROCm PyTorch but got CUDA (torch.version.cuda={torch.version.cuda}, torch.version.hip={torch.version.hip})'; \
+    print(f'Verified: PyTorch {torch.__version__} with ROCm (HIP {torch.version.hip})')"
+
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
     uv pip install --system /rixl_install/*.whl
