@@ -98,6 +98,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
             scales = getattr(layer, self.w_s_name)
             scales.data = scales.t().contiguous()
             if self.config.zero_points:
+                assert self.w_zp_name
                 zp = getattr(layer, self.w_zp_name)
                 zp.data = zp.t().contiguous()
 
