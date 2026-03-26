@@ -134,18 +134,43 @@ PyTorch only supports compute capabilities 8.0-9.0.
 
 ---
 
-## 2026-03-26 更新：NVIDIA 官方 DGX Spark 修复
+## 2026-03-26 10:29 更新：NVIDIA 官方 DGX Spark 修复进展
 
 **PR #38126** — "[NVIDIA] Fix DGX Spark logic" by johnnynunez (NVIDIA maintainer)
-- **状态：** Open，5 条评论，活跃讨论中
-- **内容：** NVIDIA 官方维护者在修复 DGX Spark 相关问题
-- **影响：** 如果这个 PR merge，可能解决部分 DGX Spark 问题
-- **我的策略：** 观察这个 PR 的内容，如果它解决了 Marlin 自动检测问题，我可以转向其他 DGX Spark 方向；如果没有，继续推进 #37141
+- **状态：** Open，7 条评论，活跃讨论中
+- **Labels：** `ready`, `ci/build`, `nvidia`
+- **最后更新：** 2026-03-25T21:12:49Z (~13h 前)
+- **关键讨论：**
+  - eugr 实测：编译成功，包含 nvfp4 kernels，auto tuner errors 正常
+  - RobTand 解释：auto tuner errors 正常（block sizes 少）
+  - johnnynunez 已 push 更新 ("done @mgoin")
+- **我的策略：** 等 merge 后检查代码变更，确认是否覆盖 SM 12.1 Marlin 自动检测
+  - 如已覆盖 → 转向其他 DGX Spark 方向（部署文档、性能优化）
+  - 如未覆盖 → 继续推进 #37141
 
 **教训：**
 - NVIDIA 维护者也在关注 DGX Spark，这是好事
 - 社区协作：我可以测试他们的修复，提供反馈
 - 避免重复工作：先看看 #38126 解决了什么
+
+---
+
+## 2026-03-26 10:29 Cron 检查摘要
+
+**PR #37959 (我的 Helm chart 修复):**
+- 状态：Open ~78h
+- Labels: `bug`, `documentation` (仍无 `ready`)
+- 人类 review: 0
+- 下一步：考虑在 Slack #pr-reviews 礼貌求助
+
+**PR #38126 (NVIDIA DGX Spark 修复):**
+- 状态：Open，~13h 无更新
+- Labels: `ready`, `ci/build`, `nvidia`
+- 等待 merge 后检查代码
+
+**izhuhaoran 动态:**
+- 5 open PRs，无新 merge
+- 专注 Blackwell/Model Runner V2 方向
 
 ---
 
@@ -168,3 +193,29 @@ PyTorch only supports compute capabilities 8.0-9.0.
 - CUDA: 13.0
 - PyTorch: 2.10.0+cu126 (with SM 12.1 warning)
 - vLLM: dev version from source
+
+---
+
+## 2026-03-26 11:34 Cron 检查摘要
+
+**PR #37959 (我的 Helm chart 修复):**
+- 状态：Open ~55h
+- Labels: `bug`, `documentation` (仍无 `ready`)
+- 人类 review: 0
+- 下一步：在 Slack #pr-reviews 礼貌求助
+
+**PR #38126 (NVIDIA DGX Spark 修复):**
+- 状态：Open，~14h 无更新
+- Labels: `ready`, `ci/build`, `nvidia`
+- 等待 merge 后检查代码是否覆盖 SM 12.1 Marlin 自动检测
+
+**izhuhaoran 动态:**
+- 5 open PRs (#38183, #38181, #38180, #38179, #38178)
+- 专注 MRV2、ROCm、KVTransfer 方向
+- 节奏稳定，无新 merge
+
+**本地环境:**
+- GPU: NVIDIA GB10 (SM 12.1)
+- Driver: 580.95.05
+- 分支：fix/helm-chart-selector-labels
+- 未提交更改：DAILY_LEARNINGS.md, dgx_spark_issues.md
