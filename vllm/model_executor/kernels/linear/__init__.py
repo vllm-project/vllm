@@ -432,16 +432,6 @@ def choose_wfp8_a16_linear_kernel(
                 f" {kernel.__name__} disabled by environment variable"
             )
             continue
-        if (
-            compute_capability is not None
-            and kernel.get_min_capability() > compute_capability
-        ):
-            failure_reasons.append(
-                f"{kernel.__name__} requires capability "
-                f"{kernel.get_min_capability()}, current compute "
-                f" capability is {compute_capability}"
-            )
-            continue
 
         can_implement, failure_reason = kernel.can_implement(config)
         if can_implement:
