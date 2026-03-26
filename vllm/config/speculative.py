@@ -65,6 +65,7 @@ SpeculativeMethod = Literal[
     "custom_class",
     EagleModelTypes,
     NgramGPUTypes,
+    "universal_draft",
 ]
 RejectionSampleMethod = Literal["standard", "synthetic"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
@@ -674,7 +675,7 @@ class SpeculativeConfig:
                 self.draft_model_config = ModelConfig(
                     model=self.model,
                     runner="draft",
-                    tokenizer=self.target_model_config.tokenizer,
+                    tokenizer=(self.model if self.method == "universal_draft" else self.target_model_config.tokenizer),
                     tokenizer_mode=self.target_model_config.tokenizer_mode,
                     trust_remote_code=self.target_model_config.trust_remote_code,
                     allowed_local_media_path=self.target_model_config.allowed_local_media_path,
@@ -725,6 +726,8 @@ class SpeculativeConfig:
                             ",which may result in lower acceptance rate"
                         )
                 elif self.method == "draft_model":
+                    pass
+                elif self.method == "universal_draft":
                     pass
                 else:
                     raise NotImplementedError(
@@ -1015,7 +1018,8 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        self.verify_equal_vocab_size_if_draft_model()
+        if self.method != "universal_draft":
+            self.verify_equal_vocab_size_if_draft_model()
         return self
 
     def verify_equal_vocab_size_if_draft_model(self):
@@ -1045,7 +1049,7 @@ class SpeculativeConfig:
         if self.parallel_drafting:
             # For parallel drafting, we need one new slot per 'masked' token
             slots_per_req = self.num_speculative_tokens - 1
-        if self.uses_draft_model():
+        if self.uses_draft_model() or self.uses_universal_draft():
             # For draft model-based speculation, we need one new slot per request
             # Since we do not slice the draft tokens
             slots_per_req += 1
@@ -1072,6 +1076,9 @@ class SpeculativeConfig:
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
+
+    def uses_universal_draft(self) -> bool:
+        return self.method == "universal_draft"
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"

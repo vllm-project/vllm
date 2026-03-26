@@ -394,6 +394,10 @@ class SpecDecodeBaseProposer:
 
         self.cudagraph_dispatcher.initialize_cudagraph_keys(eagle_cudagraph_mode)
 
+    def _prepare_draft_input_ids(self, token_ids: torch.Tensor) -> torch.Tensor:
+        """Convert token IDs for draft model input. Override for vocab mapping."""
+        return token_ids
+
     def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Greedy-sample draft tokens from hidden states."""
         if self.use_local_argmax_reduction:
@@ -571,7 +575,8 @@ class SpecDecodeBaseProposer:
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
-            input_ids = draft_token_ids_list[-1].int()
+            input_ids = self._prepare_draft_input_ids(
+                draft_token_ids_list[-1].int())
 
             if not self.constant_draft_positions:
                 positions = self._update_positions_dependent_metadata(
@@ -875,7 +880,7 @@ class SpecDecodeBaseProposer:
         return per_group_attn_metadata, per_layer_attn_metadata
 
     def model_returns_tuple(self) -> bool:
-        return self.method not in ("mtp", "draft_model", "dflash")
+        return self.method not in ("mtp", "draft_model", "universal_draft", "dflash")
 
     def prepare_next_token_ids_cpu(
         self,
