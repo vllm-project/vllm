@@ -805,6 +805,11 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             # autotuning completes before KV cache allocation.
             self._warmup_prefill_kernels(mixed_qkv)
             return
+        if (
+            current_platform.is_cuda_alike()
+            and torch.cuda.is_current_stream_capturing()
+        ):
+            return
 
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata[self.prefix]
