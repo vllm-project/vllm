@@ -63,6 +63,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         self.kv_cache_dtype = kv_cache_dtype
         self.device = device
         self.vllm_config = vllm_config
+        self.dtype = vllm_config.model_config.dtype
 
         self.attn = Attention(
             num_heads=self.num_qo_heads,
@@ -152,6 +153,7 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
             activation_quant_key=self.quant_key,
             weight_quant_key=self.quant_key,
             device=self.device,
+            input_dtype=self.dtype,
         )
 
         w = kwargs.get("w")

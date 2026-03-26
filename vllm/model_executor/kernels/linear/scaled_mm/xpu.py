@@ -40,6 +40,7 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         weight = layer.weight
         weight_scale = layer.weight_scale

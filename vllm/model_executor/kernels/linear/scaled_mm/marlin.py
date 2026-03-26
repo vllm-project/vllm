@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
 
 import torch
 
@@ -59,10 +58,8 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
-    def __init__(
-        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
-    ) -> None:
-        super().__init__(c, layer_param_names)
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
+        super().__init__(config)
         self.marlin_input_dtype = None
         self.block_quant = self.config.weight_quant_key in {kFp8Static128BlockSym}
         self.size_k_first = not self.block_quant
@@ -106,6 +103,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         if self.block_quant:
             weight_scale = layer.weight_scale_inv
