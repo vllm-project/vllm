@@ -87,6 +87,15 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
 
+        # Check if q_b_proj has fused RMSNorm+FP8Quant kernel.
+        # When True, skip standalone q_a_layernorm in forward.
+        self._fused_q_b = False
+        if self.q_b_proj is not None:
+            qm = getattr(self.q_b_proj, "quant_method", None)
+            if qm and hasattr(qm, "w8a8_block_fp8_linear"):
+                op = qm.w8a8_block_fp8_linear
+                self._fused_q_b = getattr(op, "norm_weight", None) is not None
+
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
@@ -135,7 +144,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
-            q_c = self.q_a_layernorm(q_c)
+            if not self._fused_q_b:
+                q_c = self.q_a_layernorm(q_c)
             q = self.q_b_proj(q_c)[0]
         else:
             assert self.kv_a_proj_with_mqa is not None, (
