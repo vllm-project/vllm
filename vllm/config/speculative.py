@@ -58,7 +58,7 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
 ]
-RejectionSampleMethod = Literal["strict", "probabilistic"]
+RejectionSampleMethod = Literal["strict", "probabilistic", "synthetic"]
 
 
 @config
@@ -183,6 +183,13 @@ class SpeculativeConfig:
     or probabilistic rejection sampling. Both respect the target model
     distribution, but the latter yields a higher acceptance rate at the cost
     of more memory to cache draft logits."""
+
+    synthetic_acceptance_rate: float | None = None
+    """Average acceptance rate for synthetic rejection sampling. Draft
+    tokens are accepted with a position-dependent probability that decays
+    geometrically, calibrated so that the mean rate across all speculative
+    positions equals this value. Only used when rejection_sample_method
+    is 'synthetic'. Must be in [0, 1]."""
 
     def compute_hash(self) -> str:
         """
