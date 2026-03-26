@@ -144,7 +144,10 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
     return (
         rocm_aiter_ops.is_enabled()
         and cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
-        and cfg.compilation_config.use_inductor_graph_partition
+        and (
+            cfg.compilation_config.use_inductor_graph_partition
+            or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
+        )
     )
 
 
@@ -188,7 +191,7 @@ OPTIMIZATION_LEVEL_01 = {
             "enable_sp": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
-            "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "fuse_rope_kvcache": False,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -695,6 +698,25 @@ class VllmConfig:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config
             )
+
+        if (
+            self.quant_config is not None
+            and self.model_config is not None
+            and hasattr(self.quant_config, "use_deep_gemm")
+            and self.quant_config.use_deep_gemm is None
+        ):
+            from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
+
+            model_type = getattr(self.model_config.hf_text_config, "model_type", None)
+            if should_auto_disable_deep_gemm(model_type):
+                self.quant_config.use_deep_gemm = False
+                logger.warning_once(
+                    "Auto-disabled DeepGemm for model_type=%s on Blackwell. "
+                    "DeepGemm E8M0 scale format causes accuracy degradation "
+                    "for this architecture. Falling back to CUTLASS. "
+                    "To disable DeepGemm globally, set VLLM_USE_DEEP_GEMM=0.",
+                    model_type,
+                )
 
         from vllm.v1.executor.abstract import Executor
 
