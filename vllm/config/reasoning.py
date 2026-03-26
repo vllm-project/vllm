@@ -19,7 +19,7 @@ class ReasoningConfig:
     `initialize_token_ids` and are not intended to be set directly.
     """
 
-    reasoning_parser: str | None = None
+    reasoning_parser: str = ""
     """The name of the ReasoningParser to use for this model."""
     think_start_str: str = ""
     """String that indicates the start of reasoning."""
@@ -60,9 +60,7 @@ class ReasoningConfig:
         tokenizer = cached_tokenizer_from_config(model_config=model_config)
         think_start_str = self.think_start_str
         think_end_str = self.think_end_str
-        if self.reasoning_parser is not None and (
-            not think_start_str or not think_end_str
-        ):
+        if self.reasoning_parser and (not think_start_str or not think_end_str):
             parser_cls = ReasoningParserManager.get_reasoning_parser(
                 self.reasoning_parser
             )
