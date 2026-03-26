@@ -655,7 +655,7 @@ class MoERunnerBase(MoERunner):
         the sequence-parallel context.
         """
         # TODO(bnell): this can be removed after MK migration is complete.
-        layer.ensure_moe_quant_config_init()
+        layer._ensure_moe_quant_config_init()
 
         with self._sequence_parallel_context():
             return self._forward_impl(

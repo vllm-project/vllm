@@ -145,6 +145,11 @@ def maybe_roundup_hidden_size(
     return hidden_size
 
 
+class RoutedExperts(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+
 # --8<-- [start:fused_moe]
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
@@ -411,6 +416,7 @@ class FusedMoE(CustomOp):
         )
         self.routing_method_type: RoutingMethodType = router.routing_method_type
 
+        # TODO(bnell): is this redundant now?
         # When using zero experts, slice e_score_correction_bias to cover
         # only real experts, for compatibility with monolithic kernels that
         # read it directly.
@@ -457,6 +463,8 @@ class FusedMoE(CustomOp):
             # TODO: in_dtype == out_dtype?
             disable_inplace=disable_inplace() or shared_experts is not None,
         )
+
+        # Move XXXXXXXXXXXXX
         if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
                 "Mori needs to be used with aiter fused_moe for now."
@@ -479,11 +487,13 @@ class FusedMoE(CustomOp):
         # TODO(bnell): only for weight loading. how to get around this?
         self.quant_method = quant_method
 
+        # Move XXXXXXXXXXXXX
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(
                 "is_act_and_mul=False is supported only for CUDA and ROCm for now"
             )
 
+        # Move XXXXXXXXXXXXX
         if eplb_manager is not None and not quant_method.supports_eplb:
             # TODO: Add support for additional quantization methods.
             # The implementation for other quantization methods does not
@@ -505,12 +515,9 @@ class FusedMoE(CustomOp):
             "weight_loader": self.weight_loader,
             "global_num_experts": self.global_num_experts,
         }
+
         # need full intermediate size pre-sharding for WNA16 act order
-        if quant_method.__class__.__name__ in (
-            "GPTQMarlinMoEMethod",
-            "CompressedTensorsWNA16MarlinMoEMethod",
-            "CompressedTensorsWNA16MoEMethod",
-        ):
+        if self._needs_intermediate_size_param(quant_method):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         quant_method.create_weights(layer=self, **moe_quant_params)
@@ -531,6 +538,26 @@ class FusedMoE(CustomOp):
             apply_scale_to_output=apply_scale_to_output,
             routed_scaling_factor=routed_scaling_factor,
         )
+
+    # TODO(bnell): make this a method on quant_method
+    def _needs_intermediate_size_param(self, quant_method: FusedMoEMethodBase) -> bool:
+        return quant_method.__class__.__name__ in (
+            "GPTQMarlinMoEMethod",
+            "CompressedTensorsWNA16MarlinMoEMethod",
+            "CompressedTensorsWNA16MoEMethod",
+        )
+
+    def extra_repr(self) -> str:
+        s = (
+            f"global_num_experts={self.global_num_experts}, "
+            f"local_num_experts={self.local_num_experts}, "
+            f"top_k={self.top_k}, "
+            f"intermediate_size_per_partition={self.intermediate_size_per_partition}, "  # noqa: E501
+            f"tp_size={self.tp_size},\n"
+            f"ep_size={self.ep_size}, "
+        )
+
+        return s
 
     def _get_quant_method(
         self,
@@ -557,6 +584,14 @@ class FusedMoE(CustomOp):
     def _replace_quant_method(self, mk: FusedMoEMethodBase):
         self._runner._replace_quant_method(mk)
 
+    def _ensure_moe_quant_config_init(self):
+        if self._runner.quant_method.moe_quant_config is None:
+            # Note: the moe_quant_config can't be constructed until after
+            # weight loading post processing.
+            self._runner.quant_method.moe_quant_config = (
+                self._runner.quant_method.get_fused_moe_quant_config(self)
+            )
+
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
     # This is called after all weight loading and post-processing, so it
@@ -570,7 +605,7 @@ class FusedMoE(CustomOp):
         ):
             return None
 
-        self.ensure_moe_quant_config_init()
+        self._ensure_moe_quant_config_init()
         # routing_tables only needed for round-robin expert placement with
         # DeepEP all2all backend.
         routing_tables = self._maybe_init_expert_routing_tables()
@@ -596,6 +631,10 @@ class FusedMoE(CustomOp):
                     inplace=not self.moe_config.disable_inplace,
                 )
             )
+
+    #
+    # Properties
+    #
 
     @property
     def layer_id(self):
@@ -666,6 +705,18 @@ class FusedMoE(CustomOp):
     def shared_experts(self) -> SharedExperts | None:
         return self._runner.shared_experts
 
+    #
+    # Expert maps
+    #
+
+    @property
+    def expert_map(self) -> torch.Tensor | None:
+        return (
+            self.expert_map_manager.expert_map
+            if not self.rocm_aiter_fmoe_enabled
+            else self.expert_map_manager.expert_mask
+        )
+
     def _maybe_init_expert_routing_tables(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
@@ -685,45 +736,6 @@ class FusedMoE(CustomOp):
 
         return routing_tables
 
-    @staticmethod
-    def ensure_round_robin_expert_routing_tables(
-        global_num_experts: int,
-        ep_size: int,
-        ep_rank: int,
-        local_num_experts: int,
-        device: torch.device | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        device_kwargs = {"device": device} if device is not None else {}
-        global_indices = torch.arange(
-            global_num_experts, dtype=torch.long, **device_kwargs
-        )
-        owner = torch.remainder(global_indices, ep_size)
-        local_index = torch.div(global_indices, ep_size, rounding_mode="floor")
-        base = global_num_experts // ep_size
-        remainder = global_num_experts % ep_size
-        physical_offset = owner * base
-        if remainder > 0:
-            remainder_tensor = torch.tensor(
-                remainder, dtype=torch.long, **device_kwargs
-            )
-            physical_offset = physical_offset + torch.minimum(owner, remainder_tensor)
-
-        global_to_physical = physical_offset + local_index
-        physical_to_global = torch.empty_like(global_to_physical)
-        physical_to_global[global_to_physical] = global_indices
-
-        local_global = torch.arange(
-            ep_rank,
-            global_num_experts,
-            ep_size,
-            dtype=torch.long,
-            **device_kwargs,
-        )
-        if local_global.numel() != local_num_experts:
-            local_global = local_global[:local_num_experts]
-
-        return (global_to_physical, physical_to_global, local_global)
-
     def update_expert_map(self):
         """Update expert mappings for new EP configuration."""
         # ep_size and ep_rank should already be updated in moe_parallel_config
@@ -742,6 +754,84 @@ class FusedMoE(CustomOp):
                 vllm_config=get_current_vllm_config(),
                 dp_size=get_dp_group().world_size,
             )
+
+    def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
+        """Map global expert ID to local expert ID."""
+        return self.expert_map_manager.map_global_to_local(expert_id)
+
+    #
+    # EPLB
+    #
+
+    def _init_aiter_shared_experts_topK_buffer(
+        self, vllm_config: VllmConfig, dp_size: int
+    ):
+        if self.num_fused_shared_experts > 0:
+            init_aiter_topK_meta_data(
+                n_routed_experts=self.global_num_experts,
+                n_shared_experts=self.num_fused_shared_experts,
+                top_k=self.top_k,
+                tp_rank=self.ep_rank if self.use_ep else self.tp_rank,
+                tp_size=self.ep_size if self.use_ep else self.tp_size,
+                shared_experts_score=1.0,
+                max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens
+                * dp_size,
+                is_EP=self.use_ep,
+            )
+        # HACK
+        self.expert_map_manager._local_num_experts += self.num_fused_shared_experts
+
+    def get_expert_weights(self) -> Iterable[torch.Tensor]:
+        """Delegate to EPLB manager."""
+        if self._runner.router.eplb_manager is not None:
+            return self._runner.router.eplb_manager.get_expert_weights(self)
+        else:
+            return []
+
+    def set_eplb_state(
+        self,
+        moe_layer_idx: int,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        """
+        Register the EPLB state in this layer.
+
+        This is used later in forward pass, where we get the expert mapping
+        and record the load metrics in `expert_load_view`.
+        """
+        if self._runner.router.eplb_manager is not None:
+            self._runner.router.eplb_manager.set_state(
+                moe_layer_idx,
+                expert_load_view,
+                logical_to_physical_map,
+                logical_replica_count,
+            )
+
+    @classmethod
+    def make_expert_params_mapping(
+        cls,
+        model: torch.nn.Module,
+        ckpt_gate_proj_name: str,
+        ckpt_down_proj_name: str,
+        ckpt_up_proj_name: str,
+        num_experts: int,
+        num_redundant_experts: int = 0,
+    ) -> list[tuple[str, str, int, str]]:
+        """Delegate to EPLB manager."""
+        return EplbManager.make_expert_params_mapping(
+            model,
+            ckpt_gate_proj_name,
+            ckpt_down_proj_name,
+            ckpt_up_proj_name,
+            num_experts,
+            num_redundant_experts,
+        )
+
+    #
+    # Weight Loading
+    #
 
     def _load_per_tensor_weight_scale(
         self,
@@ -913,28 +1003,6 @@ class FusedMoE(CustomOp):
         else:
             assert shard_id in ("w1", "w3")
             expert_data.copy_(loaded_weight)
-
-    def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
-        """Map global expert ID to local expert ID."""
-        return self.expert_map_manager.map_global_to_local(expert_id)
-
-    def _init_aiter_shared_experts_topK_buffer(
-        self, vllm_config: VllmConfig, dp_size: int
-    ):
-        if self.num_fused_shared_experts > 0:
-            init_aiter_topK_meta_data(
-                n_routed_experts=self.global_num_experts,
-                n_shared_experts=self.num_fused_shared_experts,
-                top_k=self.top_k,
-                tp_rank=self.ep_rank if self.use_ep else self.tp_rank,
-                tp_size=self.ep_size if self.use_ep else self.tp_size,
-                shared_experts_score=1.0,
-                max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens
-                * dp_size,
-                is_EP=self.use_ep,
-            )
-        # HACK
-        self.expert_map_manager._local_num_experts += self.num_fused_shared_experts
 
     @overload
     def weight_loader(
@@ -1281,46 +1349,9 @@ class FusedMoE(CustomOp):
                         )
                         yield param_name
 
-    def get_expert_weights(self) -> Iterable[torch.Tensor]:
-        """Delegate to EPLB manager."""
-        if self._runner.router.eplb_manager is not None:
-            return self._runner.router.eplb_manager.get_expert_weights(self)
-        else:
-            return []
-
-    def set_eplb_state(
-        self,
-        moe_layer_idx: int,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        """
-        Register the EPLB state in this layer.
-
-        This is used later in forward pass, where we get the expert mapping
-        and record the load metrics in `expert_load_view`.
-        """
-        if self._runner.router.eplb_manager is not None:
-            self._runner.router.eplb_manager.set_state(
-                moe_layer_idx,
-                expert_load_view,
-                logical_to_physical_map,
-                logical_replica_count,
-            )
-
-    def ensure_moe_quant_config_init(self):
-        if self._runner.quant_method.moe_quant_config is None:
-            # Note: the moe_quant_config can't be constructed until after
-            # weight loading post processing.
-            self._runner.quant_method.moe_quant_config = (
-                self._runner.quant_method.get_fused_moe_quant_config(self)
-            )
-
-    # @property
-    # def moe_quant_config(self) -> FusedMoEQuantConfig | None:
-    #    self.ensure_moe_quant_config_init()
-    #    return self._runner.quant_method.moe_quant_config
+    #
+    # Execution
+    #
 
     def forward_native(
         self,
@@ -1332,52 +1363,12 @@ class FusedMoE(CustomOp):
             router_logits,
         )
 
-    @property
-    def expert_map(self) -> torch.Tensor | None:
-        return (
-            self.expert_map_manager.expert_map
-            if not self.rocm_aiter_fmoe_enabled
-            else self.expert_map_manager.expert_mask
-        )
-
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
         return self.forward_native(hidden_states, router_logits)
-
-    @classmethod
-    def make_expert_params_mapping(
-        cls,
-        model: torch.nn.Module,
-        ckpt_gate_proj_name: str,
-        ckpt_down_proj_name: str,
-        ckpt_up_proj_name: str,
-        num_experts: int,
-        num_redundant_experts: int = 0,
-    ) -> list[tuple[str, str, int, str]]:
-        """Delegate to EPLB manager."""
-        return EplbManager.make_expert_params_mapping(
-            model,
-            ckpt_gate_proj_name,
-            ckpt_down_proj_name,
-            ckpt_up_proj_name,
-            num_experts,
-            num_redundant_experts,
-        )
-
-    def extra_repr(self) -> str:
-        s = (
-            f"global_num_experts={self.global_num_experts}, "
-            f"local_num_experts={self.local_num_experts}, "
-            f"top_k={self.top_k}, "
-            f"intermediate_size_per_partition={self.intermediate_size_per_partition}, "  # noqa: E501
-            f"tp_size={self.tp_size},\n"
-            f"ep_size={self.ep_size}, "
-        )
-
-        return s
 
 
 # Mark the FusedMoE weight_loader as supporting MoE-specific parameters

@@ -367,9 +367,9 @@ class ExpertMapManager:
         if self._expert_map is None:
             return
 
-        self._routing_tables = self._build_routing_tables()
+        self._routing_tables = self._ensure_round_robin_expert_routing_tables()
 
-    def _build_routing_tables(
+    def _ensure_round_robin_expert_routing_tables(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build routing tables for round-robin placement."""
