@@ -332,6 +332,7 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> (
         AsyncGenerator[StreamingResponsesResponse, None]
         | ResponsesResponse
+        | ResponseFailedEvent
         | ErrorResponse
     ):
         error_check_ret = await self._check_model(request)
@@ -513,6 +514,22 @@ class OpenAIServingResponses(OpenAIServing):
                 "Failed to create response for request %s", request.request_id
             )
             created_time = int(time.time())
+
+            # Best-effort extraction of input/output messages
+            # for debugging. Context may be partially populated.
+            input_messages: ResponseInputOutputMessage | None = None
+            output_messages: ResponseInputOutputMessage | None = None
+            if request.enable_response_messages:
+                try:
+                    if isinstance(context, HarmonyContext):
+                        input_messages = context.messages[: context.num_init_messages]
+                        output_messages = context.messages[context.num_init_messages :]
+                    elif hasattr(context, "input_messages"):
+                        input_messages = context.input_messages
+                        output_messages = context.output_messages
+                except Exception:
+                    pass
+
             failed_response = ResponsesResponse.from_request(
                 request,
                 sampling_params,
@@ -525,8 +542,13 @@ class OpenAIServingResponses(OpenAIServing):
                     code="server_error",
                     message=str(e),
                 ),
+                input_messages=input_messages,
+                output_messages=output_messages,
             )
-            return failed_response
+            return ResponseFailedEvent(
+                response=failed_response,
+                type="response.failed",
+            )
 
     async def _create_response_with_result_generator(
         self,
@@ -803,6 +825,7 @@ class OpenAIServingResponses(OpenAIServing):
         # we guarantee that if the status is not "completed", it is accurate.
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
+        raise NotImplementedError("LOL")
 
         input_messages: ResponseInputOutputMessage | None = None
         output_messages: ResponseInputOutputMessage | None = None

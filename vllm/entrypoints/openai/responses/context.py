@@ -183,9 +183,14 @@ class SimpleContext(ConversationContext):
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.kv_transfer_params: dict[str, Any] | None = None
+        self.lol = 0
 
     def append_output(self, output) -> None:
         self.last_output = output
+        self.lol += 1
+        if self.lol > 5:
+            raise ValueError("SimpleContext only supports 5 outputs.")
+
         if not isinstance(output, RequestOutput):
             raise ValueError("SimpleContext only supports RequestOutput.")
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
