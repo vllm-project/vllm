@@ -391,11 +391,6 @@ class KimiK2ToolParser(ToolParser):
                     return None
                 diff = self.prev_tool_call_arr[self.current_tool_id].get("arguments")
                 if diff:
-                    diff = (
-                        diff.encode("utf-8").decode("unicode_escape")
-                        if diff is str
-                        else diff
-                    )
                     if '"}' not in delta_text:
                         # Handle deferred section exit before returning
                         if deferred_section_exit and self.in_tool_section:

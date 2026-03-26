@@ -283,11 +283,6 @@ class Hermes2ProToolParser(ToolParser):
                     return None
                 diff = self.prev_tool_call_arr[self.current_tool_id].get("arguments")
                 if diff:
-                    diff = (
-                        diff.encode("utf-8").decode("unicode_escape")
-                        if diff is str
-                        else diff
-                    )
                     if '"}' not in delta_text:
                         return None
                     end_loc = delta_text.rindex('"}')
