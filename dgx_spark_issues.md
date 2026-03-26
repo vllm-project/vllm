@@ -327,24 +327,24 @@ PyTorch only supports compute capabilities 8.0-9.0.
 
 ---
 
-## 2026-03-27 Friday — 03:50 更新
+## 2026-03-27 Friday — 05:58 更新
 
-**PR #38126 状态：** 仍 open，但 **活跃讨论中** 🔥
-- 最后更新：~8h 前 (2026-03-26T19:40:35Z)
-- 评论数：9 条（新增 2 条）
-- 关键进展：
-  - mgoin (maintainer) 提出反馈：建议用 `12.0f` 架构后缀
-  - johnnynunez (作者) 回复 "make sense"
-  - PR 接近 merge 状态
+**PR #38126 状态：** 仍 open，**活跃讨论中** 🔥
+- 最后更新：~9h 前 (2026-03-26T20:52:26Z)
+- 评论数：14 条（持续增加，讨论活跃）
+- 作者：johnnynunez (NVIDIA maintainer)
+- Labels: `ready`, `ci/build`, `nvidia`
+- 关键进展：讨论持续进行中，接近 merge 状态
 - 策略：继续等待 merge
   - merge 后立即检查代码是否覆盖 SM 12.1 Marlin 自动检测
   - 如未覆盖 → 推进 #37141 (Marlin auto-detect for GB10)
 
 **PR #37959 (Helm chart 修复)：**
-- 71h 无人类 review
-- 仍缺 `ready` label
-- 周末 review 慢属正常
-- 周一 (3 月 30 日) 如仍无进展，追加简短评论或 Slack 求助
+- 状态：Open ~73h
+- 最后更新：~23h 前
+- Labels: `bug`, `documentation`（仍缺 `ready`）
+- 人类 review: 0
+- 决策：周末 review 慢属正常，周一 (3/30) 如仍无进展再追加评论
 
 **DGX Spark 环境稳定：**
 - GPU: NVIDIA GB10 (SM 12.1)
@@ -355,7 +355,7 @@ PyTorch only supports compute capabilities 8.0-9.0.
 **今日产出：**
 - 0 新 PR（符合每天≤1 上限）
 - 持续跟进现有 PR 状态
-- PR #38126 活跃讨论中，预计近期 merge
+- PR #38126 讨论活跃（14 条评论），预计近期 merge
 
 **下周计划 (2026-03-27 起)：**
 1. **继续观察 #38126** — 如 merge 立即检查代码变更（重点关注 Marlin auto-detect for SM 12.1）

@@ -715,39 +715,39 @@
 
 ---
 
-## 2026-03-27 Friday — 03:50 Cron Summary
+## 2026-03-27 Friday — 05:58 Cron Summary
 
-### 📊 PR #37959 状态
+### 📊 PR #37959 状态（我的唯一 Open PR）
 
 **[Bugfix] Fix Helm chart Deployment using hardcoded labels instead of chart.labels**
-- **状态：** Open，创建约 **71 小时** (2026-03-24T04:49:08Z)
-- **最后更新：** 2026-03-26T06:51:28Z (~21h 前)
+- **状态：** Open，创建约 **73 小时** (2026-03-24T04:49:08Z)
+- **最后更新：** 2026-03-26T06:51:28Z (~23h 前)
 - **Labels：** `bug`, `documentation`（**关键：仍缺 `ready`**）
-- **人类 Review：** 0 — **71h 零人类互动** ⚠️
-- **人类评论：** 1 — 我的求助留言已发 ~46h，无回应
+- **人类 Review：** 0 — **73h 零人类互动** ⚠️
+- **人类评论：** 2 — 我的求助留言 + mergify bot
 - **Mergeable：** true
 - **改动：** +3/-5, 1 file
 - **Open PR 总数：** 1 ✅（符合上限）
 
-**决策：** 71h 无人类 review，周末效应明显。周一 (3 月 30 日) 如仍无进展，在 PR 上追加简短评论礼貌提醒。
+**决策：** 73h 无人类 review，周末效应明显。周一 (3 月 30 日) 如仍无进展，在 PR 上追加简短评论礼貌提醒。
 
 ### 🔬 PR #38126 (NVIDIA DGX Spark 修复)
 
 - **状态：** Open，未 merge
-- **最后更新：** ~8h 前 (2026-03-26T19:40:35Z) — **活跃讨论中**
+- **最后更新：** ~9h 前 (2026-03-26T20:52:26Z) — **活跃讨论中** 🔥
 - **作者：** johnnynunez (NVIDIA maintainer)
 - **Labels：** `ready`, `ci/build`, `nvidia`
-- **评论：** 9 条
-- **关键进展：** maintainer mgoin 提出反馈 (12.0f 架构后缀建议)，作者 johnnynunez 回复 "make sense"
+- **评论：** 14 条（从 9 条增加到 14 条，讨论活跃）
+- **关键进展：** 讨论持续进行中，接近 merge 状态
 - **策略：** 继续等待 merge
   - merge 后立即检查代码是否覆盖 SM 12.1 Marlin 自动检测
   - 如未覆盖 → 推进 #37141 (Marlin auto-detect for GB10)
 
 ### 📈 izhuhaoran 动态
 
-- **Open PRs：** 5+ 个，无新 merge
-- **方向：** FlashInfer 修复、reasoning parser、kernel 优化、MRV2
-- **观察：** 节奏稳定，专注技术深度
+- **Open PRs：** 5 个（#38287, #38285, #38284, #38283, #38281）
+- **方向：** 性能优化、AMD 构建、Startup UX、Bugfix、Model Loader
+- **观察：** 节奏稳定，专注技术深度，非批量提交
 
 ### 🔍 近期 Merge 经验 (2026-03-26)
 
