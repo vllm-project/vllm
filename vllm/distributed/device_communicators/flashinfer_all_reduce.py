@@ -106,7 +106,7 @@ def _resolve_fi_ar_backend() -> str:
         # Should switch back to auto when the issue is resolved.
         backend = "trtllm"
 
-    logger.info_once("Auto-selected flashinfer allreduce backend: mnnvl")
+    logger.info_once(f"Auto-selected flashinfer allreduce backend: {backend}")
     return backend
 
 
