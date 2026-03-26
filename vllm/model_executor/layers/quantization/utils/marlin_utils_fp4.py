@@ -24,7 +24,7 @@ logger = init_logger(__name__)
 
 
 def is_fp4_marlin_supported():
-    return current_platform.has_device_capability(75) and not current_platform.is_rocm()
+    return current_platform.is_cuda() and current_platform.has_device_capability(75)
 
 
 def _nvfp4_compute_scale_factor(marlin_scales: torch.Tensor) -> float:
