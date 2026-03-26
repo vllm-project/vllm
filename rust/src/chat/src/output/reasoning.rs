@@ -100,7 +100,7 @@ pub(crate) async fn reasoning_event_stream(
 
     while let Some(event) = decoded_stream.next().await.transpose()? {
         match event {
-            DecodedTextEvent::Start => yield ContentEvent::Start,
+            DecodedTextEvent::Start { .. } => yield ContentEvent::Start,
             DecodedTextEvent::TextDelta { delta, .. } => {
                 for next in state.process_delta(delta) {
                     yield next;
@@ -172,14 +172,19 @@ mod tests {
     #[tokio::test]
     async fn reasoning_parser_failure_falls_back_to_plain_text() {
         let events = stream::iter(vec![
-            Ok(DecodedTextEvent::Start),
+            Ok(DecodedTextEvent::Start {
+                prompt_token_count: 3,
+                prompt_logprobs: None,
+            }),
             Ok(DecodedTextEvent::TextDelta {
                 delta: "abc".to_string(),
                 text: "abc".to_string(),
+                logprobs: None,
             }),
             Ok(DecodedTextEvent::TextDelta {
                 delta: "def".to_string(),
                 text: "abcdef".to_string(),
+                logprobs: None,
             }),
             Ok(DecodedTextEvent::Done {
                 text: "abcdef".to_string(),

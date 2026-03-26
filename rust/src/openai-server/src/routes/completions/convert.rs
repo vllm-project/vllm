@@ -46,6 +46,8 @@ pub fn prepare_completion_request(
             seed: request.sampling_seed,
             max_tokens: request.max_tokens,
             min_tokens: request.min_tokens,
+            logprobs: None,
+            prompt_logprobs: None,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,

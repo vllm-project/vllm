@@ -165,7 +165,7 @@ async fn completion_chunk_stream(
 
     while let Some(next) = stream.next().await {
         match next {
-            Ok(DecodedTextEvent::Start) => {
+            Ok(DecodedTextEvent::Start { .. }) => {
                 debug!(request_id = %response_id, "completion stream started");
                 if let Some(prompt) = echo.as_ref() {
                     yield CompletionSseChunk::Chunk(delta_chunk(

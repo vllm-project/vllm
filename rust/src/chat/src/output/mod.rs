@@ -57,7 +57,7 @@ impl ContentEvent {
     /// (non-reasoning) content and discarding cumulative fields.
     fn from_decoded_plain_text(event: DecodedTextEvent) -> Self {
         match event {
-            DecodedTextEvent::Start => Self::Start,
+            DecodedTextEvent::Start { .. } => Self::Start,
             DecodedTextEvent::TextDelta { delta, .. } => Self::TextDelta {
                 kind: AssistantBlockKind::Text,
                 delta,

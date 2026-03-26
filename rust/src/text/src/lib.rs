@@ -15,7 +15,10 @@ use futures::Stream;
 pub use lower::{
     PreparedTextRequest, lower_sampling_params, lower_text_request, resolve_max_tokens,
 };
-pub use output::{CollectedTextOutput, DecodedTextEvent, TextDecodeOptions, TextOutputStreamExt};
+pub use output::{
+    CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
+    DecodedTextEvent, DecodedTokenLogprob, TextDecodeOptions, TextOutputStreamExt,
+};
 pub use request::{Prompt, SamplingParams, TextRequest};
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_llm::Llm;

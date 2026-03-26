@@ -45,6 +45,14 @@ pub struct SamplingParams {
     pub max_tokens: Option<u32>,
     /// Minimum number of tokens to generate before EOS or stop-token handling.
     pub min_tokens: Option<u32>,
+    /// Number of log probabilities to return per generated token.
+    ///
+    /// `None` disables sample logprobs. `-1` requests the full vocabulary.
+    pub logprobs: Option<i32>,
+    /// Number of log probabilities to return per prompt token.
+    ///
+    /// `None` disables prompt logprobs. `-1` requests the full vocabulary.
+    pub prompt_logprobs: Option<i32>,
     /// Minimum probability threshold for token sampling. `None` means no explicit user override.
     pub min_p: Option<f32>,
     /// Frequency penalty applied by the sampler. `None` means no explicit user override.
@@ -69,6 +77,8 @@ impl Default for SamplingParams {
             seed: None,
             max_tokens: None,
             min_tokens: None,
+            logprobs: None,
+            prompt_logprobs: None,
             min_p: None,
             frequency_penalty: None,
             presence_penalty: None,

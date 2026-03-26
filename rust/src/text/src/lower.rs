@@ -79,6 +79,8 @@ pub fn lower_sampling_params(
         seed,
         max_tokens,
         min_tokens,
+        logprobs,
+        prompt_logprobs,
         min_p,
         frequency_penalty,
         presence_penalty,
@@ -119,8 +121,8 @@ pub fn lower_sampling_params(
         seed,
         max_tokens,
         min_tokens,
-        logprobs: None,
-        prompt_logprobs: None,
+        logprobs,
+        prompt_logprobs,
         min_p,
         frequency_penalty,
         presence_penalty,
@@ -464,6 +466,35 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
+    }
+
+    #[test]
+    fn lower_sampling_params_passes_logprobs_fields_through() {
+        let sampling_params = SamplingParams {
+            logprobs: Some(3),
+            prompt_logprobs: Some(-1),
+            ..Default::default()
+        };
+
+        let params = lower_sampling_params(
+            sampling_params,
+            SamplingHints {
+                primary_eos_token_id: None,
+                extra_eos_token_ids: BTreeSet::new(),
+                default_temperature: None,
+                default_top_p: None,
+                default_top_k: None,
+                default_min_p: None,
+                default_repetition_penalty: None,
+                default_max_tokens: None,
+                max_model_len: None,
+            },
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(params.logprobs, Some(3));
+        assert_eq!(params.prompt_logprobs, Some(-1));
     }
 
     #[test]

@@ -6,6 +6,9 @@ use tracing::info;
 use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 use vllm_llm::GenerateOutputStream;
 
+use super::logprobs::{
+    DecodedLogprobs, DecodedPromptLogprobs, decode_logprobs, decode_prompt_logprobs,
+};
 use crate::backend::{IncrementalDecoder, TextBackend};
 use crate::error::Error;
 
@@ -28,12 +31,30 @@ impl Default for TextDecodeOptions {
 /// Internal decoded-text event emitted before higher-level assistant adaptation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodedTextEvent {
-    /// The request was accepted and streaming has started.
-    Start,
-    /// A delta of text has been decoded.
+    /// The request has reached the point where prompt-scoped decoding metadata is ready.
+    Start {
+        /// Number of prompt tokens for this request.
+        prompt_token_count: usize,
+        /// Once-only prompt logprobs metadata, when requested.
+        ///
+        /// The first prompt position is always `None`, matching vLLM prompt-logprobs semantics.
+        prompt_logprobs: Option<DecodedPromptLogprobs>,
+    },
+    /// A delta of text has been decoded, optionally alongside token-position logprobs.
     ///
-    /// Upper-level may further parse this as reasoning or tool calls.
-    TextDelta { delta: String, text: String },
+    /// `delta` is the newly visible decoded text fragment for this update.
+    ///
+    /// `logprobs` covers the newly generated token positions from the same update, but is not
+    /// guaranteed to align with `delta` by character span. One update may carry token logprobs
+    /// but no newly visible text yet, and one visible text fragment may reflect multiple token
+    /// positions becoming decodable together.
+    ///
+    /// Upper-level may further parse `delta` as reasoning or tool calls.
+    TextDelta {
+        delta: String,
+        text: String,
+        logprobs: Option<DecodedLogprobs>,
+    },
     /// Terminal event carrying the full decoded text and final metadata.
     Done {
         text: String,
@@ -54,9 +75,8 @@ pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
     raw_stream: GenerateOutputStream,
     decode_options: TextDecodeOptions,
 ) {
-    yield DecodedTextEvent::Start;
-
     let mut decoder: Option<Box<dyn IncrementalDecoder>> = None;
+    let mut started = false;
     let mut prompt_token_count: Option<usize> = None;
     let mut text = String::new();
     let mut token_ids = Vec::new();
@@ -73,6 +93,25 @@ pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
             prompt_token_count = Some(prompt_token_ids.len());
             backend.create_decode_stream(prompt_token_ids, decode_options.skip_special_tokens)
         });
+        let prompt_token_count =
+            prompt_token_count.expect("first llm output must carry prompt token ids");
+
+        if !started {
+            yield DecodedTextEvent::Start {
+                prompt_token_count,
+                prompt_logprobs: output
+                    .prompt_logprobs()
+                    .map(|logprobs| {
+                        decode_prompt_logprobs(
+                            backend.as_ref(),
+                            logprobs,
+                            decode_options.skip_special_tokens,
+                        )
+                    })
+                    .transpose()?,
+            };
+            started = true;
+        }
 
         let suppress_terminal_stop_token = output.finished()
             && output.raw.finish_reason == Some(FinishReason::Stop)
@@ -103,12 +142,24 @@ pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
             // Flush any remaining buffered text after the final token.
             delta.push_str(&chunk);
         }
+        let decoded_logprobs = output
+            .logprobs
+            .as_ref()
+            .map(|logprobs| {
+                decode_logprobs(
+                    backend.as_ref(),
+                    logprobs,
+                    decode_options.skip_special_tokens,
+                )
+            })
+            .transpose()?;
 
-        if !delta.is_empty() {
+        if !delta.is_empty() || decoded_logprobs.is_some() {
             text.push_str(&delta);
             yield DecodedTextEvent::TextDelta {
                 delta,
                 text: text.clone(),
+                logprobs: decoded_logprobs,
             };
         }
 
@@ -124,8 +175,7 @@ pub async fn decoded_text_event_stream<B: TextBackend + ?Sized>(
 
             yield DecodedTextEvent::Done {
                 text,
-                prompt_token_count: prompt_token_count
-                    .expect("first llm output must carry prompt token ids"),
+                prompt_token_count,
                 token_ids,
                 finish_reason: output.raw.finish_reason,
                 stop_reason: output.raw.stop_reason,
