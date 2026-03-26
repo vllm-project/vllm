@@ -265,6 +265,9 @@ class Attention(nn.Module, AttentionLayerBase):
                 sliding_window,
             )
 
+        # For turboquant, the Triton backend handles it directly.
+        # No need to bypass with "auto".
+        backend_kv_cache_dtype = kv_cache_dtype
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
         )
@@ -293,16 +296,25 @@ class Attention(nn.Module, AttentionLayerBase):
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
         if attn_backend is None:
-            self.attn_backend = get_attn_backend(
-                head_size,
-                dtype,
-                kv_cache_dtype,
-                use_mla=False,
-                has_sink=self.has_sink,
-                use_mm_prefix=self.use_mm_prefix,
-                use_per_head_quant_scales=use_per_head_quant_scales,
-                attn_type=attn_type,
-            )
+            if kv_cache_dtype == "turboquant":
+                # Use Triton attention backend for TurboQuant — it's pure
+                # Python/Triton, making it easy to iterate toward packed
+                # storage in Phase 2.
+                from vllm.v1.attention.backends.triton_attn import (
+                    TritonAttentionBackend,
+                )
+                self.attn_backend = TritonAttentionBackend
+            else:
+                self.attn_backend = get_attn_backend(
+                    head_size,
+                    dtype,
+                    backend_kv_cache_dtype,
+                    use_mla=False,
+                    has_sink=self.has_sink,
+                    use_mm_prefix=self.use_mm_prefix,
+                    use_per_head_quant_scales=use_per_head_quant_scales,
+                    attn_type=attn_type,
+                )
         else:
             self.attn_backend = attn_backend
         backend_supports_alibi_sqrt = self.attn_backend.supports_alibi_sqrt()
@@ -334,6 +346,8 @@ class Attention(nn.Module, AttentionLayerBase):
             cache_config.enable_prefix_caching = False
 
         impl_cls = self.attn_backend.get_impl_cls()
+        # Pass original kv_cache_dtype to impl so it can detect turboquant,
+        # even though backend selection used "auto" for compatibility.
         self.impl = impl_cls(
             num_heads,
             head_size,
@@ -378,6 +392,39 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
+
+        # Fallback: if user only passed --kv-cache-dtype turboquant
+        # without --quantization, create default TurboQuantConfig
+        if (kv_cache_dtype == "turboquant"
+                and not hasattr(self, "_turboquant_config")):
+            from vllm.model_executor.layers.quantization.turboquant import (
+                TurboQuantConfig,
+            )
+            self._turboquant_config = TurboQuantConfig()
+
+        # Initialize TurboQuantState eagerly (not in forward) to avoid
+        # torch.compile graph breaks from torch.Generator in rotation matrix
+        if kv_cache_dtype == "turboquant":
+            from vllm.model_executor.layers.quantization.turboquant import (
+                TurboQuantState,
+            )
+            from vllm.model_executor.models.utils import extract_layer_index
+            layer_idx = extract_layer_index(prefix)
+            # Initialize on CUDA if available, CPU otherwise
+            init_device = torch.device("cuda") if torch.cuda.is_available() \
+                else torch.device("cpu")
+            self._tq_k_state = TurboQuantState(
+                config=self._turboquant_config,
+                head_size=head_size,
+                layer_idx=layer_idx,
+                device=init_device,
+            )
+            self._tq_v_state = TurboQuantState(
+                config=self._turboquant_config,
+                head_size=head_size,
+                layer_idx=layer_idx + 10000,
+                device=init_device,
+            )
 
         # for attn backends supporting query quantization
         self.query_quant = None
@@ -499,6 +546,14 @@ class Attention(nn.Module, AttentionLayerBase):
                     query, key, value, self.layer_name
                 )
 
+    def _apply_turboquant(self, key, value):
+        """Apply TurboQuant quantize->dequantize on K/V tensors."""
+        from vllm.model_executor.layers.quantization.turboquant import (
+            turboquant_pre_dequant,
+        )
+        return turboquant_pre_dequant(
+            key, value, self._tq_k_state, self._tq_v_state)
+
     def calc_kv_scales(self, query, key, value):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
         self._k_scale.copy_(torch.abs(key).max() / self.k_range)
@@ -539,6 +594,26 @@ class Attention(nn.Module, AttentionLayerBase):
         block_size = vllm_config.cache_config.block_size
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
+
+        # TurboQuant: packed indices + norm per slot for real compression
+        # Per (token, head): ceil(head_size * bits / 8) bytes indices + 2 bytes norm
+        # At 4-bit: 64 + 2 = 66 bytes vs 256 bf16 = 3.9x compression
+        # At 3-bit: 48 + 2 = 50 bytes vs 256 bf16 = 5.1x compression
+        # At 2-bit: 32 + 2 = 34 bytes vs 256 bf16 = 7.5x compression
+        if self.kv_cache_dtype == "turboquant":
+            import math
+            bits = int(self._turboquant_config.bit_width)
+            packed_indices_bytes = math.ceil(self.head_size * bits / 8)
+            norm_bytes = 2  # float16 norm
+            slot_bytes = packed_indices_bytes + norm_bytes
+            return FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=slot_bytes,
+                head_size_v=slot_bytes,
+                dtype=torch.uint8,
+            )
+
         if self.sliding_window is not None:
             assert not vllm_config.model_config.use_mla, (
                 "MLA is not supported for slidingwindow"

@@ -33,6 +33,7 @@ QuantizationMethods = Literal[
     "mxfp8",
     "petit_nvfp4",
     "cpu_awq",
+    "turboquant",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -131,6 +132,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .mxfp8 import Mxfp8Config
     from .petit import PetitNvFp4Config
     from .torchao import TorchAOConfig
+    from .turboquant import TurboQuantVLLMConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AWQConfig,
@@ -157,6 +159,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "mxfp8": Mxfp8Config,
         "petit_nvfp4": PetitNvFp4Config,
         "cpu_awq": CPUAWQConfig,
+        "turboquant": TurboQuantVLLMConfig,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)

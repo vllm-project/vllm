@@ -268,6 +268,7 @@ class TritonAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
+        "turboquant",
     ]
 
     @staticmethod
@@ -472,7 +473,13 @@ class TritonAttentionImpl(AttentionImpl):
 
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
-        if self.kv_cache_dtype.startswith("fp8"):
+
+        # TurboQuant Phase 2: decode uint8 cache to temporary bf16
+        if self.kv_cache_dtype == "turboquant" and hasattr(
+                layer, "_tq_k_state"):
+            key_cache, value_cache = self._decode_turboquant_cache(
+                key_cache, value_cache, layer)
+        elif self.kv_cache_dtype.startswith("fp8"):
             if key_cache.dtype != self.fp8_dtype:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
@@ -525,6 +532,86 @@ class TritonAttentionImpl(AttentionImpl):
         )
 
         return output
+
+    @torch.compiler.disable
+    def _decode_turboquant_cache(
+        self,
+        key_cache: torch.Tensor,    # [num_blocks, block_size, num_kv_heads, slot_bytes] uint8
+        value_cache: torch.Tensor,  # same
+        layer: torch.nn.Module,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Decode bit-packed TurboQuant cache to bf16 for attention.
+
+        Each slot: [packed_indices | norm_fp16_as_2_bytes]
+
+        1. Split slot into packed indices + norm bytes
+        2. Unpack indices → codebook lookup → rotated values
+        3. Unrotate (matmul with Pi)
+        4. Scale by norm
+
+        Returns bf16 key_cache and value_cache in standard paged layout.
+        """
+        import math
+        from vllm.model_executor.layers.quantization.turboquant import (
+            unpack_indices,
+        )
+
+        k_state = layer._tq_k_state
+        v_state = layer._tq_v_state
+        head_size = k_state.head_size
+        bits = int(k_state.config.bit_width)
+        packed_indices_bytes = math.ceil(head_size * bits / 8)
+
+        decoded_caches = []
+        for cache, state in [(key_cache, k_state), (value_cache, v_state)]:
+            num_blocks, block_size, num_kv_heads, slot_bytes = cache.shape
+            N = num_blocks * block_size * num_kv_heads
+
+            # Flatten to [N, slot_bytes]
+            flat = cache.reshape(N, slot_bytes)
+
+            # Split: packed indices and norm bytes
+            flat_packed = flat[:, :packed_indices_bytes]
+            norm_bytes = flat[:, packed_indices_bytes:packed_indices_bytes + 2]
+            norms = norm_bytes.view(torch.float16).reshape(N).float()
+
+            # Unpack indices
+            if bits == 4:
+                low = flat_packed & 0x0F
+                high = (flat_packed >> 4) & 0x0F
+                indices = torch.stack([low, high], dim=-1).reshape(
+                    N, -1)[:, :head_size]
+            elif bits == 2:
+                b0 = flat_packed & 0x03
+                b1 = (flat_packed >> 2) & 0x03
+                b2 = (flat_packed >> 4) & 0x03
+                b3 = (flat_packed >> 6) & 0x03
+                indices = torch.stack([b0, b1, b2, b3], dim=-1).reshape(
+                    N, -1)[:, :head_size]
+            elif bits == 3:
+                indices = torch.zeros(N, head_size, dtype=torch.uint8,
+                                      device=cache.device)
+                for i in range(N):
+                    unpacked = unpack_indices(
+                        flat_packed[i], bits, head_size)
+                    indices[i] = unpacked[:head_size]
+            else:
+                indices = flat_packed[:, :head_size]
+
+            # Codebook lookup
+            reconstructed = state.codebook[indices.long()]
+
+            # Unrotate: [N, head_size] @ [head_size, head_size]
+            unrotated = reconstructed @ state.Pi
+
+            # Scale by norms
+            unrotated = unrotated * norms.unsqueeze(-1)
+
+            decoded = unrotated.to(torch.bfloat16).reshape(
+                num_blocks, block_size, num_kv_heads, head_size)
+            decoded_caches.append(decoded)
+
+        return decoded_caches[0], decoded_caches[1]
 
     def _forward_encoder_attention(
         self,
@@ -584,6 +671,13 @@ class TritonAttentionImpl(AttentionImpl):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return
+        # TurboQuant Phase 2: encode K/V to uint8 indices + store norms
+        if self.kv_cache_dtype == "turboquant" and hasattr(
+                layer, "_tq_k_state"):
+            self._encode_turboquant_cache(
+                key, value, kv_cache, slot_mapping, layer)
+            return
+
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
 
@@ -604,6 +698,96 @@ class TritonAttentionImpl(AttentionImpl):
             layer._k_scale,
             layer._v_scale,
         )
+
+    @torch.compiler.disable
+    def _encode_turboquant_cache(
+        self,
+        key: torch.Tensor,      # [num_tokens, num_kv_heads, head_size]
+        value: torch.Tensor,     # [num_tokens, num_kv_heads, head_size]
+        kv_cache: torch.Tensor,  # [num_blocks, 2, block_size, num_kv_heads, slot_bytes] uint8
+        slot_mapping: torch.Tensor,  # [num_actual_tokens]
+        layer: torch.nn.Module,
+    ) -> None:
+        """Encode K/V as bit-packed indices + embedded norms into paged cache.
+
+        Each slot stores: [packed_indices | norm_fp16_as_2_uint8_bytes]
+        Compression vs bf16:
+          4-bit: (64 + 2) / 256 = 3.9x
+          3-bit: (48 + 2) / 256 = 5.1x
+          2-bit: (32 + 2) / 256 = 7.5x
+        """
+        import math
+        from vllm.model_executor.layers.quantization.turboquant import (
+            pack_indices,
+        )
+
+        k_state = layer._tq_k_state
+        v_state = layer._tq_v_state
+        num_actual = slot_mapping.shape[0]
+        head_size = k_state.head_size
+        bits = int(k_state.config.bit_width)
+        packed_indices_bytes = math.ceil(head_size * bits / 8)
+        slot_bytes = kv_cache.shape[-1]  # packed_indices + 2 norm bytes
+        block_size = kv_cache.shape[2]
+        num_kv_heads = key.shape[1]
+
+        for kv_idx, (tensor, state) in enumerate([
+            (key[:num_actual], k_state),
+            (value[:num_actual], v_state),
+        ]):
+            # tensor: [num_actual, num_kv_heads, head_size] bf16
+            flat = tensor.reshape(-1, head_size).float()
+
+            # Normalize
+            norms = torch.norm(flat, dim=-1, keepdim=True)
+            flat_norm = flat / (norms + 1e-8)
+
+            # Rotate
+            rotated = flat_norm @ state.PiT
+
+            # Quantize to indices
+            indices = torch.bucketize(
+                rotated.contiguous(), state.boundaries).to(torch.uint8)
+
+            # Bit-pack indices: [N, head_size] → [N, packed_indices_bytes]
+            N = indices.shape[0]
+            if bits == 4:
+                packed = indices[:, 0::2] | (indices[:, 1::2] << 4)
+            elif bits == 2:
+                packed = (indices[:, 0::4]
+                          | (indices[:, 1::4] << 2)
+                          | (indices[:, 2::4] << 4)
+                          | (indices[:, 3::4] << 6))
+            elif bits == 3:
+                packed = torch.zeros(N, packed_indices_bytes,
+                                     dtype=torch.uint8, device=indices.device)
+                for i in range(N):
+                    p = pack_indices(indices[i], bits)
+                    packed[i, :min(p.shape[0], packed_indices_bytes)] = \
+                        p[:packed_indices_bytes]
+            else:
+                packed = indices[:, :packed_indices_bytes]
+
+            # Convert norms to fp16 bytes
+            norms_fp16 = norms.squeeze(-1).to(torch.float16)  # [N]
+            norm_bytes = norms_fp16.view(torch.uint8).reshape(N, 2)  # [N, 2]
+
+            # Concatenate: [packed_indices | norm_bytes]
+            slot_data = torch.cat([packed, norm_bytes], dim=-1)  # [N, slot_bytes]
+
+            # Reshape to [num_actual, num_kv_heads, slot_bytes]
+            slot_3d = slot_data.reshape(num_actual, num_kv_heads, slot_bytes)
+
+            # Write to paged cache using slot_mapping
+            cache = kv_cache[:, kv_idx]
+
+            for t in range(num_actual):
+                slot = slot_mapping[t].item()
+                if slot < 0:
+                    continue
+                block_idx = slot // block_size
+                block_offset = slot % block_size
+                cache[block_idx, block_offset] = slot_3d[t]
 
     def fused_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
