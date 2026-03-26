@@ -343,10 +343,20 @@ class OffloadingConnectorScheduler:
             )
 
         num_computed_tokens = min(computed_tokens_per_group, default=0)
-        assert all(
+        if not all(
             group_tokens == num_computed_tokens
             for group_tokens in computed_tokens_per_group
-        ), "All KV groups must agree on the already-computed prefix length."
+        ):
+            # Some groups loaded more blocks than others (e.g., stale
+            # cache files rejected for one group but not others).
+            # Fall back to the minimum across all groups so we don't
+            # use partially-loaded prefixes.
+            logger.warning(
+                "KV groups disagree on computed prefix length: %s. "
+                "Using minimum (%d tokens) to avoid partial loads.",
+                computed_tokens_per_group,
+                num_computed_tokens,
+            )
         full_block_tokens = num_computed_tokens + num_external_tokens
         start_block_idx = self._chunk_count_for_tokens(num_computed_tokens)
         num_blocks = self._chunk_count_for_tokens(full_block_tokens)
