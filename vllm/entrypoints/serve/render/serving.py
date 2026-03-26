@@ -379,8 +379,13 @@ class OpenAIServingRender:
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
-        if (reasoning_effort := request.reasoning_effort) == "none":
-            raise ValueError(f"Harmony does not support {reasoning_effort=}")
+        reasoning_effort = request.reasoning_effort
+        if reasoning_effort == "none":
+            # "none" is not a valid Harmony reasoning effort level.
+            # Treat it as unset so the system message omits the directive;
+            # include_reasoning=False (set by the protocol validator) will
+            # strip reasoning from the response.
+            reasoning_effort = None
         sys_msg = get_system_message(
             reasoning_effort=reasoning_effort,
             browser_description=None,

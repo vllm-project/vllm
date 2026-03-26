@@ -843,6 +843,28 @@ class TestGetSystemMessage:
                     f"{channel} missing when with_custom_tools={with_tools}"
                 )
 
+    def test_none_reasoning_effort_does_not_crash(self) -> None:
+        """reasoning_effort="none" should not raise an error."""
+        sys_msg = get_system_message(reasoning_effort="none")
+        # System message should still be valid
+        assert sys_msg.author.role == Role.SYSTEM
+
+    def test_unsupported_reasoning_effort_ignored(self) -> None:
+        """Unsupported effort values (e.g. 'minimal') are silently ignored."""
+        sys_msg = get_system_message(reasoning_effort="minimal")
+        assert sys_msg.author.role == Role.SYSTEM
+
+    def test_valid_reasoning_effort_accepted(self) -> None:
+        """Valid effort values should be accepted without error."""
+        for effort in ("low", "medium", "high"):
+            sys_msg = get_system_message(reasoning_effort=effort)
+            assert sys_msg.author.role == Role.SYSTEM
+
+    def test_null_reasoning_effort_accepted(self) -> None:
+        """None reasoning_effort should be accepted without error."""
+        sys_msg = get_system_message(reasoning_effort=None)
+        assert sys_msg.author.role == Role.SYSTEM
+
 
 class TestResponseInputToHarmonyReasoningItem:
     """Tests for response_input_to_harmony handling of reasoning input items.
