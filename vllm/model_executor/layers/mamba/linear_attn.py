@@ -34,7 +34,6 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 
-@CustomOp.register("MiniMaxText01RMSNormTP")
 class MiniMaxText01RMSNormTP(CustomOp):
     def __init__(
         self,
