@@ -496,6 +496,18 @@ if is_multi_node "$commands"; then
 else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+
+  # Detect the actual GPU architecture on the host so that runtime JIT
+  # compilation (e.g. Quark kernels) only targets the present hardware
+  # instead of every architecture baked into the Docker image.
+  RUNTIME_ROCM_ARCH=$(/opt/rocm/bin/rocm_agent_enumerator 2>/dev/null | grep -v 'gfx000' | sort -u | paste -sd ';')
+  if [[ -n "$RUNTIME_ROCM_ARCH" ]]; then
+    echo "Detected runtime GPU architecture: $RUNTIME_ROCM_ARCH"
+  else
+    RUNTIME_ROCM_ARCH="gfx90a;gfx942;gfx950"
+    echo "Warning: Could not detect GPU architecture, falling back to default: $RUNTIME_ROCM_ARCH"
+  fi
+
   docker run \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
@@ -511,6 +523,7 @@ else
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
+    ${RUNTIME_ROCM_ARCH:+-e "PYTORCH_ROCM_ARCH=${RUNTIME_ROCM_ARCH}"} \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${commands}"
