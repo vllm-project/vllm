@@ -25,7 +25,7 @@ from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.tasks import ScoreType
+from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
     get_config,
@@ -93,7 +93,7 @@ LayerBlockType = Literal["attention", "linear_attention", "mamba"]
 
 _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "generate": [],
-    "pooling": ["embed", "classify", "reward"],
+    "pooling": ["embed", "classify"],
     "draft": [],
 }
 
@@ -121,7 +121,7 @@ class ModelConfig:
     """Convert the model using adapters defined in
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
-    tokenizer: str = Field(default=None)
+    tokenizer: str = None  # type: ignore[assignment]
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode | str = "auto"
@@ -177,7 +177,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: int = Field(default=None, ge=-1)
+    max_model_len: int = Field(default=None, ge=-1)  # type: ignore[assignment]
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
@@ -454,7 +454,7 @@ class ModelConfig:
             self.hf_config_path = maybe_model_redirect(self.hf_config_path)
 
         if callable(self.hf_overrides):
-            hf_overrides_kw = {}
+            hf_overrides_kw: dict[str, Any] = {}
             hf_overrides_fn = self.hf_overrides
             dict_overrides: dict[str, Any] = {}
         else:
@@ -488,6 +488,7 @@ class ModelConfig:
             self.config_format,
             hf_overrides_kw=hf_overrides_kw,
             hf_overrides_fn=hf_overrides_fn,
+            token=self.hf_token,
         )
         hf_config = maybe_patch_hf_config_from_gguf(
             self.model,
@@ -585,6 +586,14 @@ class ModelConfig:
             config_format=self.config_format,
         )
 
+        # Some checkpoints set sliding_window to 0 to indicate that sliding window is
+        # disabled, but vLLM uses None for that. Convert 0 to None to avoid errors.
+        # Set before get_and_verify_max_len to ensure that max_model_len does not get
+        # capped to 0.
+        if self.get_sliding_window() == 0:
+            self.disable_sliding_window = True
+            self.hf_text_config.sliding_window = None
+
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
 
@@ -626,7 +635,7 @@ class ModelConfig:
                 k: v for k, v in mm_config_kwargs.items() if v is not None
             }
 
-            self.multimodal_config = MultiModalConfig(**mm_config_kwargs)
+            self.multimodal_config = MultiModalConfig(**mm_config_kwargs)  # type: ignore[arg-type]
 
         # Multimodal GGUF models must use original repo for mm processing
         if is_gguf(self.tokenizer) and self.is_multimodal_model:
@@ -1004,7 +1013,7 @@ class ModelConfig:
         is_bitsandbytes = self.quantization == "bitsandbytes"
         has_quantization_config = self.model_arch_config.quantization_config is not None
         is_8bit = (
-            self.model_arch_config.quantization_config.get("load_in_8bit", False)
+            self.model_arch_config.quantization_config.get("load_in_8bit", False)  # type: ignore[union-attr]
             if has_quantization_config
             else False
         )
@@ -1292,6 +1301,7 @@ class ModelConfig:
                     "attn_type_list, or a layer_types in the hf_config, "
                     f"cannot determine the num of {block_type} layers"
                 )
+            raise AssertionError(f"Unsupported block type: {block_type}")
 
     def get_mamba_chunk_size(self) -> int | None:
         """
@@ -1340,12 +1350,14 @@ class ModelConfig:
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
                 config_format=self.config_format,
+                hf_token=self.hf_token,
             )
         else:
             config = try_get_generation_config(
                 self.generation_config,
                 trust_remote_code=self.trust_remote_code,
                 config_format=self.config_format,
+                hf_token=self.hf_token,
             )
 
         if config is None:
@@ -1407,6 +1419,41 @@ class ModelConfig:
             )
 
         return diff_sampling_param
+
+    def get_pooling_task(
+        self, supported_tasks: tuple[SupportedTask, ...]
+    ) -> PoolingTask | None:
+        if self.pooler_config is None:
+            return None
+
+        pooling_task = self.pooler_config.task
+
+        if pooling_task is not None:
+            if self.pooler_config.task in supported_tasks:
+                return self.pooler_config.task
+            else:
+                raise RuntimeError(
+                    f"Unsupported task: {pooling_task!r} "
+                    f"Supported tasks: {supported_tasks}"
+                )
+
+        if "token_classify" in supported_tasks:
+            for architecture in self.architectures:
+                if "ForTokenClassification" in architecture:
+                    return "token_classify"
+
+        priority: list[PoolingTask] = [
+            "embed&token_classify",
+            "embed",
+            "classify",
+            "token_embed",
+            "token_classify",
+            "plugin",
+        ]
+        for task in priority:
+            if task in supported_tasks:
+                return task
+        return None
 
     @cached_property
     def is_encoder_decoder(self) -> bool:
@@ -1905,7 +1952,7 @@ def _get_and_verify_dtype(
     *,
     is_pooling_model: bool,
     revision: str | None = None,
-    config_format: ConfigFormat = "hf",
+    config_format: str | ConfigFormat = "hf",
 ) -> torch.dtype:
     config_dtype = ModelArchConfigConvertorBase.get_torch_dtype(
         config, model_id, revision=revision, config_format=config_format
