@@ -14,18 +14,18 @@ from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
 )
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEQuantConfig,
-)
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
-from vllm.model_executor.layers.fused_moe.layer import (
+from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
     UnquantizedFusedMoEMethod,
 )
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (

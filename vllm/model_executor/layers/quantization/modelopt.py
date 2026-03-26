@@ -11,6 +11,11 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.layers.attention import Attention, MLAAttention
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    FusedMoeWeightScaleSupported,
+    RoutedExperts,
+)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -19,11 +24,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
-)
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,
-    FusedMoeWeightScaleSupported,
-    RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
