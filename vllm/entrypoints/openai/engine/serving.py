@@ -26,6 +26,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -124,7 +125,10 @@ CompletionLikeRequest: TypeAlias = (
 )
 
 ChatLikeRequest: TypeAlias = (
-    ChatCompletionRequest | TokenizeChatRequest | PoolingChatRequest
+    ChatCompletionRequest
+    | BatchChatCompletionRequest
+    | TokenizeChatRequest
+    | PoolingChatRequest
 )
 
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
@@ -457,7 +461,7 @@ class OpenAIServing:
             return self.create_error_response(
                 "truncate_prompt_tokens value is "
                 "greater than max_model_len."
-                " Please, select a smaller truncation size."
+                " Please request a smaller truncation size."
             )
         return None
 
@@ -720,7 +724,7 @@ class OpenAIServing:
                     f"This model's maximum context length is "
                     f"{max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the input for {operation}. "
-                    f"Please reduce the length of the input.",
+                    f"Please reduce the length of the input prompt.",
                     parameter="input_tokens",
                     value=token_num,
                 )
@@ -925,7 +929,7 @@ class OpenAIServing:
 
             # Automatic Tool Call Parsing
             try:
-                tool_parser = tool_parser_cls(tokenizer)
+                tool_parser = tool_parser_cls(tokenizer, request.tools)
             except RuntimeError as e:
                 logger.exception("Error in tool parser creation.")
                 raise e
