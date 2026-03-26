@@ -68,7 +68,12 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         kernel_type = choose_wfp8_a16_linear_kernel(linear_kernel_config)
         self.linear_kernel = kernel_type(
             linear_kernel_config,
-            layer_param_names=["weight", "weight_scale", "input_scale", None],
+            layer_param_names=[
+                "weight",
+                "weight_scale",
+                "input_scale",
+                "input_scale_ub",
+            ],
         )
 
     @classmethod
