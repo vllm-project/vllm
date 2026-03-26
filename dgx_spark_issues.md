@@ -324,3 +324,41 @@ PyTorch only supports compute capabilities 8.0-9.0.
 - 0 新 PR（符合每天≤1 上限）
 - 持续跟进现有 PR 状态
 - 已准备好 #37141 PR 代码（待 #38126 merge 后决定提交时机）
+
+---
+
+## 2026-03-27 Friday — 03:50 更新
+
+**PR #38126 状态：** 仍 open，但 **活跃讨论中** 🔥
+- 最后更新：~8h 前 (2026-03-26T19:40:35Z)
+- 评论数：9 条（新增 2 条）
+- 关键进展：
+  - mgoin (maintainer) 提出反馈：建议用 `12.0f` 架构后缀
+  - johnnynunez (作者) 回复 "make sense"
+  - PR 接近 merge 状态
+- 策略：继续等待 merge
+  - merge 后立即检查代码是否覆盖 SM 12.1 Marlin 自动检测
+  - 如未覆盖 → 推进 #37141 (Marlin auto-detect for GB10)
+
+**PR #37959 (Helm chart 修复)：**
+- 71h 无人类 review
+- 仍缺 `ready` label
+- 周末 review 慢属正常
+- 周一 (3 月 30 日) 如仍无进展，追加简短评论或 Slack 求助
+
+**DGX Spark 环境稳定：**
+- GPU: NVIDIA GB10 (SM 12.1)
+- Driver: 580.95.05
+- CUDA: 13.0
+- 无新问题发现
+
+**今日产出：**
+- 0 新 PR（符合每天≤1 上限）
+- 持续跟进现有 PR 状态
+- PR #38126 活跃讨论中，预计近期 merge
+
+**下周计划 (2026-03-27 起)：**
+1. **继续观察 #38126** — 如 merge 立即检查代码变更（重点关注 Marlin auto-detect for SM 12.1）
+2. **PR #37959** — 周一 (3/30) 如仍无进展，追加简短评论或 Slack 求助
+3. **DGX Spark 测试** — 记录 baseline 性能数据（Marlin vs CUTLASS）
+4. **社区参与** — 评论 1-2 个相关 issue（学习性质，DGX/KVCache 方向）
