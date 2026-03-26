@@ -3,7 +3,6 @@
 
 import asyncio
 import time
-import uuid
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
@@ -14,29 +13,14 @@ from typing import Final
 
 from fastapi import Request
 from openai.types.responses import (
-    ResponseContentPartAddedEvent,
-    ResponseContentPartDoneEvent,
-    ResponseFunctionCallArgumentsDeltaEvent,
-    ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
-    ResponseFunctionToolCallItem,
     ResponseOutputItem,
-    ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
     ResponseOutputText,
-    ResponseReasoningItem,
-    ResponseReasoningTextDeltaEvent,
-    ResponseReasoningTextDoneEvent,
     ResponseStatus,
-    ResponseTextDeltaEvent,
-    ResponseTextDoneEvent,
     response_text_delta_event,
 )
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
-from openai.types.responses.response_reasoning_item import (
-    Content as ResponseReasoningTextContent,
-)
 from openai.types.responses.tool import Mcp, Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import TypeAdapter
@@ -51,7 +35,6 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
 )
@@ -88,8 +71,6 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseCreatedEvent,
     ResponseInProgressEvent,
     ResponseInputOutputMessage,
-    ResponseReasoningPartAddedEvent,
-    ResponseReasoningPartDoneEvent,
     ResponsesRequest,
     ResponsesResponse,
     ResponseUsage,
@@ -120,7 +101,6 @@ from vllm.parser import ParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
-from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
 

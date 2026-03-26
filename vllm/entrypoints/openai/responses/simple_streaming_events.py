@@ -93,6 +93,9 @@ def _parse_delta_message(
         # it was already in the prompt.
         if state.prompt_is_reasoning_end:
             state.reasoning_ended = True
+        # Track content extracted when reasoning ends, so it can be restored
+        # if the tool_parser doesn't find a tool call
+        extracted_content: str | None = None
         if not state.reasoning_ended:
             delta_message = reasoning_parser.extract_reasoning_streaming(
                 previous_text=state.previous_text,
@@ -107,6 +110,9 @@ def _parse_delta_message(
                 current_token_ids = reasoning_parser.extract_content_ids(
                     delta_token_ids
                 )
+                # Save the content before stripping it, so it can be restored
+                # if the tool_parser doesn't find a tool call
+                extracted_content = delta_message.content if delta_message else None
                 if delta_message and delta_message.content:
                     current_text = delta_message.content
                     delta_message.content = None
@@ -131,29 +137,14 @@ def _parse_delta_message(
             )
             if delta_message is None:
                 delta_message = potential_reasoning_delta
-
-            # parser/model quirk: remove any spurious output text after the
-            # first tool call has started streaming
-            if delta_message and state.first_tool_call_started:
-                delta_message.content = None
-            # parser/model quirk: skip whitespaces only output text before
-            # tool calls (otherwise we stream phantom messages with, for
-            # example, just 2 newlines).
-            # TODO: might be tool_parser responsibility?
+            # If the tool_parser returned None and we had extracted content,
+            # restore it to the delta_message so it can be emitted as text
             if (
                 delta_message
-                and delta_message.content
-                and (
-                    not state.previous_delta_messages
-                    or (
-                        state.previous_delta_messages
-                        and not state.previous_delta_messages[-1].content
-                    )
-                )
-                and delta_message.content.isspace()
+                and delta_message is potential_reasoning_delta
+                and extracted_content
             ):
-                state.maybe_important_output_text_spaces += delta_message.content
-                delta_message.content = None
+                delta_message.content = extracted_content
 
     elif reasoning_parser:
         delta_message = reasoning_parser.extract_reasoning_streaming(
@@ -181,6 +172,43 @@ def _parse_delta_message(
 
     if delta_message is None:
         return None, current_text, current_token_ids
+
+    # parser/model quirk: handle tool call related quirks
+    # (applies when tool_parser is configured, regardless of reasoning_parser)
+    if tool_parser and delta_message:
+        # remove any spurious output text after the first tool call has
+        # started streaming
+        if state.first_tool_call_started:
+            delta_message.content = None
+        # skip whitespaces only output text before tool calls (otherwise we stream
+        # phantom messages with, for example, just 2 newlines).
+        # TODO: might be tool_parser responsibility?
+        if (
+            delta_message.content
+            and (
+                not state.previous_delta_messages
+                or (
+                    state.previous_delta_messages
+                    and not state.previous_delta_messages[-1].content
+                )
+            )
+            and delta_message.content.isspace()
+        ):
+            state.maybe_important_output_text_spaces += delta_message.content
+            delta_message.content = None
+        # restore accumulated whitespace on first non-whitespace content
+        elif (
+            delta_message.content
+            and state.maybe_important_output_text_spaces
+            and (
+                not state.previous_delta_messages
+                or not state.previous_delta_messages[-1].content
+            )
+        ):
+            delta_message.content = (
+                state.maybe_important_output_text_spaces + delta_message.content
+            )
+            state.maybe_important_output_text_spaces = ""
 
     if delta_message.tool_calls:
         assert len(delta_message.tool_calls) == 1, (
@@ -531,7 +559,6 @@ async def process_simple_stream(
             continue
         output = output.outputs[0]
 
-
         # Pre-compute logprobs for this iteration if needed
         current_token_ids = as_list(output.token_ids)
         logprobs_data: list | None = None
@@ -575,9 +602,7 @@ async def process_simple_stream(
                     yield _emit_event(event)
             elif delta_message.content:
                 state.current_item_id = random_uuid()
-                for event in _events_add_content_output_text_item(
-                    state, logprobs_data
-                ):
+                for event in _events_add_content_output_text_item(state, logprobs_data):
                     yield _emit_event(event)
 
             state.event_stream_started = True
@@ -610,10 +635,6 @@ async def process_simple_stream(
             state.current_item_id = random_uuid()
             for event in _events_add_content_output_text_item(state, logprobs_data):
                 yield _emit_event(event)
-            delta_message.content = (
-                state.maybe_important_output_text_spaces + delta_message.content
-            )
-            state.maybe_important_output_text_spaces = ""
             event = _event_output_text_delta(state, delta_message, logprobs_data)
             yield _emit_event(event)
         # handle tool calls
@@ -703,7 +724,9 @@ async def process_simple_stream(
         elif delta_message.reasoning is not None:
             yield _emit_event(_event_reasoning_delta(state, delta_message))
         elif delta_message.content is not None:
-            yield _emit_event(_event_output_text_delta(state, delta_message, logprobs_data))
+            yield _emit_event(
+                _event_output_text_delta(state, delta_message, logprobs_data)
+            )
         state.previous_delta_messages.append(delta_message)
 
     # result_generator is finished, finalize any open items
