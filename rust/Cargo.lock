@@ -4397,6 +4397,7 @@ dependencies = [
  "rmpv",
  "serde",
  "serde_json",
+ "serde_with",
  "serial_test",
  "thiserror-ext",
  "tokio",

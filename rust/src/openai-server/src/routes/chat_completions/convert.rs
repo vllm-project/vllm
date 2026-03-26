@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use openai_protocol::chat::{ChatCompletionRequest, ChatMessage, MessageContent};
+use openai_protocol::chat::{ChatMessage, MessageContent};
 use openai_protocol::common::{ContentPart, ToolChoice, ToolChoiceValue};
 use uuid::Uuid;
 use vllm_chat::{
@@ -9,6 +9,7 @@ use vllm_chat::{
     SamplingParams,
 };
 
+use super::types::ChatCompletionRequest;
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request};
 
@@ -222,11 +223,12 @@ fn convert_tool_choice(tool_choice: Option<&ToolChoice>) -> Result<ChatToolChoic
 mod tests {
     use std::collections::HashMap;
 
-    use openai_protocol::chat::{ChatCompletionRequest, ChatMessage, MessageContent};
+    use openai_protocol::chat::{ChatMessage, MessageContent};
     use openai_protocol::common::{ContentPart, Tool, ToolChoice};
     use serde_json::json;
 
     use super::prepare_chat_request;
+    use crate::routes::chat_completions::types::ChatCompletionRequest;
 
     fn base_request() -> ChatCompletionRequest {
         ChatCompletionRequest {

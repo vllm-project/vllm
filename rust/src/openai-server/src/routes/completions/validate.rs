@@ -1,0 +1,148 @@
+use openai_protocol::common::StringOrArray;
+use vllm_text::Prompt;
+
+use super::types::CompletionRequest;
+use crate::error::{ApiError, bail_invalid_request};
+
+/// Enforce the minimal compatibility contract for the Rust OpenAI server.
+pub(super) fn validate_request_compat(
+    request: &CompletionRequest,
+    configured_model: &str,
+) -> Result<(), ApiError> {
+    // This path is intentionally scoped to the minimum surface needed by `vllm-bench` random
+    // workload compatibility, so unsupported legacy completions features fail early here.
+    if request.model != configured_model {
+        return Err(ApiError::model_not_found(request.model.clone()));
+    }
+
+    if request.stream_options.is_some() && !request.stream {
+        bail_invalid_request!(
+            param = "stream_options",
+            "stream_options are only supported when stream=true."
+        );
+    }
+
+    if request.n.unwrap_or(1) > 1 {
+        bail_invalid_request!(param = "n", "Only n=1 is supported.");
+    }
+
+    if request.max_tokens == Some(0) {
+        bail_invalid_request!(param = "max_tokens", "max_tokens must be greater than 0.");
+    }
+
+    if request.echo && matches!(request.prompt, Prompt::TokenIds(_)) {
+        bail_invalid_request!(
+            param = "echo",
+            "echo is not supported with token-ID prompts."
+        );
+    }
+
+    if request.suffix.is_some() {
+        bail_invalid_request!(param = "suffix", "suffix is not supported.");
+    }
+
+    if request.best_of.is_some() {
+        bail_invalid_request!(param = "best_of", "best_of is not supported.");
+    }
+
+    if has_non_empty_stop(request.stop.as_ref()) {
+        bail_invalid_request!(
+            param = "stop",
+            "Stop strings are not supported by the minimal Rust frontend."
+        );
+    }
+
+    if request.logprobs.is_some() {
+        bail_invalid_request!(param = "logprobs", "logprobs are not supported.");
+    }
+
+    if request.prompt_logprobs.is_some() {
+        bail_invalid_request!(
+            param = "prompt_logprobs",
+            "prompt_logprobs are not supported."
+        );
+    }
+
+    if request.seed.is_some() {
+        bail_invalid_request!(
+            param = "seed",
+            "seed is not supported, use sampling_seed instead."
+        );
+    }
+
+    if request.logit_bias.is_some() {
+        bail_invalid_request!(param = "logit_bias", "logit_bias is not supported.");
+    }
+
+    if request.regex.is_some() {
+        bail_invalid_request!(param = "regex", "regex constraints are not supported.");
+    }
+
+    if request.ebnf.is_some() {
+        bail_invalid_request!(param = "ebnf", "ebnf constraints are not supported.");
+    }
+
+    if request.json_schema.is_some() {
+        bail_invalid_request!(param = "json_schema", "json_schema is not supported.");
+    }
+
+    if request.lora_path.is_some() {
+        bail_invalid_request!(param = "lora_path", "lora_path is not supported.");
+    }
+
+    if request.session_params.is_some() {
+        bail_invalid_request!(
+            param = "session_params",
+            "session_params are not supported."
+        );
+    }
+
+    if request.return_hidden_states {
+        bail_invalid_request!(
+            param = "return_hidden_states",
+            "return_hidden_states is not supported."
+        );
+    }
+
+    Ok(())
+}
+
+fn has_non_empty_stop(stop: Option<&StringOrArray>) -> bool {
+    match stop {
+        None => false,
+        Some(StringOrArray::String(value)) => !value.is_empty(),
+        Some(StringOrArray::Array(values)) => values.iter().any(|value| !value.is_empty()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::validate_request_compat;
+    use crate::routes::completions::types::CompletionRequest;
+
+    fn base_request() -> CompletionRequest {
+        serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": true,
+        }))
+        .expect("parse request")
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_logprobs_fields() {
+        let request = CompletionRequest {
+            logprobs: Some(1),
+            ..base_request()
+        };
+        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+
+        let request = CompletionRequest {
+            prompt_logprobs: Some(1),
+            ..base_request()
+        };
+        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+    }
+}

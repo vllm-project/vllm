@@ -1,4 +1,6 @@
 mod convert;
+mod types;
+mod validate;
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -22,7 +24,8 @@ use vllm_text::{DecodedTextEvent, TextOutputStream, TextOutputStreamExt as _};
 
 use super::utils::unix_timestamp;
 use crate::error::{ApiError, bail_server_error, server_error};
-use crate::routes::completions::convert::{CompletionRequest, prepare_completion_request};
+use crate::routes::completions::convert::prepare_completion_request;
+use crate::routes::completions::types::CompletionRequest;
 use crate::state::AppState;
 
 /// Validate one completions request and proxy it into the shared `vllm-text` stack.
@@ -42,7 +45,7 @@ pub(super) async fn completions(
     info!(
         request_id = %response_id,
         model = %response_model,
-        stream = body.inner.stream,
+        stream = body.stream,
         "completion"
     );
 
@@ -57,7 +60,7 @@ pub(super) async fn completions(
         }
     };
 
-    if body.inner.stream {
+    if body.stream {
         let chunk_stream = completion_chunk_stream(
             text_stream,
             response_id,

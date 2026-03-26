@@ -1,4 +1,5 @@
 pub mod convert;
+mod types;
 mod validate;
 
 use std::collections::BTreeMap;
@@ -12,8 +13,8 @@ use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
 use openai_protocol::chat::{
-    ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse,
-    ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice,
+    ChatChoice, ChatCompletionMessage, ChatCompletionResponse, ChatCompletionStreamResponse,
+    ChatMessageDelta, ChatStreamChoice,
 };
 use openai_protocol::common::{
     FunctionCallDelta, FunctionCallResponse, ToolCall, ToolCallDelta, Usage,
@@ -27,6 +28,7 @@ use vllm_engine_core_client::protocol::{FinishReason, StopReason};
 
 use crate::error::{ApiError, bail_server_error, server_error};
 use crate::routes::chat_completions::convert::prepare_chat_request;
+use crate::routes::chat_completions::types::ChatCompletionRequest;
 use crate::routes::utils::unix_timestamp;
 use crate::state::AppState;
 
