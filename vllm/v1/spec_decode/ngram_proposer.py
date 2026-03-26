@@ -136,6 +136,7 @@ class NgramProposer:
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
         | None = None,  # unused
+        num_speculative_tokens: int | None = None,  # unused, for interface compat
     ) -> list[list[int]]:
         # find which requests need ngram proposals
         valid_ngram_requests = []

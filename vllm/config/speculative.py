@@ -62,6 +62,34 @@ RejectionSampleMethod = Literal["strict", "probabilistic"]
 
 
 @config
+class DynamicSpeculativeConfig:
+    """Configuration for dynamic speculative decoding.
+
+    This allows dynamically adjusting the number of draft tokens based on
+    batch size and acceptance rate to optimize throughput."""
+
+    batch_stats: dict[int, dict[int, float]] = None
+    """Batch statistics mapping batch_size -> {num_drafts -> ITL_ms}.
+
+    Example:
+        {
+            1: {0: 6.87, 3: 9.41, 5: 10.8},
+            4: {0: 7.3, 3: 9.95, 5: 11.59},
+        }
+    where K=0 means no speculative decoding (vanilla).
+    """
+
+    max_num_speculative_tokens: int = None
+    """Maximum number of speculative tokens supported in the statistics."""
+
+    acceptance_rate_per_pos: list[float] = None
+    """Acceptance rate per position from offline profiling."""
+
+    warmup_steps: int = 10
+    """Number of steps before using online acceptance rates."""
+
+
+@config
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
 
@@ -183,6 +211,13 @@ class SpeculativeConfig:
     or probabilistic rejection sampling. Both respect the target model
     distribution, but the latter yields a higher acceptance rate at the cost
     of more memory to cache draft logits."""
+
+    # Dynamic speculative decoding
+    dynamic_config_path: str | None = None
+    """Path to JSON config file for dynamic speculative decoding."""
+
+    dynamic_config: SkipValidation[DynamicSpeculativeConfig] = None  # type: ignore
+    """Loaded dynamic speculative config (set in __post_init__)."""
 
     def compute_hash(self) -> str:
         """
@@ -609,6 +644,21 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+
+        # Load dynamic speculative config if path provided
+        if self.dynamic_config_path is not None:
+            import json
+
+            with open(self.dynamic_config_path) as f:
+                data = json.load(f)
+            # JSON keys are strings, convert batch_stats keys to int
+            if "batch_stats" in data and data["batch_stats"] is not None:
+                data["batch_stats"] = {
+                    int(bs): {int(k): v for k, v in stats.items()}
+                    for bs, stats in data["batch_stats"].items()
+                }
+            self.dynamic_config = DynamicSpeculativeConfig(**data)
+
         return self
 
     def _validate_suffix_decoding(self):

@@ -4488,6 +4488,7 @@ class GPUModelRunner(
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
                 slot_mappings=slot_mappings,
+                num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
             )
         elif spec_config.use_ngram_gpu():
             assert isinstance(self.drafter, NgramProposerGPU)
@@ -4699,6 +4700,7 @@ class GPUModelRunner(
                 mm_embed_inputs=mm_embed_inputs,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
                 slot_mappings=slot_mappings,
+                num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
             )
 
         return draft_token_ids
