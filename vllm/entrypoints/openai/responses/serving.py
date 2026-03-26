@@ -98,7 +98,7 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import ProcessorInputs, token_inputs
+from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
@@ -219,7 +219,7 @@ class OpenAIServingResponses(OpenAIServing):
     async def render_responses_request(
         self,
         request: ResponsesRequest,
-    ) -> tuple[list, list[ProcessorInputs]] | ErrorResponse:
+    ) -> tuple[list, list[EngineInput]] | ErrorResponse:
         """
         Validate the model and preprocess a responses request.
 
@@ -227,7 +227,7 @@ class OpenAIServingResponses(OpenAIServing):
         engine-aware checks (LoRA model validation, engine health).
 
         Returns:
-            A tuple of (messages, engine_prompts) on success,
+            A tuple of (messages, engine_inputs) on success,
             or an ErrorResponse on failure.
         """
         error_check_ret = await self._check_model(request)
@@ -259,10 +259,10 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _validate_generator_input(
         self,
-        engine_prompt: ProcessorInputs,
+        engine_input: EngineInput,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
-        prompt_len = self._extract_prompt_len(engine_prompt)
+        prompt_len = self._extract_prompt_len(engine_input)
         max_model_len = self.model_config.max_model_len
 
         if prompt_len >= max_model_len:
@@ -339,7 +339,7 @@ class OpenAIServingResponses(OpenAIServing):
         if isinstance(result, ErrorResponse):
             return result
 
-        messages, engine_prompts = result
+        messages, engine_inputs = result
 
         lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)
@@ -382,15 +382,15 @@ class OpenAIServingResponses(OpenAIServing):
             available_tools = []
         tokenizer = self.renderer.get_tokenizer()
 
-        for engine_prompt in engine_prompts:
-            maybe_error = self._validate_generator_input(engine_prompt)
+        for engine_input in engine_inputs:
+            maybe_error = self._validate_generator_input(engine_input)
             if maybe_error is not None:
                 return maybe_error
 
             default_max_tokens = get_max_tokens(
                 max_model_len,
                 request.max_output_tokens,
-                self._extract_prompt_len(engine_prompt),
+                self._extract_prompt_len(engine_input),
                 self.default_sampling_params,
                 self.override_max_tokens,
             )
@@ -449,7 +449,7 @@ class OpenAIServingResponses(OpenAIServing):
                     )
             generator = self._generate_with_builtin_tools(
                 request_id=request.request_id,
-                engine_prompt=engine_prompt,
+                engine_input=engine_input,
                 sampling_params=sampling_params,
                 context=context,
                 lora_request=lora_request,
@@ -554,7 +554,7 @@ class OpenAIServingResponses(OpenAIServing):
             request_input=messages,
         )
 
-        _, engine_prompts = await self.openai_serving_render.preprocess_chat(
+        _, engine_inputs = await self.openai_serving_render.preprocess_chat(
             request,
             new_messages,
             default_template=chat_template,
@@ -563,12 +563,12 @@ class OpenAIServingResponses(OpenAIServing):
             tool_dicts=tool_dicts,
             tool_parser=tool_parser,
         )
-        return engine_prompts
+        return engine_inputs
 
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
-        engine_prompt: ProcessorInputs,
+        engine_input: EngineInput,
         sampling_params: SamplingParams,
         context: ConversationContext,
         lora_request: LoRARequest | None = None,
@@ -585,13 +585,13 @@ class OpenAIServingResponses(OpenAIServing):
 
             self._log_inputs(
                 sub_request_id,
-                engine_prompt,
+                engine_input,
                 params=sampling_params,
                 lora_request=lora_request,
             )
 
             generator = self.engine_client.generate(
-                engine_prompt,
+                engine_input,
                 sampling_params,
                 sub_request_id,
                 lora_request=lora_request,
@@ -619,11 +619,11 @@ class OpenAIServingResponses(OpenAIServing):
             # Render the next prompt token ids and update sampling_params.
             if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
                 token_ids = context.render_for_completion()
-                engine_prompt = token_inputs(token_ids)
+                engine_input = tokens_input(token_ids)
 
                 sampling_params.max_tokens = max_model_len - len(token_ids)
             elif isinstance(context, ParsableContext):
-                (engine_prompt,) = await self._render_next_turn(
+                (engine_input,) = await self._render_next_turn(
                     context.request,
                     context.parser.response_messages,
                     context.tool_dicts,
@@ -635,7 +635,7 @@ class OpenAIServingResponses(OpenAIServing):
                 sampling_params.max_tokens = get_max_tokens(
                     max_model_len,
                     context.request.max_output_tokens,
-                    self._extract_prompt_len(engine_prompt),
+                    self._extract_prompt_len(engine_input),
                     self.default_sampling_params,  # type: ignore
                     self.override_max_tokens,  # type: ignore
                 )
@@ -1116,7 +1116,7 @@ class OpenAIServingResponses(OpenAIServing):
             reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
         tool_parser = None
         if self.parser and self.parser.tool_parser_cls:
-            tool_parser = self.parser.tool_parser_cls(tokenizer)
+            tool_parser = self.parser.tool_parser_cls(tokenizer, request.tools)
         reasoning_ended = False
         tool_call_text_started = False
         previous_text = ""

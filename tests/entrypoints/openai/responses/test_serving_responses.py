@@ -39,7 +39,7 @@ from vllm.entrypoints.openai.responses.utils import extract_tool_types
 from vllm.entrypoints.serve.render.serving import (
     _extract_allowed_tools_from_mcp_requests,
 )
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 
@@ -260,20 +260,20 @@ class TestValidateGeneratorInput:
         """Test _validate_generator_input with valid prompt length"""
         # Create an engine prompt with valid length (less than max_model_len)
         valid_prompt_token_ids = list(range(5))  # 5 tokens < 100 max_model_len
-        engine_prompt = TokensPrompt(prompt_token_ids=valid_prompt_token_ids)
+        engine_input = tokens_input(valid_prompt_token_ids)
 
         # Call the method
-        result = serving_responses_instance._validate_generator_input(engine_prompt)
+        result = serving_responses_instance._validate_generator_input(engine_input)
 
         # Should return None for valid input
         assert result is None
 
         # create an invalid engine prompt
         invalid_prompt_token_ids = list(range(200))  # 100 tokens >= 100 max_model_len
-        engine_prompt = TokensPrompt(prompt_token_ids=invalid_prompt_token_ids)
+        engine_input = tokens_input(invalid_prompt_token_ids)
 
         # Call the method
-        result = serving_responses_instance._validate_generator_input(engine_prompt)
+        result = serving_responses_instance._validate_generator_input(engine_input)
 
         # Should return an ErrorResponse
         assert result is not None
