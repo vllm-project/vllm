@@ -33,11 +33,10 @@ DTYPE_MAP = {
 def get_configs_cutile():
     """Search space for cuTile Tile sizes and L2 grouping."""
     configs = []
-    # Common tile sizes for FP8/Hopper/Ada optimization
-    for tm in [128]:#[64, 128, 256]:
-        for tn in [128]:#[64, 128, 256]:
-            for tk in [128]:#[32, 64, 128]:
-                for grp in [1]:#[1, 4, 8]:
+    for tm in [64, 128, 256]:
+        for tn in [64, 128, 256]:
+            for tk in [32, 64, 128]:
+                for grp in [1, 4, 8]:
                     configs.append({
                         "TILE_M": tm, "TILE_N": tn, "TILE_K": tk, "GROUP_SIZE_M": grp
                     })
