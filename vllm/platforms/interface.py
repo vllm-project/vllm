@@ -438,7 +438,7 @@ class Platform:
 
         model_config = vllm_config.model_config
         # model_config may be None during testing.
-        if model_config is None:
+        if not cache_config.user_specified_block_size and model_config is None:
             cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             return
 
@@ -454,7 +454,7 @@ class Platform:
             vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        if not attn_layers:
+        if not cache_config.user_specified_block_size and not attn_layers:
             cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             return
 
@@ -465,20 +465,24 @@ class Platform:
                 backend_cls = b
                 break
 
-        if backend_cls is None:
+        if not cache_config.user_specified_block_size and backend_cls is None:
             cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             return
-        with set_current_vllm_config(vllm_config):
-            preferred = backend_cls.get_preferred_block_size(
-                CacheConfig.DEFAULT_BLOCK_SIZE
-            )
-        if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
-            logger.info(
-                "Setting kv cache block size to %d for %s backend.",
-                preferred,
-                backend_cls.get_name(),
-            )
-        cache_config.block_size = preferred
+
+        assert backend_cls is not None
+
+        if not cache_config.user_specified_block_size:
+            with set_current_vllm_config(vllm_config):
+                preferred = backend_cls.get_preferred_block_size(
+                    CacheConfig.DEFAULT_BLOCK_SIZE
+                )
+            if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
+                logger.info(
+                    "Setting kv cache block size to %d for %s backend.",
+                    preferred,
+                    backend_cls.get_name(),
+                )
+            cache_config.block_size = preferred
 
         if model_config.is_hybrid:
             cls._align_hybrid_block_size(vllm_config, backend_cls)
