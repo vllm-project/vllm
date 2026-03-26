@@ -790,16 +790,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
         # Only set thinking_token_budget based on reasoning_effort when
         # thinking_token_budget is not explicitly provided by the user
         if reasoning_effort is not None and thinking_token_budget is None:
-            if reasoning_effort == "none":
-                data["thinking_token_budget"] = 0
-            elif reasoning_effort == "low":
-                data["thinking_token_budget"] = 1024
-            elif reasoning_effort == "medium":
-                data["thinking_token_budget"] = 2048
-            elif reasoning_effort == "high":
-                data["thinking_token_budget"] = 8192
-            elif reasoning_effort == "xhigh":
-                data["thinking_token_budget"] = 16384
+            buget_map = {
+                "none": 0,
+                "low": 1024,
+                "medium": 2048,
+                "high": 8192,
+                "xhigh": 16384,
+            }
+            data["thinking_token_budget"] = buget_map.get(reasoning_effort, 0)
         return data
 
 
