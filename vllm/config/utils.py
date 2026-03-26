@@ -37,10 +37,12 @@ ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
 
 
 @overload
+@dataclass_transform(field_specifiers=(PydanticField,))
 def config(cls: type[ConfigT]) -> type[ConfigT]: ...
 
 
 @overload
+@dataclass_transform(field_specifiers=(PydanticField,))
 def config(
     *, config: ConfigDict | None = None, **kwargs: Any
 ) -> Callable[[type[ConfigT]], type[ConfigT]]: ...

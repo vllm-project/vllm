@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import asdict, fields
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from vllm.config.utils import config, get_hash_factors, hash_factors
 from vllm.logger import init_logger
