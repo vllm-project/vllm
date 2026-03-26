@@ -288,7 +288,7 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
         assert "error" in response.object
         assert (
             "truncate_prompt_tokens value is greater than max_model_len. "
-            "Please, select a smaller truncation size." in response.message
+            "Please request a smaller truncation size." in response.message
         )
 
 

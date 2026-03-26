@@ -461,7 +461,7 @@ class OpenAIServing:
             return self.create_error_response(
                 "truncate_prompt_tokens value is "
                 "greater than max_model_len."
-                " Please, select a smaller truncation size."
+                " Please request a smaller truncation size."
             )
         return None
 
@@ -724,7 +724,7 @@ class OpenAIServing:
                     f"This model's maximum context length is "
                     f"{max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the input for {operation}. "
-                    f"Please reduce the length of the input.",
+                    f"Please reduce the length of the input prompt.",
                     parameter="input_tokens",
                     value=token_num,
                 )
