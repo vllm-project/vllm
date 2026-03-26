@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -25,6 +25,28 @@ from vllm.v1.outputs import (
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+
+
+def _metadata_has_step_work(value: Any) -> bool:
+    if value is None:
+        return False
+
+    if isinstance(value, (bool, int, float, str, bytes, bytearray)):
+        return bool(value)
+
+    if isinstance(value, torch.Tensor):
+        return value.numel() > 0
+
+    if isinstance(value, dict):
+        return any(_metadata_has_step_work(item) for item in value.values())
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_metadata_has_step_work(item) for item in value)
+
+    if hasattr(value, "__dict__"):
+        return any(_metadata_has_step_work(item) for item in vars(value).values())
+
+    return True
 
 
 class KVConnector:
@@ -58,6 +80,7 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
         self._disabled = False
+        self._step_has_pre_forward_work = False
 
     def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
         if self._disabled:
@@ -65,6 +88,10 @@ class ActiveKVConnector(KVConnector):
 
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
+        self._step_has_pre_forward_work = _metadata_has_step_work(kv_connector_metadata)
+        if not self._step_has_pre_forward_work:
+            return
+
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
         self.kv_connector.handle_preemptions(kv_connector_metadata)
 
@@ -85,7 +112,7 @@ class ActiveKVConnector(KVConnector):
             return None
 
         output = KVConnectorOutput()
-        if wait_for_save:
+        if wait_for_save and self._step_has_pre_forward_work:
             self.kv_connector.wait_for_save()
         output.finished_sending, output.finished_recving = (
             self.kv_connector.get_finished(scheduler_output.finished_req_ids)
@@ -95,6 +122,7 @@ class ActiveKVConnector(KVConnector):
         output.kv_cache_events = self.kv_connector.get_kv_connector_kv_cache_events()
         if clear_metadata:
             self.kv_connector.clear_connector_metadata()
+        self._step_has_pre_forward_work = False
         return output
 
     def clear_metadata(self) -> None:
