@@ -292,7 +292,6 @@ set(VLLM_EXT_SRC
   "csrc/layernorm_kernels.cu"
   "csrc/fused_qknorm_rope_kernel.cu"
   "csrc/layernorm_quant_kernels.cu"
-  "csrc/minimax_reduce_rms_kernel.cu"
   "csrc/sampler.cu"
   "csrc/topk.cu"
   "csrc/cuda_view.cu"
@@ -307,6 +306,8 @@ set(VLLM_EXT_SRC
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_EXT_SRC "csrc/minimax_reduce_rms_kernel.cu")
+
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.

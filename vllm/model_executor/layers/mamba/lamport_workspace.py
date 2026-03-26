@@ -289,13 +289,14 @@ def get_allreduce_workspace(
     process_group : optional
         ``torch.distributed`` process group.
     """
-    key = (rank, world_size)
+    if comm_size is None:
+        comm_size = LamportWorkspace.compute_comm_size_for_minimax(
+            max_tokens, world_size, fused_qk=True
+        )
+    pg_id = id(process_group) if process_group is not None else 0
+    key = (rank, world_size, comm_size, pg_id)
     with _cache_lock:
         if key not in _workspace_cache:
-            if comm_size is None:
-                comm_size = LamportWorkspace.compute_comm_size_for_minimax(
-                    max_tokens, world_size, fused_qk=True
-                )
             ws = LamportWorkspace(rank, world_size, comm_size, process_group)
             _workspace_cache[key] = ws
         return _workspace_cache[key].workspace
