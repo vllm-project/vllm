@@ -504,10 +504,9 @@ if is_torch_equal("2.9.0"):
 def _apply_fxgraphcache_pickle_patch(pickler_cls, bypass_cls):
     """Wrap pickler_cls.dumps to convert ValueError into bypass_cls.
 
-    Idempotent: sets pickler_cls._vllm_fxgraph_dumps_patched after the first
-    apply. The replacement dumps also sets _vllm_patched on the wrapper
-    function so a second call sees hasattr(pickler_cls.dumps, "_vllm_patched")
-    and returns without double-wrapping.
+    Idempotent: sets `_vllm_fxgraph_dumps_patched` on the class after the
+    first apply to prevent re-application. The wrapper function is also
+    marked with `_vllm_patched` as an additional safeguard.
     """
     if getattr(pickler_cls, "_vllm_fxgraph_dumps_patched", False):
         return
