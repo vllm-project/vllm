@@ -80,6 +80,7 @@ class SpecDecodeBaseProposer:
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
 
         self.enable_multi_layers_mtp = self.speculative_config.enable_multi_layers_mtp
+        # number of layers in each MTP/EAGLE module
         self.layer_num = 1
 
         # We need to get the hidden size from the draft model config because

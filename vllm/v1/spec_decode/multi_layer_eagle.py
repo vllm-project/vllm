@@ -82,21 +82,6 @@ class MultiLayerEagleProposer(EagleProposer):
         token_indices_to_sample.add_(shift)
         common_attn_metadata.seq_lens.sub_(shift)
 
-        # NOTE: ignore cpu data to avoid device sync
-        # common_attn_metadata.seq_lens_cpu.copy_(common_attn_metadata.seq_lens,
-        #                                         non_blocking=True)
-        # query_lens = common_attn_metadata.query_start_loc[
-        #     1:] - common_attn_metadata.query_start_loc[:-1]
-        # num_computed_tokens = common_attn_metadata.seq_lens - query_lens.to(
-        #     common_attn_metadata.seq_lens.dtype)
-        # common_attn_metadata.num_computed_tokens_cpu.copy_(
-        #     num_computed_tokens.to(
-        #         common_attn_metadata.num_computed_tokens_cpu.dtype),
-        #     non_blocking=True,
-        # )
-        # common_attn_metadata.max_seq_len =
-        #       int(common_attn_metadata.seq_lens_cpu.max().item())
-
         cached_lens = multi_layer_eagle_metadata.cached_len
         shift = torch.minimum(shift, cached_lens)
 
@@ -124,23 +109,6 @@ class MultiLayerEagleProposer(EagleProposer):
         )
 
         return prev_token_ids, prev_positions, prev_hidden_states, common_attn_metadata
-
-    def prepare_inputs(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        sampled_token_ids: list[list[int]],
-        num_draft_tokens: list[int],
-    ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
-        """
-        This function is used to prepare the inputs for speculative decoding.
-        It updates to the common_attn_metadata to account for the rejected
-        tokens (and newly sampled tokens). It also returns the token indices
-        of the tokens that should be fed to the speculator.
-        """
-        raise Exception(
-            "speculative_config.disable_padded_drafter_batch"
-            " is not supported now for MultiLayerEagleProposer."
-        )
 
     @torch.inference_mode()
     def dummy_run(
