@@ -416,6 +416,36 @@ def _get_llama_4_scaling(
     return scaling[..., None, None]
 
 
+def _enable_native_quant(linear: nn.Module) -> None:
+    """Enable native aten quant for a linear layer so Inductor can fuse
+    with a preceding RMSNorm. Only effective for block FP8 quantized layers."""
+    qm = getattr(linear, "quant_method", None)
+    if qm is not None and hasattr(qm, "w8a8_block_fp8_linear"):
+        qm.w8a8_block_fp8_linear.use_native_quant = True
+
+
+def _set_fused_norm(linear: nn.Module, layernorm: nn.Module) -> bool:
+    """Set norm params on a linear layer for fused RMSNorm+FP8Quant.
+
+    When the fused Triton kernel is used, the standalone RMSNorm should
+    be skipped in the forward pass — the linear layer will do both
+    RMSNorm and FP8 quant in a single kernel.
+
+    Returns True if fused norm was successfully set.
+    """
+    qm = getattr(linear, "quant_method", None)
+    if (
+        qm is not None
+        and hasattr(qm, "w8a8_block_fp8_linear")
+        and qm.w8a8_block_fp8_linear.use_native_quant
+    ):
+        op = qm.w8a8_block_fp8_linear
+        op.norm_weight = layernorm.weight
+        op.norm_eps = layernorm.variance_epsilon
+        return True
+    return False
+
+
 class DeepseekV2Attention(nn.Module):
     def __init__(
         self,
@@ -891,6 +921,12 @@ class DeepseekV2MLAAttention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.q_b_proj",
             )
+            # q_b_proj native quant is set by get_quant_method() based on prefix
+            # Don't hardcode _enable_native_quant here — it would override
+            # VLLM_SKIP_NATIVE_QUANT env var control
+            self._fused_q_b = _set_fused_norm(
+                self.q_b_proj, self.q_a_layernorm
+            )
         else:
             self.q_proj = ColumnParallelLinear(
                 proj_input_size,
@@ -907,6 +943,7 @@ class DeepseekV2MLAAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj",
         )
+        # kv_b_proj: keep CUDA CustomOp (native quant = 2 kernels > 1 CUDA kernel)
         self.o_proj = RowParallelLinear(
             self.num_heads * self.v_head_dim,
             self.hidden_size,
