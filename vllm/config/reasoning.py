@@ -57,7 +57,7 @@ class ReasoningConfig:
         `initialize_token_ids`. Not intended to be configured directly."""
         return self._think_end_token_ids
 
-    def initialize_token_ids(self, model_config: ModelConfig) -> bool:
+    def initialize_token_ids(self, model_config: ModelConfig) -> None:
         """Initialize reasoning token IDs from strings using the tokenizer.
 
         Returns True if initialization was successful, False otherwise."""
@@ -66,7 +66,7 @@ class ReasoningConfig:
             and self._think_end_token_ids is not None
         ):
             self._enabled = True
-            return True  # Already initialized
+            return  # Already initialized
 
         tokenizer = cached_tokenizer_from_config(model_config=model_config)
         think_start_str = self.think_start_str
@@ -87,7 +87,7 @@ class ReasoningConfig:
         if not think_start_str or not think_end_str:
             # If we don't have valid strings to tokenize,
             # we can't initialize the token IDs.
-            return False
+            return
         self._think_start_token_ids = tokenizer.encode(
             think_start_str, add_special_tokens=False
         )
@@ -103,4 +103,4 @@ class ReasoningConfig:
                 "Ensure the strings are valid tokens in the model's vocabulary."
             )
         self._enabled = True
-        return True
+        return
