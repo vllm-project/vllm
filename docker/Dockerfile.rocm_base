@@ -144,6 +144,7 @@ ARG PYTORCH_VISION_REPO
 ARG PYTORCH_AUDIO_REPO
 ARG USE_SCCACHE
 
+RUN apt-get update && apt-get install -y pkg-config liblzma-dev
 RUN git clone ${PYTORCH_REPO} pytorch
 RUN cd pytorch && git checkout ${PYTORCH_BRANCH}
 RUN cd pytorch \
