@@ -15,6 +15,7 @@ ALLOWED_FILES = {
     "vllm/platforms/",
     "vllm/utils/torch_utils.py",
     "tests/distributed/test_utils.py",
+    "tools/pre_commit/check_device_count.py",
 }
 
 
