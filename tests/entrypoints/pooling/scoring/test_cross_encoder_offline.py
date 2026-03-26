@@ -23,8 +23,6 @@ TEXTS_2 = [
     "The capital of Germany is Berlin.",
 ]
 
-DTYPE = "half"
-
 
 @pytest.fixture(scope="module")
 def llm():

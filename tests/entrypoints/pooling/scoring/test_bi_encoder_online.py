@@ -344,7 +344,7 @@ async def test_score_api_max_model_len(server: RemoteOpenAIServer):
         },
     )
     assert score_response.status_code == 400
-    assert "Please, select a smaller truncation size." in score_response.text
+    assert "Please request a smaller truncation size." in score_response.text
 
 
 @pytest.mark.asyncio

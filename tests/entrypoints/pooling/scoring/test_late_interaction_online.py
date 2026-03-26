@@ -38,7 +38,7 @@ def server():
 
 
 @pytest.fixture(scope="module")
-def hf_model(hf_runner):
+def hf_model():
     return ColBERTScoringHfRunner(
         model_name=MODEL_NAME, linear_weights_key=LINEAR_WEIGHTS_KEY
     )
