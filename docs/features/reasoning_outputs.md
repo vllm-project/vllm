@@ -263,14 +263,14 @@ If `thinking_token_budget` is not specified, no explicit reasoning limit is appl
 | `reasoning_end_str`   | `str \| null`  | String that marks the end of reasoning content   |
 
 !!! note
-    `reasoning_end_str` can include a transition phrase before the reasoning end token. For example, setting `reasoning_end_str` to `"I have to give the solution based on the reasoning directly now.</reasoning>"` instructs the model to emit that phrase when the budget is exhausted, making the reasoning termination more natural.
+    `reasoning_end_str` can include a transition phrase before the reasoning end token. For example, setting `reasoning_end_str` to `"I have to give the solution based on the reasoning directly now.</think>"` instructs the model to emit that phrase when the budget is exhausted, making the reasoning termination more natural.
 
 ### Online Serving
 
 ```bash
 vllm serve Qwen/Qwen3-0.6B \
     --reasoning-parser qwen3 \
-    --reasoning-config '{"reasoning_start_str": "<reasoning>", "reasoning_end_str": "I have to give the solution based on the reasoning directly now.</think>"}'
+    --reasoning-config '{"reasoning_start_str": "<think>", "reasoning_end_str": "I have to give the solution based on the reasoning directly now.</think>"}'
 ```
 
 Then make a request with `thinking_token_budget` to limit the reasoning tokens:
