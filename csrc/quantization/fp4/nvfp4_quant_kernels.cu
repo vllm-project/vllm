@@ -319,11 +319,18 @@ __global__ void convert_sf_sm103_to_sm100_kernel(
 
 // ============================================================================
 // Host entry: SM103 activation quantization
+//
+// When use_pdl=true, the kernel is launched with
+// cudaLaunchAttributeProgrammaticStreamSerialization, allowing the next
+// kernel on the same stream (typically the GEMM consumer) to begin
+// executing before this quantization kernel fully completes.  This
+// overlaps the tail of quantization with the head of the GEMM.
 // ============================================================================
-void scaled_fp4_quant_sm103a(torch::Tensor const& output,
-                             torch::Tensor const& input,
-                             torch::Tensor const& output_sf,
-                             torch::Tensor const& input_sf) {
+static void scaled_fp4_quant_sm103a_impl(torch::Tensor const& output,
+                                         torch::Tensor const& input,
+                                         torch::Tensor const& output_sf,
+                                         torch::Tensor const& input_sf,
+                                         bool use_pdl) {
   int32_t m = input.size(0);
   int32_t n = input.size(1);
 
@@ -361,11 +368,55 @@ void scaled_fp4_quant_sm103a(torch::Tensor const& output,
   VLLM_DISPATCH_HALF_TYPES(input.scalar_type(), "nvfp4_quant_sm103", [&] {
     using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
     auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
-    vllm::cvt_fp16_to_fp4_sm103<cuda_type, false><<<grid, block, 0, stream>>>(
-        m, n, num_padded_cols, input_ptr, input_sf_ptr,
-        reinterpret_cast<uint32_t*>(output_ptr),
-        reinterpret_cast<uint32_t*>(sf_out));
+    auto output_u32 = reinterpret_cast<uint32_t*>(output_ptr);
+    auto sf_out_u32 = reinterpret_cast<uint32_t*>(sf_out);
+
+    if (use_pdl) {
+      // PDL launch: set ProgrammaticStreamSerialization so the next kernel
+      // (GEMM) can begin before this quant kernel fully completes.
+      cudaLaunchConfig_t launch_config = {};
+      launch_config.gridDim = grid;
+      launch_config.blockDim = block;
+      launch_config.dynamicSmemBytes = 0;
+      launch_config.stream = stream;
+
+      cudaLaunchAttribute pdl_attr;
+      pdl_attr.id = cudaLaunchAttributeProgrammaticStreamSerialization;
+      pdl_attr.val.programmaticStreamSerializationAllowed = 1;
+      launch_config.numAttrs = 1;
+      launch_config.attrs = &pdl_attr;
+
+      CUDA_CHECK(cudaLaunchKernelEx(
+          &launch_config,
+          vllm::cvt_fp16_to_fp4_sm103<cuda_type, false>,
+          m, n, num_padded_cols, input_ptr, input_sf_ptr,
+          output_u32, sf_out_u32));
+    } else {
+      vllm::cvt_fp16_to_fp4_sm103<cuda_type, false>
+          <<<grid, block, 0, stream>>>(
+              m, n, num_padded_cols, input_ptr, input_sf_ptr,
+              output_u32, sf_out_u32);
+    }
   });
+}
+
+// Original entry point (no PDL).
+void scaled_fp4_quant_sm103a(torch::Tensor const& output,
+                             torch::Tensor const& input,
+                             torch::Tensor const& output_sf,
+                             torch::Tensor const& input_sf) {
+  scaled_fp4_quant_sm103a_impl(output, input, output_sf, input_sf,
+                                /*use_pdl=*/false);
+}
+
+// PDL-enabled entry point: launches quant kernel with
+// ProgrammaticStreamSerialization to overlap with a subsequent GEMM.
+void scaled_fp4_quant_sm103a_pdl(torch::Tensor const& output,
+                                 torch::Tensor const& input,
+                                 torch::Tensor const& output_sf,
+                                 torch::Tensor const& input_sf) {
+  scaled_fp4_quant_sm103a_impl(output, input, output_sf, input_sf,
+                                /*use_pdl=*/true);
 }
 
 // ============================================================================

@@ -319,7 +319,7 @@ template <typename Config>
 void runGemm(at::Tensor& D, at::Tensor const& A, at::Tensor const& B,
              at::Tensor const& A_sf, at::Tensor const& B_sf,
              at::Tensor const& alpha, int64_t m, int64_t n, int64_t k,
-             cudaStream_t stream) {
+             cudaStream_t stream, bool launch_with_pdl = false) {
   typename Config::Gemm gemm;
 
   auto arguments =
@@ -334,7 +334,12 @@ void runGemm(at::Tensor& D, at::Tensor const& A, at::Tensor const& B,
 
   CUTLASS_CHECK(gemm.initialize(arguments, workspace.data_ptr(), stream));
 
-  CUTLASS_CHECK(gemm.run(arguments, workspace.data_ptr(), stream));
+  // When launch_with_pdl=true, CUTLASS sets
+  // cudaLaunchAttributeProgrammaticStreamSerialization on the GEMM kernel,
+  // allowing the next kernel on the stream to begin before this GEMM
+  // fully completes.
+  CUTLASS_CHECK(gemm.run(arguments, workspace.data_ptr(), stream,
+                         /*cuda_adapter=*/nullptr, launch_with_pdl));
 }
 
 // Dispatch function to select appropriate config based on M
@@ -374,21 +379,22 @@ void cutlass_fp4_gemm_sm103_dispatch(torch::Tensor& D, torch::Tensor const& A,
                                      torch::Tensor const& B_sf,
                                      torch::Tensor const& alpha, int64_t m,
                                      int64_t n, int64_t k,
-                                     cudaStream_t stream) {
+                                     cudaStream_t stream,
+                                     bool launch_with_pdl = false) {
   uint32_t const mp2 = std::max(static_cast<uint32_t>(16), next_pow_2(m));
 
   if (mp2 <= 16) {
     // m in [1, 16] -- 1SM, low-latency decode
     runGemm<Fp4GemmSm103<sm103_fp4_config_M16, OutType>>(
-        D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
+        D, A, B, A_sf, B_sf, alpha, m, n, k, stream, launch_with_pdl);
   } else if (mp2 <= 256) {
     // m in (16, 256] -- 2SM, small tile
     runGemm<Fp4GemmSm103<sm103_fp4_config_M256, OutType>>(
-        D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
+        D, A, B, A_sf, B_sf, alpha, m, n, k, stream, launch_with_pdl);
   } else {
     // m in (256, inf) -- 2SM, large tile
     runGemm<Fp4GemmSm103<sm103_fp4_config_default, OutType>>(
-        D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
+        D, A, B, A_sf, B_sf, alpha, m, n, k, stream, launch_with_pdl);
   }
 }
 
@@ -495,14 +501,18 @@ void cutlass_scaled_fp4_mm_sm100a(torch::Tensor& D, torch::Tensor const& A,
 //
 // Uses FP4 Ultra MMA instructions with K=768 tiles for higher throughput.
 // Scale factors must be in Sm103BlockScaledConfig layout (different from SM100).
+//
+// When launch_with_pdl=true, the CUTLASS GEMM is launched with
+// ProgrammaticStreamSerialization, allowing the next kernel on the stream
+// to begin before this GEMM completes.  Combined with a PDL-enabled
+// quantization producer, this creates a pipelined quant->GEMM overlap.
 // ============================================================================
 #if defined(CUTLASS_ARCH_MMA_SM103_SUPPORTED)
 
-void cutlass_scaled_fp4_mm_sm103a(torch::Tensor& D, torch::Tensor const& A,
-                                  torch::Tensor const& B,
-                                  torch::Tensor const& A_sf,
-                                  torch::Tensor const& B_sf,
-                                  torch::Tensor const& alpha) {
+static void cutlass_scaled_fp4_mm_sm103a_impl(
+    torch::Tensor& D, torch::Tensor const& A, torch::Tensor const& B,
+    torch::Tensor const& A_sf, torch::Tensor const& B_sf,
+    torch::Tensor const& alpha, bool launch_with_pdl) {
   CHECK_INPUT(A, FLOAT4_E2M1X2, "a");
   CHECK_INPUT(B, FLOAT4_E2M1X2, "b");
 
@@ -556,15 +566,36 @@ void cutlass_scaled_fp4_mm_sm103a(torch::Tensor& D, torch::Tensor const& A,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(A.get_device());
 
   if (out_dtype == at::ScalarType::Half) {
-    cutlass_fp4_gemm_sm103_dispatch<cutlass::half_t>(D, A, B, A_sf, B_sf,
-                                                     alpha, m, n, k, stream);
+    cutlass_fp4_gemm_sm103_dispatch<cutlass::half_t>(
+        D, A, B, A_sf, B_sf, alpha, m, n, k, stream, launch_with_pdl);
   } else if (out_dtype == at::ScalarType::BFloat16) {
     cutlass_fp4_gemm_sm103_dispatch<cutlass::bfloat16_t>(
-        D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
+        D, A, B, A_sf, B_sf, alpha, m, n, k, stream, launch_with_pdl);
   } else {
     TORCH_CHECK(false, "Unsupported output data type of nvfp4 mm (", out_dtype,
                 ")");
   }
+}
+
+// Original entry point (no PDL).
+void cutlass_scaled_fp4_mm_sm103a(torch::Tensor& D, torch::Tensor const& A,
+                                  torch::Tensor const& B,
+                                  torch::Tensor const& A_sf,
+                                  torch::Tensor const& B_sf,
+                                  torch::Tensor const& alpha) {
+  cutlass_scaled_fp4_mm_sm103a_impl(D, A, B, A_sf, B_sf, alpha,
+                                     /*launch_with_pdl=*/false);
+}
+
+// PDL-enabled entry point: GEMM launched with ProgrammaticStreamSerialization
+// so the next kernel on the stream can overlap with this GEMM's tail.
+void cutlass_scaled_fp4_mm_sm103a_pdl(torch::Tensor& D, torch::Tensor const& A,
+                                      torch::Tensor const& B,
+                                      torch::Tensor const& A_sf,
+                                      torch::Tensor const& B_sf,
+                                      torch::Tensor const& alpha) {
+  cutlass_scaled_fp4_mm_sm103a_impl(D, A, B, A_sf, B_sf, alpha,
+                                     /*launch_with_pdl=*/true);
 }
 
 #endif  // CUTLASS_ARCH_MMA_SM103_SUPPORTED

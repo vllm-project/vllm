@@ -26,6 +26,19 @@ void scaled_fp4_quant_sm103a_out(torch::Tensor const& input,
                                  torch::Tensor const& input_sf,
                                  torch::Tensor& output,
                                  torch::Tensor& output_sf);
+// PDL-enabled variants (ProgrammaticStreamSerialization).
+void cutlass_scaled_fp4_mm_sm103a_pdl(torch::Tensor& D,
+                                      torch::Tensor const& A,
+                                      torch::Tensor const& B,
+                                      torch::Tensor const& A_sf,
+                                      torch::Tensor const& B_sf,
+                                      torch::Tensor const& alpha);
+std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_sm103a_pdl_func(
+    torch::Tensor const& input, torch::Tensor const& input_sf);
+void scaled_fp4_quant_sm103a_pdl_out(torch::Tensor const& input,
+                                     torch::Tensor const& input_sf,
+                                     torch::Tensor& output,
+                                     torch::Tensor& output_sf);
 #endif
 
 // Note on op signatures:
@@ -468,6 +481,33 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       " -> ()");
   ops.impl("scaled_fp4_quant_sm103.out", torch::kCUDA,
            &scaled_fp4_quant_sm103a_out);
+
+  // PDL-enabled SM103 GEMM: launched with ProgrammaticStreamSerialization
+  // so the next kernel on the stream can overlap with this GEMM's tail.
+  ops.def(
+      "cutlass_scaled_fp4_mm_sm103a_pdl(Tensor! out, Tensor a, Tensor b,"
+      "                                 Tensor block_scale_a,"
+      "                                 Tensor block_scale_b,"
+      "                                 Tensor alpha) -> ()");
+  ops.impl("cutlass_scaled_fp4_mm_sm103a_pdl", torch::kCUDA,
+           &cutlass_scaled_fp4_mm_sm103a_pdl);
+
+  // PDL-enabled SM103 quantization: launched with
+  // ProgrammaticStreamSerialization so the subsequent GEMM can begin
+  // before this quant kernel completes.
+  ops.def(
+      "scaled_fp4_quant_sm103_pdl(Tensor input,"
+      "                           Tensor input_scale) -> (Tensor, Tensor)");
+  ops.impl("scaled_fp4_quant_sm103_pdl", torch::kCUDA,
+           &scaled_fp4_quant_sm103a_pdl_func);
+
+  ops.def(
+      "scaled_fp4_quant_sm103_pdl.out(Tensor input,"
+      "                               Tensor input_scale,"
+      "                               *, Tensor(a!) output,"
+      "                               Tensor(b!) output_scale) -> ()");
+  ops.impl("scaled_fp4_quant_sm103_pdl.out", torch::kCUDA,
+           &scaled_fp4_quant_sm103a_pdl_out);
 #endif
 
   // cutlass nvfp4 block scaled group GEMM

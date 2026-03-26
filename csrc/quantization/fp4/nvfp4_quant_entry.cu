@@ -32,6 +32,11 @@ void scaled_fp4_quant_sm103a(torch::Tensor const& output,
                              torch::Tensor const& input,
                              torch::Tensor const& output_sf,
                              torch::Tensor const& input_sf);
+// PDL variant: launches quant with ProgrammaticStreamSerialization.
+void scaled_fp4_quant_sm103a_pdl(torch::Tensor const& output,
+                                 torch::Tensor const& input,
+                                 torch::Tensor const& output_sf,
+                                 torch::Tensor const& input_sf);
 #endif
 
 #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
@@ -174,4 +179,44 @@ void scaled_fp4_quant_sm103a_out(torch::Tensor const& input,
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(false,
                               "No compiled SM103 nvfp4 quantization kernel");
+}
+
+// ============================================================================
+// PDL-enabled SM103 quantization entry points.
+//
+// These launch the quant kernel with ProgrammaticStreamSerialization,
+// allowing the subsequent GEMM to begin before quantization completes.
+// ============================================================================
+std::tuple<torch::Tensor, torch::Tensor> scaled_fp4_quant_sm103a_pdl_func(
+    torch::Tensor const& input, torch::Tensor const& input_sf) {
+  int64_t n = input.size(-1);
+  int64_t m = input.numel() / n;
+  auto device = input.device();
+
+  auto output = torch::empty(
+      {m, n / 2}, torch::TensorOptions().device(device).dtype(torch::kUInt8));
+
+  auto [sf_m, sf_n] = vllm::computeSwizzledSFShape(m, n);
+  auto output_sf = torch::empty(
+      {sf_m, sf_n},
+      torch::TensorOptions().device(device).dtype(torch::kInt32));
+
+#if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
+  scaled_fp4_quant_sm103a_pdl(output, input, output_sf, input_sf);
+  return {output, output_sf};
+#endif
+  TORCH_CHECK_NOT_IMPLEMENTED(
+      false, "No compiled SM103 PDL nvfp4 quantization kernel");
+}
+
+void scaled_fp4_quant_sm103a_pdl_out(torch::Tensor const& input,
+                                     torch::Tensor const& input_sf,
+                                     torch::Tensor& output,
+                                     torch::Tensor& output_sf) {
+#if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
+  scaled_fp4_quant_sm103a_pdl(output, input, output_sf, input_sf);
+  return;
+#endif
+  TORCH_CHECK_NOT_IMPLEMENTED(
+      false, "No compiled SM103 PDL nvfp4 quantization kernel");
 }

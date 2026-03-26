@@ -247,3 +247,68 @@ def test_quantize_to_fp4_padded_no_sf_swizzled(pad_shape: tuple[int, int]) -> No
     out_ans = cast_from_fp4(out, m, n)
     torch.testing.assert_close(out_ans, out_ref)
     torch.testing.assert_close(scale_ans, scale_ref)
+
+
+# ============================================================================
+# SM103-native quantization correctness
+# ============================================================================
+
+_SM103_QUANT_SHAPES = SHAPES + PAD_SHAPES
+
+
+@pytest.mark.skipif(
+    not hasattr(torch.ops._C, "scaled_fp4_quant_sm103"),
+    reason="scaled_fp4_quant_sm103 op not available "
+    "(rebuild without VLLM_USE_PRECOMPILED=1)",
+)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("shape", _SM103_QUANT_SHAPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_scaled_fp4_quant_sm103_matches_sm100(
+    dtype: torch.dtype,
+    shape: tuple[int, int],
+    seed: int,
+) -> None:
+    """
+    Verify scaled_fp4_quant_sm103 (SM103-native layout) against the SM100 path.
+
+    Two invariants:
+      1. Packed FP4 data is identical — both kernels quantize to the same
+         e2m1 values; only the SF memory layout differs.
+      2. SM103 native SFs are byte-identical to SM100 SFs run through
+         convert_sf_layout_sm100_to_sm103 — confirms the in-kernel swizzle
+         matches the standalone conversion kernel.
+    """
+    set_random_seed(seed)
+    torch.set_default_device("cuda:0")
+    m, n = shape
+
+    x = torch.randn((m, n), dtype=dtype)
+    tensor_amax = torch.abs(x).max().to(torch.float32)
+    global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / tensor_amax
+
+    # SM100 reference: ops wrapper returns fp4 (uint8) and sf (float8_e4m3fn)
+    fp4_sm100, sf_sm100 = ops.scaled_fp4_quant(
+        x, global_scale, is_sf_swizzled_layout=True
+    )
+
+    # SM103 native: raw C++ op returns sf as int32; view as float8 to match
+    fp4_sm103, sf_sm103_i32 = torch.ops._C.scaled_fp4_quant_sm103(x, global_scale)
+    sf_sm103 = sf_sm103_i32.view(torch.float8_e4m3fn)
+
+    # 1. FP4 quantized data must be identical
+    assert torch.equal(fp4_sm103, fp4_sm100), (
+        f"FP4 data mismatch between SM100 and SM103 quant kernels "
+        f"(shape={shape}, dtype={dtype})"
+    )
+
+    # 2. SM103 native SFs must match SM100 SFs converted to SM103 layout
+    sf_sm100_converted = torch.empty_like(sf_sm100)
+    torch.ops._C.convert_sf_layout_sm100_to_sm103(sf_sm100_converted, sf_sm100)
+
+    assert torch.equal(sf_sm103.view(torch.uint8), sf_sm100_converted.view(torch.uint8)), (
+        f"SM103 native SF layout doesn't match "
+        f"convert_sf_layout_sm100_to_sm103(SM100 SFs) "
+        f"(shape={shape}, dtype={dtype})"
+    )

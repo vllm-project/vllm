@@ -31,6 +31,13 @@ void cutlass_scaled_fp4_mm_sm103a(torch::Tensor& D, torch::Tensor const& A,
                                   torch::Tensor const& A_sf,
                                   torch::Tensor const& B_sf,
                                   torch::Tensor const& alpha);
+// PDL variant: GEMM launched with ProgrammaticStreamSerialization.
+void cutlass_scaled_fp4_mm_sm103a_pdl(torch::Tensor& D,
+                                      torch::Tensor const& A,
+                                      torch::Tensor const& B,
+                                      torch::Tensor const& A_sf,
+                                      torch::Tensor const& B_sf,
+                                      torch::Tensor const& alpha);
 #endif
 
 #if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
