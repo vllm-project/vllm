@@ -58,6 +58,10 @@ class OffloadingConnectorWorker:
         self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
 
         self._finished_reqs_waiting_for_store: set[ReqId] = set()
+        # Loads that failed validation (e.g. stale cache) and were never
+        # submitted to the I/O engine.  Reported as "finished receiving"
+        # so the scheduler falls back to recompute.
+        self._failed_load_req_ids: set[ReqId] = set()
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -324,7 +328,20 @@ class OffloadingConnectorWorker:
                 job_id,
             )
             success = self.worker.transfer_async(job_id, transfer_spec)
-            assert success
+            if not success:
+                logger.warning(
+                    "offloading worker load submission failed for "
+                    "req_id=%s job_id=%s (stale cache files?), "
+                    "falling back to recompute",
+                    req_id,
+                    job_id,
+                )
+                # Remove from tracking and mark as failed so
+                # get_finished() reports it as complete, letting the
+                # scheduler fall back to recompute.
+                del self._load_job[req_id]
+                del self._jobs[job_id]
+                self._failed_load_req_ids.add(req_id)
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
         for req_id, transfer_spec in metadata.reqs_to_store.items():
@@ -395,6 +412,13 @@ class OffloadingConnectorWorker:
                     job_id,
                 )
                 finished_recving.add(req_id)
+
+        # Include loads that failed validation (stale cache) so the
+        # scheduler removes them from _reqs_being_loaded and falls
+        # back to recompute.
+        if self._failed_load_req_ids:
+            finished_recving.update(self._failed_load_req_ids)
+            self._failed_load_req_ids.clear()
 
         for req_id in finished_req_ids:
             pending_req_jobs = self._store_jobs.get(req_id)

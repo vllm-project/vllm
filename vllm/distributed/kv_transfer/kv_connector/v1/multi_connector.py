@@ -557,15 +557,20 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         best_score = 0.0
         best_result: tuple[int, bool] = (0, False)
 
-        per_connector_results: list[tuple[int, bool]] = []
+        # Track which connectors gave a definitive answer vs deferred.
+        per_connector_results: list[tuple[int, bool] | None] = []
+        any_resolved = False
         for i, c in enumerate(self._connectors):
-            name = self._connector_names[i]
             toks, load_async = c.get_num_new_matched_tokens(
                 request, num_computed_tokens
             )
-            # If any connector is still resolving, defer the decision.
             if toks is None:
-                return (None, False)
+                # Connector is still resolving (e.g. backpressured).
+                # Skip it — don't block connectors that already answered.
+                per_connector_results.append(None)
+                continue
+            any_resolved = True
+            name = self._connector_names[i]
             self._selection_stats.record_query(name)
             per_connector_results.append((toks, load_async))
             if toks > 0:
@@ -575,18 +580,22 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                     best_idx = i
                     best_result = (toks, load_async)
 
+        # Only defer if ALL connectors returned None.
+        if not any_resolved:
+            return (None, False)
+
         if best_idx >= 0:
             winner_name = self._connector_names[best_idx]
             self._requests_to_connector[request.request_id] = best_idx
             self._selection_stats.record_hit(winner_name, best_result[0])
-            # Record misses for non-winning connectors that had no tokens.
-            for i, (toks, _) in enumerate(per_connector_results):
-                if i != best_idx and toks == 0:
+            for i, result in enumerate(per_connector_results):
+                if i != best_idx and result is not None and result[0] == 0:
                     self._selection_stats.record_miss(self._connector_names[i])
         else:
-            # No connector had a hit.
-            for name in self._connector_names:
-                self._selection_stats.record_miss(name)
+            # No connector had a hit (resolved ones all returned 0).
+            for i, result in enumerate(per_connector_results):
+                if result is not None:
+                    self._selection_stats.record_miss(self._connector_names[i])
 
         return best_result
 

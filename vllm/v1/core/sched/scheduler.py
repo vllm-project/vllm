@@ -692,7 +692,10 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled.
                             break
 
-                if self.need_mamba_block_aligned_split:
+                if self.need_mamba_block_aligned_split and not load_kv_async:
+                    # Skip mamba alignment when doing an async KV load
+                    # (num_new_tokens is intentionally 0 — we're loading
+                    # cached tokens, not computing new ones).
                     num_new_tokens = self._mamba_block_aligned_split(
                         request,
                         num_new_tokens,
