@@ -31,7 +31,7 @@ def _metadata_has_step_work(value: Any) -> bool:
     if value is None:
         return False
 
-    if isinstance(value, (bool, int, float, str, bytes, bytearray)):
+    if isinstance(value, (bool, str, bytes, bytearray)):
         return bool(value)
 
     if isinstance(value, torch.Tensor):
