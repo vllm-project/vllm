@@ -56,6 +56,9 @@ async def init_generate_state(
         MCPToolServer,
         ToolServer,
     )
+    from vllm.entrypoints.openai.chat_completion.batch_serving import (
+        OpenAIServingChatBatch,
+    )
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
     from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
     from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
@@ -96,27 +99,31 @@ async def init_generate_state(
         if "generate" in supported_tasks
         else None
     )
+    _chat_kwargs = dict(
+        engine_client=engine_client,
+        models=state.openai_serving_models,
+        response_role=args.response_role,
+        openai_serving_render=state.openai_serving_render,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        trust_request_chat_template=args.trust_request_chat_template,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+        enable_force_include_usage=args.enable_force_include_usage,
+        enable_log_outputs=args.enable_log_outputs,
+        enable_log_deltas=args.enable_log_deltas,
+    )
     state.openai_serving_chat = (
-        OpenAIServingChat(
-            engine_client,
-            state.openai_serving_models,
-            args.response_role,
-            openai_serving_render=state.openai_serving_render,
-            request_logger=request_logger,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            default_chat_template_kwargs=args.default_chat_template_kwargs,
-            trust_request_chat_template=args.trust_request_chat_template,
-            return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-            enable_auto_tools=args.enable_auto_tool_choice,
-            exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
-            tool_parser=args.tool_call_parser,
-            reasoning_parser=args.structured_outputs_config.reasoning_parser,
-            enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-            enable_force_include_usage=args.enable_force_include_usage,
-            enable_log_outputs=args.enable_log_outputs,
-            enable_log_deltas=args.enable_log_deltas,
-        )
+        OpenAIServingChat(**_chat_kwargs) if "generate" in supported_tasks else None
+    )
+    state.openai_serving_chat_batch = (
+        OpenAIServingChatBatch(**_chat_kwargs)
         if "generate" in supported_tasks
         else None
     )
