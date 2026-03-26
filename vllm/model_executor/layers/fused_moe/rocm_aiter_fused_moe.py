@@ -359,6 +359,39 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
 
+    @staticmethod
+    def is_supported_config(
+        cls,
+        moe_config,
+        weight_key,
+        activation_key,
+        activation_format,
+    ):
+        supported, reason = super(AiterExperts, AiterExperts).is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if not supported:
+            return supported, reason
+        # CK MXFP4 MoE GEMM kernels require both hidden_dim and
+        # intermediate_size_per_partition to be aligned to 256.
+        if weight_key == kMxfp4Static:
+            from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+                CK_MXFP4_MOE_DIM_ALIGNMENT,
+            )
+
+            align = CK_MXFP4_MOE_DIM_ALIGNMENT
+            if moe_config.hidden_dim % align != 0:
+                return False, (
+                    f"hidden_dim={moe_config.hidden_dim} is not a multiple of {align}"
+                )
+            if moe_config.intermediate_size_per_partition % align != 0:
+                return False, (
+                    f"intermediate_size_per_partition="
+                    f"{moe_config.intermediate_size_per_partition} is not a "
+                    f"multiple of {align}"
+                )
+        return True, None
+
     def supports_expert_map(self):
         return True
 
