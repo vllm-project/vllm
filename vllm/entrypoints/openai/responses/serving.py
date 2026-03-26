@@ -548,6 +548,7 @@ class OpenAIServingResponses(OpenAIServing):
             return ResponseFailedEvent(
                 response=failed_response,
                 type="response.failed",
+                sequence_number=0,
             )
 
     async def _create_response_with_result_generator(
@@ -2076,6 +2077,29 @@ class OpenAIServingResponses(OpenAIServing):
                 error_json = self._convert_generation_error_to_streaming_response(e)
                 yield _increment_sequence_number_and_return(
                     TypeAdapter(StreamingResponsesResponse).validate_json(error_json)
+                )
+                return
+            except Exception as e:
+                logger.exception("Error in responses stream generator.")
+                failed_response = ResponsesResponse.from_request(
+                    request,
+                    sampling_params,
+                    model_name=model_name,
+                    created_time=created_time,
+                    output=[],
+                    status="failed",
+                    usage=None,
+                    error=ResponseError(
+                        code="server_error",
+                        message=str(e),
+                    ),
+                )
+                yield _increment_sequence_number_and_return(
+                    ResponseFailedEvent(
+                        type="response.failed",
+                        sequence_number=-1,
+                        response=failed_response,
+                    )
                 )
                 return
 
