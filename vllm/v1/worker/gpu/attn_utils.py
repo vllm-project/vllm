@@ -167,7 +167,7 @@ def _update_hybrid_attention_mamba_layout(
 def _reshape_kv_cache(
     kv_cache_config: KVCacheConfig,
     kv_cache_raw_tensors: dict[str, torch.Tensor],
-    attn_backends: dict[str, AttentionBackend],
+    attn_backends: dict[str, type[AttentionBackend]],
     cache_dtype: str,
     kernel_block_sizes: list[int],
 ) -> dict[str, torch.Tensor]:
@@ -255,7 +255,7 @@ def init_kv_cache(
     runner_kv_caches: list[torch.Tensor],
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
-    attn_backends: dict[str, AttentionBackend],
+    attn_backends: dict[str, type[AttentionBackend]],
     device: torch.device,
     cache_dtype: str,
     kernel_block_sizes: list[int],
