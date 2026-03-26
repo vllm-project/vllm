@@ -22,7 +22,7 @@ pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
     ChatToolChoice, SamplingParams,
 };
-pub use stream::{ChatEventStream, CollectedAssistantMessage};
+pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
 
 mod backend;
 pub mod backends;

@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use openai_protocol::chat::{ChatMessage, MessageContent};
+use openai_protocol::chat::{ChatChoice, ChatMessage, MessageContent};
 use openai_protocol::common::{
     Function, FunctionCall, FunctionChoice, ResponseFormat, StreamOptions, StringOrArray, Tool,
-    ToolChoice, ToolChoiceValue, ToolReference, default_true, validate_stop,
+    ToolChoice, ToolChoiceValue, ToolReference, Usage, default_true, validate_stop,
 };
 use openai_protocol::sampling_params::{validate_top_k_value, validate_top_p_value};
 use openai_protocol::validated::Normalizable;
@@ -13,9 +13,9 @@ use validator::Validate;
 
 /// vLLM-compatible request type for the Chat Completions API.
 ///
-/// This mirrors [`openai_protocol::chat::ChatCompletionRequest`], but keeps the
-/// request type local to the route module so we can extend it directly with
-/// vLLM-compatible fields instead of layering wrapper deserializers on top.
+/// Mirrors [`openai_protocol::chat::ChatCompletionRequest`]. The local copy keeps the request
+/// type route-owned so we can add the vLLM-only fields `echo` and `prompt_logprobs` directly
+/// instead of layering wrapper deserializers on top.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, Validate)]
 #[validate(schema(function = "validate_chat_cross_parameters"))]
@@ -263,6 +263,23 @@ impl Normalizable for ChatCompletionRequest {
             self.tool_choice = Some(ToolChoice::Value(choice_value));
         }
     }
+}
+
+/// Mirrors [`openai_protocol::chat::ChatCompletionResponse`].
+///
+/// The top-level shape stays aligned with upstream, and the only local extension is the vLLM-only
+/// `prompt_logprobs` payload.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ChatCompletionResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<ChatChoice>,
+    pub usage: Option<Usage>,
+    pub system_fingerprint: Option<String>,
+    pub prompt_logprobs: Option<Vec<Option<HashMap<String, f32>>>>,
 }
 
 fn default_model() -> String {

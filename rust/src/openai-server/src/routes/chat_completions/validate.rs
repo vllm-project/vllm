@@ -36,19 +36,27 @@ pub(super) fn validate_request_compat(
         "Verbosity control is not supported.",
     )?;
 
-    if request.logprobs {
-        bail_invalid_request!(param = "logprobs", "logprobs are not supported.");
-    }
-
-    if request.top_logprobs.is_some() {
-        bail_invalid_request!(param = "top_logprobs", "top_logprobs are not supported.");
-    }
-
-    if request.prompt_logprobs.is_some() {
+    if request.top_logprobs.is_some() && !request.logprobs {
         bail_invalid_request!(
-            param = "prompt_logprobs",
-            "prompt_logprobs are not supported."
+            param = "top_logprobs",
+            "top_logprobs can only be used when logprobs=true."
         );
+    }
+
+    if let Some(prompt_logprobs) = request.prompt_logprobs {
+        if prompt_logprobs < 0 && prompt_logprobs != -1 {
+            bail_invalid_request!(
+                param = "prompt_logprobs",
+                "prompt_logprobs must be a non-negative value or -1."
+            );
+        }
+
+        if request.stream && (prompt_logprobs > 0 || prompt_logprobs == -1) {
+            bail_invalid_request!(
+                param = "prompt_logprobs",
+                "prompt_logprobs are not available when stream=true."
+            );
+        }
     }
 
     if request.response_format.is_some() {
@@ -267,21 +275,44 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_compat_rejects_logprobs_fields() {
+    fn validate_request_compat_accepts_output_logprobs() {
         let request = ChatCompletionRequest {
             logprobs: true,
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+            .expect("logprobs should be accepted");
+    }
 
+    #[test]
+    fn validate_request_compat_rejects_top_logprobs_without_logprobs() {
         let request = ChatCompletionRequest {
             top_logprobs: Some(0),
             ..base_request()
         };
         assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+    }
 
+    #[test]
+    fn validate_request_compat_rejects_streaming_prompt_logprobs_requests() {
         let request = ChatCompletionRequest {
             prompt_logprobs: Some(1),
+            ..base_request()
+        };
+        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+
+        let request = ChatCompletionRequest {
+            prompt_logprobs: Some(-1),
+            ..base_request()
+        };
+        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_invalid_prompt_logprobs_value() {
+        let request = ChatCompletionRequest {
+            stream: false,
+            prompt_logprobs: Some(-2),
             ..base_request()
         };
         assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());

@@ -9,9 +9,9 @@ use vllm_text::Prompt;
 
 /// vLLM-compatible request type for the Completions API.
 ///
-/// This mirrors [`openai_protocol::completion::CompletionRequest`], but keeps the
-/// request type local to the route module so we can extend it directly with
-/// vLLM-compatible fields instead of layering wrapper deserializers on top.
+/// Mirrors [`openai_protocol::completion::CompletionRequest`]. The local copy keeps the request
+/// type route-owned so we can accept token-id prompts via [`vllm_text::Prompt`] and add the
+/// vLLM-only `prompt_logprobs` field directly instead of layering wrapper deserializers on top.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct CompletionRequest {
@@ -135,6 +135,10 @@ pub struct CompletionRequest {
 
 impl Normalizable for CompletionRequest {}
 
+/// Mirrors [`openai_protocol::completion::CompletionResponse`].
+///
+/// The top-level response shape stays aligned with upstream; the vLLM-specific prompt logprobs
+/// payload lives on [`CompletionChoice`].
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CompletionResponse {
@@ -147,6 +151,10 @@ pub(super) struct CompletionResponse {
     pub system_fingerprint: Option<String>,
 }
 
+/// Mirrors [`openai_protocol::completion::CompletionChoice`].
+///
+/// Adds the vLLM-only `prompt_logprobs` payload on top of the upstream `matched_stop`
+/// metadata.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CompletionChoice {
@@ -158,6 +166,7 @@ pub(super) struct CompletionChoice {
     pub prompt_logprobs: Option<Vec<Option<HashMap<String, f32>>>>,
 }
 
+/// Mirrors [`openai_protocol::completion::CompletionStreamResponse`].
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CompletionStreamResponse {
     pub id: String,
@@ -169,6 +178,7 @@ pub(super) struct CompletionStreamResponse {
     pub system_fingerprint: Option<String>,
 }
 
+/// Mirrors [`openai_protocol::completion::CompletionStreamChoice`].
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CompletionStreamChoice {
     pub text: String,
@@ -187,10 +197,10 @@ pub(super) enum CompletionSseChunk {
     Usage(CompletionUsageChunk),
 }
 
-/// Minimal JSON shape for the extra streamed usage chunk used by `vllm-bench`.
+/// Local wrapper for the extra streamed usage chunk.
 ///
-/// The streamed completion chunk DTO does not include a `usage` field, so the Rust server emits
-/// this thin local wrapper for the terminal accounting event.
+/// This is not a direct `openai_protocol` mirror. It extends the streamed completion chunk shape
+/// with a terminal `usage` field for the accounting event emitted before `[DONE]`.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CompletionUsageChunk {
     pub id: String,

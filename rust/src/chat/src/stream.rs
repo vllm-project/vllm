@@ -104,6 +104,8 @@ impl Stream for ChatEventStream {
     }
 }
 
+pub trait ChatEventStreamTrait = Stream<Item = Result<ChatEvent>> + Send + 'static;
+
 #[cfg(test)]
 mod tests {
     use futures::stream;

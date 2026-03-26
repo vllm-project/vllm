@@ -22,6 +22,10 @@ pub struct PreparedRequest {
     pub response_model: String,
     /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
+    /// Whether the caller requested output logprobs on chat choices.
+    pub requested_logprobs: bool,
+    /// Whether the caller requested top-level prompt logprobs.
+    pub include_prompt_logprobs: bool,
     /// Lowered text-only chat request for `vllm-chat`.
     pub chat_request: ChatRequest,
 }
@@ -44,6 +48,8 @@ pub fn prepare_chat_request(
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
+    let requested_logprobs = request.logprobs;
+    let include_prompt_logprobs = request.prompt_logprobs.is_some();
 
     let chat_request = ChatRequest {
         request_id: response_id.clone(),
@@ -55,8 +61,10 @@ pub fn prepare_chat_request(
             seed: request.sampling_seed,
             max_tokens: request.max_completion_tokens,
             min_tokens: request.min_tokens,
-            logprobs: None,
-            prompt_logprobs: None,
+            logprobs: request
+                .logprobs
+                .then_some(request.top_logprobs.unwrap_or(0) as i32),
+            prompt_logprobs: request.prompt_logprobs,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
@@ -82,6 +90,8 @@ pub fn prepare_chat_request(
         response_id,
         response_model: configured_model.to_string(),
         include_usage,
+        requested_logprobs,
+        include_prompt_logprobs,
         chat_request,
     })
 }
@@ -635,5 +645,43 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&prepared.chat_request);
+    }
+
+    #[test]
+    fn prepare_chat_request_lowers_logprobs_fields() {
+        let request = ChatCompletionRequest {
+            stream: false,
+            logprobs: true,
+            prompt_logprobs: Some(2),
+            ..base_request()
+        };
+
+        let prepared =
+            prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").expect("request is valid");
+
+        assert!(prepared.requested_logprobs);
+        assert!(prepared.include_prompt_logprobs);
+        assert_eq!(prepared.chat_request.sampling_params.logprobs, Some(0));
+        assert_eq!(
+            prepared.chat_request.sampling_params.prompt_logprobs,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_keeps_prompt_logprobs_independent_from_echo() {
+        let request = ChatCompletionRequest {
+            logprobs: true,
+            top_logprobs: Some(3),
+            echo: true,
+            ..base_request()
+        };
+
+        let prepared =
+            prepare_chat_request(&request, "Qwen/Qwen1.5-0.5B-Chat").expect("request is valid");
+
+        assert_eq!(prepared.chat_request.sampling_params.logprobs, Some(3));
+        assert_eq!(prepared.chat_request.sampling_params.prompt_logprobs, None);
+        assert!(!prepared.include_prompt_logprobs);
     }
 }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use openai_protocol::common::LogProbs;
+use openai_protocol::common::{ChatLogProbs, ChatLogProbsContent, LogProbs, TopLogProb};
 use vllm_text::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
 };
@@ -92,6 +92,21 @@ pub fn decoded_prompt_logprobs_to_maps(
         .collect()
 }
 
+/// Convert decoded token-position logprobs into the OpenAI chat `logprobs` shape.
+pub fn decoded_logprobs_to_openai_chat(
+    logprobs: &DecodedLogprobs,
+) -> Result<ChatLogProbs, ApiError> {
+    let content = logprobs
+        .positions
+        .iter()
+        .map(position_to_chat_logprobs_content)
+        .try_collect()?;
+
+    Ok(ChatLogProbs::Detailed {
+        content: Some(content),
+    })
+}
+
 /// Count visible text positions using OpenAI completions' character-offset convention.
 pub fn text_len(text: &str) -> u32 {
     u32::try_from(text.chars().count()).unwrap_or(u32::MAX)
@@ -145,6 +160,33 @@ fn position_top_logprobs_map(position: &DecodedPositionLogprobs) -> HashMap<Stri
         .collect()
 }
 
-fn clamp_logprob(logprob: f32) -> f32 {
+fn position_to_chat_logprobs_content(
+    position: &DecodedPositionLogprobs,
+) -> Result<ChatLogProbsContent, ApiError> {
+    let chosen = position.entries.first().ok_or_else(|| {
+        server_error!("decoded chat logprobs position unexpectedly had no token candidates")
+    })?;
+
+    Ok(ChatLogProbsContent {
+        token: chosen.token.clone(),
+        logprob: clamp_logprob(chosen.logprob),
+        bytes: Some(token_bytes(&chosen.token)),
+        top_logprobs: position
+            .entries
+            .iter()
+            .map(|entry| TopLogProb {
+                token: entry.token.clone(),
+                logprob: clamp_logprob(entry.logprob),
+                bytes: Some(token_bytes(&entry.token)),
+            })
+            .collect(),
+    })
+}
+
+fn token_bytes(token: &str) -> Vec<u8> {
+    token.as_bytes().to_vec()
+}
+
+pub fn clamp_logprob(logprob: f32) -> f32 {
     logprob.max(-9999.0)
 }
