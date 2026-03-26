@@ -1326,7 +1326,7 @@ class OpenAIServingResponses(OpenAIServing):
             else None
         )
         tool_parser = (
-            self.parser.tool_parser_cls(tokenizer)
+            self.parser.tool_parser_cls(tokenizer, request.tools)
             if self.parser and self.parser.tool_parser_cls
             else None
         )
