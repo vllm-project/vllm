@@ -95,7 +95,7 @@ def _resolve_fi_ar_backend() -> str:
         logger.info_once(f"Using flashinfer allreduce backend: {backend}")
         return backend
 
-    if get_node_count() > 1:
+    if get_node_count() > 1:  # noqa: SIM108
         # Use mnnvl backend for multi-node setup since
         # trtllm backend does not support multi-node allreduce
         backend = "mnnvl"
@@ -106,8 +106,9 @@ def _resolve_fi_ar_backend() -> str:
         # Should switch back to auto when the issue is resolved.
         backend = "trtllm"
 
-    logger.info_once(f"Auto-selected flashinfer allreduce backend: mnnvl")
+    logger.info_once("Auto-selected flashinfer allreduce backend: mnnvl")
     return backend
+
 
 def get_fi_ar_workspace(
     world_size: int,
@@ -172,7 +173,7 @@ def get_fi_ar_quant_workspace(
             "multi-node allreduce. Disabling quant fusion."
         )
         return None
-    
+
     # Reuse the non-quant workspace if it was already created with trtllm
     if _fi_ar_workspace is not None and _fi_ar_workspace.backend == "trtllm":
         _fi_ar_quant_workspace = _fi_ar_workspace
