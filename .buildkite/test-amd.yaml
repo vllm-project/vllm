@@ -3763,6 +3763,7 @@ steps:
   - vllm/model_executor/models/qwen3_5_mtp.py
   - vllm/transformers_utils/configs/qwen3_5.py
   - vllm/transformers_utils/configs/qwen3_5_moe.py
+  - vllm/model_executor/models/qwen.py
   - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
