@@ -17,8 +17,16 @@ class VocabMapping:
         self.target_vocab_size = target_vocab_size
         self.draft_vocab_size = draft_vocab_size
         self.device = device
-        self.target_unk_token_id = getattr(target_tokenizer, "unk_token_id", None) or 0
-        self.draft_unk_token_id = getattr(draft_tokenizer, "unk_token_id", None) or 0
+        self.target_unk_token_id = target_tokenizer.unk_token_id
+        if self.target_unk_token_id is None:
+            raise ValueError(
+                'Target tokenizer does not have an unk_token_id. '
+                'universal_draft requires tokenizers with a defined unk_token.')
+        self.draft_unk_token_id = draft_tokenizer.unk_token_id
+        if self.draft_unk_token_id is None:
+            raise ValueError(
+                'Draft tokenizer does not have an unk_token_id. '
+                'universal_draft requires tokenizers with a defined unk_token.')
 
         target_vocab = target_tokenizer.get_vocab()
         draft_vocab = draft_tokenizer.get_vocab()
