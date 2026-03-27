@@ -943,20 +943,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         return
 
 
-def gdn_in_proj(
-    hidden_states: torch.Tensor,
-    qkvz_output_size: int,
-    ba_output_size: int,
-    layer_name: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Custom op for the input projection.
-    """
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
-    return self._forward_in_proj(hidden_states)
-
-
 def gdn_attention_core(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
