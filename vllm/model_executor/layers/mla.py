@@ -12,7 +12,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
 
-# Try to import AITER ops for fused kernels
+# Import AITER ops for fused RMSNorm + FP8 quantization
 try:
     from aiter import dtypes
     from aiter.jit.utils.torch_guard import torch_compile_guard
@@ -38,10 +38,7 @@ def _fused_rms_fp8_group_quant_fake(
     output_unquantized_inp1: bool = False,
     transpose_scale: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fake implementation for torch.compile/CUDA graphs.
-
-    Returns tuple: (out1_quantized, out1_bs, out2)
-    """
+    """Fake implementation for torch.compile/CUDA graphs."""
     if dtype_quant is None:
         dtype_quant = dtypes.fp8
     m, n1 = q_c.shape
@@ -52,7 +49,6 @@ def _fused_rms_fp8_group_quant_fake(
     if transpose_scale:
         out1_bs = out1_bs.transpose(0, 1).contiguous().view(*out1_bs.shape)
     out2 = torch.empty_like(kv_c)
-    # Return tuple for ATOM-style pattern
     return out1_quantized, out1_bs, out2
 
 
@@ -68,40 +64,31 @@ def _fuse_rmsnorm_quant_impl(
     output_unquantized_inp1: bool = False,
     transpose_scale: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fused dual RMSNorm + FP8 quantization using AITER (ATOM pattern).
+    """Fused dual RMSNorm + FP8 quantization using AITER.
 
-    Fuses:
-    1. RMSNorm on q_c
-    2. FP8 group quantization on q_c
-    3. RMSNorm on kv_c (without quantization)
-
-    Based on ATOM's implementation in deepseek_v2.py:245-280
+    Fuses RMSNorm on q_c with FP8 group quantization, and RMSNorm on kv_c
+    without quantization.
 
     Returns:
         (q_c_quantized, q_c_scale, kv_c_normed)
-
-    Uses @torch_compile_guard decorator for CUDA graph compatibility.
     """
-    # Call AITER's fused kernel
-    # Returns: ((out1_quantized, out1_bs), out1_unquantized, out2, out_res1)
     (q_c_quantized, q_c_scale), _, kv_c_normed, _ = fused_rms_fp8_group_quant(
-        q_c,  # x1: first input to normalize + quantize
-        q_a_layernorm_weight,  # x1_weight: RMSNorm weight for q_c
-        q_a_layernorm_variance_epsilon,  # x1_epsilon: epsilon for q_c
-        kv_c,  # x2: second input to normalize (no quant)
-        kv_a_layernorm_weight,  # x2_weight: RMSNorm weight for kv_c
-        kv_a_layernorm_variance_epsilon,  # x2_epsilon: epsilon for kv_c
-        group_size,  # group_size: 128 elements per group
-        dtype_quant,  # dtype_quant: dtypes.fp8
-        None,  # res1: no residual connection
-        output_unquantized_inp1,  # output_unquantized_inp1: False
-        transpose_scale,  # transpose_scale: True
+        q_c,
+        q_a_layernorm_weight,
+        q_a_layernorm_variance_epsilon,
+        kv_c,
+        kv_a_layernorm_weight,
+        kv_a_layernorm_variance_epsilon,
+        group_size,
+        dtype_quant,
+        None,
+        output_unquantized_inp1,
+        transpose_scale,
     )
-    # Return flattened tuple (ATOM pattern)
     return q_c_quantized, q_c_scale, kv_c_normed
 
 
-# Apply decorator conditionally only when AITER is available
+# Apply torch_compile_guard decorator when AITER is available
 if _AITER_AVAILABLE:
     _fuse_rmsnorm_quant = torch_compile_guard(gen_fake=_fused_rms_fp8_group_quant_fake)(
         _fuse_rmsnorm_quant_impl
