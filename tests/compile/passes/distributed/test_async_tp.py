@@ -224,21 +224,27 @@ class _BaseFlashInferBMMFP8Model(torch.nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.dtype = dtype
-        self.weight = torch.rand([hidden_size, hidden_size]).to(FP8_DTYPE).t()
-        self.scale_a = torch.tensor(1.0, dtype=torch.float32)
-        self.scale_b = torch.tensor(1.0, dtype=torch.float32)
+        self.register_buffer(
+            "weight", torch.rand([hidden_size, hidden_size]).to(FP8_DTYPE).t()
+        )
+        self.register_buffer("scale_a", torch.tensor(1.0, dtype=torch.float32))
+        self.register_buffer("scale_b", torch.tensor(1.0, dtype=torch.float32))
         self.tp_world_size = get_tensor_model_parallel_world_size()
         self.tp_group_name = get_tp_group().unique_name
 
     def run_bmm_fp8(self, input: torch.Tensor) -> torch.Tensor:
-        return torch.ops.vllm.bmm_fp8(
+        bmm_result = torch.ops.vllm.bmm_fp8.default(
             input.unsqueeze(0),
             self.weight.unsqueeze(0),
             self.scale_a,
             self.scale_b,
             self.dtype,
             "auto",
-        ).reshape(input.shape[0], self.weight.shape[1])
+        )
+        return torch.ops.aten.reshape.default(
+            bmm_result,
+            [input.shape[0], self.weight.shape[1]],
+        )
 
     def run_all_gather(self, input: torch.Tensor) -> torch.Tensor:
         return torch.ops.vllm.all_gather.default(
