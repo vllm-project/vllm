@@ -35,7 +35,7 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpForma
         3. Each line is wrapped to the specified width (width of terminal).
         """
         # The pattern also includes whitespace after the newline
-        newlines_to_remove = re.compile(r"(?<!\n)\n(?!\n)(?!\s*(-|\*|\+))\s*")
+        newlines_to_remove = re.compile(r"(?<!\n)\n(?!\n)(?!\s*(-|\*|\+|\d+\.))\s*")
         lines = newlines_to_remove.sub(" ", text).splitlines()
         return sum([textwrap.wrap(line, width) for line in lines], [])
 
