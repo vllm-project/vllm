@@ -189,7 +189,7 @@ def chunk_gated_delta_rule(
         >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda').sigmoid()
         >>> g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda'))
         >>> h0 = torch.randn(B, H, V, K, dtype=torch.bfloat16, device='cuda')
-        >>> o, ht, _ = chunk_gated_delta_rule(
+        >>> o, ht = chunk_gated_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
             output_final_state=True
