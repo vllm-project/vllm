@@ -7,10 +7,7 @@ import torch
 
 import vllm.envs as envs
 from tests.compile.backend import TestBackend
-from tests.utils import (
-    TestFP8Layer,
-    multi_gpu_test,
-)
+from tests.utils import multi_gpu_test
 from vllm.compilation.passes.fusion.collective_fusion import AsyncTPPass
 from vllm.config import (
     CompilationConfig,
@@ -27,10 +24,6 @@ from vllm.distributed import (
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
-)
-from vllm.model_executor.kernels.linear import FlashInferFP8ScaledMMLinearKernel
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
@@ -225,25 +218,15 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
 class _BaseFlashInferBMMFP8Model(torch.nn.Module):
     """Base for FlashInfer bmm_fp8 test models."""
 
-    quant_key = kFp8StaticTensorSym
-
     def __init__(self, hidden_size=16, dtype=torch.float16):
         super().__init__()
         self.hidden_size = hidden_size
         self.dtype = dtype
-        self.fp8_linear = TestFP8Layer(
-            weight_shape=(hidden_size, hidden_size),
-            activation_quant_key=self.quant_key,
-            weight_quant_key=self.quant_key,
-            out_dtype=dtype,
-            force_kernel=FlashInferFP8ScaledMMLinearKernel,
-        )
-        assert self.fp8_linear.input_scale is not None
-        self.weight = self.fp8_linear.weight
-        # Keep the runtime graph on scalar scales to match the FlashInfer
-        # exact pattern while still sourcing test params from TestFP8Layer.
-        self.scale_a = self.fp8_linear.input_scale[0]
-        self.scale_b = self.fp8_linear.weight_scale[0]
+        # FlashInfer bmm_fp8 takes non-transposed [K, N] weights with per-tensor
+        # scalar scales.
+        self.weight = torch.empty([hidden_size, hidden_size], dtype=FP8_DTYPE)
+        self.scale_a = torch.tensor(1.0, dtype=torch.float32)
+        self.scale_b = torch.tensor(1.0, dtype=torch.float32)
 
     def run_bmm_fp8(self, input: torch.Tensor) -> torch.Tensor:
         return torch.ops.vllm.bmm_fp8(
@@ -392,7 +375,6 @@ def async_tp_pass_on_test_model(
     # configure vllm config for SequenceParallelismPass
     vllm_config = VllmConfig()
     vllm_config.compilation_config = CompilationConfig(
-        custom_ops=["none", "+quant_fp8"],
         pass_config=PassConfig(
             fuse_gemm_comms=True,
         ),
