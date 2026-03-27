@@ -44,7 +44,7 @@ def opcheck_int8_quant_dynamic(output, input, symmetric=True):
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
 def test_dynamic_scaled_int8_quant(
-    num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int
+    default_vllm_config, num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int
 ) -> None:
     set_random_seed(seed)
 
@@ -68,7 +68,7 @@ def test_dynamic_scaled_int8_quant(
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
 def test_dynamic_scaled_int8_azp_quant(
-    num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int
+    default_vllm_config, num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int
 ) -> None:
     set_random_seed(seed)
     int8_traits = torch.iinfo(torch.int8)
@@ -80,7 +80,11 @@ def test_dynamic_scaled_int8_azp_quant(
 
     # calculate scale and azp, and adjust the range
     scales = (x_token_max - x_token_min) / torch.tensor(255.0)
-    azps = torch.round(torch.tensor(-128.0) - x_token_min / scales).to(torch.int32)
+    azps = (
+        torch.round(torch.tensor(-128.0) - x_token_min / scales)
+        .clamp(-128, 127)
+        .to(torch.int32)
+    )
 
     torch_out = (
         ((x / scales).round() + azps)
@@ -109,7 +113,7 @@ def test_dynamic_scaled_int8_azp_quant(
 @pytest.mark.parametrize("scale", SCALE)
 @torch.inference_mode()
 def test_static_scaled_int8_quant(
-    num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int, scale: float
+    default_vllm_config, num_tokens: int, hidden_size: int, dtype: torch.dtype, seed: int, scale: float
 ) -> None:
     set_random_seed(seed)
     int8_traits = torch.iinfo(torch.int8)
@@ -137,6 +141,7 @@ def test_static_scaled_int8_quant(
 @pytest.mark.parametrize("azp", [-255, 54])
 @torch.inference_mode()
 def test_static_scaled_int8_azp_quant(
+    default_vllm_config,
     num_tokens: int,
     hidden_size: int,
     dtype: torch.dtype,
@@ -169,7 +174,7 @@ def test_static_scaled_int8_azp_quant(
 
 @pytest.mark.parametrize("is_max", [True, False])
 @torch.inference_mode()
-def test_static_scaled_int8_azp_quant_saturating_cast(is_max: bool) -> None:
+def test_static_scaled_int8_azp_quant_saturating_cast(default_vllm_config, is_max: bool) -> None:
     # Test that the saturating cast works correctly for values near i32 max/min
 
     from numpy import inf, nextafter
@@ -193,3 +198,37 @@ def test_static_scaled_int8_azp_quant_saturating_cast(is_max: bool) -> None:
 
     out, _, _ = scaled_int8_quant(x, scale, azp, symmetric=False)
     torch.testing.assert_close(expected, out, atol=0, rtol=0)
+
+
+@torch.inference_mode()
+def test_compiled_static_int8_quant(default_vllm_config) -> None:
+    """Verify compiled decomposition matches CUDA for static INT8 quant."""
+    x = torch.randn(128, 4096, dtype=torch.bfloat16, device="cuda")
+    scale = torch.tensor([0.05], dtype=torch.float32, device="cuda")
+
+    out_cuda, _, _ = scaled_int8_quant(x, scale)
+
+    @torch.compile
+    def compiled(x, s):
+        return scaled_int8_quant(x, s)
+
+    out_compiled, _, _ = compiled(x, scale)
+    torch.testing.assert_close(out_cuda.float(), out_compiled.float(),
+                               atol=0, rtol=0)
+
+
+@torch.inference_mode()
+def test_compiled_dynamic_int8_quant(default_vllm_config) -> None:
+    """Verify compiled decomposition matches CUDA for dynamic INT8 quant."""
+    x = torch.randn(128, 4096, dtype=torch.bfloat16, device="cuda")
+
+    out_cuda, scale_cuda, _ = scaled_int8_quant(x)
+
+    @torch.compile
+    def compiled(x):
+        return scaled_int8_quant(x)
+
+    out_compiled, scale_compiled, _ = compiled(x)
+    torch.testing.assert_close(scale_cuda, scale_compiled, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(out_cuda.float(), out_compiled.float(),
+                               atol=1, rtol=0.01)

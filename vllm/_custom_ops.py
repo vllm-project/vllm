@@ -1962,24 +1962,12 @@ def scaled_int8_quant(
     Returns:
       tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] : Output int8 tensor, scales, and optionally azp.
     """
-    output = torch.empty_like(input, dtype=torch.int8)
-    if scale is not None:
-        # static-per-tensor quantization.
-        assert symmetric == (azp is None), (
-            "azp must only be provided for asymmetric quantization."
-        )
-        torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
-        return output, scale, azp
+    # Use CustomOp for proper decomposition support
+    from vllm.model_executor.layers.quantization.input_quant_int8 import QuantInt8
 
-    # dynamic-per-token quantization.
-    input_scales = torch.empty(
-        (input.numel() // input.shape[-1], 1), device=input.device, dtype=torch.float32
-    )
-    input_azp = None if symmetric else torch.empty_like(input_scales, dtype=torch.int32)
-    torch.ops._C.dynamic_scaled_int8_quant(
-        output, input.contiguous(), input_scales, input_azp
-    )
-    return output, input_scales, input_azp
+    static = scale is not None
+    quant_op = QuantInt8(static=static, symmetric=symmetric)
+    return quant_op.forward(input, scale, azp)
 
 
 # gguf
