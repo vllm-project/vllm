@@ -35,9 +35,9 @@ def _build_integer_tensor(
     if torch_dtype is torch.uint8:
         return torch.randint(0, 256, shape, dtype=torch.uint8)
     if torch_dtype is torch.int32:
-        return torch.randint(-(2**15), 2**15, shape, dtype=torch.int32)
+        return torch.randint(-(2**20), 2**20, shape, dtype=torch.int32)
     if torch_dtype is torch.int64:
-        return torch.randint(-(2**31), 2**31, shape, dtype=torch.int64)
+        return torch.randint(-(2**62), 2**62, shape, dtype=torch.int64)
 
     raise AssertionError(f"Unsupported non-floating embed dtype: {embed_dtype}")
 
