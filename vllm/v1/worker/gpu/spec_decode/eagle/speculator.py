@@ -5,6 +5,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from vllm._custom_ops import scaled_fp8_quant
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
@@ -25,7 +26,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 from vllm.v1.worker.gpu.dp_utils import sync_cudagraph_and_dp_padding
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_flash_sample, gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
@@ -117,6 +118,19 @@ class EagleSpeculator:
 
         self.model = load_eagle_model(target_model, self.vllm_config)
 
+        if self.draft_logits is None:
+            # Cache quantized draft LM head weights for flash sampling,
+            # which skips materializing the full draft logits tensor.
+            # NOTE: Draft models do not currently have LM head bias.
+            self.lm_head_weight_fp8, self.lm_head_inv_scale = scaled_fp8_quant(
+                self.model.lm_head.weight
+            )
+            self.draft_id_to_target_id = getattr(
+                self.model, "draft_id_to_target_id", None
+            )
+            lp = getattr(self.model, "logits_processor", None)
+            self.logit_scale = lp.scale if lp is not None else 1.0
+
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
@@ -140,6 +154,49 @@ class EagleSpeculator:
             active_layer_names=self.draft_attn_layer_names,
         )
         self.block_tables = block_tables
+
+    def _sample(
+        self,
+        hidden_states: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        pos: torch.Tensor,
+        step: int,
+    ):
+        # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
+        # used for draft and target sampling.
+        shifted_pos = pos + 1
+        if self.draft_logits is None:
+            # Draft logits do not need to be materialized. Use flash sampling to
+            # save on HBM roundtrips.
+            hidden_states_fp8, hidden_states_inv_scale = scaled_fp8_quant(hidden_states)
+            logits_scale = (
+                self.logit_scale * self.lm_head_inv_scale * hidden_states_inv_scale
+            )
+            return gumbel_flash_sample(
+                hidden_states_fp8,
+                self.lm_head_weight_fp8,
+                self.model.lm_head.shard_indices,
+                idx_mapping,
+                self.temperature,
+                self.seeds,
+                shifted_pos,
+                apply_temperature=True,
+                logits_scale=logits_scale,
+                draft_vocab_offsets=self.draft_id_to_target_id,
+            )
+        else:
+            # The draft logits are needed, so they must be fully materialized
+            # on all ranks.
+            logits = self.model.compute_logits(hidden_states)
+            return gumbel_sample(
+                logits,
+                idx_mapping,
+                self.temperature,
+                self.seeds,
+                shifted_pos,
+                apply_temperature=True,
+                processed_logits_out=self.draft_logits[:, step],
+            )
 
     @torch.inference_mode()
     def run_model(
@@ -211,20 +268,13 @@ class EagleSpeculator:
             )
             last_hidden_states = last_hidden_states[:num_reqs]
             hidden_states = hidden_states[:num_reqs]
-            logits = self.model.compute_logits(last_hidden_states)
 
-            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
-            # used for draft and target sampling.
-            draft_tokens = gumbel_sample(
-                logits,
+            # Sample the draft tokens.
+            draft_tokens = self._sample(
+                last_hidden_states,
                 idx_mapping,
-                self.temperature,
-                self.seeds,
-                pos + 1,
-                apply_temperature=True,
-                processed_logits_out=self.draft_logits[:, step]
-                if self.draft_logits is not None
-                else None,
+                pos,
+                step,
             )
             self.draft_tokens[:num_reqs, step] = draft_tokens
 
@@ -379,7 +429,6 @@ class EagleSpeculator:
             mm_inputs=mm_inputs,
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
-        logits = self.model.compute_logits(sample_hidden_states)
 
         num_reqs = input_batch.num_reqs
         # NOTE(woosuk): For draft sampling, we only consider the temperature
@@ -395,18 +444,13 @@ class EagleSpeculator:
         # Gather the values and copy them to the pre-allocated buffers.
         pos = self.input_buffers.positions[:num_reqs]
         torch.gather(input_batch.positions, 0, last_token_indices, out=pos)
-        # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
-        # used for draft and target sampling.
-        draft_tokens = gumbel_sample(
-            logits,
+
+        # Sample the draft tokens.
+        draft_tokens = self._sample(
+            sample_hidden_states,
             idx_mapping,
-            self.temperature,
-            self.seeds,
-            pos + 1,
-            apply_temperature=True,
-            processed_logits_out=self.draft_logits[:, 0]
-            if self.draft_logits is not None
-            else None,
+            pos,
+            step=0,
         )
 
         if self.num_speculative_steps == 1:
