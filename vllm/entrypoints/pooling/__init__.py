@@ -45,9 +45,15 @@ def register_pooling_api_routers(
     supported_tasks: tuple["SupportedTask", ...],
     model_config: ModelConfig | None = None,
 ):
-    from vllm.entrypoints.pooling.pooling.api_router import router as pooling_router
+    if model_config is None:
+        return
 
-    app.include_router(pooling_router)
+    pooling_task = model_config.get_pooling_task(supported_tasks)
+
+    if pooling_task is not None:
+        from vllm.entrypoints.pooling.pooling.api_router import router as pooling_router
+
+        app.include_router(pooling_router)
 
     if "classify" in supported_tasks:
         from vllm.entrypoints.pooling.classify.api_router import (
@@ -91,6 +97,7 @@ def init_pooling_state(
                 engine_client,
                 state.openai_serving_models,
                 state.openai_serving_render,
+                supported_tasks=supported_tasks,
                 request_logger=request_logger,
                 chat_template=resolved_chat_template,
                 chat_template_content_format=args.chat_template_content_format,
