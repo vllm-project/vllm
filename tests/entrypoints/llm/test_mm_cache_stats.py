@@ -64,7 +64,7 @@ def test_mm_cache_stats(
 ):
     llm = LLM(
         model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
-        max_model_len=4096,
+        max_model_len=8192,
         max_num_seqs=5,
         enforce_eager=True,
         mm_processor_cache_type=mm_processor_cache_type,
