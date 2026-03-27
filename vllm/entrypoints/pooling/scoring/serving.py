@@ -6,9 +6,7 @@ from fastapi.responses import JSONResponse
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
-from vllm.entrypoints.openai.engine.protocol import (
-    UsageInfo,
-)
+from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.logger import init_logger
