@@ -23,9 +23,9 @@ __global__ void get_group_gemm_starts(
 
   // expert_offsets is a view of expert_first_token_offset[:-1], so
   // expert_offsets[num_experts] (one past the view) is total_tokens.
-  // For zero-token experts, expert_offset == total_tokens which produces
-  // one-past-the-end pointers. Use offset 0 instead so TMA descriptors
-  // always reference valid memory.
+  // For zero-token experts at the end, expert_offset == total_tokens which
+  // produces  one-past-the-end pointers. Use offset 0 instead so TMA
+  // descriptors always reference valid memory.
   int64_t num_tokens = expert_offsets[blockDim.x];
   int64_t safe_offset = (expert_offset >= num_tokens) ? 0 : expert_offset;
 
