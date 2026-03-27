@@ -253,7 +253,7 @@ def make_local_attention_virtual_batches(
     #   seqlens_q_local = [2, 2, 1, 4, 4, 1, 4, 1]
     #
     # First Get batched arange. (E.g., [2, 4, 2] -> [0, 1, 0, 1, 2, 3, 0, 1])
-    #   (TODO: max a utility to share this code with _prepare_inputs)
+    #   (TODO: make a utility to share this code with _prepare_inputs)
     # arange step 1. [2, 4, 2] -> [2, 6, 8]
     cu_num_blocks = np.cumsum(local_blocks)
     virtual_batches = cu_num_blocks[-1]
@@ -489,10 +489,14 @@ def split_decodes_and_prefills(
     common_attn_metadata: CommonAttentionMetadata,
     decode_threshold: int = 1,
     require_uniform: bool = False,
+    treat_short_extends_as_decodes: bool = True,
 ) -> tuple[int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
     requests.
+
+    The batch is expected to be ordered as:
+        decode → short_extend → long_extend → prefill
 
     Args:
         common_attn_metadata: CommonAttentionMetadata object containing the
@@ -501,6 +505,9 @@ def split_decodes_and_prefills(
         require_uniform: If True, requires that all decode requests have the
             same query length. When set, some queries may be considered prefills
             even if they are <= decode_threshold, in order to ensure uniformity.
+        treat_short_extends_as_decodes: If True (default), short extends
+            (query_len <= threshold but still prefilling) are counted as
+            decodes. If False, they are counted as prefills.
 
     Returns:
         num_decodes: The number of decode requests.
@@ -513,8 +520,10 @@ def split_decodes_and_prefills(
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
 
-    if max_query_len <= decode_threshold and (
-        not require_uniform or decode_threshold <= 1
+    if (
+        max_query_len <= decode_threshold
+        and (not require_uniform or decode_threshold <= 1)
+        and treat_short_extends_as_decodes
     ):
         return num_reqs, 0, num_tokens, 0
 
@@ -528,17 +537,19 @@ def split_decodes_and_prefills(
         # requests may have a query length of 0 but since they are padding its fine
         # to treat them as decodes (ensures num_decodes matches the captured size)
         if torch.all((query_lens == query_lens[0]) | (query_lens == 0)):
-            assert num_reqs * query_lens[0] == num_tokens, "tokens not padded correctly"
             return num_reqs, 0, num_tokens, 0  # all decodes
         is_prefill = query_lens != query_lens[0]
     else:
         is_prefill = query_lens > decode_threshold
 
+    if not treat_short_extends_as_decodes:
+        assert common_attn_metadata.is_prefilling is not None
+        is_prefill |= common_attn_metadata.is_prefilling
+
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
 
     first_prefill = is_prefill.int().argmax(dim=-1).item()
-    assert torch.all(query_lens[:first_prefill] <= decode_threshold)
     num_decodes = first_prefill
     num_prefills = num_reqs - num_decodes
     num_decode_tokens = query_start_loc[first_prefill].item()
@@ -582,39 +593,52 @@ def reorder_batch_to_split_decodes_and_prefills(
     Reorders the batch to split into prefill and decode requests; places all
     requests with <= decode_threshold tokens at the front of the batch.
 
+    The batch is reordered into 4 regions:
+        decode:        (num_scheduled <= threshold AND is not prefilling)
+        short_extend:  (num_scheduled <= threshold AND is chunked prefilling)
+        long_extend:   (num_scheduled > threshold AND is chunked prefilling)
+        prefill:       (num_computed == 0)   # First chunks
+
     Returns:
         True if the batch was modified, False otherwise.
     """
-    # We now want to reorder the batch into decode → extend → prefill order
-    # where:
-    #   decode: request with num_scheduled_tokens <= decode_threshold
-    #   extend: non-decode request with existing context
-    #   prefill: non-decode request with no existing context
-    # NOTE for now we loosely use "decode" to mean requests where attention is
-    #  likely memory-bound and "prefill" to mean requests where attention is
-    #  likely compute-bound,
     num_reqs = len(input_batch.req_ids)
     num_scheduled_tokens = [
         scheduler_output.num_scheduled_tokens[id] for id in input_batch.req_ids
     ]
     num_scheduled_tokens_np = np.array(num_scheduled_tokens)
     num_computed_tokens_np = input_batch.num_computed_tokens_cpu[:num_reqs]
+    num_prompt_tokens_np = input_batch.num_prompt_tokens[:num_reqs]
 
-    is_prefill = num_computed_tokens_np == 0
-    is_decode = (num_scheduled_tokens_np <= decode_threshold) & (~is_prefill)
-    is_extend = (num_scheduled_tokens_np > decode_threshold) & (~is_prefill)
+    has_context = num_computed_tokens_np > 0
+    is_below_threshold = num_scheduled_tokens_np <= decode_threshold
+    done_prefilling = num_computed_tokens_np >= num_prompt_tokens_np
 
-    # Desired order: decode → extend → prefill
-    req_regions = np.zeros(is_decode.shape, dtype=np.int32)  # 0 = decode by default
-    req_regions[is_extend] = 1
-    req_regions[is_prefill] = 2
+    # Mutually exclusive categories (exactly one True per request):
+    # 1. No context yet -> prefill
+    # 2. Has context, above threshold -> long_extend
+    # 3. Has context, below threshold, still prefilling -> short_extend
+    # 4. Has context, below threshold, done prefilling -> decode
+    is_pure_prefill = ~has_context
+    is_long_extend = has_context & ~is_below_threshold
+    is_short_extend = has_context & is_below_threshold & ~done_prefilling
+    is_decode = has_context & is_below_threshold & done_prefilling
+
+    # Desired order: decode → short_extend → long_extend → prefill
+    req_regions = np.zeros(num_reqs, dtype=np.int32)  # 0 = decode by default
+    req_regions[is_short_extend] = 1
+    req_regions[is_long_extend] = 2
+    req_regions[is_pure_prefill] = 3
 
     num_decodes = int(is_decode.sum())
-    num_extends = int(is_extend.sum())
+    num_short_extends = int(is_short_extend.sum())
+    num_long_extends = int(is_long_extend.sum())
+    num_prefills = int(is_pure_prefill.sum())
 
-    target_regions = np.zeros(num_reqs, dtype=np.int32)
-    target_regions[num_decodes : num_decodes + num_extends] = 1
-    target_regions[num_decodes + num_extends :] = 2
+    target_regions = np.repeat(
+        [0, 1, 2, 3],
+        [num_decodes, num_short_extends, num_long_extends, num_prefills],
+    ).astype(np.int32)
 
     needs_swap = req_regions != target_regions
 
@@ -775,10 +799,10 @@ def compute_causal_conv1d_metadata(
                     MAX_NUM_PROGRAMS
                 ).fill_(PAD_SLOT_ID)
 
-        batch_ptr[0:mlist_len].copy_(mlist)
+        batch_ptr[0:mlist_len].copy_(mlist, non_blocking=True)
         token_chunk_offset_ptr[  # type: ignore
             0:mlist_len
-        ].copy_(offsetlist)
+        ].copy_(offsetlist, non_blocking=True)
         nums_dict[BLOCK_M]["batch_ptr"] = batch_ptr
         nums_dict[BLOCK_M]["token_chunk_offset_ptr"] = token_chunk_offset_ptr  # type: ignore
 
@@ -825,38 +849,6 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens.squeeze(1)
 
 
-def extend_all_queries_by_1(
-    common_attn_metadata: CommonAttentionMetadata,
-    arange: torch.Tensor,
-    new_slot_mapping: torch.Tensor,
-) -> CommonAttentionMetadata:
-    """
-    Creates a new CommonAttentionMetadata with all query lengths increased by 1.
-    Also all seq lens are increased by 1.
-    This is useful e.g. in speculative decoding with draft models, where we
-    extend each sequence by 1 token.
-    The slot mapping is computed externally, as it requires more information.
-    """
-    cad = common_attn_metadata
-    # query start loc must be increased by [+0, +1, +2, ..., +batch_size]
-    new_query_start_loc = cad.query_start_loc + arange[: len(cad.query_start_loc)]
-    new_query_start_loc_cpu = cad.query_start_loc_cpu + torch.arange(
-        len(cad.query_start_loc_cpu), dtype=torch.int32
-    )
-    new_cad = cad.replace(
-        query_start_loc=new_query_start_loc,
-        query_start_loc_cpu=new_query_start_loc_cpu,
-        seq_lens=cad.seq_lens + 1,
-        # each request is extended by 1 token -> batch_size tokens are added
-        num_actual_tokens=cad.num_actual_tokens + cad.batch_size(),
-        # All query lens increase by 1, so max query len increases by 1
-        max_query_len=cad.max_query_len + 1,
-        max_seq_len=cad.max_seq_len + 1,
-        slot_mapping=new_slot_mapping,
-    )
-    return new_cad
-
-
 def mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -887,8 +879,12 @@ def mamba_get_block_table_tensor(
             (seq_lens - 1) // kv_cache_spec.block_size,
             min=0,
         )
+        # Use int32 for arithmetic to avoid dtype promotion overhead,
+        # then convert to int64 for gather (which requires Long indices)
         offsets = torch.arange(
-            1 + kv_cache_spec.num_speculative_blocks, device=block_table.device
+            1 + kv_cache_spec.num_speculative_blocks,
+            device=block_table.device,
+            dtype=torch.int32,
         )
-        indices_to_gather = start_indices.unsqueeze(1) + offsets
+        indices_to_gather = (start_indices.unsqueeze(1) + offsets).to(torch.int64)
         return torch.gather(block_table, 1, indices_to_gather)

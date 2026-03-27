@@ -6,7 +6,6 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -63,7 +62,6 @@ class Request:
         prompt_token_ids: list[int] | None,
         sampling_params: SamplingParams | None,
         pooling_params: PoolingParams | None,
-        eos_token_id: int | None,
         client_index: int = 0,
         arrival_time: float | None = None,
         prompt_embeds: torch.Tensor | None = None,
@@ -74,18 +72,19 @@ class Request:
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
+        reasoning_ended: bool | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
         self.priority = priority
         self.sampling_params = sampling_params
         self.pooling_params = pooling_params
-        # Because of LoRA, the eos token id can be different for each request.
-        self.eos_token_id = eos_token_id
         self.lora_request = lora_request
         self.structured_output_request = StructuredOutputRequest.from_sampling_params(
             sampling_params
         )
+        if self.structured_output_request is not None:
+            self.structured_output_request.reasoning_ended = reasoning_ended
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
 
         self.status = RequestStatus.WAITING
@@ -103,7 +102,7 @@ class Request:
             assert sampling_params.max_tokens is not None
             self.max_tokens = sampling_params.max_tokens
             if self.structured_output_request is not None:
-                self.status = RequestStatus.WAITING_FOR_FSM
+                self.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
 
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = sampling_params.extra_args.get(
@@ -114,6 +113,9 @@ class Request:
 
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
+        # Cache per-block prompt-embed hashes to avoid rehashing the same
+        # tensor slices when generating extra keys.
+        self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             prompt_token_ids, prompt_embeds
         )
@@ -147,6 +149,9 @@ class Request:
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
 
+        # True if this request is scheduled as a non-final prefill chunk.
+        self.is_prefill_chunk = False
+
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
@@ -158,10 +163,11 @@ class Request:
         self.num_external_computed_tokens = 0
 
         self.block_hashes: list[BlockHash] = []
-        self.get_hash_new_full_blocks: Callable[[], list[BlockHash]] | None = None
-        if block_hasher is not None:
-            self.get_hash_new_full_blocks = partial(block_hasher, self)
-            self.block_hashes = self.get_hash_new_full_blocks()
+        # Store the block hasher without binding self to avoid creating a
+        # reference cycle (Request -> partial -> Request) that prevents
+        # immediate garbage collection via reference counting.
+        self._block_hasher: Callable[[Request], list[BlockHash]] | None = block_hasher
+        self.update_block_hashes()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
@@ -184,7 +190,6 @@ class Request:
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
-            eos_token_id=request.eos_token_id,
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
             cache_salt=request.cache_salt,
@@ -192,6 +197,7 @@ class Request:
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
             resumable=request.resumable,
+            reasoning_ended=request.reasoning_ended,
         )
 
     def append_output_token_ids(
@@ -205,8 +211,12 @@ class Request:
             self._output_token_ids.extend(token_ids)
             self._all_token_ids.extend(token_ids)
 
-        if self.get_hash_new_full_blocks is not None:
-            self.block_hashes.extend(self.get_hash_new_full_blocks())
+        self.update_block_hashes()
+
+    def update_block_hashes(self) -> None:
+        """Compute block hashes for any new full blocks and append them."""
+        if self._block_hasher is not None:
+            self.block_hashes.extend(self._block_hasher(self))
 
     @property
     def use_structured_output(self) -> bool:
@@ -253,7 +263,7 @@ class Request:
 
     def get_num_encoder_embeds(self, input_id: int) -> int:
         assert input_id < len(self.mm_features)
-        return self.mm_features[input_id].mm_position.get_num_embeds
+        return self.mm_features[input_id].mm_position.get_num_embeds()
 
     def record_event(
         self,
@@ -286,7 +296,7 @@ class RequestStatus(enum.IntEnum):
     """Status of a request."""
 
     WAITING = enum.auto()
-    WAITING_FOR_FSM = enum.auto()
+    WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
     WAITING_FOR_STREAMING_REQ = enum.auto()
     RUNNING = enum.auto()
@@ -298,6 +308,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
     FINISHED_ERROR = enum.auto()
+    FINISHED_REPETITION = enum.auto()
 
     def __str__(self) -> str:
         return self.name
@@ -322,4 +333,5 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
     RequestStatus.WAITING_FOR_STREAMING_REQ: FinishReason.STOP,
+    RequestStatus.FINISHED_REPETITION: FinishReason.REPETITION,
 }

@@ -11,6 +11,7 @@ from vllm.config.compilation import (
 )
 from vllm.config.device import DeviceConfig
 from vllm.config.ec_transfer import ECTransferConfig
+from vllm.config.kernel import KernelConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
@@ -23,9 +24,16 @@ from vllm.config.model import (
 )
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.observability import ObservabilityConfig
+from vllm.config.offload import (
+    OffloadBackend,
+    OffloadConfig,
+    PrefetchOffloadConfig,
+    UVAOffloadConfig,
+)
 from vllm.config.parallel import EPLBConfig, ParallelConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.profiler import ProfilerConfig
+from vllm.config.reasoning import ReasoningConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.speech_to_text import SpeechToTextConfig
@@ -47,6 +55,7 @@ from vllm.config.vllm import (
     get_layers_from_vllm_config,
     set_current_vllm_config,
 )
+from vllm.config.weight_transfer import WeightTransferConfig
 
 # __all__ should only contain classes and functions.
 # Types and globals should be imported from their respective modules.
@@ -64,6 +73,8 @@ __all__ = [
     "DeviceConfig",
     # From vllm.config.ec_transfer
     "ECTransferConfig",
+    # From vllm.config.kernel
+    "KernelConfig",
     # From vllm.config.kv_events
     "KVEventsConfig",
     # From vllm.config.kv_transfer
@@ -81,11 +92,18 @@ __all__ = [
     "MultiModalConfig",
     # From vllm.config.observability
     "ObservabilityConfig",
+    # From vllm.config.offload
+    "OffloadBackend",
+    "OffloadConfig",
+    "PrefetchOffloadConfig",
+    "UVAOffloadConfig",
     # From vllm.config.parallel
     "EPLBConfig",
     "ParallelConfig",
     # From vllm.config.pooler
     "PoolerConfig",
+    # From vllm.config.reasoning
+    "ReasoningConfig",
     # From vllm.config.scheduler
     "SchedulerConfig",
     # From vllm.config.speculative
@@ -111,4 +129,5 @@ __all__ = [
     "get_current_vllm_config_or_none",
     "set_current_vllm_config",
     "get_layers_from_vllm_config",
+    "WeightTransferConfig",
 ]

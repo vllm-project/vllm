@@ -24,6 +24,7 @@
 
 ARG CUDA_VERSION=12.9.1
 ARG PYTHON_VERSION=3.12
+ARG UBUNTU_VERSION=22.04
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
@@ -38,7 +39,7 @@ ARG PYTHON_VERSION=3.12
 # version are not backwards compatible with OSes that use an earlier version.
 ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
-ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04
+ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
 # their own mirror. When doing so, we don't benefit from the transparent
@@ -111,6 +112,10 @@ RUN apt-get update -y \
         gcc-10 \
         g++-10 \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
+    # Install python dev headers if available (needed for cmake FindPython on Ubuntu 24.04
+    # which ships cmake 3.28 and requires Development.SABIModule; silently skipped on
+    # Ubuntu 20.04/22.04 where python3.x-dev is not available without a PPA)
+    && (apt-get install -y --no-install-recommends python${PYTHON_VERSION}-dev 2>/dev/null || true) \
     && rm -rf /var/lib/apt/lists/* \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && $HOME/.local/bin/uv venv /opt/venv --python ${PYTHON_VERSION} \
@@ -132,8 +137,10 @@ ENV UV_LINK_MODE=copy
 # Verify GCC version
 RUN gcc --version
 
-# Ensure CUDA compatibility library is loaded
-RUN echo "/usr/local/cuda-$(echo "$CUDA_VERSION" | cut -d. -f1,2)/compat/" > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
+# Enable CUDA forward compatibility by setting '-e VLLM_ENABLE_CUDA_COMPATIBILITY=1'
+# Only needed for datacenter/professional GPUs with older drivers.
+# See: https://docs.nvidia.com/deploy/cuda-compatibility/
+ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 
 # ============================================================
 # SLOW-CHANGING DEPENDENCIES BELOW
@@ -260,7 +267,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Build the vLLM wheel
 # if USE_SCCACHE is set, use sccache to speed up compilation
+# AWS credentials mounted at ~/.aws/credentials for sccache S3 auth (optional)
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Installing sccache..." \
         && case "${TARGETPLATFORM}" in \
@@ -306,7 +315,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 #################### CSRC BUILD IMAGE ####################
 
 #################### EXTENSIONS BUILD IMAGE ####################
-# Build DeepGEMM, pplx-kernels, DeepEP - runs in PARALLEL with csrc-build
+# Build DeepGEMM, DeepEP - runs in PARALLEL with csrc-build
 # This stage is independent and doesn't affect csrc cache
 FROM base AS extensions-build
 ARG CUDA_VERSION
@@ -320,7 +329,7 @@ WORKDIR /workspace
 
 # Build DeepGEMM wheel
 # Default moved here from tools/install_deepgemm.sh for centralized version management
-ARG DEEPGEMM_GIT_REF=594953acce41793ae00a1233eb516044d604bcb6
+ARG DEEPGEMM_GIT_REF=477618cd51baffca09c4b0b87e97c03fe827ef03
 COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     mkdir -p /tmp/deepgemm/dist && \
@@ -333,10 +342,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Ensure the wheel dir exists so COPY won't fail when DeepGEMM is skipped
 RUN mkdir -p /tmp/deepgemm/dist && touch /tmp/deepgemm/dist/.deepgemm_skipped
 
-# Build pplx-kernels and DeepEP wheels
+# Build DeepEP wheels
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
 # Defaults moved here from tools/ep_kernels/install_python_libraries.sh for centralized version management
-ARG PPLX_COMMIT_HASH=12cecfd
 ARG DEEPEP_COMMIT_HASH=73b6ea4
 ARG NVSHMEM_VER
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -345,7 +353,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     /tmp/install_python_libraries.sh \
         --workspace /tmp/ep_kernels_workspace \
         --mode wheel \
-        ${PPLX_COMMIT_HASH:+--pplx-ref "$PPLX_COMMIT_HASH"} \
         ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} \
         ${NVSHMEM_VER:+--nvshmem-ver "$NVSHMEM_VER"} && \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
@@ -505,7 +512,6 @@ RUN apt-get update -y \
         software-properties-common \
         curl \
         sudo \
-        python3-pip \
         ffmpeg \
         libsm6 \
         libxext6 \
@@ -533,6 +539,7 @@ RUN apt-get update -y \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
+    && rm -f /usr/lib/python${PYTHON_VERSION}/EXTERNALLY-MANAGED \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
@@ -560,8 +567,10 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
-# Ensure CUDA compatibility library is loaded
-RUN echo "/usr/local/cuda-$(echo "$CUDA_VERSION" | cut -d. -f1,2)/compat/" > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
+# Enable CUDA forward compatibility by setting '-e VLLM_ENABLE_CUDA_COMPATIBILITY=1'
+# Only needed for datacenter/professional GPUs with older drivers.
+# See: https://docs.nvidia.com/deploy/cuda-compatibility/
+ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 
 # ============================================================
 # SLOW-CHANGING DEPENDENCIES BELOW
@@ -578,14 +587,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
-# Install FlashInfer pre-compiled kernel cache and binaries
-# This is ~1.1GB and only changes when FlashInfer version bumps
+# Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.2
+ARG FLASHINFER_VERSION=0.6.6
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
-    && uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
+    uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
     && flashinfer show-config
 
@@ -616,7 +623,7 @@ RUN set -eux; \
 ARG BITSANDBYTES_VERSION_X86=0.46.1
 ARG BITSANDBYTES_VERSION_ARM64=0.42.0
 ARG TIMM_VERSION=">=1.0.17"
-ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.3"
+ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.7"
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_ARM64}"; \
@@ -624,7 +631,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_X86}"; \
     fi; \
     uv pip install --system accelerate hf_transfer modelscope \
-        "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs]${RUNAI_MODEL_STREAMER_VERSION}"
+        "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
 
 # ============================================================
 # VLLM INSTALLATION (depends on build stage)
@@ -672,7 +679,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
-# Install EP kernels wheels (pplx-kernels and DeepEP) that have been built in the `build` stage
+# Install EP kernels wheels (DeepEP) that have been built in the `build` stage
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system ep_kernels/dist/*.whl --verbose \

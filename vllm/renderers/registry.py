@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.tokenizers.registry import tokenizer_args_from_config
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.registry import (
+    cached_tokenizer_from_config,
+    tokenizer_args_from_config,
+)
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
-from .protocol import BaseRenderer
+from .base import BaseRenderer
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -19,7 +23,9 @@ _VLLM_RENDERERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Renderer"),
     "hf": ("hf", "HfRenderer"),
     "grok2": ("grok2", "Grok2Renderer"),
+    "kimi_audio": ("hf", "HfRenderer"),
     "mistral": ("mistral", "MistralRenderer"),
+    "qwen_vl": ("hf", "HfRenderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
 }
 
@@ -55,11 +61,11 @@ class RendererRegistry:
     def load_renderer(
         self,
         renderer_mode: str,
-        config: "ModelConfig",
-        tokenizer_kwargs: dict[str, Any],
+        config: "VllmConfig",
+        tokenizer: TokenizerLike | None,
     ) -> BaseRenderer:
         renderer_cls = self.load_renderer_cls(renderer_mode)
-        return renderer_cls.from_config(config, tokenizer_kwargs)
+        return renderer_cls(config, tokenizer)
 
 
 RENDERER_REGISTRY = RendererRegistry(
@@ -71,18 +77,10 @@ RENDERER_REGISTRY = RendererRegistry(
 """The global `RendererRegistry` instance."""
 
 
-def renderer_from_config(config: "ModelConfig", **kwargs):
-    tokenizer_mode, tokenizer_name, args, kwargs = tokenizer_args_from_config(
-        config, **kwargs
-    )
+def renderer_from_config(config: "VllmConfig", **kwargs):
+    model_config = config.model_config
 
-    if config.tokenizer_mode == "auto" and config.model_impl == "terratorch":
-        renderer_mode = "terratorch"
-    else:
-        renderer_mode = tokenizer_mode
+    tokenizer = cached_tokenizer_from_config(model_config, **kwargs)
+    renderer_mode, *_ = tokenizer_args_from_config(model_config, **kwargs)
 
-    return RENDERER_REGISTRY.load_renderer(
-        renderer_mode,
-        config,
-        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
-    )
+    return RENDERER_REGISTRY.load_renderer(renderer_mode, config, tokenizer)

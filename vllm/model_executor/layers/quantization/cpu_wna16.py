@@ -261,7 +261,7 @@ class CPUAWQLinearMethod(LinearMethodBase):
 
         zeros = pack_cols(zeros, bits, group_num, output_size).contiguous()
         # make 16 output channel as a block and transpose to
-        # the make the block contigous
+        # the make the block contiguous
         weight = pack_cols(weight, bits, input_size, output_size)
         weight = (
             weight.view(input_size, -1, 16 // pack_factor)
@@ -292,7 +292,7 @@ class CPUAWQLinearMethod(LinearMethodBase):
 
 
 def _get_isa_hint(dtype: torch.dtype) -> str:
-    supports_amx = torch._C._cpu._is_amx_tile_supported()
+    supports_amx = torch.cpu._is_amx_tile_supported()
     if supports_amx and dtype in (torch.bfloat16,):
         return "amx"
     else:

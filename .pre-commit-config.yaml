@@ -13,7 +13,7 @@ repos:
     args: [--output-format, github, --fix]
   - id: ruff-format
 - repo: https://github.com/crate-ci/typos
-  rev: v1.38.1
+  rev: v1.43.5
   hooks:
   - id: typos
     args: [--force-exclude]
@@ -24,22 +24,58 @@ repos:
     exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
     types_or: [c++, cuda]
     args: [--style=file, --verbose]
-- repo: https://github.com/igorshubovych/markdownlint-cli
-  rev: v0.45.0
+- repo: https://github.com/DavidAnson/markdownlint-cli2
+  rev: v0.21.0
   hooks:
-  - id: markdownlint
-    exclude: '.*\.inc\.md'
-    stages: [manual] # Only run in CI
+  - id: markdownlint-cli2
+    language_version: lts
+    args: [--fix]
+    exclude: ^CLAUDE\.md$
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
   - id: actionlint
 - repo: https://github.com/astral-sh/uv-pre-commit
-  rev: 0.9.1
+  rev: 0.11.1
   hooks:
     - id: pip-compile
       args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu129, --python-platform, x86_64-manylinux_2_28, --python-version, "3.12"]
       files: ^requirements/test\.(in|txt)$
+    - id: pip-compile
+      alias: pip-compile-rocm
+      name: pip-compile-rocm
+      args: [
+        requirements/rocm-test.in, -o, requirements/rocm-test.txt,
+        --index-strategy, unsafe-best-match,
+        -c, requirements/rocm.txt,
+        --python-platform, x86_64-manylinux_2_28,
+        --python-version, "3.12",
+        # Exclude torch and CUDA/NVIDIA packages
+        --no-emit-package, torch,
+        --no-emit-package, torchvision,
+        --no-emit-package, torchaudio,
+        --no-emit-package, triton,
+        --no-emit-package, cuda-bindings,
+        --no-emit-package, cuda-pathfinder,
+        --no-emit-package, cuda-toolkit,
+        --no-emit-package, cupy-cuda12x,
+        --no-emit-package, nvidia-cublas,
+        --no-emit-package, nvidia-cuda-cupti,
+        --no-emit-package, nvidia-cuda-nvrtc,
+        --no-emit-package, nvidia-cuda-runtime,
+        --no-emit-package, nvidia-cudnn-cu13,
+        --no-emit-package, nvidia-cufft,
+        --no-emit-package, nvidia-cufile,
+        --no-emit-package, nvidia-curand,
+        --no-emit-package, nvidia-cusolver,
+        --no-emit-package, nvidia-cusparse,
+        --no-emit-package, nvidia-cusparselt-cu13,
+        --no-emit-package, nvidia-nccl-cu13,
+        --no-emit-package, nvidia-nvjitlink,
+        --no-emit-package, nvidia-nvshmem-cu13,
+        --no-emit-package, nvidia-nvtx,
+      ]
+      files: ^requirements/rocm-test\.(in|txt)$
 - repo: local
   hooks:
   - id: format-torch-nightly-test
@@ -55,7 +91,7 @@ repos:
       language: python
       types_or: [python, pyi]
       require_serial: true
-      additional_dependencies: [mypy==1.11.1, regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
+      additional_dependencies: ["mypy[faster-cache]==1.19.1", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: python tools/pre_commit/mypy.py 1 "3.10"
@@ -121,24 +157,16 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/pre_commit/update-dockerfile-graph.sh
     language: script
-  - id: enforce-import-regex-instead-of-re
-    name: Enforce import regex as re
-    entry: python tools/pre_commit/enforce_regex_import.py
+  - id: check-forbidden-imports
+    name: Check for forbidden imports
+    entry: python tools/pre_commit/check_forbidden_imports.py
     language: python
     types: [python]
-    pass_filenames: false
     additional_dependencies: [regex]
-  # forbid directly import triton
-  - id: forbid-direct-triton-import
-    name: "Forbid direct 'import triton'"
-    entry: python tools/pre_commit/check_triton_import.py
-    language: python
-    types: [python]
-    pass_filenames: false
-    additional_dependencies: [regex]
-  - id: check-pickle-imports
-    name: Prevent new pickle/cloudpickle imports
-    entry: python tools/pre_commit/check_pickle_imports.py
+  # prevent use torch.cuda APIs
+  - id: check-torch-cuda-call
+    name: "Prevent new 'torch.cuda' APIs call"
+    entry: python tools/pre_commit/check_torch_cuda.py
     language: python
     types: [python]
     additional_dependencies: [regex]
@@ -158,6 +186,11 @@ repos:
     name: Check attention backend documentation is up to date
     entry: python tools/pre_commit/generate_attention_backend_docs.py --check
     language: python
+  - id: check-boolean-context-manager
+    name: Check for boolean ops in with-statements
+    entry: python tools/pre_commit/check_boolean_context_manager.py
+    language: python
+    types: [python]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

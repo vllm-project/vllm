@@ -7,7 +7,9 @@ import pytest
 
 from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.utils import multi_gpu_test
+from vllm import LLM
 from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
@@ -505,7 +507,8 @@ def test_apc_single_prompt_block_align_alignment(
     vllm_runner_kwargs["enable_prefix_caching"] = True
     with vllm_runner(**vllm_runner_kwargs) as vllm_model:
         # Retrieve the default mamba state block size
-        mamba_block_size = vllm_model.llm.llm_engine.cache_config.mamba_block_size
+        vllm_config = vllm_model.llm.llm_engine.vllm_config
+        mamba_block_size = vllm_config.cache_config.mamba_block_size
 
     # In case the hybrid model does not have the
     # "mamba_block_size" assume a fixed constant
@@ -577,6 +580,10 @@ def test_apc_multiple_prompts_all_cached_outputs(
         model, max_model_len, tensor_parallel_size=tensor_parallel_size
     )
     vllm_runner_kwargs["mamba_ssm_cache_dtype"] = "float32"
+    # Reduce the effects of batch variance on ROCm since batch invariance is not
+    # yet supported. See: https://github.com/vllm-project/vllm/issues/27433
+    if current_platform.is_rocm():
+        vllm_runner_kwargs["max_num_seqs"] = 4
 
     vllm_outputs_no_cache, _ = _get_vLLM_output(
         vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens, num_logprobs
@@ -654,7 +661,8 @@ def test_apc_multiple_prompts_block_align_alignment(
     vllm_runner_kwargs["enable_prefix_caching"] = True
     with vllm_runner(**vllm_runner_kwargs) as vllm_model:
         # Retrieve the default mamba state block size
-        mamba_block_size = vllm_model.llm.llm_engine.cache_config.mamba_block_size
+        vllm_config = vllm_model.llm.llm_engine.vllm_config
+        mamba_block_size = vllm_config.cache_config.mamba_block_size
 
     # In case the hybrid model does not have the
     # "mamba_block_size" assume a fixed constant
@@ -764,3 +772,84 @@ def test_apc_multiple_prompts_partial_cached_outputs(
             name_0="vllm_no_cache",
             name_1=f"vllm_cache_it_{r_idx + 1}",
         )
+
+
+# Test that outputs match whether prefix caching is enabled or not for mamba.
+@pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
+def test_same_mamba_output_apc_on_vs_off(
+    vllm_runner,
+    model: str,
+) -> None:
+    num_logprobs = 5
+    prompts = [
+        "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
+        "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
+    ]
+    max_tokens = 20
+    max_model_len = max(len(p) for p in prompts) + max_tokens + 64
+
+    base_kwargs = _get_vllm_runner_params(model, max_model_len)
+    base_kwargs.update(
+        enforce_eager=True, block_size=16, seed=42, gpu_memory_utilization=0.8
+    )
+
+    # No prefix caching
+    kwargs_no_apc = {**base_kwargs, "enable_prefix_caching": False}
+    with vllm_runner(**kwargs_no_apc) as vllm_model:
+        outputs_no_apc, _ = _get_vLLM_output(
+            vllm_runner,
+            kwargs_no_apc,
+            prompts,
+            max_tokens,
+            num_logprobs=num_logprobs,
+            vllm_model=vllm_model,
+        )
+    # With prefix caching
+    kwargs_with_apc = {
+        **base_kwargs,
+        "enable_prefix_caching": True,
+        "mamba_block_size": 16,
+    }
+    with vllm_runner(**kwargs_with_apc) as vllm_model:
+        outputs_with_apc, _ = _get_vLLM_output(
+            vllm_runner,
+            kwargs_with_apc,
+            prompts,
+            max_tokens,
+            num_logprobs=num_logprobs,
+            vllm_model=vllm_model,
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=outputs_no_apc[0],
+        outputs_1_lst=outputs_with_apc[0],
+        name_0="vllm_no_apc",
+        name_1="vllm_with_apc",
+    )
+
+
+# we have to use a real large model to get reasonable results
+# the model can't be a hybrid model as we need block_size 16
+@pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
+def test_apc_common_prefix_same_batch(
+    model: str,
+    monkeypatch,
+) -> None:
+    # Required to put the two requests in the same batch
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    llm = LLM(
+        model=model,
+        enforce_eager=True,
+        block_size=16,
+        mamba_block_size=16,
+        enable_prefix_caching=True,
+        seed=42,
+    )
+    prompts = [
+        "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
+        "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
+    ]
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=20)
+    outputs = llm.generate(prompts, sampling_params)
+    for output in outputs:
+        assert "two" in output.outputs[0].text

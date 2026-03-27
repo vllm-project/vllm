@@ -10,6 +10,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -31,6 +32,12 @@ logger = init_logger(__name__)
 class TreeAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "float16",
+        "bfloat16",
+    ]
+    forward_includes_kv_cache_update: bool = False
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -326,6 +333,33 @@ class TreeAttentionImpl(AttentionImpl):
                 "TreeAttentionImpl."
             )
 
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        key_cache, value_cache = kv_cache.unbind(0)
+
+        # Reshape the input keys and values and store them in the cache.
+        # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+        # not padded. However, we don't need to do key[:num_actual_tokens]
+        # and value[:num_actual_tokens] because the reshape_and_cache_flash
+        # op uses the slot_mapping's shape to determine the number of
+        # actual tokens.
+        ops.reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -361,26 +395,7 @@ class TreeAttentionImpl(AttentionImpl):
             # Profiling run.
             return output.fill_(0)
 
-        # Cache the input KVs.
         key_cache, value_cache = kv_cache.unbind(0)
-        if self.kv_sharing_target_layer_name is None:
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
-            # not padded. However, we don't need to do key[:num_actual_tokens]
-            # and value[:num_actual_tokens] because the reshape_and_cache_flash
-            # op uses the slot_mapping's shape to determine the number of
-            # actual tokens.
-            ops.reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens

@@ -13,10 +13,14 @@ from vllm import SamplingParams
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingConnectorMetadata,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
-    OffloadingConnectorMetadata,
-    OffloadingConnectorStats,
 )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
@@ -26,8 +30,13 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
 )
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.kv_offload.abstract import (
     LoadStoreSpec,
     OffloadingEvent,
@@ -42,12 +51,12 @@ from vllm.v1.kv_offload.worker.worker import (
     TransferSpec,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
+from vllm.v1.structured_output import StructuredOutputManager
 
 from .utils import (
     EOS_TOKEN_ID,
     create_model_runner_output,
-    create_scheduler,
     create_vllm_config,
 )
 
@@ -148,17 +157,23 @@ class TransferSummary:
 
 class RequestRunner:
     def __init__(
-        self, offloaded_block_size: int, gpu_block_size: int, num_gpu_blocks: int
+        self,
+        offloaded_block_size: int,
+        gpu_block_size: int,
+        num_gpu_blocks: int,
+        async_scheduling: bool = True,
     ):
         self.offloaded_block_size: int = offloaded_block_size
         self.gpu_block_size: int = gpu_block_size
         self.num_gpu_blocks: int = num_gpu_blocks
+        self.async_scheduling: bool = async_scheduling
 
         self.req_id: int = -1
 
         vllm_config = create_vllm_config(
             block_size=gpu_block_size, max_num_batched_tokens=1000
         )
+        vllm_config.scheduler_config.async_scheduling = async_scheduling
         vllm_config.kv_transfer_config = KVTransferConfig(
             kv_connector="OffloadingConnector",
             kv_role="kv_both",
@@ -169,10 +184,37 @@ class RequestRunner:
             },
         )
 
-        self.scheduler: Scheduler = create_scheduler(
-            vllm_config, num_blocks=num_gpu_blocks
+        block_size = vllm_config.cache_config.block_size
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_gpu_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                )
+            ],
         )
-        self.worker_connector = OffloadingConnector(vllm_config, KVConnectorRole.WORKER)
+        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.num_kv_groups = len(kv_cache_config.kv_cache_groups)
+
+        scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
+        self.scheduler = scheduler_cls(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            log_stats=True,
+            structured_output_manager=StructuredOutputManager(vllm_config),
+            block_size=block_size,
+        )
+
+        self.worker_connector = OffloadingConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
 
         # register worker kv_caches to enable OffloadingWorker creations
         self.worker_connector.register_cross_layers_kv_cache(
@@ -219,19 +261,20 @@ class RequestRunner:
         self._dummy_ctx: ForwardContext = ForwardContext(
             no_compile_layers={},
             attn_metadata={},
-            virtual_engine=0,
             slot_mapping={},
         )
 
     def new_request(self, token_ids: list[int]):
         self.req_id += 1
 
+        sampling_params = SamplingParams(max_tokens=1000)
+        sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+
         req = Request(
             request_id=str(self.req_id),
             prompt_token_ids=token_ids,
-            sampling_params=SamplingParams(max_tokens=1000),
+            sampling_params=sampling_params,
             pooling_params=None,
-            eos_token_id=EOS_TOKEN_ID,
             block_hasher=self._block_hasher,
         )
 
@@ -311,6 +354,8 @@ class RequestRunner:
 
         tokens_iter = iter(decoded_tokens)
         token_id = next(tokens_iter, None)
+        prev_scheduler_output = None
+        prev_model_runner_output = None
         while True:
             assert self.scheduler.requests
 
@@ -321,10 +366,7 @@ class RequestRunner:
             assert kv_connector_metadata is not None
             assert isinstance(kv_connector_metadata, OffloadingConnectorMetadata)
 
-            if scheduler_output.preempted_req_ids:
-                self.worker_connector.handle_preemptions(
-                    scheduler_output.preempted_req_ids
-                )
+            self.worker_connector.handle_preemptions(kv_connector_metadata)
 
             self.worker_connector.bind_connector_metadata(kv_connector_metadata)
             self.worker_connector.start_load_kv(self._dummy_ctx)
@@ -352,10 +394,19 @@ class RequestRunner:
             if self.scheduler.running:
                 token_id = next(tokens_iter, None)
 
-            self.scheduler.update_from_output(scheduler_output, model_runner_output)
+            if self.async_scheduling:
+                # in async scheduling we update the output of the previous step
+                if prev_model_runner_output is not None:
+                    self.scheduler.update_from_output(
+                        prev_scheduler_output, prev_model_runner_output
+                    )
+                prev_scheduler_output = scheduler_output
+                prev_model_runner_output = model_runner_output
+            else:
+                self.scheduler.update_from_output(scheduler_output, model_runner_output)
 
             if (
-                prev_token_id is EOS_TOKEN_ID
+                prev_token_id == EOS_TOKEN_ID
                 and prev_token_id != token_id
                 and self.scheduler.requests
             ):
@@ -363,6 +414,11 @@ class RequestRunner:
                 continue
 
             if token_id is None:
+                if self.async_scheduling:
+                    # sample last token
+                    self.scheduler.update_from_output(
+                        prev_scheduler_output, prev_model_runner_output
+                    )
                 break
 
         self._parse_transfers()
@@ -443,11 +499,14 @@ class RequestRunner:
 def request_runner():
     runners = []
 
-    def runner_factory(offloaded_block_size, gpu_block_size, num_gpu_blocks):
+    def runner_factory(
+        offloaded_block_size, gpu_block_size, num_gpu_blocks, async_scheduling
+    ):
         runner = RequestRunner(
             offloaded_block_size=offloaded_block_size,
             gpu_block_size=gpu_block_size,
             num_gpu_blocks=num_gpu_blocks,
+            async_scheduling=async_scheduling,
         )
         runners.append(runner)
         return runner
@@ -464,7 +523,8 @@ def generate_store_output(block_hashes: Iterable[BlockHash]):
     )
 
 
-def test_offloading_connector(request_runner):
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_offloading_connector(request_runner, async_scheduling: bool):
     offloaded_block_size = 12
     gpu_block_size = 4
     num_gpu_blocks = 100
@@ -474,6 +534,7 @@ def test_offloading_connector(request_runner):
         offloaded_block_size=offloaded_block_size,
         gpu_block_size=gpu_block_size,
         num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
     )
 
     # 3 blocks, store just the middle block (skip first and last)
@@ -496,26 +557,28 @@ def test_offloading_connector(request_runner):
     runner.run(decoded_tokens=[0])
     runner.manager.prepare_store.assert_called()
 
-    # 1 more block, now set block_hashes_to_store = []
+    # 1 more block (+ token for async scheduling)
+    # now set block_hashes_to_store = []
     runner.manager.prepare_store.side_effect = (
         lambda block_hashes: generate_store_output([])
     )
-    runner.run(decoded_tokens=[0] * offloaded_block_size)
+    runner.run(decoded_tokens=[0] * (offloaded_block_size + 1))
 
-    # 1 more block, now check touch was called with all 6 blocks
+    # 1 more block (+ token for kicking off offloading)
+    # now check touch was called with all 6 blocks
     runner.manager.prepare_store.side_effect = (
         lambda block_hashes: generate_store_output(block_hashes)
     )
-    runner.run(decoded_tokens=[0] * offloaded_block_size)
+    runner.run(
+        decoded_tokens=[0] * (offloaded_block_size + 1),
+        expected_stored_gpu_block_indexes=(15, 16, 17),
+    )
     runner.manager.touch.assert_called()
     block_hashes1 = list(runner.manager.touch.call_args.args[0])
     assert len(block_hashes1) == 6
 
     # terminate request
-    runner.run(
-        decoded_tokens=[EOS_TOKEN_ID],
-        expected_stored_gpu_block_indexes=(15, 16, 17),
-    )
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
 
     # create a new request differing only on the last token
     runner.new_request(token_ids=[0] * (offloaded_block_size * 6 - 1) + [1])
@@ -606,7 +669,8 @@ def test_offloading_connector(request_runner):
     assert event.medium == "B"
 
 
-def test_request_preemption(request_runner):
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_request_preemption(request_runner, async_scheduling: bool):
     offloaded_block_size = 12
     gpu_block_size = 4
     num_gpu_blocks = 100
@@ -615,6 +679,7 @@ def test_request_preemption(request_runner):
         offloaded_block_size=offloaded_block_size,
         gpu_block_size=gpu_block_size,
         num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
     )
 
     free_block_queue = runner.scheduler.kv_cache_manager.block_pool.free_block_queue
@@ -672,7 +737,8 @@ def test_request_preemption(request_runner):
     )
 
 
-def test_concurrent_lookups_of_the_same_prefix(request_runner):
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling: bool):
     offloaded_block_size = 12
     gpu_block_size = 4
     num_gpu_blocks = 100
@@ -681,6 +747,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner):
         offloaded_block_size=offloaded_block_size,
         gpu_block_size=gpu_block_size,
         num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
     )
 
     # store 1 blocks
@@ -728,6 +795,59 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner):
 
     # second request will use the GPU prefix cache
     assert transfer_jobs == list(runner.offloading_spec.handler.transfer_specs)
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_abort_loading_requests(request_runner, async_scheduling: bool):
+    offloaded_block_size = 12
+    gpu_block_size = 4
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        offloaded_block_size=offloaded_block_size,
+        gpu_block_size=gpu_block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
+    )
+
+    # store 1 blocks
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = (
+        lambda block_hashes: generate_store_output(block_hashes)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored_gpu_block_indexes=(0, 1, 2),
+    )
+
+    # start a request to load the first block, but don't complete
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.lookup.return_value = 1
+    runner.run(
+        decoded_tokens=[],
+        complete_transfers=False,
+    )
+
+    # request triggered a load
+    transfer_jobs = list(runner.offloading_spec.handler.transfer_specs)
+    assert transfer_jobs
+
+    # abort request
+    req_id = str(runner.req_id)
+    runner.scheduler.finish_requests((req_id,), RequestStatus.FINISHED_ABORTED)
+
+    # verify request is not deleted
+    assert req_id in runner.scheduler.requests
+
+    # complete loading request
+    runner.run(
+        decoded_tokens=[],
+        expected_loaded_gpu_block_indexes=(0, 1, 2),
+    )
+
+    # assert request is deleted
+    assert req_id not in runner.scheduler.requests
 
 
 class TestOffloadingConnectorStats:
