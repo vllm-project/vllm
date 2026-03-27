@@ -58,9 +58,7 @@ class ReasoningConfig:
         return self._think_end_token_ids
 
     def initialize_token_ids(self, model_config: ModelConfig) -> None:
-        """Initialize reasoning token IDs from strings using the tokenizer.
-
-        Returns True if initialization was successful, False otherwise."""
+        """Initialize reasoning token IDs from strings using the tokenizer."""
         if (
             self._think_start_token_ids is not None
             and self._think_end_token_ids is not None
