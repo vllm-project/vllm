@@ -21,6 +21,8 @@ use vllm_openai_server::{Config, serve};
 struct Args {
     #[arg(long)]
     handshake_address: String,
+    #[arg(long, default_value_t = 1)]
+    engine_count: usize,
     #[arg(long, default_value = "Qwen/Qwen3-0.6B")]
     model: String,
     #[arg(long, default_value = "127.0.0.1")]
@@ -41,6 +43,7 @@ async fn main() -> Result<()> {
     let port = unique_local_port()?;
     let config = Config {
         handshake_address: args.handshake_address,
+        engine_count: args.engine_count,
         model: args.model,
         host: "127.0.0.1".to_string(),
         port,

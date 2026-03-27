@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -17,99 +18,172 @@ use crate::protocol::{
 /// Dedicated single-frame sentinel emitted by Python `EngineCoreProc` when the engine dies.
 pub const ENGINE_CORE_DEAD_SENTINEL: &[u8] = b"ENGINE_CORE_DEAD";
 
-/// Represents the connected transport components after a successful startup handshake, which the
-/// client can use for subsequent communication with the engine.
-pub struct ConnectedTransport {
-    /// The local address of the input socket that the engine connects to for receiving requests.
-    pub input_address: String,
-    /// The local address of the output socket that the engine connects to for sending responses.
-    pub output_address: String,
+/// Per-engine handshake result collected while bootstrapping one shared transport.
+#[derive(Clone)]
+pub struct ConnectedEngine {
     /// The identity of the connected engine.
     pub engine_identity: Vec<u8>,
-
-    /// The sending half of the input socket.
-    pub input_send: RouterSendHalf,
-    /// The output socket for receiving responses from the engine.
-    pub output_socket: PullSocket,
-
     /// The READY message received from the engine during the handshake.
     pub ready_message: ReadyMessage,
 }
 
-/// Connect to the engine through the startup handshake protocol, returning [`ConnectedTransport`].
+/// Represents the connected shared transport plus all registered engines after a successful
+/// multi-engine startup handshake.
+pub struct ConnectedTransport {
+    /// The local address of the shared input socket that all engines connect to for receiving
+    /// requests.
+    pub input_address: String,
+    /// The local address of the shared output socket that all engines connect to for sending
+    /// responses.
+    pub output_address: String,
+    /// All engines connected through the startup handshake.
+    pub engines: Vec<ConnectedEngine>,
+
+    /// The sending half of the shared input socket.
+    pub input_send: RouterSendHalf,
+    /// The shared output socket for receiving responses from all engines.
+    pub output_socket: PullSocket,
+}
+
+/// Connect to one or more engines through the startup handshake protocol, returning the shared
+/// data-plane transport plus the registered engines.
 pub async fn connect(
     handshake_address: &str,
+    engine_count: usize,
     local_host: &str,
     local_input_address: Option<&str>,
     local_output_address: Option<&str>,
     ready_timeout: Duration,
 ) -> Result<ConnectedTransport> {
-    info!("waiting for engine to connect");
+    if engine_count == 0 {
+        return Err(Error::UnexpectedHandshakeMessage {
+            reason: "expected engine_count >= 1".to_string(),
+        });
+    }
 
-    // 1. Bind handshake socket and local input/output sockets.
+    info!(
+        engine_count,
+        handshake_address, "waiting for engines to connect"
+    );
+
+    // 1. Bind shared local input/output sockets first so every engine receives the same data-plane
+    //    addresses during handshake.
     debug!(
-        handshake_address,
         local_host,
         ?ready_timeout,
-        "waiting for HELLO from engine"
+        engine_count,
+        "binding shared transport sockets"
     );
-    let mut handshake_socket = RouterSocket::new();
-    handshake_socket.bind(handshake_address).await?;
-
     let (input_address, mut input_socket, output_address, output_socket) =
         bind_local_sockets(local_host, local_input_address, local_output_address).await?;
     debug!(%input_address, %output_address, "bound local transport sockets");
 
-    // 2. Wait for HELLO from engine, extract engine identity, and send INIT with local socket
-    //    addresses.
-    let hello = timeout(ready_timeout, handshake_socket.recv())
-        .await
-        .map_err(|_| Error::HandshakeTimeout {
-            stage: "HELLO",
-            timeout: ready_timeout,
-        })??;
-    let (engine_identity, _) = decode_handshake_message(hello, None, "HELLO")?;
-    debug!(?engine_identity, "received HELLO from engine");
+    // 2. Bind the shared handshake socket once. All engines connect to this socket with their own
+    //    identities, and startup order does not matter.
+    let mut handshake_socket = RouterSocket::new();
+    handshake_socket.bind(handshake_address).await?;
 
-    send_init_message(
-        &mut handshake_socket,
-        &engine_identity,
-        &input_address,
-        &output_address,
-    )
-    .await?;
-    debug!(?engine_identity, "sent INIT to engine");
+    // 3. Receive HELLO/READY from each engine on the shared handshake socket until all expected
+    //    engines have completed startup. READY can arrive before later HELLOs, so startup must be
+    //    driven by a single mixed-status loop.
+    let mut engines = Vec::with_capacity(engine_count);
+    let mut seen_identities = BTreeSet::new();
+    let mut ready_pending = BTreeMap::new();
+    while engines.len() < engine_count || !ready_pending.is_empty() {
+        debug!(
+            handshake_address,
+            connected = engines.len(),
+            ready = engines.len() - ready_pending.len(),
+            waiting_for = engine_count,
+            "waiting for engine startup message"
+        );
+        let message = timeout(ready_timeout, handshake_socket.recv())
+            .await
+            .map_err(|_| Error::HandshakeTimeout {
+                stage: "HELLO/READY",
+                timeout: ready_timeout,
+            })??;
+        let (engine_identity, handshake_message) = decode_handshake_message(message, None)?;
+        match handshake_message.status.as_deref() {
+            Some("HELLO") => {
+                if engines.len() >= engine_count {
+                    return Err(Error::UnexpectedHandshakeMessage {
+                        reason: format!(
+                            "received HELLO for unexpected extra engine identity {engine_identity:?}"
+                        ),
+                    });
+                }
+                if !seen_identities.insert(engine_identity.clone()) {
+                    return Err(Error::UnexpectedHandshakeMessage {
+                        reason: format!(
+                            "duplicate engine identity {engine_identity:?} observed during startup handshake"
+                        ),
+                    });
+                }
+                debug!(
+                    handshake_address,
+                    ?engine_identity,
+                    "received HELLO from engine"
+                );
 
-    // 3. Wait for READY from engine and for the engine to connect to the input socket.
-    debug!(?engine_identity, "waiting for READY from engine");
-    let ready = timeout(ready_timeout, handshake_socket.recv())
-        .await
-        .map_err(|_| Error::HandshakeTimeout {
-            stage: "READY",
-            timeout: ready_timeout,
-        })??;
-    let (_, ready_message) = decode_handshake_message(ready, Some(&engine_identity), "READY")?;
+                send_init_message(
+                    &mut handshake_socket,
+                    &engine_identity,
+                    &input_address,
+                    &output_address,
+                )
+                .await?;
+                debug!(handshake_address, ?engine_identity, "sent INIT to engine");
+
+                let engine_idx = engines.len();
+                engines.push(ConnectedEngine {
+                    engine_identity: engine_identity.clone(),
+                    // Haven't received READY yet, use a placeholder for now.
+                    ready_message: ReadyMessage::default(),
+                });
+                ready_pending.insert(engine_identity, engine_idx);
+            }
+            Some("READY") => {
+                let Some(engine_idx) = ready_pending.remove(&engine_identity) else {
+                    return Err(Error::UnexpectedHandshakeMessage {
+                        reason: format!(
+                            "received READY for unexpected or duplicate engine identity {engine_identity:?}"
+                        ),
+                    });
+                };
+                debug!(
+                    handshake_address,
+                    ?engine_identity,
+                    ?handshake_message,
+                    "received READY from engine"
+                );
+                engines[engine_idx].ready_message = handshake_message;
+            }
+            other => {
+                return Err(Error::UnexpectedHandshakeMessage {
+                    reason: format!("unexpected handshake status {other:?}"),
+                });
+            }
+        }
+    }
+
+    // 4. Wait for every engine to connect to the shared input socket and register itself.
+    wait_for_input_registrations(&mut input_socket, &engines, ready_timeout).await?;
     debug!(
-        ?engine_identity,
-        ?ready_message,
-        "received READY from engine"
+        engine_count = engines.len(),
+        "all engines registered on shared input socket"
     );
 
-    // 4. Wait for the engine to connect to the input socket and register itself.
-    wait_for_input_registration(&mut input_socket, &engine_identity, ready_timeout).await?;
-    debug!(?engine_identity, "engine input registered");
-
-    info!("engine connected");
+    info!(engine_count = engines.len(), "engines connected");
 
     let (input_send, _) = input_socket.split();
 
     Ok(ConnectedTransport {
         input_address,
         output_address,
-        engine_identity,
         input_send,
         output_socket,
-        ready_message,
+        engines,
     })
 }
 
@@ -134,11 +208,10 @@ async fn bind_local_sockets(
     Ok((input_address, input_socket, output_address, output_socket))
 }
 
-/// Decode a handshake message and validate its structure, identity, and status.
+/// Decode a handshake message and validate its structure and identity.
 fn decode_handshake_message(
     message: ZmqMessage,
     expected_identity: Option<&[u8]>,
-    expected_status: &'static str,
 ) -> Result<(Vec<u8>, ReadyMessage)> {
     if message.len() != 2 {
         return Err(Error::UnexpectedHandshakeMessage {
@@ -158,15 +231,6 @@ fn decode_handshake_message(
     }
 
     let handshake_message: ReadyMessage = decode_msgpack(&frames[1])?;
-    if handshake_message.status.as_deref() != Some(expected_status) {
-        return Err(Error::UnexpectedHandshakeMessage {
-            reason: format!(
-                "expected status {expected_status:?}, got {:?}",
-                handshake_message.status
-            ),
-        });
-    }
-
     Ok((actual_identity, handshake_message))
 }
 
@@ -198,41 +262,49 @@ async fn send_init_message(
     Ok(())
 }
 
-/// Receive the input registration message from the engine and validate its identity.
+/// Receive the input registration message from each engine and validate its identity.
 ///
-/// There will 2 frames: [identity, empty-payload].
-async fn wait_for_input_registration(
+/// Each registration contains 2 frames: `[identity, empty-payload]`.
+async fn wait_for_input_registrations(
     input_socket: &mut RouterSocket,
-    expected_identity: &[u8],
+    expected_engines: &[ConnectedEngine],
     ready_timeout: Duration,
 ) -> Result<()> {
-    let registration = timeout(ready_timeout, input_socket.recv())
-        .await
-        .map_err(|_| Error::InputRegistrationTimeout {
-            timeout: ready_timeout,
-        })??;
+    let mut pending = expected_engines
+        .iter()
+        .map(|e| &e.engine_identity)
+        .collect::<BTreeSet<_>>();
 
-    if registration.len() != 2 {
-        return Err(Error::UnexpectedHandshakeMessage {
-            reason: format!(
-                "expected 2 frames for engine input registration, got {}",
-                registration.len()
-            ),
-        });
-    }
+    while !pending.is_empty() {
+        let registration = timeout(ready_timeout, input_socket.recv())
+            .await
+            .map_err(|_| Error::InputRegistrationTimeout {
+                timeout: ready_timeout,
+            })??;
 
-    let frames = registration.into_vec();
-    let actual_identity = frames[0].to_vec();
-    if actual_identity != expected_identity {
-        return Err(Error::UnexpectedHandshakeIdentity {
-            expected: expected_identity.to_vec(),
-            actual: actual_identity,
-        });
-    }
-    if !frames[1].is_empty() {
-        return Err(Error::UnexpectedHandshakeMessage {
-            reason: "expected empty payload for engine input registration".to_string(),
-        });
+        if registration.len() != 2 {
+            return Err(Error::UnexpectedHandshakeMessage {
+                reason: format!(
+                    "expected 2 frames for engine input registration, got {}",
+                    registration.len()
+                ),
+            });
+        }
+
+        let frames = registration.into_vec();
+        let actual_identity = frames[0].to_vec();
+        if !pending.remove(&actual_identity) {
+            return Err(Error::UnexpectedHandshakeMessage {
+                reason: format!(
+                    "received input registration for unexpected engine identity {actual_identity:?}"
+                ),
+            });
+        }
+        if !frames[1].is_empty() {
+            return Err(Error::UnexpectedHandshakeMessage {
+                reason: "expected empty payload for engine input registration".to_string(),
+            });
+        }
     }
 
     Ok(())

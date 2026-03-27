@@ -12,6 +12,7 @@ byteorder.workspace = true
 bytes.workspace = true
 enum-as-inner.workspace = true
 futures.workspace = true
+itertools.workspace = true
 parking_lot.workspace = true
 rmp-serde.workspace = true
 rmpv.workspace = true

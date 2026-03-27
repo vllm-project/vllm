@@ -466,6 +466,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
     let client = EngineCoreClient::connect_with_input_output_addresses(
         EngineCoreClientConfig {
             handshake_address,
+            engine_count: 1,
             model_name: "test-model".to_string(),
             local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(2),
@@ -537,6 +538,7 @@ where
     let client = EngineCoreClient::connect_with_input_output_addresses(
         EngineCoreClientConfig {
             handshake_address,
+            engine_count: 1,
             model_name: "test-model".to_string(),
             local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(2),
@@ -576,6 +578,7 @@ where
     let client = EngineCoreClient::connect_with_input_output_addresses(
         EngineCoreClientConfig {
             handshake_address,
+            engine_count: 1,
             model_name: "test-model".to_string(),
             local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(2),
@@ -630,6 +633,141 @@ async fn test_app_with_backend_and_stream_output_specs(
 
 async fn test_chat_with_engine_handle() -> (ChatLlm, tokio::task::JoinHandle<()>) {
     test_chat_with_engine_outputs(b"engine-openai-chat", default_stream_output_specs()).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn concurrent_non_stream_completions_are_distributed_across_two_engines() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let (engine_seen_tx, mut engine_seen_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let engine_task_0 = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_seen_tx = engine_seen_tx.clone();
+        async move {
+            let (mut dealer, mut push) =
+                setup_mock_engine(engine_handshake, b"engine-openai-0".to_vec()).await;
+            let add = recv_engine_message(&mut dealer).await;
+            let request: EngineCoreRequest =
+                rmp_serde::from_slice(&add[1]).expect("decode request");
+            engine_seen_tx
+                .send("engine-openai-0".to_string())
+                .expect("record engine 0 request");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    engine_index: 0,
+                    outputs: vec![
+                        request_output(&request.request_id, vec![b'h' as u32], None),
+                        request_output(
+                            &request.request_id,
+                            vec![b'i' as u32],
+                            Some(EngineCoreFinishReason::Stop),
+                        ),
+                    ],
+                    finished_requests: Some(BTreeSet::from([request.request_id.clone()])),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let engine_task_1 = tokio::spawn({
+        let engine_handshake = handshake_address.clone();
+        let engine_seen_tx = engine_seen_tx.clone();
+        async move {
+            let (mut dealer, mut push) =
+                setup_mock_engine(engine_handshake, b"engine-openai-1".to_vec()).await;
+            let add = recv_engine_message(&mut dealer).await;
+            let request: EngineCoreRequest =
+                rmp_serde::from_slice(&add[1]).expect("decode request");
+            engine_seen_tx
+                .send("engine-openai-1".to_string())
+                .expect("record engine 1 request");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            send_outputs(
+                &mut push,
+                EngineCoreOutputs {
+                    engine_index: 1,
+                    outputs: vec![
+                        request_output(&request.request_id, vec![b'h' as u32], None),
+                        request_output(
+                            &request.request_id,
+                            vec![b'i' as u32],
+                            Some(EngineCoreFinishReason::Stop),
+                        ),
+                    ],
+                    finished_requests: Some(BTreeSet::from([request.request_id.clone()])),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    });
+    drop(engine_seen_tx);
+
+    let client = EngineCoreClient::connect_with_input_output_addresses(
+        EngineCoreClientConfig {
+            handshake_address,
+            engine_count: 2,
+            model_name: "test-model".to_string(),
+            local_host: "127.0.0.1".to_string(),
+            ready_timeout: Duration::from_secs(2),
+            client_index: 0,
+        },
+        Some(ipc.input_endpoint()),
+        Some(ipc.output_endpoint()),
+    )
+    .await
+    .expect("connect client");
+
+    let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
+    let app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
+
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "Qwen/Qwen1.5-0.5B-Chat",
+                    "prompt": "hello",
+                    "stream": false
+                })
+                .to_string(),
+            ))
+            .expect("build request")
+    };
+
+    let (response_1, response_2) =
+        tokio::join!(app.clone().oneshot(request()), app.oneshot(request()));
+    let response_1 = response_1.expect("call first request");
+    let response_2 = response_2.expect("call second request");
+    assert_eq!(response_1.status(), StatusCode::OK);
+    assert_eq!(response_2.status(), StatusCode::OK);
+
+    let _body_1 = to_bytes(response_1.into_body(), usize::MAX)
+        .await
+        .expect("read first body");
+    let _body_2 = to_bytes(response_2.into_body(), usize::MAX)
+        .await
+        .expect("read second body");
+    engine_task_0.await.expect("engine task 0");
+    engine_task_1.await.expect("engine task 1");
+
+    let mut seen = vec![
+        engine_seen_rx.recv().await.expect("first routed engine"),
+        engine_seen_rx.recv().await.expect("second routed engine"),
+    ];
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec!["engine-openai-0".to_string(), "engine-openai-1".to_string()]
+    );
 }
 
 async fn server_load(app: &axum::Router) -> u64 {
@@ -932,6 +1070,7 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
     let client = EngineCoreClient::connect_with_input_output_addresses(
         EngineCoreClientConfig {
             handshake_address,
+            engine_count: 1,
             model_name: "test-model".to_string(),
             local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(2),
@@ -1616,6 +1755,7 @@ async fn non_stream_completions_include_logprobs() {
     let client = EngineCoreClient::connect_with_input_output_addresses(
         EngineCoreClientConfig {
             handshake_address,
+            engine_count: 1,
             model_name: "test-model".to_string(),
             local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(2),
@@ -1720,6 +1860,7 @@ async fn non_stream_completions_include_prompt_logprobs() {
     let client = EngineCoreClient::connect_with_input_output_addresses(
         EngineCoreClientConfig {
             handshake_address,
+            engine_count: 1,
             model_name: "test-model".to_string(),
             local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(2),
@@ -1810,6 +1951,7 @@ async fn non_stream_chat_uses_final_only_output_kind() {
     let client = EngineCoreClient::connect_with_input_output_addresses(
         EngineCoreClientConfig {
             handshake_address,
+            engine_count: 1,
             model_name: "test-model".to_string(),
             local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(2),
@@ -1872,6 +2014,7 @@ async fn non_stream_completions_use_final_only_output_kind() {
     let client = EngineCoreClient::connect_with_input_output_addresses(
         EngineCoreClientConfig {
             handshake_address,
+            engine_count: 1,
             model_name: "test-model".to_string(),
             local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(2),
@@ -2307,6 +2450,7 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
     let client = EngineCoreClient::connect_with_input_output_addresses(
         EngineCoreClientConfig {
             handshake_address,
+            engine_count: 1,
             model_name: "test-model".to_string(),
             local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(2),

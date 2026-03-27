@@ -65,12 +65,12 @@ fn ready_message(status: &str) -> ReadyMessage {
 
 /// Complete the engine-core handshake and connect mock input/output sockets.
 ///
-/// This returns the `DealerSocket` used to receive client requests and the
-/// `PushSocket` used to send engine outputs back to the client.
-pub async fn setup_mock_engine(
+/// This returns the decoded handshake init message plus the `DealerSocket` used to receive client
+/// requests and the `PushSocket` used to send engine outputs back to the client.
+pub async fn setup_mock_engine_with_init(
     engine_handshake: String,
     engine_identity: Vec<u8>,
-) -> (DealerSocket, PushSocket) {
+) -> (HandshakeInitMessage, DealerSocket, PushSocket) {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let mut options = SocketOptions::default();
@@ -124,6 +124,18 @@ pub async fn setup_mock_engine(
         .await
         .expect("send READY ready message");
 
+    (init, dealer, push)
+}
+
+/// Complete the engine-core handshake and connect mock input/output sockets.
+///
+/// This returns the `DealerSocket` used to receive client requests and the
+/// `PushSocket` used to send engine outputs back to the client.
+pub async fn setup_mock_engine(
+    engine_handshake: String,
+    engine_identity: Vec<u8>,
+) -> (DealerSocket, PushSocket) {
+    let (_, dealer, push) = setup_mock_engine_with_init(engine_handshake, engine_identity).await;
     (dealer, push)
 }
 

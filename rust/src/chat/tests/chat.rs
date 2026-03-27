@@ -339,6 +339,7 @@ async fn chat_streams_text_events() {
     let chat = connect_chat_llm_with_ipc(
         EngineCoreClientConfig {
             handshake_address,
+            engine_count: 1,
             model_name: "test-model".to_string(),
             local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(2),
@@ -449,7 +450,7 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
 
     let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
     let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig::new(handshake_address),
+        EngineCoreClientConfig::new_single(handshake_address),
         &ipc,
         backend,
     )
@@ -536,7 +537,7 @@ async fn chat_stream_flushes_held_text_on_finish() {
 
     let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
     let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig::new(handshake_address),
+        EngineCoreClientConfig::new_single(handshake_address),
         &ipc,
         backend,
     )
@@ -643,7 +644,7 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
         inner: FakeChatBackend::new(),
     });
     let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig::new(handshake_address),
+        EngineCoreClientConfig::new_single(handshake_address),
         &ipc,
         backend,
     )
@@ -706,7 +707,7 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
 
     let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
     let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig::new(handshake_address),
+        EngineCoreClientConfig::new_single(handshake_address),
         &ipc,
         backend,
     )
@@ -816,7 +817,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
     let backend: Arc<dyn ChatTextBackend> =
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
     let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig::new(handshake_address),
+        EngineCoreClientConfig::new_single(handshake_address),
         &ipc,
         backend,
     )
@@ -939,7 +940,7 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
     let backend: Arc<dyn ChatTextBackend> =
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
     let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig::new(handshake_address.clone()),
+        EngineCoreClientConfig::new_single(handshake_address.clone()),
         &ipc,
         backend.clone(),
     )
@@ -1012,7 +1013,7 @@ async fn chat_stream_parses_tool_calls_automatically() {
     let backend: Arc<dyn ChatTextBackend> =
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
     let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig::new(handshake_address),
+        EngineCoreClientConfig::new_single(handshake_address),
         &ipc,
         backend,
     )
@@ -1116,7 +1117,7 @@ async fn chat_collect_message_preserves_tool_call_arguments_in_final_only_mode()
     let backend: Arc<dyn ChatTextBackend> =
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
     let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig::new(handshake_address),
+        EngineCoreClientConfig::new_single(handshake_address),
         &ipc,
         backend,
     )
@@ -1194,7 +1195,7 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
 
     let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
     let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig::new(handshake_address.clone()),
+        EngineCoreClientConfig::new_single(handshake_address.clone()),
         &ipc,
         backend,
     )
@@ -1348,7 +1349,7 @@ async fn chat_rejects_tool_parsing_without_model_hint() {
 
     let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
     let chat = connect_chat_llm_with_ipc(
-        EngineCoreClientConfig::new(handshake_address),
+        EngineCoreClientConfig::new_single(handshake_address),
         &ipc,
         backend,
     )

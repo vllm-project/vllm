@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::slice;
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ use crate::protocol::{
     ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequestType,
     OtherEngineCoreOutputs, UtilityOutput, encode_msgpack,
 };
+use crate::transport::ConnectedEngine;
 use crate::{Error, Result, transport};
 
 pub(crate) struct ClientInner {
@@ -28,11 +30,11 @@ pub(crate) struct ClientInner {
 
 impl ClientInner {
     /// Create a new instance with the given input send half after the startup handshake completes.
-    pub fn new(input_send: RouterSendHalf, model_name: String) -> Self {
+    pub fn new(input_send: RouterSendHalf, model_name: String, engine_count: usize) -> Self {
         Self {
             input_send: AsyncMutex::new(Some(input_send)),
             model_name,
-            request_reg: Mutex::new(RequestRegistry::default()),
+            request_reg: Mutex::new(RequestRegistry::new(engine_count)),
             utility_reg: Mutex::new(UtilityRegistry::default()),
             health_error: ArcSwapOption::empty(),
         }
@@ -43,9 +45,9 @@ impl ClientInner {
         &self.model_name
     }
 
-    /// Register a newly added request. Return the per-request output channel bound to its
-    /// `request_id`.
-    pub fn register_request(&self, request_id: String) -> Result<OutputReceiver> {
+    /// Register a newly added request. Return the selected engine index and the per-request output
+    /// channel bound to its `request_id`.
+    pub fn register_request(&self, request_id: String) -> Result<(usize, OutputReceiver)> {
         let mut registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
@@ -73,8 +75,11 @@ impl ClientInner {
     }
 
     /// Filter the given request IDs to the subset that are still tracked as active and can be
-    /// aborted.
-    pub fn abortable_request_ids(&self, request_ids: &[String]) -> Result<Vec<String>> {
+    /// aborted, grouped by the engine that originally accepted them.
+    pub fn abortable_request_ids(
+        &self,
+        request_ids: &[String],
+    ) -> Result<BTreeMap<usize, Vec<String>>> {
         let registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
@@ -177,6 +182,17 @@ impl ClientInner {
         self.input_send.lock().await.take();
     }
 
+    /// Remove the request from the active registry for auto-abort and return the engine that the
+    /// request was originally routed to, if it is still active.
+    pub fn take_auto_abort_target(&self, request_id: &str) -> Option<usize> {
+        let mut registry = self.request_reg.lock();
+        let (_, engine_idx) = registry.remove(request_id)?;
+        if registry.is_closed() {
+            return None;
+        }
+        Some(engine_idx)
+    }
+
     /// Publish the first persistent health error and return the sticky error recorded for this
     /// client. Later failures do not overwrite the first one so `/health` and post-close callers
     /// observe a stable cause.
@@ -205,28 +221,27 @@ impl ClientInner {
 /// properly terminated.
 pub(crate) async fn run_abort_loop(
     inner: Arc<ClientInner>,
-    engine_identity: Vec<u8>,
+    engines: Vec<ConnectedEngine>,
     mut abort_rx: mpsc::UnboundedReceiver<String>,
 ) {
     // TODO: receive and abort requests in batch
     while let Some(request_id) = abort_rx.recv().await {
-        let should_abort = {
-            let mut registry = inner.request_reg.lock();
-            let removed = registry.remove(&request_id).is_some();
-            removed && !registry.is_closed()
-        };
-        if !should_abort {
+        let Some(engine_idx) = inner.take_auto_abort_target(&request_id) else {
             debug!(request_id, "skip auto-abort for inactive request");
             continue;
-        }
+        };
         info!(request_id, "auto-aborting request due to dropped stream");
 
         if let Err(error) = inner
-            .do_abort_requests(&engine_identity, slice::from_ref(&request_id))
+            .do_abort_requests(
+                &engines[engine_idx].engine_identity,
+                slice::from_ref(&request_id),
+            )
             .await
         {
             warn!(
                 request_id,
+                engine_idx,
                 error = %error.as_report(),
                 "failed to auto-abort dropped request stream"
             );
@@ -327,7 +342,7 @@ mod tests {
         let mut socket = RouterSocket::new();
         socket.bind("tcp://127.0.0.1:0").await.unwrap();
         let (send, _) = socket.split();
-        ClientInner::new(send, "test-model".to_string())
+        ClientInner::new(send, "test-model".to_string(), 1)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -4281,6 +4281,7 @@ dependencies = [
  "expect-test",
  "futures",
  "hex",
+ "itertools 0.14.0",
  "parking_lot",
  "rmp-serde",
  "rmpv",
