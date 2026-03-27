@@ -237,7 +237,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
     ) -> torch.Tensor:
         q_c = None
         kv_lora = None
-        q_c_scale = None  # For FP8 quantized path
+        q_c_scale = None  # Set when fuse_qknorm_quant is enabled
 
         if self.q_lora_rank is not None:
             assert self.fused_qkv_a_proj is not None, (
