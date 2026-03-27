@@ -232,11 +232,13 @@ class TestLoadFromTqAsync:
             media_io = ImageMediaIO(image_mode="RGB")
             result = await connector._load_from_tq_async(url, media_io)
 
-        assert isinstance(result, Image.Image)
-        assert result.mode == "RGB"
-        assert result.size == (64, 48)
-        # Pixel values should match (modulo PNG encode/decode which is lossless)
-        np.testing.assert_array_equal(np.asarray(result), np.asarray(img))
+        # P0 fix: result should be MediaWithBytes, not raw PIL Image
+        from vllm.multimodal.media.base import MediaWithBytes as MWB
+        assert isinstance(result, MWB)
+        assert result.media.mode == "RGB"
+        assert result.media.size == (64, 48)
+        # Pixel values must match exactly (no lossy encode/decode)
+        np.testing.assert_array_equal(np.asarray(result.media), np.asarray(img))
 
     @pytest.mark.asyncio
     async def test_batch_of_images(self):
@@ -367,6 +369,69 @@ class TestLoadFromTqAsync:
                 await connector._load_from_tq_async(
                     "tq://part/key/0", media_io
                 )
+
+    @pytest.mark.asyncio
+    async def test_batch_cache_avoids_duplicate_fetches(self):
+        """P1 fix: multiple URLs with same batch_key should fetch TQ only once."""
+        from vllm.multimodal.media.tq_connector import TQMediaConnector
+
+        images = [
+            _make_test_image(16, 16, "RGB"),
+            _make_test_image(32, 32, "RGB"),
+            _make_test_image(24, 24, "RGB"),
+        ]
+        td = _encode_images_as_tq_batch(images)
+        mock_client = _build_mock_tq_client(td)
+
+        connector = TQMediaConnector()
+
+        with patch(
+            "vllm.multimodal.media.tq_connector._init_tq_client",
+            return_value=mock_client,
+        ):
+            from vllm.multimodal.media.image import ImageMediaIO
+
+            media_io = ImageMediaIO(image_mode="RGB")
+
+            # Fetch all 3 images from the same batch.
+            for i in range(3):
+                await connector._load_from_tq_async(
+                    f"tq://mm_images/samebatch/{i}", media_io
+                )
+
+        # TQ should have been called only once (meta + data).
+        assert mock_client.async_kv_retrieve_meta.call_count == 1
+        assert mock_client.async_get_data.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_different_batch_keys_fetched_separately(self):
+        """Different batch_keys should each trigger a TQ fetch."""
+        from vllm.multimodal.media.tq_connector import TQMediaConnector
+
+        img = _make_test_image(8, 8, "RGB")
+        td = _encode_images_as_tq_batch([img])
+        mock_client = _build_mock_tq_client(td)
+
+        connector = TQMediaConnector()
+
+        with patch(
+            "vllm.multimodal.media.tq_connector._init_tq_client",
+            return_value=mock_client,
+        ):
+            from vllm.multimodal.media.image import ImageMediaIO
+
+            media_io = ImageMediaIO(image_mode="RGB")
+
+            await connector._load_from_tq_async(
+                "tq://part/batch_a/0", media_io
+            )
+            await connector._load_from_tq_async(
+                "tq://part/batch_b/0", media_io
+            )
+
+        # Two different batch_keys → two TQ fetches.
+        assert mock_client.async_kv_retrieve_meta.call_count == 2
+        assert mock_client.async_get_data.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +593,32 @@ class TestLoadFromTqSync:
 
             media_io = ImageMediaIO(image_mode="RGB")
             result = connector.load_from_url(
+                "tq://part/batch/0", media_io
+            )
+
+        assert isinstance(result, Image.Image)
+
+    @pytest.mark.asyncio
+    async def test_sync_from_async_context_no_deadlock(self):
+        """P2 fix: sync path must not deadlock when called inside an async ctx."""
+        from vllm.multimodal.media.tq_connector import TQMediaConnector
+
+        img = _make_test_image(8, 8, "RGB")
+        td = _encode_images_as_tq_batch([img])
+        mock_client = _build_mock_tq_client(td)
+
+        connector = TQMediaConnector()
+
+        with patch(
+            "vllm.multimodal.media.tq_connector._init_tq_client",
+            return_value=mock_client,
+        ):
+            from vllm.multimodal.media.image import ImageMediaIO
+
+            media_io = ImageMediaIO(image_mode="RGB")
+            # Call the sync path from within a running async event loop.
+            # The old implementation would deadlock here.
+            result = connector._load_from_tq_sync(
                 "tq://part/batch/0", media_io
             )
 
