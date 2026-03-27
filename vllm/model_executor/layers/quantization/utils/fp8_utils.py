@@ -410,7 +410,7 @@ class W8A8BlockFp8LinearOp:
         ) and should_use_deepgemm_for_fp8_linear(
             output_dtype, weight, self.is_deep_gemm_supported
         ):
-            # FlashInfer path - always quantizes internally
+            # FlashInfer: does not support pre-quantized input
             assert input_scale is None, (
                 "FlashInfer FP8 blockscale GEMM does not support pre-quantized input"
             )
@@ -419,21 +419,19 @@ class W8A8BlockFp8LinearOp:
         elif should_use_deepgemm_for_fp8_linear(
             output_dtype, weight, self.is_deep_gemm_supported
         ):
-            # DeepGEMM path - always quantizes internally
+            # DeepGEMM: does not support pre-quantized input
             assert input_scale is None, (
                 "DeepGEMM FP8 linear does not support pre-quantized input"
             )
             output = self._run_deepgemm(input_2d, weight, weight_scale)
         else:
-            # AITER/Triton/Cutlass path - supports pre-quantized input
+            # AITER/Triton/Cutlass: supports pre-quantized input
             output = self.w8a8_blockscale_op(
                 input_2d, weight, weight_scale, input_scale
             )
 
         if bias is not None:
             output = output + bias
-        # Don't convert output dtype - backends return the correct dtype
-        # (BF16 from GEMM, even when input is pre-quantized FP8)
         return output.view(*output_shape)
 
     def _run_deepgemm(
@@ -462,15 +460,13 @@ class W8A8BlockFp8LinearOp:
         input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if input_scale is None:
-            # Input not pre-quantized, quantize it now
+            # Quantize input if not already quantized
             assert self.input_quant_op is not None
             q_input, input_scale = self.input_quant_op(input_2d)
-            # Output dtype is same as input (typically BF16)
             output_dtype = input_2d.dtype
         else:
-            # Input is already quantized (FP8), use it directly
+            # Use pre-quantized FP8 input directly
             q_input = input_2d
-            # FP8 GEMM always outputs BF16, not FP8
             output_dtype = torch.bfloat16
         if self.is_hopper:
             return torch.ops.vllm.padded_cutlass(
@@ -513,14 +509,12 @@ class W8A8BlockFp8LinearOp:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_a8w8_blockscale
 
         if input_scale is not None:
-            # Input is already quantized (FP8), use it directly
+            # Use pre-quantized FP8 input directly
             q_input = input_2d
-            # FP8 GEMM always outputs BF16, not FP8
             output_dtype = torch.bfloat16
         else:
-            # Input not pre-quantized, quantize it now
+            # Quantize input if not already quantized
             q_input, input_scale = self.input_quant_op(input_2d, use_triton=use_triton)
-            # Output dtype is same as input (typically BF16)
             output_dtype = input_2d.dtype
 
         return gemm_a8w8_blockscale_op(
@@ -540,15 +534,13 @@ class W8A8BlockFp8LinearOp:
         input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if input_scale is None:
-            # Input not pre-quantized, quantize it now
+            # Quantize input if not already quantized
             assert self.input_quant_op is not None
             q_input, input_scale = self.input_quant_op(input_2d)
-            # Output dtype is same as input (typically BF16)
             output_dtype = input_2d.dtype
         else:
-            # Input is already quantized (FP8), use it directly
+            # Use pre-quantized FP8 input directly
             q_input = input_2d
-            # FP8 GEMM always outputs BF16, not FP8
             output_dtype = torch.bfloat16
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
             q_input,
