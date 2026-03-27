@@ -291,6 +291,10 @@ class ModelConfig:
     definitions"""
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
+    renderer_num_workers: int = 1
+    """Number of worker threads in the renderer thread pool. This pool
+    handles async tokenization, chat template rendering, and multimodal
+    preprocessing."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None
@@ -542,7 +546,9 @@ class ModelConfig:
 
         # Set default tokenizer modes based on model architecture
         if self.tokenizer_mode == "auto":
-            if arch == "Grok1ForCausalLM":
+            if self.model_impl == "terratorch":
+                self.tokenizer_mode = "terratorch"
+            elif arch == "Grok1ForCausalLM":
                 self.tokenizer_mode = "grok2"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
