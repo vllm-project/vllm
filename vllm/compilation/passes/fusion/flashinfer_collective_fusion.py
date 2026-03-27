@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
-
 import torch
 import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
@@ -17,11 +15,7 @@ from ..fx_utils import is_func
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FLASHINFER_BMM_FP8_MIN_M = 64
-FLASHINFER_VIEW_OPS = (
-    torch.ops.aten.view.default,
-    torch.ops.aten.reshape.default,
-    torch.ops.aten._unsafe_view.default,
-)
+FLASHINFER_VIEW_OP = torch.ops.aten.reshape.default
 
 
 def _get_node_arg(node: fx.Node, name: str, index: int) -> object:
@@ -97,12 +91,9 @@ def _has_exact_qkv_split_user(node: fx.Node) -> bool:
 
 
 class _BaseFlashInferPattern:
-    def __init__(
-        self, dtype: torch.dtype, device: str | None, view_op: Callable
-    ) -> None:
+    def __init__(self, dtype: torch.dtype, device: str | None) -> None:
         self.dtype = dtype
         self.device = device
-        self.view_op = view_op
         self.tp = get_tp_group()
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -116,8 +107,6 @@ class _BaseFlashInferPattern:
 
 class FlashInferBMMFP8ReduceScatterPattern(_BaseFlashInferPattern):
     def register(self, pm_pass: PatternMatcherPass) -> None:
-        view_op = self.view_op
-
         def pattern(
             input: torch.Tensor,
             weight: torch.Tensor,
@@ -132,7 +121,10 @@ class FlashInferBMMFP8ReduceScatterPattern(_BaseFlashInferPattern):
                 self.dtype,
                 "auto",
             )
-            mm_result = view_op(bmm_result, [input.shape[0], weight.shape[1]])
+            mm_result = FLASHINFER_VIEW_OP(
+                bmm_result,
+                [input.shape[0], weight.shape[1]],
+            )
             return torch.ops.vllm.reduce_scatter.default(
                 mm_result,
                 dim=0,
@@ -177,8 +169,6 @@ class FlashInferBMMFP8ReduceScatterPattern(_BaseFlashInferPattern):
 
 class AllGatherFlashInferBMMFP8QKVPattern(_BaseFlashInferPattern):
     def register(self, pm_pass: PatternMatcherPass) -> None:
-        view_op = self.view_op
-
         def pattern(
             x: torch.Tensor,
             weight: torch.Tensor,
@@ -199,7 +189,10 @@ class AllGatherFlashInferBMMFP8QKVPattern(_BaseFlashInferPattern):
                 self.dtype,
                 "auto",
             )
-            return view_op(bmm_result, [all_gather.shape[0], weight.shape[1]])
+            return FLASHINFER_VIEW_OP(
+                bmm_result,
+                [all_gather.shape[0], weight.shape[1]],
+            )
 
         def replacement(
             x: torch.Tensor,

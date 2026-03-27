@@ -20,7 +20,6 @@ from vllm.platforms import current_platform
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .flashinfer_collective_fusion import (
-    FLASHINFER_VIEW_OPS,
     AllGatherFlashInferBMMFP8QKVPattern,
     FlashInferBMMFP8ReduceScatterPattern,
 )
@@ -411,13 +410,12 @@ class AsyncTPPass(VllmPatternMatcherPass):
             )
             if hasattr(torch.ops.vllm, "bmm_fp8"):
                 register_flashinfer_async_tp_ops()
-                for view_op in FLASHINFER_VIEW_OPS:
-                    FlashInferBMMFP8ReduceScatterPattern(
-                        self.model_dtype, self.device, view_op
-                    ).register(self.patterns)
-                    AllGatherFlashInferBMMFP8QKVPattern(
-                        self.model_dtype, self.device, view_op
-                    ).register(self.patterns)
+                FlashInferBMMFP8ReduceScatterPattern(
+                    self.model_dtype, self.device
+                ).register(self.patterns)
+                AllGatherFlashInferBMMFP8QKVPattern(
+                    self.model_dtype, self.device
+                ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
