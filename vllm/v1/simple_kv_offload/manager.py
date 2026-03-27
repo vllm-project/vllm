@@ -180,7 +180,7 @@ class SimpleCPUOffloadScheduler:
         kv_cache_config: "KVCacheConfig", max_num_batched_tokens: int
     ) -> int:
         """GPU blocks to keep available (free/offloaded) per step in lazy mode."""
-        WATERMARK_RATIO = 0.5  # Reserve larger space to avoid running out of GPU blocks
+        WATERMARK_RATIO = 1.0  # Reserve larger space to avoid running out of GPU blocks
         target = 0
         for g in kv_cache_config.kv_cache_groups:
             spec = g.kv_cache_spec
@@ -459,6 +459,7 @@ class SimpleCPUOffloadScheduler:
         num_free = cpu_block_pool.get_num_free_blocks()
         kv_cache_groups = self.cpu_kv_cache_config.kv_cache_groups
         num_groups = len(kv_cache_groups)
+        gpu_blocks_this_step: set[int] = set()
 
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             state = self._reqs_to_store.get(req_id)
@@ -468,6 +469,7 @@ class SimpleCPUOffloadScheduler:
             # Accumulate new block IDs.
             if preempted:
                 state.block_ids = tuple([] for _ in range(num_groups))
+                state.num_stored_blocks = [0] * num_groups
             if new_block_id_groups:
                 for g in range(min(num_groups, len(new_block_id_groups))):
                     if new_block_id_groups[g] is not None:
@@ -512,9 +514,11 @@ class SimpleCPUOffloadScheduler:
                     if bhash_with_group is None:
                         break
 
-                    # Check if this group's data is already cached in CPU.
+                    # Check if this group's data is already scheduled for store
+                    # in this step or already cached in CPU.
                     if (
-                        cpu_block_pool.cached_block_hash_to_block.get_one_block(
+                        gpu_block_id in gpu_blocks_this_step
+                        or cpu_block_pool.cached_block_hash_to_block.get_one_block(
                             bhash_with_group
                         )
                         is not None
@@ -548,6 +552,7 @@ class SimpleCPUOffloadScheduler:
                 req_ids.append(req_id)
                 merged_gpu_block_ids.extend(gpu_block_ids)
                 merged_cpu_block_ids.extend(cpu_block_ids)
+                gpu_blocks_this_step.update(gpu_block_ids)
 
                 # Touch GPU blocks to prevent freeing during async copy
                 gpu_block_pool.touch(
