@@ -19,7 +19,11 @@ from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .flashinfer_collective_fusion import FlashInferCollectiveGemmRewriter
+from .flashinfer_collective_fusion import (
+    FLASHINFER_VIEW_OPS,
+    AllGatherFlashInferBMMFP8QKVPattern,
+    FlashInferBMMFP8ReduceScatterPattern,
+)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -379,12 +383,8 @@ class AsyncTPPass(VllmPatternMatcherPass):
         super().__init__(config)
 
         # Enable symmetric memory for the TP process group
-        self.tp_device_group_name = get_tp_group().device_group.group_name
-        self.flashinfer_rewriter = FlashInferCollectiveGemmRewriter(
-            self.tp_device_group_name
-        )
-        enable_symm_mem_for_group(self.tp_device_group_name)
-        register_flashinfer_async_tp_ops()
+        tp_device_group_name = get_tp_group().device_group.group_name
+        enable_symm_mem_for_group(tp_device_group_name)
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="async_tp_pass"
         )
@@ -409,6 +409,15 @@ class AsyncTPPass(VllmPatternMatcherPass):
             AllGatherCutlassScaledMMPattern(self.model_dtype, self.device).register(
                 self.patterns
             )
+            if hasattr(torch.ops.vllm, "bmm_fp8"):
+                register_flashinfer_async_tp_ops()
+                for view_op in FLASHINFER_VIEW_OPS:
+                    FlashInferBMMFP8ReduceScatterPattern(
+                        self.model_dtype, self.device, view_op
+                    ).register(self.patterns)
+                    AllGatherFlashInferBMMFP8QKVPattern(
+                        self.model_dtype, self.device, view_op
+                    ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
@@ -426,9 +435,5 @@ class AsyncTPPass(VllmPatternMatcherPass):
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
-        matched_by_patterns = self.patterns.apply(graph)
-        matched_flashinfer = 0
-        if self.model_dtype == torch.bfloat16 and hasattr(torch.ops.vllm, "bmm_fp8"):
-            matched_flashinfer = self.flashinfer_rewriter.rewrite(graph)
-        self.matched_count = matched_by_patterns + matched_flashinfer
+        self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
