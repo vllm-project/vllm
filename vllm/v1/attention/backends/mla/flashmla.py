@@ -192,7 +192,6 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
                 n = num_splits.size(0)
                 assert n <= self.cg_buf_num_splits.size(0)
                 self.cg_buf_num_splits[:n].copy_(num_splits)
-                self.cg_buf_num_splits[n:].fill_(num_splits[-1])
                 num_splits = self.cg_buf_num_splits[:n]
 
             scheduler_metadata.tile_scheduler_metadata = tile_scheduler_metadata
