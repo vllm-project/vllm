@@ -103,8 +103,10 @@ handle_pytest_exit() {
   local exit_code=$1
   if [ "$exit_code" -eq 5 ]; then
     echo "Pytest exit code 5 (no tests collected) - treating as success."
+    SCRIPT_EXIT_CODE=0
     exit 0
   fi
+  SCRIPT_EXIT_CODE=$exit_code
   exit "$exit_code"
 }
 
@@ -384,10 +386,20 @@ image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 docker pull "${image_name}"
 
+RESULTS_DIR=""  # set in single-node path; used by EXIT trap for cleanup
+# SCRIPT_EXIT_CODE is set just before calling the trap so that even if ROCm/GPU
+# runtime cleanup inside docker rm triggers a C-level exit() call (same class of
+# bug seen in HPU), the explicit "exit $SCRIPT_EXIT_CODE" at the end of the trap
+# restores the correct exit code. Default 1 = fail-safe.
+SCRIPT_EXIT_CODE=1
+
 remove_docker_container() {
   docker rm -f "${container_name}" || docker image rm -f "${image_name}" || true
+  if [[ -n "${RESULTS_DIR}" ]]; then
+    rm -rf "${RESULTS_DIR}" || true
+  fi
 }
-trap remove_docker_container EXIT
+trap 'remove_docker_container; exit ${SCRIPT_EXIT_CODE}' EXIT
 
 # --- Prepare commands ---
 echo "--- Running container"
@@ -497,6 +509,11 @@ else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
 
+  # Mount a results directory so we can detect exit-code masking by C-level
+  # GPU/ROCm runtime cleanup. pytest writes JUnit XML before sys.exit(), so
+  # the XML survives even if ROCm's atexit handler calls exit(0) afterward.
+  RESULTS_DIR=$(mktemp -d)
+
   docker run \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
@@ -512,10 +529,29 @@ else
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
+    -e "PYTORCH_ROCM_ARCH=" \
+    -v "${RESULTS_DIR}:/tmp/vllm-ci-results" \
+    -e "PYTEST_ADDOPTS=--junitxml=/tmp/vllm-ci-results/results.xml" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -eo pipefail -c "unset PYTORCH_ROCM_ARCH && ${commands}"
 
   exit_code=$?
+  echo "--- Container exited with code: ${exit_code}"
+
+  # If the container exited 0 but pytest recorded failures in the JUnit XML,
+  # the exit code was masked — most likely by the ROCm/HIP runtime calling
+  # exit(0) from a C-level atexit handler or destructor during process
+  # cleanup, AFTER Python's sys.exit(1) was already called.
+  if [[ "$exit_code" -eq 0 && -f "${RESULTS_DIR}/results.xml" ]]; then
+    if grep -qE 'failures="[1-9]|errors="[1-9]' "${RESULTS_DIR}/results.xml"; then
+      echo "--- MASKED FAILURE DETECTED"
+      echo "Container exited 0 but JUnit XML reports test failures."
+      echo "Likely cause: C-level ROCm/GPU runtime called exit(0) during"
+      echo "process cleanup, overriding Python's non-zero exit code."
+      exit_code=1
+    fi
+  fi
+
   handle_pytest_exit "$exit_code"
 fi
