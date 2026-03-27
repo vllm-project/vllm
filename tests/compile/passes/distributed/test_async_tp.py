@@ -18,10 +18,12 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed import (
+    get_tp_group,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_world_size,
     init_distributed_environment,
     initialize_model_parallel,
 )
@@ -222,10 +224,11 @@ class _BaseFlashInferBMMFP8Model(torch.nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.dtype = dtype
-        # Match the layout used by the existing FlashInfer FP8 test helpers.
         self.weight = torch.rand([hidden_size, hidden_size]).to(FP8_DTYPE).t()
         self.scale_a = torch.tensor(1.0, dtype=torch.float32)
         self.scale_b = torch.tensor(1.0, dtype=torch.float32)
+        self.tp_world_size = get_tensor_model_parallel_world_size()
+        self.tp_group_name = get_tp_group().unique_name
 
     def run_bmm_fp8(self, input: torch.Tensor) -> torch.Tensor:
         return torch.ops.vllm.bmm_fp8(
@@ -237,13 +240,29 @@ class _BaseFlashInferBMMFP8Model(torch.nn.Module):
             "auto",
         ).reshape(input.shape[0], self.weight.shape[1])
 
+    def run_all_gather(self, input: torch.Tensor) -> torch.Tensor:
+        return torch.ops.vllm.all_gather.default(
+            input,
+            dim=0,
+            world_size=self.tp_world_size,
+            group_name=self.tp_group_name,
+        )
+
+    def run_reduce_scatter(self, input: torch.Tensor) -> torch.Tensor:
+        return torch.ops.vllm.reduce_scatter.default(
+            input,
+            dim=0,
+            world_size=self.tp_world_size,
+            group_name=self.tp_group_name,
+        )
+
 
 class TestFlashInferBMMFP8RSModel(_BaseFlashInferBMMFP8Model):
     def forward(self, input: torch.Tensor):
         """bmm_fp8 + reduce_scatter - matches FlashInfer's traced pattern."""
         fp8_input = input.to(FP8_DTYPE)
         output = self.run_bmm_fp8(fp8_input)
-        return tensor_model_parallel_reduce_scatter(output, dim=0)
+        return self.run_reduce_scatter(output)
 
     def ops_in_model_before(self):
         return [torch.ops.vllm.reduce_scatter.default]
@@ -256,12 +275,14 @@ class TestAGFlashInferBMMFP8Model(_BaseFlashInferBMMFP8Model):
     def forward(self, input: torch.Tensor):
         """all_gather + bmm_fp8 - matches FlashInfer's traced pattern."""
         fp8_input = input.to(FP8_DTYPE)
-        all_gather = tensor_model_parallel_all_gather(fp8_input, dim=0)
+        all_gather = self.run_all_gather(fp8_input)
         output = self.run_bmm_fp8(all_gather)
         q_size = self.hidden_size // 2
         kv_size = self.hidden_size // 4
-        q, k, v = output.split([q_size, kv_size, kv_size], dim=-1)
-        return torch.cat((q, k, v), dim=-1)
+        q, k, v = torch.ops.aten.split_with_sizes.default(
+            output, [q_size, kv_size, kv_size], -1
+        )
+        return torch.ops.aten.cat.default([q, k, v], -1)
 
     def ops_in_model_before(self):
         return [torch.ops.vllm.all_gather.default]
