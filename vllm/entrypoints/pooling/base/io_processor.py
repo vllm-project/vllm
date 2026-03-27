@@ -21,7 +21,7 @@ from vllm.entrypoints.pooling.typing import (
     PoolingServeContext,
 )
 from vllm.inputs import EngineInput, SingletonPrompt
-from vllm.renderers import BaseRenderer, merge_kwargs
+from vllm.renderers import BaseRenderer, TokenizeParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.tool_parsers import ToolParser
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -99,8 +99,11 @@ class PoolingIOProcessor:
     # offline APIs
 
     def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
+        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
+            **(ctx.tokenization_kwargs or {})
+        )
         return self._preprocess_completion_offline(
-            prompts=ctx.prompts, tokenization_kwargs=ctx.tokenization_kwargs
+            prompts=ctx.prompts, tok_params=tok_params
         )
 
     async def pre_process_offline_async(self, ctx: OfflineInputsContext):
@@ -202,26 +205,19 @@ class PoolingIOProcessor:
     def _preprocess_completion_offline(
         self,
         prompts: PromptType | Sequence[PromptType],
-        tokenization_kwargs: dict[str, Any] | None = None,
+        tok_params: TokenizeParams,
     ) -> Sequence[EngineInput]:
-        renderer = self.renderer
-        model_config = self.model_config
-
         prompts = prompt_to_seq(prompts)
-
         parsed_prompts = [
             (
                 prompt
                 if isinstance(prompt, bytes)
-                else parse_model_prompt(model_config, prompt)
+                else parse_model_prompt(self.model_config, prompt)
             )
             for prompt in prompts
         ]
-        tok_params = renderer.default_cmpl_tok_params.with_kwargs(
-            **(tokenization_kwargs or {})
-        )
 
-        return renderer.render_cmpl(
+        return self.renderer.render_cmpl(
             parsed_prompts,
             tok_params,
         )

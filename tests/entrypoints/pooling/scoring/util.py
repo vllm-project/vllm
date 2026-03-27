@@ -8,7 +8,7 @@ from safetensors.torch import load_file
 from transformers import AutoModel, AutoTokenizer
 
 from tests.conftest import HfRunner
-from vllm.entrypoints.pooling.score.utils import compute_maxsim_score
+from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 
 
 class ColBERTScoringHfRunner(torch.nn.Module):

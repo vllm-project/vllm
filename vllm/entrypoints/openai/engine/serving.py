@@ -56,7 +56,7 @@ from vllm.entrypoints.pooling.pooling.protocol import (
     PoolingCompletionRequest,
     PoolingResponse,
 )
-from vllm.entrypoints.pooling.score.protocol import (
+from vllm.entrypoints.pooling.scoring.protocol import (
     RerankRequest,
     ScoreDataRequest,
     ScoreQueriesDocumentsRequest,

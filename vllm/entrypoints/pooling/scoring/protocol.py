@@ -12,14 +12,15 @@ from vllm.entrypoints.pooling.base.protocol import (
     ClassifyRequestMixin,
     PoolingBasicRequestMixin,
 )
-from vllm.entrypoints.pooling.score.utils import (
+from vllm.renderers import TokenizeParams
+from vllm.tasks import PoolingTask
+from vllm.utils import random_uuid
+
+from .typing import (
     ScoreContentPartParam,
     ScoreInput,
     ScoreInputs,
 )
-from vllm.renderers import TokenizeParams
-from vllm.tasks import PoolingTask
-from vllm.utils import random_uuid
 
 
 class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
@@ -30,12 +31,11 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            truncation_side=self.truncation_side,
             do_lower_case=encoder_config.get("do_lower_case", False),
             max_total_tokens_param="max_model_len",
         )
 
-    def to_pooling_params(self, task: PoolingTask = "classify"):
+    def to_pooling_params(self, task: PoolingTask = "score"):
         return PoolingParams(
             task=task,
             use_activation=self.use_activation,
@@ -106,12 +106,11 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            truncation_side=self.truncation_side,
             do_lower_case=encoder_config.get("do_lower_case", False),
             max_total_tokens_param="max_model_len",
         )
 
-    def to_pooling_params(self, task: PoolingTask = "classify"):
+    def to_pooling_params(self, task: PoolingTask = "score"):
         return PoolingParams(
             task=task,
             use_activation=self.use_activation,

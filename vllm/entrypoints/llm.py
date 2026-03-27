@@ -46,7 +46,8 @@ from vllm.entrypoints.chat_utils import (
     load_chat_template,
 )
 from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_processors
-from vllm.entrypoints.pooling.scoring.typing import ScoreInputs, ScoringOfflineInputs
+from vllm.entrypoints.pooling.scoring.io_processor import BiEncoderIOProcessor
+from vllm.entrypoints.pooling.scoring.typing import ScoreInputs
 from vllm.entrypoints.pooling.typing import OfflineInputsContext, OfflineOutputsContext
 from vllm.entrypoints.utils import log_non_default_args
 from vllm.inputs import (
@@ -1445,16 +1446,16 @@ class LLM:
         io_processor = cast(BiEncoderIOProcessor, io_processor)
         pooling_task = io_processor.pooling_task
 
-        score_data_1, score_data_2 = io_processor.validate_score_inputs(
+        scoring_data = io_processor.validate_score_inputs(
             data_1,
             data_2,
         )
 
-        offset = len(score_data_1)
+        offset = len(scoring_data.data_1)
 
         processor_inputs = io_processor.pre_process_offline(
             ctx=OfflineInputsContext(
-                prompts=ScoringOfflineInputs(score_data_1, score_data_2),
+                prompts=scoring_data,
                 tokenization_kwargs=tokenization_kwargs,
                 intermediates=offset,
             )

@@ -25,6 +25,11 @@ def init_pooling_io_processors(
 
         processors.append(("embed", EmbedIOProcessor))
 
+    if model_config.score_type == "bi-encoder":
+        from vllm.entrypoints.pooling.scoring.io_processor import BiEncoderIOProcessor
+
+        processors.append(("bi-encoder", BiEncoderIOProcessor))
+
     return {
         task: processor_cls(
             model_config=model_config,

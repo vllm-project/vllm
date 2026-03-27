@@ -42,6 +42,6 @@ ScoreData = str | list[ScoreContentPartParam]
 
 
 @dataclass
-class ScoringOfflineInputs:
+class ScoringData:
     data_1: list[ScoreData]
     data_2: list[ScoreData]

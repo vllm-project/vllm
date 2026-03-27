@@ -68,7 +68,7 @@ def register_pooling_api_routers(
         app.include_router(embed_router)
 
     if enable_scoring_api(supported_tasks, model_config):
-        from vllm.entrypoints.pooling.score.api_router import router as score_router
+        from vllm.entrypoints.pooling.scoring.api_router import router as score_router
 
         app.include_router(score_router)
 
@@ -84,7 +84,7 @@ def init_pooling_state(
     from vllm.entrypoints.pooling.classify.serving import ServingClassification
     from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
     from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
-    from vllm.entrypoints.pooling.score.serving import ServingScores
+    from vllm.entrypoints.pooling.scoring.serving import ServingScores
     from vllm.tasks import POOLING_TASKS
 
     model_config = engine_client.model_config
@@ -136,8 +136,9 @@ def init_pooling_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            score_template=resolved_chat_template,
-            log_error_stack=args.log_error_stack,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+            trust_request_chat_template=args.trust_request_chat_template,
         )
         if enable_scoring_api(supported_tasks, model_config)
         else None
