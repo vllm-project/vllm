@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: Basic Models Tests (Initialization)
   timeout_in_minutes: 45
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/test_initialization.py
@@ -12,10 +11,11 @@ steps:
   commands:
     # Run a subset of model initialization tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
+  mirror:
+    torch_nightly: true
 
 - label: Basic Models Tests (Extra Initialization) %N
   timeout_in_minutes: 45
-  torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
   - tests/models/test_initialization.py
@@ -26,6 +26,8 @@ steps:
     # test.) Also run if model initialization test file is modified
     - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
+  mirror:
+    torch_nightly: true
 
 - label: Basic Models Tests (Other)
   timeout_in_minutes: 45
