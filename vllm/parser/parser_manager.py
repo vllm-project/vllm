@@ -6,7 +6,7 @@ from __future__ import annotations
 import importlib
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from vllm.logger import init_logger
 from vllm.utils.collection_utils import is_list_of
@@ -159,7 +159,7 @@ class ParserManager:
             if isinstance(name, str):
                 names = [name]
             elif is_list_of(name, str):
-                names = name
+                names = cast(list[str], name)
             else:
                 names = [class_name]
 
@@ -279,20 +279,7 @@ class ParserManager:
             except KeyError:
                 pass  # No unified parser with this name
 
-        # Strategy 2: Check for parser with either name
-        for name in [tool_parser_name, reasoning_parser_name]:
-            if name:
-                try:
-                    parser = cls.get_parser_internal(name)
-                    logger.info(
-                        "Using unified parser '%s' for reasoning and tool parsing.",
-                        name,
-                    )
-                    return parser
-                except KeyError:
-                    pass
-
-        # Strategy 3: Create a DelegatingParser with the individual parser classes
+        # Strategy 2: Create a DelegatingParser with the individual parser classes
         reasoning_parser_cls = cls.get_reasoning_parser(reasoning_parser_name)
         tool_parser_cls = cls.get_tool_parser(
             tool_parser_name, enable_auto_tools, model_name

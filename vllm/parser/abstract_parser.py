@@ -180,6 +180,79 @@ class Parser:
             A list of ResponseOutputItem objects.
         """
 
+    def extract_chat_completion_parts(
+        self,
+        *,
+        model_output: str,
+        request: ChatCompletionRequest,
+        enable_auto_tools: bool = False,
+    ) -> tuple[str | None, list[FunctionCall], str | None]:
+        """
+        Extract reasoning, tool calls, and remaining content from a complete
+        model-generated string for Chat Completions.
+
+        Used for non-streaming chat completion responses where we have the
+        entire model output available before constructing the final message.
+
+        Args:
+            model_output: The complete model-generated string.
+            request: The chat completion request used to generate the output.
+            enable_auto_tools: Whether to enable automatic tool call parsing.
+
+        Returns:
+            A tuple of (reasoning_content, function_calls, remaining_content).
+        """
+        reasoning, content = self.extract_reasoning(model_output, request)
+        function_calls: list[FunctionCall] = []
+
+        if request.tool_choice and isinstance(
+            request.tool_choice, ChatCompletionNamedToolChoiceParam
+        ):
+            assert content is not None
+            function_calls.append(
+                FunctionCall(name=request.tool_choice.function.name, arguments=content)
+            )
+            return reasoning, function_calls, None
+
+        if request.tool_choice == "required":
+            tool_calls = []
+            with contextlib.suppress(ValidationError):
+                content = content or ""
+                tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(
+                    content
+                )
+            for tool_call in tool_calls:
+                function_calls.append(
+                    FunctionCall(
+                        name=tool_call.name,
+                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
+                    )
+                )
+            return reasoning, function_calls, None
+
+        if enable_auto_tools and (
+            request.tool_choice == "auto" or request.tool_choice is None
+        ):
+            tool_call_info = self.extract_tool_calls(
+                content if content is not None else "",
+                request=request,
+            )
+            if tool_call_info is not None and tool_call_info.tools_called:
+                function_calls.extend(
+                    FunctionCall(
+                        id=tool_call.id,
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    )
+                    for tool_call in tool_call_info.tool_calls
+                )
+                remaining_content = tool_call_info.content
+                if remaining_content and remaining_content.strip() == "":
+                    remaining_content = None
+                return reasoning, function_calls, remaining_content
+
+        return reasoning, [], content
+
     @abstractmethod
     def extract_reasoning(
         self,
@@ -324,11 +397,8 @@ class DelegatingParser(Parser):
         tool_call_id_type: str = "random",
         logprobs: list[Logprob] | None = None,
     ) -> list[ResponseOutputItem]:
-        # First extract reasoning
         reasoning, content = self.extract_reasoning(model_output, request)
-
-        # Then parse tool calls from the content
-        tool_calls, content = self._parse_tool_calls(
+        tool_calls, content = self._parse_function_calls(
             request=request,
             content=content,
             enable_auto_tools=enable_auto_tools,
@@ -391,15 +461,28 @@ class DelegatingParser(Parser):
 
         return outputs
 
-    def _parse_tool_calls(
+    def extract_chat_completion_parts(
         self,
-        request: ResponsesRequest,
+        *,
+        model_output: str,
+        request: ChatCompletionRequest,
+        enable_auto_tools: bool = False,
+    ) -> tuple[str | None, list[FunctionCall], str | None]:
+        reasoning, content = self.extract_reasoning(model_output, request)
+        function_calls, content = self._parse_function_calls(
+            request=request,
+            content=content,
+            enable_auto_tools=enable_auto_tools,
+        )
+        return reasoning, function_calls, content
+
+    def _parse_function_calls(
+        self,
+        request: ResponsesRequest | ChatCompletionRequest,
         content: str | None,
         enable_auto_tools: bool,
     ) -> tuple[list[FunctionCall], str | None]:
         """
-        TODO(qandrew): merge _parse_tool_calls_from_content
-        for ChatCompletions into this function
         Parse tool calls from content based on request tool_choice settings.
 
         Returns:
@@ -542,10 +625,12 @@ class _WrappedParser(DelegatingParser):
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
 
-    def __init__(self, tokenizer: TokenizerLike):
+    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer)
         # Instantiate the underlying parsers from class attributes
         if self.__class__.reasoning_parser_cls is not None:
-            self._reasoning_parser = self.__class__.reasoning_parser_cls(tokenizer)
+            self._reasoning_parser = self.__class__.reasoning_parser_cls(
+                tokenizer, *args, **kwargs
+            )
         if self.__class__.tool_parser_cls is not None:
             self._tool_parser = self.__class__.tool_parser_cls(tokenizer)
