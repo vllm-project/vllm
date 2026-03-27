@@ -1344,7 +1344,7 @@ class OpenAIServingResponses(OpenAIServing):
             reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
         tool_parser = None
         if self.parser and self.parser.tool_parser_cls:
-            tool_parser = self.parser.tool_parser_cls(tokenizer)
+            tool_parser = self.parser.tool_parser_cls(tokenizer, request.tools)
         reasoning_ended = False
         tool_call_text_started = False
         previous_text = ""
