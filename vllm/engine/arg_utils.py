@@ -443,6 +443,7 @@ class EngineArgs:
     )
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
+    riy_expert_profile: str | None = ParallelConfig.riy_expert_profile
     expert_placement_strategy: ExpertPlacementStrategy = (
         ParallelConfig.expert_placement_strategy
     )
@@ -946,6 +947,7 @@ class EngineArgs:
             **parallel_kwargs["disable_nccl_for_dp_synchronization"],
         )
         parallel_group.add_argument("--enable-eplb", **parallel_kwargs["enable_eplb"])
+        parallel_group.add_argument("--riy-expert-profile", **parallel_kwargs["riy_expert_profile"])
         parallel_group.add_argument("--eplb-config", **parallel_kwargs["eplb_config"])
         parallel_group.add_argument(
             "--expert-placement-strategy",
@@ -1770,6 +1772,7 @@ class EngineArgs:
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
+            riy_expert_profile=self.riy_expert_profile,
             eplb_config=self.eplb_config,
             expert_placement_strategy=self.expert_placement_strategy,
             max_parallel_loading_workers=self.max_parallel_loading_workers,

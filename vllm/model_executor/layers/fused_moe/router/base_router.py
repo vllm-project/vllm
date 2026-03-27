@@ -6,6 +6,29 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+import os as _os_riy
+
+from vllm.model_executor.layers.fused_moe.riy import (
+    apply_riy_mask,
+    get_riy_state,
+)
+
+_riy_monitor_enabled = _os_riy.environ.get('VLLM_RIY_MONITOR', '0') == '1'
+
+
+def _is_capturing() -> bool:
+    """Check if we're inside torch.compile tracing.
+
+    During tracing, we must not perform side-effect ops (scatter_add_ on
+    non-graph tensors, HTTP calls, etc.).
+
+    Note: we only check torch.compiler.is_compiling(), NOT
+    torch.cuda.is_current_stream_capturing(). The latter returns True
+    during both CUDA graph capture AND replay, which would permanently
+    block RIY stats. The scatter_add_ on separate tensors is safe
+    during graph replay (it's just not captured into the graph).
+    """
+    return torch.compiler.is_compiling()
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -84,6 +107,30 @@ if current_platform.is_cuda_alike():
             src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
         )
         return topk_ids
+
+    @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+    def riy_record_stats_compiled(
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        freq_view: torch.Tensor,
+        weight_view: torch.Tensor,
+        collecting: torch.Tensor,
+    ) -> None:
+        """Compiled stats accumulator — runs inside CUDA Graph replay.
+
+        The collecting flag (GPU scalar, 0 or 1) gates accumulation.
+        When 0, scatter_add_ adds zeros — effectively a no-op but the
+        graph structure stays identical.
+        """
+        ids_flat = topk_ids.flatten().long()
+        gate = collecting.long()
+        freq_view.scatter_add_(
+            0, ids_flat,
+            torch.ones_like(ids_flat, dtype=torch.int64) * gate)
+        weight_view.scatter_add_(
+            0, ids_flat,
+            topk_weights.flatten().to(weight_view.dtype) * collecting.float())
+
 else:
 
     def eplb_map_to_physical_and_record(
@@ -94,6 +141,23 @@ else:
     ) -> torch.Tensor:
         # CPU fallback: no EPLB so just return as is
         return topk_ids
+
+    def riy_record_stats_compiled(
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        freq_view: torch.Tensor,
+        weight_view: torch.Tensor,
+        collecting: torch.Tensor,
+    ) -> None:
+        # CPU fallback: plain scatter_add_
+        ids_flat = topk_ids.flatten().long()
+        gate = collecting.long()
+        freq_view.scatter_add_(
+            0, ids_flat,
+            torch.ones_like(ids_flat, dtype=torch.int64) * gate)
+        weight_view.scatter_add_(
+            0, ids_flat,
+            topk_weights.flatten().to(weight_view.dtype) * collecting.float())
 
 
 class BaseRouter(FusedMoERouter):
@@ -114,6 +178,7 @@ class BaseRouter(FusedMoERouter):
         # TODO(bnell): Once the MK is constructed at layer init time, we
         # can make this a plain value instead of a callback.
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        layer_idx: int = -1,
     ):
         """
         Note: the indices dtype might not be available at router construction
@@ -128,6 +193,13 @@ class BaseRouter(FusedMoERouter):
         self.enable_eplb = enable_eplb
         self.indices_type_getter = indices_type_getter
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
+        self.layer_idx = layer_idx
+        # RIY compiled stats views (set by FusedMoE.__init__)
+        self.riy_freq_view: torch.Tensor | None = None
+        self.riy_weight_view: torch.Tensor | None = None
+        self.riy_collecting_flag: torch.Tensor | None = None
+        # RIY logit mask: -inf for pruned experts (set by FusedMoE.__init__)
+        self.prune_logit_mask: torch.Tensor | None = None
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
@@ -231,10 +303,34 @@ class BaseRouter(FusedMoERouter):
         # Step 2: Get indices type.
         indices_type = self._get_indices_type()
 
+        # Step 2b: RIY — mask pruned expert logits before routing
+        if self.prune_logit_mask is not None:
+            router_logits = router_logits + self.prune_logit_mask
+
         # Step 3: Compute routing (delegated to subclass)
         topk_weights, topk_ids = self._compute_routing(
             hidden_states, router_logits, indices_type
         )
+
+        # Step 3b: RIY — stats on registered buffers (graph-compatible)
+        if self.riy_freq_view is not None:
+            _ids = topk_ids.reshape(-1).long()
+            _cf = self.riy_collecting_flag.long().expand(_ids.shape[0])
+            self.riy_freq_view.scatter_add_(0, _ids, _cf)
+            _w = topk_weights.reshape(-1).to(self.riy_weight_view.dtype)
+            _cf_f = self.riy_collecting_flag.float().expand(_w.shape[0])
+            self.riy_weight_view.scatter_add_(0, _ids, _w * _cf_f)
+
+        # Step 3c: RIY — mask + HTTP server (only with VLLM_RIY_MONITOR=1)
+        if not _is_capturing() and _riy_monitor_enabled:
+            riy = get_riy_state()
+            if riy.enabled and self.layer_idx >= 0:
+                riy.on_forward()
+                mask_t = riy.get_mask_tensor(self.layer_idx)
+                if mask_t is not None:
+                    mask_t = mask_t.to(topk_ids.device)
+                    topk_weights = apply_riy_mask(
+                        topk_weights, topk_ids, mask_t)
 
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:

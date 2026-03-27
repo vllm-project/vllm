@@ -1,0 +1,59 @@
+#!/bin/bash
+# RIY Test: Qwen3.5-122B-A10B INT4 AutoRound — DGX Spark (TP=1)
+# Based on ng17e DGX flags from start.ng17e.serve.qwen35-397b
+
+set -euo pipefail
+
+CONTAINER_NAME="vllm-riy-test"
+IMAGE="localhost/vllm-ng17e-riy:latest"
+MODEL_PATH="/data/tensordata/Qwen3.5-122B-A10B-int4-AutoRound"
+MODEL_NAME="qwen3.5-122b"
+PORT=8011
+RIY_PORT=8019
+
+echo "=== RIY Test: Qwen3.5-122B INT4 on DGX ==="
+echo "Image:    $IMAGE"
+echo "Model:    $MODEL_PATH"
+echo "API:      http://localhost:${PORT}/v1/chat/completions"
+echo "RIY:      http://localhost:${RIY_PORT}/riy/health"
+echo ""
+
+podman stop "$CONTAINER_NAME" 2>/dev/null || true
+podman rm "$CONTAINER_NAME" 2>/dev/null || true
+
+podman run -d \
+  --name "$CONTAINER_NAME" \
+  --device nvidia.com/gpu=all \
+  --ipc=host \
+  --security-opt=label=disable \
+  --hooks-dir=/usr/share/containers/oci/hooks.d \
+  -v /data/tensordata:/data/tensordata:ro \
+  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+  -p "${PORT}:${PORT}" \
+  -p "${RIY_PORT}:${RIY_PORT}" \
+  -e VLLM_MARLIN_USE_ATOMIC_ADD=1 \
+  -e FLASHINFER_DISABLE_VERSION_CHECK=1 \
+  -e TORCH_CUDNN_V8_API_DISABLED=1 \
+  "$IMAGE" \
+  vllm serve "$MODEL_PATH" \
+    --served-model-name "$MODEL_NAME" \
+    --host 0.0.0.0 \
+    --port "$PORT" \
+    --max-model-len 32768 \
+    --gpu-memory-utilization 0.05 \
+    --kv-cache-memory-bytes 8G \
+    --kv-cache-dtype fp8 \
+    --max-num-batched-tokens 8192 \
+    --enable-prefix-caching \
+    --trust-remote-code \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser qwen3
+
+echo ""
+echo "Container '$CONTAINER_NAME' gestartet."
+echo "Logs:     podman logs -f $CONTAINER_NAME"
+echo "RIY TUI:  python3 ~/vllm-riy/tools/riy_live.py --port $RIY_PORT"
+echo ""
+
+podman logs -f "$CONTAINER_NAME"

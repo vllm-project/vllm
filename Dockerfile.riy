@@ -1,0 +1,10 @@
+FROM localhost/vllm-ng17e:latest
+
+# Apply RIY patch to vllm
+COPY riy.patch /tmp/riy.patch
+RUN cd /usr/local/lib/python3.12/dist-packages && \
+    patch -p1 < /tmp/riy.patch && \
+    rm /tmp/riy.patch
+
+# Add riy_live.py tool
+COPY tools/riy_live.py /opt/riy_live.py

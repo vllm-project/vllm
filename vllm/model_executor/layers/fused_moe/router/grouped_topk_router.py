@@ -261,6 +261,7 @@ class GroupedTopKRouter(BaseRouter):
         num_fused_shared_experts: int = 0,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        layer_idx: int = -1,
     ):
         super().__init__(
             top_k=top_k,
@@ -268,6 +269,7 @@ class GroupedTopKRouter(BaseRouter):
             eplb_state=eplb_state,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
+            layer_idx=layer_idx,
         )
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group

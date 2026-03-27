@@ -49,6 +49,8 @@ def create_fused_moe_router(
     # eplb parameters
     enable_eplb: bool = False,
     eplb_state: EplbLayerState = EMPTY_EPLB_STATE,
+    # riy parameters
+    layer_idx: int = -1,
 ) -> FusedMoERouter:
     """
     Factory function to create the appropriate FusedMoERouter subclass based on
@@ -98,6 +100,7 @@ def create_fused_moe_router(
             eplb_state=eplb_state,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
+            layer_idx=layer_idx,
         )
 
     if use_grouped_topk:
@@ -120,6 +123,7 @@ def create_fused_moe_router(
             num_fused_shared_experts=num_fused_shared_experts,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
+            layer_idx=layer_idx,
         )
         if (
             grouped_topk_router.routing_method_type != RoutingMethodType.Unspecified
@@ -143,6 +147,7 @@ def create_fused_moe_router(
             renormalize=renormalize,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
+            layer_idx=layer_idx,
         )
 
     if e_score_correction_bias is not None:
@@ -156,6 +161,7 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
+            layer_idx=layer_idx,
         )
 
     return FusedTopKRouter(
@@ -166,4 +172,5 @@ def create_fused_moe_router(
         scoring_func=scoring_func,
         enable_eplb=enable_eplb,
         indices_type_getter=indices_type_getter,
+        layer_idx=layer_idx,
     )

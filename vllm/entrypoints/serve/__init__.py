@@ -52,6 +52,10 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_tokenize_router(app)
 
+    # RIY API runs as standalone HTTP server on port 8019 in the
+    # EngineCore worker process (not via FastAPI in the APIServer process).
+    # See vllm/model_executor/layers/fused_moe/riy.py
+
     from .instrumentator import register_instrumentator_api_routers
 
     register_instrumentator_api_routers(app)
