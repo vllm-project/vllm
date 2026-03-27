@@ -1652,8 +1652,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # way when using the mp backend. (Requires an AMD CPU.)
     "VLLM_USE_MONITORX": lambda: bool(
         int(
-            os.getenv("VLLM_USE_MONITORX", "1")
-        ),  # TODO Default to "0", this is just for testing
+            os.getenv("VLLM_USE_MONITORX", "0")
+        ),
 }
 
 
