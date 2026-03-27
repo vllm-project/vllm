@@ -246,11 +246,14 @@ class CpuPlatform(Platform):
                     "size_asserts": False,
                     "nan_asserts": False,
                     "epilogue_fusion": True,
+                    "cpp.dynamic_threads": True,
                 }
             )
 
         if vllm_config.lora_config is not None:
             compilation_config.mode = CompilationMode.NONE
+
+        vllm_config.profiler_config.torch_profiler_dump_cuda_time_total = False
 
         assert vllm_config.device_config.device_type == "cpu"
 
@@ -278,8 +281,12 @@ class CpuPlatform(Platform):
         # Disable multi-stream for shared experts as no Stream on CPU
         os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-        # Intel OpenMP setting
+        # Avoid inductor generates num_thread() and breaks the thread binding
+        os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
+
         ld_preload_str = os.getenv("LD_PRELOAD", "")
+
+        # Intel OpenMP setting
         if "libiomp5.so" in ld_preload_str:
             # The time(milliseconds) that a thread should wait after
             # completing the execution of a parallel region, before sleeping.
@@ -291,10 +298,35 @@ class CpuPlatform(Platform):
             os.environ["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
             os.environ["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
 
+        cpu_architecture = Platform.get_cpu_architecture()
+
+        # LD_PRELOAD libtcmalloc, bundled under vllm/libs to reduce
+        # memory allocation overhead
         if (
             platform.system() == "Linux"
-            and Platform.get_cpu_architecture()
-            in (CpuArchEnum.ARM, CpuArchEnum.POWERPC)
+            and cpu_architecture in (CpuArchEnum.ARM, CpuArchEnum.X86)
+            and "libtcmalloc" not in ld_preload_str
+        ):
+            vllm_pkg = os.path.dirname(os.path.dirname(__file__))
+            tcmalloc_so = None
+            for pattern in ("libtcmalloc_minimal*.so*", "libtcmalloc.so*"):
+                tcmalloc_so_candidates = glob.glob(
+                    os.path.join(vllm_pkg, "libs", pattern)
+                )
+                if tcmalloc_so_candidates:
+                    tcmalloc_so = tcmalloc_so_candidates[0]
+                    break
+
+            if tcmalloc_so is not None:
+                if ld_preload_str:
+                    ld_preload_str = f"{tcmalloc_so}:{ld_preload_str}"
+                else:
+                    ld_preload_str = tcmalloc_so
+                os.environ["LD_PRELOAD"] = ld_preload_str
+
+        if (
+            platform.system() == "Linux"
+            and cpu_architecture in (CpuArchEnum.ARM, CpuArchEnum.POWERPC)
             and not ("libomp" in ld_preload_str or "libgomp" in ld_preload_str)
         ):
             # We need to LD_PRELOAD PyTorch's libgomp, otherwise only
@@ -470,21 +502,32 @@ class CpuPlatform(Platform):
     @classmethod
     def import_kernels(cls) -> None:
         if Platform.get_cpu_architecture() in (CpuArchEnum.X86,):
-            if torch._C._cpu._is_avx512_supported():
-                try:
-                    import vllm._C  # noqa: F401
-                except ImportError as e:
-                    logger.warning("Failed to import from vllm._C: %r", e)
+            # Note: The lib name is _C_AVX2/AVX512, but the module name is _C.
+            # This will cause a exception "dynamic module does define
+            # module export function". But the library is imported
+            # successfully. So ignore the exception for now, until we find
+            # a solution.
+            ignored_msg = "dynamic module does not define module export function"
+            if torch.cpu._is_avx512_supported():
+                if torch.cpu._is_avx512_bf16_supported():
+                    try:
+                        import vllm._C  # noqa: F401
+                    except ImportError as e:
+                        logger.warning("Failed to import from vllm._C: %r", e)
+                else:
+                    try:
+                        import vllm._C_AVX512  # noqa: F401
+                    except ImportError as e:
+                        if ignored_msg not in e.msg:
+                            logger.warning(
+                                "Failed to import from vllm._C_AVX512: %r", e
+                            )
             else:
-                # Note: The lib name is _C_AVX2, but the module name is _C.
-                # This will cause a exception "dynamic module does define
-                # module export function". But the library is imported
-                # successfully. So ignore the exception for now, until we find
-                # a solution.
                 try:
                     import vllm._C_AVX2  # noqa: F401
                 except ImportError as e:
-                    logger.warning("Failed to import from vllm._C_AVX2: %r", e)
+                    if ignored_msg not in e.msg:
+                        logger.warning("Failed to import from vllm._C_AVX2: %r", e)
         else:
             try:
                 import vllm._C  # noqa: F401
