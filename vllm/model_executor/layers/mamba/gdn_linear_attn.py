@@ -154,9 +154,8 @@ def fi_chunk_gated_delta_rule(
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
         super().__init__()
-        backend_cfg = get_current_vllm_config().additional_config.get(
-            "gdn_prefill_backend", "auto"
-        )
+        vllm_config = get_current_vllm_config()
+        backend_cfg = vllm_config.additional_config.get("gdn_prefill_backend", "auto")
         backend = str(backend_cfg).strip().lower()
 
         supports_flashinfer = (
@@ -175,6 +174,16 @@ class ChunkGatedDeltaRule(CustomOp):
             use_flashinfer = False
         else:
             use_flashinfer = supports_flashinfer
+
+        # APC ("all" mode) requires returning intermediate chunk states, which
+        # FlashInfer does not support. Fall back to Triton/FLA in that case.
+        apc_enabled = vllm_config.cache_config.mamba_cache_mode == "all"
+        if use_flashinfer and apc_enabled:
+            logger.warning_once(
+                "GDN prefill FlashInfer backend does not support APC "
+                "(`mamba_cache_mode='all'`). Falling back to Triton/FLA."
+            )
+            use_flashinfer = False
 
         if use_flashinfer:
             logger.info_once("Using FlashInfer GDN prefill kernel", scope="local")
@@ -226,6 +235,8 @@ class ChunkGatedDeltaRule(CustomOp):
         output_final_state: bool,
         cu_seqlens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
+        return_intermediate_states: bool = False,
+        state_dtype: torch.dtype | None = None,
     ):
         return fla_chunk_gated_delta_rule(
             q=q,
@@ -237,6 +248,8 @@ class ChunkGatedDeltaRule(CustomOp):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            return_intermediate_states=return_intermediate_states,
+            state_dtype=state_dtype,
         )
 
 
@@ -1071,7 +1084,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                     core_attn_out_non_spec,
                     last_recurrent_state,
                     chunk_state_history,
-                ) = fla_chunk_gated_delta_rule(
+                ) = self.chunk_gated_delta_rule(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,

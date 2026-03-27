@@ -83,8 +83,6 @@ class GDNAttentionMetadata:
     num_computed_tokens_p: torch.Tensor | None = None  # shape: [batch,]
 
     # These are non-None if there are prefill requests in the batch
-    seq_idx_p: torch.Tensor | None = None  # shape: [batch,]
-    cu_chunk_seqlen_p: torch.Tensor | None = None  # shape: [batch,]
     last_chunk_indices_p: torch.Tensor | None = None  # shape: [batch,]
 
     # The following attributes are for triton implementation of causal_conv1d
@@ -196,12 +194,10 @@ class GDNAttentionMetadataBuilder(
         )
 
     @staticmethod
-    def _compute_chunk_metadata(
+    def _compute_gdn_chunk_metadata(
         chunk_size: int,
-        num_prefills: int,
-        num_computed_tokens_p_cpu: torch.Tensor,
         query_start_loc_p_cpu: torch.Tensor,
-    ) -> tuple[list[int], list[int], list[int]]:
+    ) -> list[int]:
         """
         Compute chunk-specific metadata for GDN.
 
@@ -211,19 +207,13 @@ class GDNAttentionMetadataBuilder(
 
         Args:
             chunk_size: Size of each chunk (64 for GDN)
-            num_prefills: Number of prefill sequences
-            num_computed_tokens_p_cpu: Cumulative number of computed tokens for prefill
-                sequences, shape [num_prefills]
             query_start_loc_p_cpu: Cumulative sequence lengths for prefill sequences,
                 shape [num_prefills + 1]
 
         Returns:
-            cu_chunk_seqlen: Cumulative chunk sequence lengths
-            seq_idx: Sequence index for each chunk
             last_chunk_indices: Last chunk index for each sequence
         """
-        cu_chunk_seqlen = []
-        seq_idx = []
+        num_prefills = len(query_start_loc_p_cpu) - 1
         last_chunk_indices = []
         chunk_pos = 0
 
@@ -235,10 +225,7 @@ class GDNAttentionMetadataBuilder(
             # Simply divide the sequence into chunks based on total length
             # This matches how prepare_chunk_indices works in the FLA kernel
             n_chunks = cdiv(seq_len, chunk_size)
-            for _ in range(n_chunks):
-                seq_idx.append(req_idx)
-                cu_chunk_seqlen.append(chunk_pos)
-                chunk_pos += 1
+            chunk_pos += n_chunks
 
             # Record the last chunk index for this sequence
             if n_chunks > 0:
@@ -246,7 +233,7 @@ class GDNAttentionMetadataBuilder(
             else:
                 last_chunk_indices.append(-1)
 
-        return cu_chunk_seqlen, seq_idx, last_chunk_indices
+        return last_chunk_indices
 
     def build(  # type: ignore[override]
         self,
@@ -284,8 +271,6 @@ class GDNAttentionMetadataBuilder(
         block_idx_first_scheduled_token_p: torch.Tensor | None = None
 
         num_computed_tokens_p: torch.Tensor | None = None
-        seq_idx_p: torch.Tensor | None = None
-        cu_chunk_seqlen_p: torch.Tensor | None = None
         last_chunk_indices_p: torch.Tensor | None = None
         non_spec_query_start_loc_cpu: torch.Tensor | None = None
 
@@ -446,21 +431,9 @@ class GDNAttentionMetadataBuilder(
             query_start_loc_p_cpu = (
                 non_spec_query_start_loc_cpu[-num_prefills - 1 :] - num_decode_tokens
             )
-            cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
+            last_chunk_indices = self._compute_gdn_chunk_metadata(
                 chunk_size=self.chunk_size,
-                num_prefills=int(num_prefills),
-                num_computed_tokens_p_cpu=num_computed_tokens_p.cpu(),
                 query_start_loc_p_cpu=query_start_loc_p_cpu,
-            )
-            seq_idx_p = torch.as_tensor(
-                seq_idx,
-                device=m.query_start_loc.device,
-                dtype=torch.int32,
-            )
-            cu_chunk_seqlen_p = torch.as_tensor(
-                cu_chunk_seqlen,
-                device=m.query_start_loc.device,
-                dtype=torch.int32,
             )
             last_chunk_indices_p = torch.as_tensor(
                 last_chunk_indices,
@@ -606,8 +579,6 @@ class GDNAttentionMetadataBuilder(
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
             block_idx_last_computed_token=block_idx_last_computed_token,
-            seq_idx_p=seq_idx_p,
-            cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,
             num_computed_tokens_p=num_computed_tokens_p,
             nums_dict=nums_dict,
