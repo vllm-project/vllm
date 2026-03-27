@@ -25,7 +25,6 @@ class AttentionVerifyAndUpdateConfig(VerifyAndUpdateConfig):
         """
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
-        attention_config = vllm_config.attention_config
         parallel_config = vllm_config.parallel_config
         assert cache_config is not None
         from vllm.config import set_current_vllm_config
@@ -77,7 +76,7 @@ class AttentionVerifyAndUpdateConfig(VerifyAndUpdateConfig):
             if not is_valid_block_size:
                 raise ValueError(
                     f"Unexpected block_size {cache_config.block_size} for current"
-                    f" attention backend {attention_config.backend},"
-                    f" the supported block_sizes of {attention_config.backend}:"
+                    f" attention backend {backend_cls},"
+                    f" the supported block_sizes of {backend_cls}:"
                     f" {supported_kernel_block_sizes}"
                 )
