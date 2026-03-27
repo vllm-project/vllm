@@ -35,6 +35,7 @@ from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
+    ScoreEncoderCacheManager,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -209,6 +210,10 @@ class Scheduler(SchedulerInterface):
             if self.is_encoder_decoder
             else EncoderCacheManager(cache_size=encoder_cache_size)
         )
+
+        if vllm_config.score_encoder_cache_config.enabled:
+            self.encoder_cache_manager = ScoreEncoderCacheManager(cache_size=encoder_cache_size, 
+                                                      vllm_config=self.vllm_config)
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
@@ -920,6 +925,8 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            promoting_mm_hashes=self.encoder_cache_manager.get_promoting_mm_hashes(),
+            cpu_get_encoder_mm_hashes=self.encoder_cache_manager.get_cpu_get_encoder_mm_hashes(),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
