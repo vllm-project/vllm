@@ -190,6 +190,23 @@ docker run --rm \
     --model Qwen/Qwen3-0.6B
 ```
 
+A nightly Docker image is also available, built from the latest development branch:
+
+```bash
+docker run --rm \
+    --group-add=video \
+    --cap-add=SYS_PTRACE \
+    --security-opt seccomp=unconfined \
+    --device /dev/kfd \
+    --device /dev/dri \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    --env "HF_TOKEN=$HF_TOKEN" \
+    -p 8000:8000 \
+    --ipc=host \
+    vllm/vllm-openai-rocm:nightly \
+    --model Qwen/Qwen3-0.6B
+```
+
 #### Use AMD's Docker Images
 
 Prior to January 20th, 2026 when the official docker images are available on [upstream vLLM docker hub](https://hub.docker.com/v2/repositories/vllm/vllm-openai-rocm/tags/), the [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
