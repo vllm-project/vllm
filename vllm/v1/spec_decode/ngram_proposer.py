@@ -54,10 +54,16 @@ class NgramProposer:
 
         # Trigger Numba JIT compilation for N-gram proposer.
         # This usually takes less than 1 second.
+        # Use a small input with a repeated pattern so that the Numba-jitted
+        # functions (batch_propose_numba, _find_longest_matched_ngram_and_
+        # propose_tokens) are actually reached and compiled. Previously,
+        # empty sampled_token_ids caused propose() to skip all requests,
+        # deferring JIT compilation to the first real inference call.
+        warmup_tokens = np.array([[1, 2, 1, 2]], dtype=np.int32)
         self.propose(
-            [[]] * 1024,
-            np.zeros(1024, dtype=np.int32),
-            np.zeros((1024, self.max_model_len), dtype=np.int32),
+            [[0]],
+            np.array([4], dtype=np.int32),
+            warmup_tokens,
         )
 
     def batch_propose(
