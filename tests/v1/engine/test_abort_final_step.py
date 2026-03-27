@@ -249,8 +249,17 @@ async def test_abort_during_final_step(async_scheduling: bool):
                         )
                     await asyncio.sleep(0.01)
 
-                # Abort the request while execute_model is blocked
+                 # Abort the request while execute_model is blocked
                 await engine.abort(request_id)
+
+                # Wait briefly to ensure the ABORT message has been received
+                # by the engine core's input socket thread and placed in the
+                # aborts_queue BEFORE we unblock execute_model. Without this
+                # sleep there is a race: abort_requests_async() returns as
+                # soon as the ZMQ message is sent, but the engine core thread
+                # may not have dequeued it yet, causing _process_aborts_queue()
+                # to see an empty queue when the model output arrives.
+                await asyncio.sleep(0.05)
 
                 # Now unblock execute_model by deleting the file
                 # The abort should be processed before the model output
