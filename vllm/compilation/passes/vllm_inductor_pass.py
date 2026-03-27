@@ -207,7 +207,10 @@ class VllmPatternReplacement(ABC, Generic[P, R]):
     @property
     @abstractmethod
     def replacement(self) -> Callable[P, R]:
-        """Returns a closure defining the FX subgraph to substitute in place of each match."""
+        """
+        Returns a closure defining the FX subgraph to
+        substitute in place of each match.
+        """
         ...
 
     @abstractmethod
