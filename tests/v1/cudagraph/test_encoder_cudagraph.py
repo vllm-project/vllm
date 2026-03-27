@@ -210,11 +210,11 @@ class SimpleMockViTModel(torch.nn.Module):
             out_hidden_size=_HIDDEN,
         )
 
-    def is_image_inputs(
+    def get_input_modality(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> bool:
-        return True
+    ) -> str:
+        return "image"
 
     def get_encoder_cudagraph_budget_range(
         self,
@@ -492,11 +492,13 @@ class SimpleMockVideoViTModel(torch.nn.Module):
             out_hidden_size=_HIDDEN,
         )
 
-    def is_image_inputs(
+    def get_input_modality(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> bool:
-        return "video_grid_thw" not in mm_kwargs
+    ) -> str:
+        if "image_grid_thw" in mm_kwargs:
+            return "image"
+        return "video"
 
     def get_encoder_cudagraph_budget_range(
         self,

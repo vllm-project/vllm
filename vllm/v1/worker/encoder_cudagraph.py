@@ -199,9 +199,9 @@ class EncoderCudaGraphManager:
         looks up the per-modality key from ``config.modality_input_keys``,
         falling back to ``config.input_key`` when not configured.
         """
-        if self.model.is_image_inputs(mm_kwargs):
-            return self.config.modality_input_keys.get("image", self.config.input_key)
-        return self.config.modality_input_keys.get("video", self.config.input_key)
+        return self.config.modality_input_keys.get(
+            self.model.get_input_modality(mm_kwargs), self.config.input_key
+        )
 
     def _get_per_item_out_tokens(self, mm_kwargs: dict[str, Any]) -> list[int]:
         """Get per-item output token counts as plain ints."""
