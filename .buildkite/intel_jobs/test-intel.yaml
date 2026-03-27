@@ -1,6 +1,6 @@
 group: Intel
 steps:
-  - label: ":docker: Build XPU image"
+  - label: ":docker: Build XPU image xx"
     soft_fail: true
     depends_on: []
     key: image-build-xpu
