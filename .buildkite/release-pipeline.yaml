@@ -90,6 +90,14 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+  - label: "Generate and upload wheel indices"
+    depends_on: "build-wheels"
+    allow_dependency_failure: true
+    agents:
+      queue: cpu_queue_release
+    commands:
+      - "bash .buildkite/scripts/generate-and-upload-nightly-index.sh"
+
   - group: "Build release Docker images"
     key: "build-release-images"
     steps:
@@ -402,38 +410,7 @@ steps:
           # Save ECR tag for downstream jobs
           buildkite-agent meta-data set "rocm-base-image-tag" "$${ECR_CACHE_TAG}"
           
-        # Scenario 2: Image cached but wheels missing
-        elif [ "$${IMAGE_EXISTS}" = "true" ] && [ "$${WHEELS_EXIST}" = "false" ]; then
-          echo ""
-          echo "PARTIAL CACHE - Image exists, extracting wheels..."
-          echo ""
-          
-          docker pull "$${ECR_CACHE_TAG}"
-          
-          # Rebuild wheel extraction stage
-          DOCKER_BUILDKIT=1 docker buildx build \
-            --file docker/Dockerfile.rocm_base \
-            --tag rocm-base-debs:$${BUILDKITE_BUILD_NUMBER} \
-            --build-arg BASE_IMAGE="$${ECR_IMAGE_TAG}" \
-            --target debs_wheel_release \
-            --build-arg USE_SCCACHE=1 \
-            --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
-            --build-arg SCCACHE_REGION_NAME=us-west-2 \
-            --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
-            --load \
-            .
-          
-          # Extract and upload wheels
-          mkdir -p artifacts/rocm-base-wheels
-          cid=$(docker create rocm-base-debs:$${BUILDKITE_BUILD_NUMBER})
-          docker cp $${cid}:/app/debs/. artifacts/rocm-base-wheels/
-          docker rm $${cid}
-          
-          .buildkite/scripts/cache-rocm-base-wheels.sh upload
-          
-          buildkite-agent meta-data set "rocm-base-image-tag" "$${ECR_CACHE_TAG}"
-          
-        # Scenario 3: Full rebuild needed
+        # Scenario 2: Full rebuild needed
         else
           echo ""
           echo " CACHE MISS - Building from scratch..."
@@ -453,7 +430,7 @@ steps:
           # Build wheel extraction stage
           DOCKER_BUILDKIT=1 docker buildx build \
             --file docker/Dockerfile.rocm_base \
-            --tag rocm-base-debs:${BUILDKITE_BUILD_NUMBER} \
+            --tag rocm-base-debs:$${BUILDKITE_BUILD_NUMBER} \
             --target debs_wheel_release \
             --build-arg USE_SCCACHE=1 \
             --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
