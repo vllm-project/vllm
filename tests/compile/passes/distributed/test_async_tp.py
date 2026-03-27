@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -232,43 +234,29 @@ class _BaseFlashInferBMMFP8Model(torch.nn.Module):
         self.tp_world_size = get_tensor_model_parallel_world_size()
         self.tp_group_name = get_tp_group().unique_name
 
-    def run_bmm_fp8(self, input: torch.Tensor) -> torch.Tensor:
+
+class TestFlashInferBMMFP8RSModel(_BaseFlashInferBMMFP8Model):
+    def forward(self, input: torch.Tensor):
+        """bmm_fp8 + reduce_scatter - matches FlashInfer's traced pattern."""
+        fp8_input = input.to(FP8_DTYPE)
         bmm_result = torch.ops.vllm.bmm_fp8.default(
-            input.unsqueeze(0),
+            fp8_input.unsqueeze(0),
             self.weight.unsqueeze(0),
             self.scale_a,
             self.scale_b,
             self.dtype,
             "auto",
         )
-        return torch.ops.aten.reshape.default(
+        mm_result = torch.ops.aten.reshape.default(
             bmm_result,
-            [input.shape[0], self.weight.shape[1]],
+            [fp8_input.shape[0], self.weight.shape[1]],
         )
-
-    def run_all_gather(self, input: torch.Tensor) -> torch.Tensor:
-        return torch.ops.vllm.all_gather.default(
-            input,
-            dim=0,
-            world_size=self.tp_world_size,
-            group_name=self.tp_group_name,
-        )
-
-    def run_reduce_scatter(self, input: torch.Tensor) -> torch.Tensor:
         return torch.ops.vllm.reduce_scatter.default(
-            input,
+            mm_result,
             dim=0,
             world_size=self.tp_world_size,
             group_name=self.tp_group_name,
         )
-
-
-class TestFlashInferBMMFP8RSModel(_BaseFlashInferBMMFP8Model):
-    def forward(self, input: torch.Tensor):
-        """bmm_fp8 + reduce_scatter - matches FlashInfer's traced pattern."""
-        fp8_input = input.to(FP8_DTYPE)
-        output = self.run_bmm_fp8(fp8_input)
-        return self.run_reduce_scatter(output)
 
     def ops_in_model_before(self):
         return [torch.ops.vllm.reduce_scatter.default]
@@ -281,8 +269,24 @@ class TestAGFlashInferBMMFP8Model(_BaseFlashInferBMMFP8Model):
     def forward(self, input: torch.Tensor):
         """all_gather + bmm_fp8 - matches FlashInfer's traced pattern."""
         fp8_input = input.to(FP8_DTYPE)
-        all_gather = self.run_all_gather(fp8_input)
-        output = self.run_bmm_fp8(all_gather)
+        all_gather = torch.ops.vllm.all_gather.default(
+            fp8_input,
+            dim=0,
+            world_size=self.tp_world_size,
+            group_name=self.tp_group_name,
+        )
+        bmm_result = torch.ops.vllm.bmm_fp8.default(
+            all_gather.unsqueeze(0),
+            self.weight.unsqueeze(0),
+            self.scale_a,
+            self.scale_b,
+            self.dtype,
+            "auto",
+        )
+        output = torch.ops.aten.reshape.default(
+            bmm_result,
+            [all_gather.shape[0], self.weight.shape[1]],
+        )
         q_size = self.hidden_size // 2
         kv_size = self.hidden_size // 4
         q, k, v = torch.ops.aten.split_with_sizes.default(
@@ -401,6 +405,7 @@ def async_tp_pass_on_test_model(
     # configure vllm config for SequenceParallelismPass
     vllm_config = VllmConfig()
     vllm_config.compilation_config = CompilationConfig(
+        debug_dump_path=Path("/tmp/vllm_async_tp_test_dump"),
         pass_config=PassConfig(
             fuse_gemm_comms=True,
         ),
