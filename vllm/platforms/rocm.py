@@ -536,6 +536,16 @@ class RocmPlatform(Platform):
             )
             return AttentionBackendEnum.FLASH_ATTN
 
+        # Triton prefill attention uses tiled/blocked computation, avoiding
+        # the N^2 memory allocation that TORCH_SDPA's "math" backend triggers
+        # on ROCm devices without efficient SDPA kernels (e.g. gfx906).
+        if dtype == torch.float16 or dtype == torch.bfloat16:
+            logger.info_once(
+                "No efficient SDPA backend available; using Triton attention "
+                "for ViT model to avoid N^2 memory allocation."
+            )
+            return AttentionBackendEnum.TRITON_ATTN
+
         logger.info_once("Using Torch SDPA backend for ViT model.")
         return AttentionBackendEnum.TORCH_SDPA
 
