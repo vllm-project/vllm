@@ -646,6 +646,22 @@ def filter_duplicate_safetensors_files(
     weight_files_in_index = set()
     for weight_name in weight_map:
         weight_files_in_index.add(os.path.join(hf_folder, weight_map[weight_name]))
+    # Check that all files referenced in the index actually exist on disk.
+    # This catches cases where shard files are missing from a downloaded
+    # or quantized checkpoint, which would otherwise silently produce a
+    # model with uninitialized weights.
+    missing_files = {
+        f for f in weight_files_in_index if not os.path.isfile(f)
+    }
+    if missing_files:
+        raise RuntimeError(
+            "The following weight files are referenced in "
+            f"{index_file} but are missing on disk: "
+            f"{sorted(missing_files)}. This usually means the "
+            "model checkpoint is incomplete or was not fully "
+            "downloaded. Please re-download the model."
+        )
+
     # Filter out any fields that are not found in the index file.
     hf_weights_files = [f for f in hf_weights_files if f in weight_files_in_index]
     return hf_weights_files
