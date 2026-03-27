@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -44,7 +45,7 @@ from vllm.utils.torch_utils import (
 logger = init_logger(__name__)
 
 
-def get_layer_from_name(layer_name: str) -> torch.nn.Module:
+def get_layer_from_name(layer_name: str) -> torch.nn.Module:  # FusedMoE
     forward_context: ForwardContext = get_forward_context()
     if layer_name == "from_forward_context":
         all_moe_layers = forward_context.all_moe_layers
@@ -58,7 +59,9 @@ def get_layer_from_name(layer_name: str) -> torch.nn.Module:
             )
         layer_name = all_moe_layers[moe_layer_index]
         forward_context.moe_layer_index += 1
-    return forward_context.no_compile_layers[layer_name]
+    layer = forward_context.no_compile_layers[layer_name]
+    # assert isinstance(layer, FusedMoE)
+    return layer
 
 
 # On torch >= 2.11, layer_name is a hoisted ModuleName opaque object;
@@ -88,7 +91,6 @@ def _moe_forward(
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer._runner._forward_dispatch(
-        layer.routed_experts,
         hidden_states,
         router_logits,
         shared_experts_input,
@@ -112,7 +114,6 @@ def _moe_forward_shared(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer._runner._forward_dispatch(
-        layer.routed_experts,
         hidden_states,
         router_logits,
         shared_experts_input,
@@ -186,13 +187,13 @@ class MoERunnerBase(MoERunner):
 
     def __init__(
         self,
-        layer: torch.nn.Module,
+        layer_name: str,
         moe_config: FusedMoEConfig,
         router: FusedMoERouter,
         routed_input_transform: torch.nn.Module | None,
         gate: torch.nn.Module | None,
         shared_experts: torch.nn.Module | None,
-        quant_method: FusedMoEMethodBase,
+        routed_experts: RoutedExperts,
         enable_dbo: bool,
         routed_output_transform: torch.nn.Module | None = None,
         apply_scale_to_output: bool = False,
@@ -209,9 +210,9 @@ class MoERunnerBase(MoERunner):
             self._shared_experts = SharedExperts(
                 shared_experts,
                 moe_config=moe_config,
-                mk_owns_shared_expert=quant_method.mk_owns_shared_expert,  # ?
+                mk_owns_shared_expert=routed_experts.quant_method.mk_owns_shared_expert,
             )
-        self._quant_method = quant_method
+        self.routed_experts = routed_experts
         self.enable_dbo = enable_dbo
         self.enable_eplb = moe_config.moe_parallel_config.enable_eplb
         self.apply_scale_to_output = (
@@ -220,9 +221,9 @@ class MoERunnerBase(MoERunner):
         self.routed_scaling_factor = routed_scaling_factor
 
         # Needed for string -> FusedMoE layer lookup in custom ops.
-        self.layer_name = layer.layer_name
+        self.layer_name = layer_name
 
-        self._forward_entry = self._select_forward(layer)
+        self._forward_entry = self._select_forward()
 
     @property
     def is_internal_router(self) -> bool:
@@ -230,7 +231,7 @@ class MoERunnerBase(MoERunner):
 
     @property
     def quant_method(self) -> FusedMoEMethodBase:
-        return self._quant_method
+        return self.routed_experts.quant_method
 
     @property
     def shared_experts(self) -> SharedExperts | None:
@@ -238,13 +239,13 @@ class MoERunnerBase(MoERunner):
 
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
-        self._quant_method = quant_method
+        self.routed_experts.quant_method = quant_method
         if self._shared_experts is not None:
             self._shared_experts._mk_owns_shared_expert = (
                 quant_method.mk_owns_shared_expert
             )
 
-    def _select_forward(self, layer: torch.nn.Module) -> Callable:
+    def _select_forward(self) -> Callable:
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
@@ -446,7 +447,6 @@ class MoERunnerBase(MoERunner):
 
     def _apply_quant_method(
         self,
-        layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
@@ -465,7 +465,7 @@ class MoERunnerBase(MoERunner):
 
         if self.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
-            fused_out = layer.forward(
+            fused_out = self.routed_experts.forward(
                 x=hidden_states,
                 router_logits=router_logits,
             )
@@ -476,7 +476,7 @@ class MoERunnerBase(MoERunner):
                 router_logits=router_logits,
             )
 
-            fused_out = layer.forward(
+            fused_out = self.routed_experts.forward(
                 x=hidden_states,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
@@ -643,7 +643,6 @@ class MoERunnerBase(MoERunner):
 
     def _forward_dispatch(
         self,
-        layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
@@ -655,11 +654,10 @@ class MoERunnerBase(MoERunner):
         the sequence-parallel context.
         """
         # TODO(bnell): this can be removed after MK migration is complete.
-        layer._ensure_moe_quant_config_init()
+        self.routed_experts._ensure_moe_quant_config_init()
 
         with self._sequence_parallel_context():
             return self._forward_impl(
-                layer,
                 hidden_states,
                 router_logits,
                 shared_experts_input,
@@ -668,7 +666,6 @@ class MoERunnerBase(MoERunner):
     @abstractmethod
     def _forward_impl(
         self,
-        layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,

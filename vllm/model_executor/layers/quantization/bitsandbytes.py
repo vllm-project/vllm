@@ -11,7 +11,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,
     FusedMoEMethodBase,
     RoutedExperts,
 )
@@ -165,7 +164,7 @@ class BitsAndBytesConfig(QuantizationConfig):
             if is_layer_skipped_bnb(prefix, self.llm_int8_skip_modules):
                 return UnquantizedLinearMethod()
             return BitsAndBytesLinearMethod(self)
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             return BitsAndBytesMoEMethod(self, layer.moe_config)
         return None
 
@@ -452,7 +451,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -473,7 +472,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         )
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         return None
 

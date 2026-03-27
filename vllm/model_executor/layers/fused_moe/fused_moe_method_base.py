@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -18,6 +19,11 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import (
+        RoutedExperts,
+    )
 
 logger = init_logger(__name__)
 
@@ -44,7 +50,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     @abstractmethod
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: "RoutedExperts",
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -78,7 +84,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-        layer: torch.nn.Module,
+        layer: "RoutedExperts",
     ) -> FusedMoEExpertsModular:
         # based on the all2all implementation, select the appropriate
         # gemm implementation
@@ -89,7 +95,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @abstractmethod
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: "RoutedExperts"
     ) -> FusedMoEQuantConfig | None:
         raise NotImplementedError
 
@@ -123,7 +129,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     def apply(
         self,
-        layer: "RoutedExperts",  # type: ignore[name-defined] # noqa: F821
+        layer: "RoutedExperts",
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -146,7 +152,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     def apply_monolithic(
         self,
-        layer: "RoutedExperts",  # type: ignore[name-defined] # noqa: F821
+        layer: "RoutedExperts",
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:

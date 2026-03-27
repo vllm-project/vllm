@@ -49,9 +49,6 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner_factory import (
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
 )
-from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
-    UnquantizedFusedMoEMethod,
-)
 from vllm.model_executor.layers.fused_moe.utils import (
     disable_inplace,
 )
@@ -137,6 +134,19 @@ def maybe_roundup_hidden_size(
     return hidden_size
 
 
+def register_layer_for_moe_forward_op(
+    vllm_config: VllmConfig,
+    layer: torch.nn.Module,
+):
+    # For smuggling this layer into the fused moe custom op
+    prefix = layer.layer_name
+    compilation_config = vllm_config.compilation_config
+    if prefix in compilation_config.static_forward_context:
+        raise ValueError("Duplicate layer name: {}".format(prefix))
+    compilation_config.static_forward_context[prefix] = layer
+    compilation_config.static_all_moe_layers.append(prefix)
+
+
 # --8<-- [start:fused_moe]
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
@@ -203,6 +213,9 @@ class FusedMoE(CustomOp):
     ):
         super().__init__()
 
+        # IMPORTANT: RoutedExperts must have same layer_name/prefix as FusedMoE for now
+        self.layer_name = prefix
+
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
@@ -251,13 +264,6 @@ class FusedMoE(CustomOp):
         # Expert mapping used in self.load_weights
         self.expert_mapping = expert_mapping
 
-        # For smuggling this layer into the fused moe custom op
-        compilation_config = vllm_config.compilation_config
-        if prefix in compilation_config.static_forward_context:
-            raise ValueError("Duplicate layer name: {}".format(prefix))
-        compilation_config.static_forward_context[prefix] = self
-        compilation_config.static_all_moe_layers.append(prefix)
-        self.layer_name = prefix
         expert_placement_strategy: ExpertPlacementStrategy = (
             vllm_config.parallel_config.expert_placement_strategy
         )
@@ -430,7 +436,7 @@ class FusedMoE(CustomOp):
         )
         self.hidden_size = hidden_size
 
-        self.moe_config: FusedMoEConfig = FusedMoEConfig(
+        self.moe_config = FusedMoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
@@ -466,50 +472,11 @@ class FusedMoE(CustomOp):
 
         logger.debug("FusedMoEConfig = %s", self.moe_config)
 
-        quant_method = self._get_quant_method(
-            prefix,
-            quant_config,
-            self.moe_config,
-        )
-
-        # TODO(bnell): only for weight loading. how to get around this?
-        self.quant_method = quant_method
-
         # Move XXXXXXXXXXXXX
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(
                 "is_act_and_mul=False is supported only for CUDA and ROCm for now"
             )
-
-        # Move XXXXXXXXXXXXX
-        if eplb_manager is not None and not quant_method.supports_eplb:
-            # TODO: Add support for additional quantization methods.
-            # The implementation for other quantization methods does not
-            # contain essential differences, but the current quant API
-            # design causes duplicated work when extending to new
-            # quantization methods, so I'm leaving it for now.
-            # If you plan to add support for more quantization methods,
-            # please refer to the implementation in `Fp8MoEMethod`.
-            raise NotImplementedError(
-                f"EPLB is not supported {quant_method.__class__.__name__}."
-            )
-
-        # Storing the runner in the FusedMoE is an intermediate state, eventually
-        # the runner will own the FusedMoE layer and provide the execution interface
-        # for MoE ops.
-        self._runner = create_moe_runner(
-            layer=self,
-            moe_config=self.moe_config,
-            router=router,
-            routed_input_transform=routed_input_transform,
-            routed_output_transform=routed_output_transform,
-            gate=gate,
-            shared_experts=shared_experts,
-            quant_method=quant_method,
-            enable_dbo=vllm_config.parallel_config.enable_dbo,
-            apply_scale_to_output=apply_scale_to_output,
-            routed_scaling_factor=routed_scaling_factor,
-        )
 
         # Create RoutedExperts instance BEFORE create_weights()
         # This will hold all expert weight parameters
@@ -520,7 +487,6 @@ class FusedMoE(CustomOp):
             intermediate_size,
             self.moe_config,
             self.quant_config,
-            self.quant_method,
             expert_map_manager=self.expert_map_manager,
             # Extra params that are needed by quant_methods, pass along for now
             rocm_aiter_fmoe_enabled=self.rocm_aiter_fmoe_enabled,
@@ -533,9 +499,46 @@ class FusedMoE(CustomOp):
             e_score_correction_bias=e_score_correction_bias,
             apply_router_weight_on_input=apply_router_weight_on_input,
             activation=MoEActivation.from_str(activation),
-            # XXXXXXXXXXXXXXXXXXXXXXXX
-            shared_experts=self._runner.shared_experts,
         )
+
+        # HACK
+        self.quant_method = self.routed_experts.quant_method
+
+        # Move XXXXXXXXXXXXX
+        if eplb_manager is not None and not self.quant_method.supports_eplb:
+            # TODO: Add support for additional quantization methods.
+            # The implementation for other quantization methods does not
+            # contain essential differences, but the current quant API
+            # design causes duplicated work when extending to new
+            # quantization methods, so I'm leaving it for now.
+            # If you plan to add support for more quantization methods,
+            # please refer to the implementation in `Fp8MoEMethod`.
+            raise NotImplementedError(
+                f"EPLB is not supported {self.quant_method.__class__.__name__}."
+            )
+
+        # Storing the runner in the FusedMoE is an intermediate state, eventually
+        # the runner will own the FusedMoE layer and provide the execution interface
+        # for MoE ops.
+        self._runner = create_moe_runner(
+            layer_name=self.layer_name,
+            moe_config=self.moe_config,
+            router=router,
+            routed_input_transform=routed_input_transform,
+            routed_output_transform=routed_output_transform,
+            gate=gate,
+            shared_experts=shared_experts,
+            routed_experts=self.routed_experts,
+            enable_dbo=vllm_config.parallel_config.enable_dbo,
+            apply_scale_to_output=apply_scale_to_output,
+            routed_scaling_factor=routed_scaling_factor,
+        )
+
+        # HACK XXXXXXXXXXXXXXXXXXXXXXXX
+        self.routed_experts.shared_experts = self._runner.shared_experts
+
+        # For smuggling this layer into the fused moe custom op
+        register_layer_for_moe_forward_op(vllm_config, self)
 
     def extra_repr(self) -> str:
         s = (
@@ -549,31 +552,12 @@ class FusedMoE(CustomOp):
 
         return s
 
-    def _get_quant_method(
-        self,
-        prefix: str,
-        quant_config: QuantizationConfig | None,
-        moe_config: FusedMoEConfig,
-    ) -> FusedMoEMethodBase:
-        """
-        Helper method to ensure quant_method is never None and
-        of the proper type.
-        """
-        quant_method = None
-        if quant_config is not None:
-            quant_method = quant_config.get_quant_method(self, prefix)
-        if quant_method is None:
-            quant_method = UnquantizedFusedMoEMethod(moe_config)
-        assert isinstance(quant_method, FusedMoEMethodBase)
-        return quant_method
-
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py
     # and vllm/distributed/elastic_ep/elastic_execute.py
     # can safely swap out the quant_method. We should figure out a less
     # intrusive way to do this.
     def _replace_quant_method(self, mk: FusedMoEMethodBase):
         self._runner._replace_quant_method(mk)
-        self.routed_experts.quant_method = mk
 
     # def _ensure_moe_quant_config_init(self):
     #    if self._runner.quant_method.moe_quant_config is None:

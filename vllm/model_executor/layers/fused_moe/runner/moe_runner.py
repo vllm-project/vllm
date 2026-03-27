@@ -44,11 +44,12 @@ class MoERunner(torch.nn.Module):
     def shared_experts(self) -> SharedExperts | None:
         raise NotImplementedError
 
-    @abstractmethod
-    def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
-        raise NotImplementedError
-
     @property
     @abstractmethod
     def is_internal_router(self) -> bool:
+        raise NotImplementedError
+
+    # Temporary hack
+    @abstractmethod
+    def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
         raise NotImplementedError

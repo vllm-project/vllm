@@ -15,7 +15,6 @@ from vllm.model_executor.kernels.linear import (
     choose_mp_linear_kernel,
 )
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
@@ -66,29 +65,28 @@ logger = init_logger(__name__)
 
 def get_moe_quant_method(
     config: "GPTQMarlinConfig",
-    layer: torch.nn.Module,
+    layer: RoutedExperts,
     prefix: str,
     moe_method_cls: type,
 ):
     cloned_config = deepcopy(config)
 
-    if isinstance(layer, FusedMoE):
-        # False = skip module, None = no override, else = Positive match
-        if (
-            get_dynamic_override(  # noqa: E712
-                cloned_config,  # noqa: E712
-                layer_name=prefix,
-            )
-            == False
-        ):  # noqa: E712
-            return UnquantizedFusedMoEMethod(layer.moe_config)
+    assert isinstance(layer, RoutedExperts)
+    # False = skip module, None = no override, else = Positive match
+    if (
+        get_dynamic_override(  # noqa: E712
+            cloned_config,  # noqa: E712
+            layer_name=prefix,
+        )
+        == False
+    ):  # noqa: E712
+        return UnquantizedFusedMoEMethod(layer.moe_config)
 
-        if prefix:
-            # Dynamic per module/layer rules may override base config
-            override_config(cloned_config, prefix=prefix)
+    if prefix:
+        # Dynamic per module/layer rules may override base config
+        override_config(cloned_config, prefix=prefix)
 
-        return moe_method_cls(cloned_config, layer.moe_config)
-    return None
+    return moe_method_cls(cloned_config, layer.moe_config)
 
 
 class GPTQMarlinConfig(QuantizationConfig):
@@ -242,7 +240,7 @@ class GPTQMarlinConfig(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
             if not check_moe_marlin_supports_layer(layer, self.group_size):
@@ -505,7 +503,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -659,7 +657,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         device = layer.w13_qweight.device
         layer.workspace = marlin_make_workspace_new(device, 4)
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
 
         if is_a_8bit:
@@ -789,7 +787,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         from vllm.model_executor.layers.fused_moe.config import (
             gptq_marlin_moe_quant_config,
@@ -813,7 +811,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     def select_gemm_impl(
         self,
         prepare_finalize,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
     ):
         """
         Select the GEMM implementation for GPTQ-Marlin MoE.

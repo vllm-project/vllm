@@ -12,7 +12,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
 )
@@ -208,7 +207,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             if getattr(quant_method, "backend", "") == "marlin":
                 quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return quant_method
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             quant_method = self.FusedMoEMethodCls(
                 quant_config=self, moe_config=layer.moe_config
             )
@@ -757,7 +756,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
     ) -> mk.FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
@@ -766,7 +765,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -883,7 +882,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             shared_experts=layer.shared_experts,
         )
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         w13 = layer.w13_weight
         w2 = layer.w2_weight
         w13_scale = layer.w13_weight_scale
@@ -914,7 +913,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
 
-    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+    def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         w1_scale = layer.w13_weight_scale
         w2_scale = layer.w2_weight_scale
         a1_scale = layer.w13_input_scale
@@ -1224,7 +1223,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -1397,7 +1396,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
-    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+    def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         return make_nvfp4_moe_quant_config(
             backend=self.nvfp4_backend,
             w13_scale=layer.w13_weight_scale,
@@ -1717,7 +1716,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -1908,7 +1907,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             torch.stack(w2_scale_shuffled).contiguous(),
         )
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
@@ -1928,7 +1927,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
     ) -> mk.FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
@@ -1936,7 +1935,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         )
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         # TRTLLM MXFP8 path is monolithic and does not use modular kernel config.
         return None
@@ -2151,7 +2150,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         Tries three strategies in order:
         1. Direct lookup in ``quantized_layers``.
         2. Packed/fused-layer lookup (unfuse via ``packed_modules_mapping``).
-        3. Prefix-based lookup for FusedMoE (any child key starts with
+        3. Prefix-based lookup for RoutedExperts (any child key starts with
            ``prefix + "."``).
 
         Returns the upper-cased quant_algo string, or *None* if the prefix
@@ -2178,7 +2177,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                     f"{algos}. All shards must use the same quantization."
                 )
 
-        # 3. Prefix-based lookup (for FusedMoE / parent modules)
+        # 3. Prefix-based lookup (for RoutedExperts / parent modules)
         prefix_dot = prefix + "."
         for key, info in self.quantized_layers.items():
             if key.startswith(prefix_dot):
@@ -2212,7 +2211,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             # Layer not in quantized_layers — leave unquantized
             return UnquantizedLinearMethod()
 
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             if quant_algo == "FP8":
                 return ModelOptFp8MoEMethod(
                     quant_config=self.fp8_config,

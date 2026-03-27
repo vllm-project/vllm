@@ -21,7 +21,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,
     FusedMoEMethodBase,
     RoutedExperts,
 )
@@ -95,7 +94,7 @@ class GGUFConfig(QuantizationConfig):
             ):
                 return UnquantizedEmbeddingMethod()
             return GGUFEmbeddingMethod(self)
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             # TODO: Select UnquantizedFusedMoEMethod on unquantized layers.
             return GGUFMoEMethod(self, layer.moe_config)
         return None
@@ -566,7 +565,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -627,7 +626,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_qweight_type", w2_qweight_type)
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         return None
 

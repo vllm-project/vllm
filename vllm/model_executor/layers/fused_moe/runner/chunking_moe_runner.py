@@ -63,7 +63,7 @@ class ChunkingMoERunner(MoERunnerBase):
     #    return getattr(self._inner, name)
 
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
-        self._quant_method = quant_method
+        self.routed_experts.quant_method = quant_method
         self._inner._replace_quant_method(quant_method)
         assert self._shared_experts == self._inner._shared_experts
 
@@ -136,7 +136,6 @@ class ChunkingMoERunner(MoERunnerBase):
 
     def _forward_impl(
         self,
-        layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
@@ -194,7 +193,6 @@ class ChunkingMoERunner(MoERunnerBase):
 
                 # Delegate per-chunk computation to the inner runner.
                 chunk_result = self._inner._forward_impl(
-                    layer=layer,
                     hidden_states=hidden_states_chunk,
                     router_logits=router_logits_chunk,
                     shared_experts_input=shared_experts_input_chunk,

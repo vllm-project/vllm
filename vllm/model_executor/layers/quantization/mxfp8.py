@@ -6,15 +6,15 @@
 from typing import Any
 
 import torch
-from torch.nn import Module
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEConfig,
     FusedMoEMethodBase,
+    RoutedExperts,
+    UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
@@ -105,7 +105,7 @@ class Mxfp8Config(Fp8Config):
             ):
                 return UnquantizedLinearMethod()
             return Mxfp8OnlineLinearMethod(self)
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             if is_layer_skipped(
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
@@ -113,7 +113,7 @@ class Mxfp8Config(Fp8Config):
                 skip_with_substr=True,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
-            return Mxfp8OnlineMoEMethod(self, layer)
+            return Mxfp8OnlineMoEMethod(self, layer.moe_config)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
@@ -179,7 +179,7 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
             **extra_weight_attrs,
         )
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
@@ -226,8 +226,8 @@ class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
 
     uses_meta_device: bool = True
 
-    def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
-        FusedMoEMethodBase.__init__(self, layer.moe_config)
+    def __init__(self, quant_config: Fp8Config, moe_config: FusedMoEConfig):
+        FusedMoEMethodBase.__init__(self, moe_config)
         self.quant_config = quant_config
         assert not quant_config.is_checkpoint_fp8_serialized
         assert quant_config.activation_scheme == "dynamic"
@@ -240,7 +240,7 @@ class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
 
     def create_weights(
         self,
-        layer: Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -305,7 +305,7 @@ class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
 
         return torch.stack(w_quant), torch.stack(w_scales)
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 

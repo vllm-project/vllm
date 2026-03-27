@@ -22,6 +22,9 @@ from vllm.model_executor.layers.fused_moe.expert_map_manager import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -57,7 +60,6 @@ class RoutedExperts(torch.nn.Module):
         intermediate_size: int,
         moe_config: FusedMoEConfig,
         quant_config: QuantizationConfig | None,
-        quant_method: FusedMoEMethodBase,
         expert_map_manager: ExpertMapManager,
         **kwargs,
     ):
@@ -65,7 +67,6 @@ class RoutedExperts(torch.nn.Module):
         self.layer_name = layer_name
         self.moe_config = moe_config
         self.quant_config = quant_config
-        self.quant_method = quant_method
         self.expert_map_manager = expert_map_manager
         self.hidden_size = moe_config.hidden_dim
         self.intermediate_size_per_partition = (
@@ -84,6 +85,12 @@ class RoutedExperts(torch.nn.Module):
         # Bit of hack until things are settled
         self.__dict__.update(kwargs)
 
+        self.quant_method = self._get_quant_method(
+            self.layer_name,
+            self.quant_config,
+            self.moe_config,
+        )
+
         moe_quant_params = {
             "num_experts": moe_config.num_local_experts,
             "hidden_size": moe_config.hidden_dim,
@@ -97,10 +104,28 @@ class RoutedExperts(torch.nn.Module):
         }
 
         # need full intermediate size pre-sharding for WNA16 act order
-        if self._needs_intermediate_size_param(quant_method):
+        if self._needs_intermediate_size_param(self.quant_method):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
-        quant_method.create_weights(layer=self, **moe_quant_params)
+        self.quant_method.create_weights(layer=self, **moe_quant_params)
+
+    def _get_quant_method(
+        self,
+        prefix: str,
+        quant_config: QuantizationConfig | None,
+        moe_config: FusedMoEConfig,
+    ) -> FusedMoEMethodBase:
+        """
+        Helper method to ensure quant_method is never None and
+        of the proper type.
+        """
+        quant_method = None
+        if quant_config is not None:
+            quant_method = quant_config.get_quant_method(self, prefix)
+        if quant_method is None:
+            quant_method = UnquantizedFusedMoEMethod(moe_config)
+        assert isinstance(quant_method, FusedMoEMethodBase)
+        return quant_method
 
     # TODO(bnell): make this a method on quant_method
     def _needs_intermediate_size_param(self, quant_method: FusedMoEMethodBase) -> bool:
@@ -692,6 +717,7 @@ class RoutedExperts(torch.nn.Module):
     # Execution
     #
 
+    # TODO: split this
     def forward(
         self,
         x: torch.Tensor,

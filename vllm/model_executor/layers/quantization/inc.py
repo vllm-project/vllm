@@ -8,6 +8,7 @@ import regex as re
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
@@ -224,7 +225,6 @@ class INCConfig(QuantizationConfig):
             self.extra_config = hf_to_vllm_mapper.apply_dict(self.extra_config)
 
     def apply_awq_quant_layer(self, layer, prefix: str, backend: str = "auto"):
-        from vllm.model_executor.layers.fused_moe import FusedMoE
         from vllm.model_executor.layers.quantization.utils.marlin_utils import (
             check_marlin_supported,
             check_moe_marlin_supports_layer,
@@ -254,7 +254,7 @@ class INCConfig(QuantizationConfig):
                 AWQ_TYPE_MAP[weight_bits], group_size, not sym
             )
 
-            if isinstance(layer, FusedMoE):
+            if isinstance(layer, RoutedExperts):
                 use_marlin = use_marlin and check_moe_marlin_supports_layer(
                     layer, group_size
                 )
@@ -288,7 +288,7 @@ class INCConfig(QuantizationConfig):
                 zero_point=not sym,
             )
 
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             if use_marlin:
                 return AWQMarlinMoEMethod(quant_args_marlin, layer.moe_config)
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
@@ -310,7 +310,6 @@ class INCConfig(QuantizationConfig):
         return None
 
     def apply_gptq_quant_layer(self, layer, prefix: str, backend: str = "auto"):
-        from vllm.model_executor.layers.fused_moe import FusedMoE
         from vllm.model_executor.layers.quantization.utils.marlin_utils import (
             check_marlin_supported,
             check_moe_marlin_supports_layer,
@@ -339,7 +338,7 @@ class INCConfig(QuantizationConfig):
             use_marlin = (weight_bits, sym) in GPTQ_TYPE_MAP and check_marlin_supported(
                 GPTQ_TYPE_MAP[(weight_bits, sym)], group_size, has_zp=not sym
             )
-            if isinstance(layer, FusedMoE):
+            if isinstance(layer, RoutedExperts):
                 use_marlin = use_marlin and check_moe_marlin_supports_layer(
                     layer, group_size
                 )
@@ -375,7 +374,7 @@ class INCConfig(QuantizationConfig):
                 dynamic={},
             )
 
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             if use_marlin:
                 return GPTQMarlinMoEMethod(quant_args_marlin, layer.moe_config)
             else:

@@ -7,7 +7,6 @@ import torch
 
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
@@ -167,7 +166,7 @@ class MoeWNA16Config(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         if is_layer_skipped_quant(prefix, self.modules_to_not_convert):
-            if isinstance(layer, FusedMoE):
+            if isinstance(layer, RoutedExperts):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
@@ -203,7 +202,7 @@ class MoeWNA16Config(QuantizationConfig):
                     )
             else:
                 raise ValueError("moe_wna16 only support gptq and awq.")
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             return MoeWNA16Method(self, layer.moe_config)
         return None
 
@@ -225,7 +224,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -344,7 +343,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 set_weight_attrs(param, extra_weight_attrs)
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         weight_bits = self.quant_config.weight_bits
         has_zp = self.quant_config.has_zp

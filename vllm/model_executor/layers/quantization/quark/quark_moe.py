@@ -68,7 +68,7 @@ class QuarkMoEMethod(FusedMoEMethodBase):
     @staticmethod
     def get_moe_method(
         quant_config: "QuarkConfig",  # type: ignore # noqa E501 # noqa F821
-        module: torch.nn.Module,
+        module: RoutedExperts,
         layer_name: str,
     ) -> "QuarkMoEMethod":
         layer_quant_config = quant_config._find_matched_config(layer_name, module)
@@ -166,7 +166,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -291,7 +291,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         else:
             layer.w13_bias, layer.w2_bias = None, None
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         # Fp8 moe kernels require a single activation scale.
         # We take the max of all the scales in case they differ.
         if self.static_input_scales:
@@ -426,7 +426,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             )
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         return fp8_w8a8_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
@@ -518,7 +518,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -585,7 +585,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         set_weight_attrs(w13_weight_scale_2, extra_weight_attrs)
         set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
             layer.w13_weight.data, layer.w2_weight.data
         )
@@ -788,7 +788,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -911,7 +911,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-    def process_weights_after_loading(self, layer):
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if self.static_input_scales and self.input_dtype == "fp8":
             # firstly, process activations if fp8 static input
             if layer.w13_input_scale is None or layer.w2_input_scale is None:
@@ -999,7 +999,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         torch.accelerator.empty_cache()
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         if self.ocp_mx_scheme == "w_mxfp4":
             return mxfp4_w4a16_moe_quant_config(
@@ -1086,7 +1086,7 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
     ):
         super().__init__(weight_config, input_config, moe)
 
-    def process_weights_after_loading(self, layer):
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
         w13_bias = layer.w13_bias.to(torch.float32)
@@ -1157,7 +1157,7 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
             )
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         return mxfp4_w4a8_moe_quant_config(
             w1_scale=self.w13_precision_config,
@@ -1175,7 +1175,7 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
 
     def apply_monolithic(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         expert_map: torch.Tensor | None = None,

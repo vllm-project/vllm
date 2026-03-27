@@ -8,6 +8,7 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
@@ -226,7 +227,7 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
     )[0]
 
 
-def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
+def check_moe_marlin_supports_layer(layer: RoutedExperts, group_size: int) -> bool:
     if current_platform.is_rocm():
         return False
     hidden_size = layer.hidden_size
@@ -471,7 +472,7 @@ def get__quant_fp8_method() -> QuantFP8:
     return _quant_fp8_method
 
 
-def get_marlin_input_dtype(prefix: str | None = None):
+def get_marlin_input_dtype(prefix: str | None = None):  # ?
     if envs.VLLM_MARLIN_INPUT_DTYPE is None:
         return
     elif envs.VLLM_MARLIN_INPUT_DTYPE.lower() == "int8":
