@@ -30,7 +30,7 @@ def chunk_gated_delta_rule_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     return_intermediate_states: bool = False,
     state_dtype: torch.dtype | None = None,
 ):
@@ -95,7 +95,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
-        cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
         return_intermediate_states: bool = False,
         state_dtype: torch.dtype | None = None,
@@ -137,7 +137,7 @@ def chunk_gated_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     return_intermediate_states: bool = False,
     state_dtype: torch.dtype | None = None,
@@ -163,7 +163,7 @@ def chunk_gated_delta_rule(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, H, V, K]`. Default: `False`.
-        cu_seqlens (torch.LongTensor):
+        cu_seqlens (torch.Tensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
     Returns:
@@ -197,8 +197,8 @@ def chunk_gated_delta_rule(
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, beta, g = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, beta, g))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
-        >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var, _ = chunk_gated_delta_rule(
+        >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.int32)
+        >>> o_var, ht_var = chunk_gated_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
             output_final_state=True,

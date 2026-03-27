@@ -19,10 +19,10 @@ or just on the low or high end.
     If tuning performance by hand, always benchmark your exact use-case with and without the fusion to verify the impact.
 
 | Fusion                                                                         | `PassConfig` flag            | Fused operations                               | Default at                     | E2E Speedup        | Fullgraph | `num_tokens` |
-|--------------------------------------------------------------------------------|------------------------------|------------------------------------------------|--------------------------------|--------------------|-----------|--------------|
+| ------------------------------------------------------------------------------ | ---------------------------- | ---------------------------------------------- | ------------------------------ | ------------------ | --------- | ------------ |
 | [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms)                  | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No        | Low          |
 | [Attention + Quant](#attention--quantization-fuse_attn_quant)                  | `fuse_attn_quant`            | Attention output → FP8/NVFP4 quant             | Off by default                 | 3-7%               | Yes       | Always       |
-| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O1 (ROCm/AITER only)           | TBD                | No        | Low          |
+| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O2 (ROCm/AITER only)           | 2-4%               | No        | Low          |
 | [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                    | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No        | Low          |
 | [Sequence Parallelism](#sequence-parallelism-enable_sp)                        | `enable_sp`                  | AllReduce → ReduceScatter + AllGather          | Off by default                 | Prereq for AsyncTP | Yes       | High         |
 | [AsyncTP GEMM + collective](#asynctp-gemm--collective-overlap-fuse_gemm_comms) | `fuse_gemm_comms`            | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | 7-10%              | Yes       | High         |
@@ -37,7 +37,7 @@ The table below lists the quantization schemes supported by each fusion on each 
 [#36066](https://github.com/vllm-project/vllm/issues/36066)
 
 | Fusion                       | SM100 (Blackwell)                        | SM90 (Hopper)                            | SM89 (Ada)                               | SM80 (Ampere) | ROCm                                     |
-|------------------------------|------------------------------------------|------------------------------------------|------------------------------------------|---------------|------------------------------------------|
+| ---------------------------- | ---------------------------------------- | ---------------------------------------- | ---------------------------------------- | ------------- | ---------------------------------------- |
 | `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVFP4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
 | `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
 | `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |

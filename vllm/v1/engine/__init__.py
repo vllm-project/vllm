@@ -9,7 +9,6 @@ from typing import Any, Literal
 import msgspec
 import numpy as np
 import torch
-from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -109,17 +108,6 @@ class EngineCoreRequest(
             return self.sampling_params
         assert self.pooling_params is not None
         return self.pooling_params
-
-    @property
-    @deprecated(
-        "EngineCoreRequest.eos_token_id will be removed in v0.18. "
-        "Please use EngineCoreRequest.sampling_params.eos_token_id instead."
-    )
-    def eos_token_id(self) -> int | None:
-        if self.sampling_params is None:
-            return None
-
-        return self.sampling_params.eos_token_id
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -249,10 +237,7 @@ class ReconfigureDistributedRequest(msgspec.Struct):
     new_data_parallel_master_ip: str
     new_data_parallel_master_port: int
     new_data_parallel_master_port_list: list[int]
-    new_stateless_world_group_port_list: list[list[int]]
-    new_stateless_dp_group_port_list: list[list[int]]
-    new_stateless_ep_group_port_list: list[list[int]]
-    new_stateless_eplb_group_port_list: list[list[int]]
+    coord_store_port: int
 
 
 class ReconfigureRankType(enum.IntEnum):

@@ -6,9 +6,6 @@ from copy import deepcopy
 
 from tblib import pickling_support
 
-# Import fixture
-from tests.v1.entrypoints.conftest import sample_json_schema  # noqa
-
 # ruff: noqa
 
 # Install support for pickling exceptions so that we can nicely propagate
@@ -80,6 +77,55 @@ if TYPE_CHECKING:
 
 
 logger = init_logger(__name__)
+
+
+@pytest.fixture
+def sample_json_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"},
+            "skills": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                },
+            },
+            "grade": {
+                "type": "string",
+                "pattern": "^[A-D]$",
+            },
+            "email": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$",
+            },
+            "work_history": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "company": {"type": "string"},
+                        "duration": {
+                            "type": "number",
+                            "minimum": 0.0,
+                            "maximum": 100.0,
+                        },
+                        "position": {"type": "string"},
+                    },
+                    "required": ["company", "duration", "position"],
+                    "additionalProperties": False,
+                },
+                "minItems": 0,
+                "maxItems": 3,
+            },
+        },
+        "required": ["name", "age", "skills", "grade", "email", "work_history"],
+        "additionalProperties": False,
+        "minProperties": 1,
+        "maxProperties": 10,
+    }
+
 
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
@@ -428,7 +474,7 @@ class HfRunner:
             )
 
         # don't put this import at the top level
-        # it will call torch.cuda.device_count()
+        # it will call torch.accelerator.device_count()
         from transformers import AutoProcessor
 
         self.processor = AutoProcessor.from_pretrained(
@@ -794,7 +840,6 @@ class VllmRunner:
         tensor_parallel_size: int = 1,
         block_size: int = 16 if not torch.xpu.is_available() else 64,
         enable_chunked_prefill: bool | None = False,
-        swap_space: int = 4,
         enforce_eager: bool | None = False,
         # Set this to avoid hanging issue
         default_torch_num_threads: int | None = None,
@@ -831,7 +876,6 @@ class VllmRunner:
                 trust_remote_code=trust_remote_code,
                 dtype=dtype,
                 seed=seed,
-                swap_space=swap_space,
                 enforce_eager=enforce_eager,
                 disable_log_stats=disable_log_stats,
                 tensor_parallel_size=tensor_parallel_size,
@@ -1537,7 +1581,7 @@ def clean_gpu_memory_between_tests():
 
     from tests.utils import wait_for_gpu_memory_to_clear
 
-    num_gpus = torch.cuda.device_count()
+    num_gpus = torch.accelerator.device_count()
     if num_gpus > 0:
         try:
             wait_for_gpu_memory_to_clear(

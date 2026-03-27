@@ -288,7 +288,7 @@ def chunk_gated_delta_rule_fwd_h(
     output_final_state: bool = False,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     save_new_value: bool = True,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     state_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.

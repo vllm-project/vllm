@@ -11,7 +11,6 @@ from typing import Final, Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
 from fastapi import Request
-from soundfile import LibsndfileError
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
@@ -39,32 +38,17 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import ProcessorInputs
+from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
-from vllm.model_executor.models import (
-    SupportsTranscription,
-    supports_transcription,
-)
-from vllm.multimodal.audio import split_audio
+from vllm.model_executor.models import SupportsTranscription
+from vllm.multimodal.audio import get_audio_duration, split_audio
+from vllm.multimodal.media.audio import load_audio
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
-from vllm.utils.import_utils import PlaceholderModule
-
-try:
-    import librosa
-except ImportError:
-    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
-
-# Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`, soundfile
-# being librosa's main backend. Used to validate if an audio loading error is due to a
-# server error vs a client error (invalid audio file).
-# 1 = unrecognised format      (file is not a supported audio container)
-# 3 = malformed file           (corrupt or structurally invalid audio)
-# 4 = unsupported encoding     (codec not supported by this libsndfile build)
-_BAD_SF_CODES = {1, 3, 4}
 
 SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
 SpeechToTextResponseVerbose: TypeAlias = (
@@ -131,121 +115,6 @@ class OpenAISpeechToText(OpenAIServing):
                 self.default_sampling_params,
             )
 
-        # Warm up audio preprocessing to avoid first-request latency
-        self._warmup_audio_preprocessing()
-        # Warm up input processor with dummy audio
-        self._warmup_input_processor()
-
-    def _warmup_audio_preprocessing(self) -> None:
-        """Warm up audio processing libraries to avoid first-request latency.
-
-        The first call to librosa functions (load, get_duration, mel-spectrogram)
-        triggers JIT compilation and library initialization which can take ~7s.
-        This method warms up these operations during server initialization.
-        """
-        # Skip warmup if librosa is not installed (optional dependency)
-        if isinstance(librosa, PlaceholderModule):
-            return
-
-        # Skip warmup if model doesn't support transcription
-        if not supports_transcription(self.model_cls):
-            return
-
-        if getattr(self.model_cls, "skip_warmup_audio_preprocessing", False):
-            return
-
-        try:
-            warmup_start = time.perf_counter()
-            logger.info("Warming up audio preprocessing libraries...")
-
-            # Create a minimal dummy audio (1 second of silence at target sample rate)
-            dummy_audio = np.zeros(int(self.asr_config.sample_rate), dtype=np.float32)
-
-            # Warm up librosa.load by using librosa functions on the dummy data
-            # This initializes FFTW, numba JIT, and other audio processing libraries
-            _ = librosa.get_duration(y=dummy_audio, sr=self.asr_config.sample_rate)
-
-            # Warm up mel-spectrogram computation with model-specific parameters
-            from vllm.transformers_utils.processor import cached_processor_from_config
-
-            processor = cached_processor_from_config(self.model_config)
-            feature_extractor = None
-            if hasattr(processor, "feature_extractor"):
-                feature_extractor = processor.feature_extractor
-            elif hasattr(processor, "audio_processor"):
-                # For models like GraniteSpeech that use audio_processor
-                audio_proc = processor.audio_processor
-                if hasattr(audio_proc, "feature_extractor"):
-                    feature_extractor = audio_proc.feature_extractor
-                # If audio_processor doesn't have feature_extractor,
-                # skip mel-spectrogram warmup for these models
-
-            if feature_extractor is not None:
-                _ = librosa.feature.melspectrogram(
-                    y=dummy_audio,
-                    sr=self.asr_config.sample_rate,
-                    n_mels=getattr(feature_extractor, "n_mels", 128),
-                    n_fft=getattr(feature_extractor, "n_fft", 400),
-                    hop_length=getattr(feature_extractor, "hop_length", 160),
-                )
-
-            warmup_elapsed = time.perf_counter() - warmup_start
-            logger.info("Audio preprocessing warmup completed in %.2fs", warmup_elapsed)
-        except Exception:
-            # Don't fail initialization if warmup fails - log exception and continue
-            logger.exception(
-                "Audio preprocessing warmup failed (non-fatal): %s. "
-                "First request may experience higher latency.",
-            )
-
-    def _warmup_input_processor(self) -> None:
-        """Warm up input processor with dummy audio to avoid first-request latency.
-
-        The first call to renderer.render_cmpl() with multimodal audio
-        triggers multimodal processing initialization which can take ~2.5s.
-        This method processes a dummy audio request to warm up the pipeline.
-        """
-        # Skip warmup if model doesn't support transcription
-        if not supports_transcription(self.model_cls):
-            return
-
-        # Only warm up if model supports transcription methods
-        if not hasattr(self.model_cls, "get_generation_prompt"):
-            return
-
-        try:
-            warmup_start = time.perf_counter()
-            logger.info("Warming up multimodal input processor...")
-
-            # Create minimal dummy audio (1 second of silence)
-            dummy_audio = np.zeros(int(self.asr_config.sample_rate), dtype=np.float32)
-
-            # Use the same method that _preprocess_speech_to_text uses
-            # to create the prompt
-            dummy_prompt = self.model_cls.get_generation_prompt(
-                audio=dummy_audio,
-                stt_config=self.asr_config,
-                model_config=self.model_config,
-                language="en",
-                task_type=self.task_type,
-                request_prompt="",
-                to_language=None,
-            )
-            parsed_prompt = parse_model_prompt(self.model_config, dummy_prompt)
-
-            # Process the dummy input through the input processor
-            # This will trigger all the multimodal processing initialization
-            _ = self.renderer.render_cmpl([parsed_prompt])
-
-            warmup_elapsed = time.perf_counter() - warmup_start
-            logger.info("Input processor warmup completed in %.2fs", warmup_elapsed)
-        except Exception:
-            # Don't fail initialization if warmup fails - log warning and continue
-            logger.exception(
-                "Input processor warmup failed (non-fatal): %s. "
-                "First request may experience higher latency."
-            )
-
     @cached_property
     def model_cls(self) -> type[SupportsTranscription]:
         from vllm.model_executor.model_loader import get_model_cls
@@ -264,8 +133,6 @@ class OpenAISpeechToText(OpenAIServing):
         via ``get_language_detection_prompt`` and
         ``parse_language_detection_output``.
         """
-        from vllm.sampling_params import SamplingParams
-
         prompt = self.model_cls.get_language_detection_prompt(
             audio_chunk,
             self.asr_config,
@@ -304,7 +171,7 @@ class OpenAISpeechToText(OpenAIServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[ProcessorInputs], float]:
+    ) -> tuple[list[EngineInput], float]:
         # Validate request
         language = self.model_cls.validate_language(request.language)
         # Skip to_language validation to avoid extra logging for Whisper.
@@ -321,20 +188,20 @@ class OpenAISpeechToText(OpenAIServing):
                 value=len(audio_data) / 1024**2,
             )
 
-        with io.BytesIO(audio_data) as bytes_:
-            try:
-                # NOTE resample to model SR here for efficiency. This is also a
-                # pre-requisite for chunking, as it assumes Whisper SR.
-                y, sr = librosa.load(bytes_, sr=self.asr_config.sample_rate)
-            except LibsndfileError as exc:
-                # Distinguish client errors (invalid audio) from server errors
-                if exc.code in _BAD_SF_CODES:
-                    raise ValueError("Invalid or unsupported audio file.") from exc
-                raise
+        # Decode audio bytes.  For container formats (MP4, M4A, WebM) that
+        # soundfile cannot detect from a BytesIO stream, _load_audio_bytes
+        # transparently falls back to ffmpeg via an in-memory fd.
+        # NOTE resample to model SR here for efficiency. This is also a
+        # pre-requisite for chunking, as it assumes Whisper SR.
+        try:
+            with io.BytesIO(audio_data) as buf:
+                y, sr = load_audio(buf, sr=self.asr_config.sample_rate)
+        except Exception as exc:
+            raise ValueError("Invalid or unsupported audio file.") from exc
 
-        duration = librosa.get_duration(y=y, sr=sr)
-        do_split_audio = (
-            self.asr_config.allow_audio_chunking
+        duration = get_audio_duration(y=y, sr=sr)
+        do_split_audio = self.asr_config.allow_audio_chunking and (
+            self.asr_config.max_audio_clip_s is not None
             and duration > self.asr_config.max_audio_clip_s
         )
 
@@ -383,9 +250,9 @@ class OpenAISpeechToText(OpenAIServing):
 
             parsed_prompts.append(parsed_prompt)
 
-        engine_prompts = await self.renderer.render_cmpl_async(parsed_prompts)
+        engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_prompts, duration
+        return engine_inputs, duration
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -402,6 +269,27 @@ class OpenAISpeechToText(OpenAIServing):
         )
 
         return prompt
+
+    @staticmethod
+    def _get_decoder_prompt_len(engine_inputs: list[EngineInput]) -> int:
+        """Get the length of the decoder prompt. Currently we need to offset
+        by the decoder prompt length when running beam search because the mm
+        encoder is not currently cached and runs on decode calls; because of
+        this, we need to make sure the redundant encoder calls won't exceed
+        the context :(
+
+        FIXME (Alex) - this will be removed in the very near future once the
+        encoder/decoder caching is implemented.
+        """
+        input_len = 0
+        assert len(engine_inputs) > 0
+        first_input = engine_inputs[0]
+
+        if first_input.get("type") == "enc_dec":
+            first_input = cast(EncoderDecoderInput, first_input)
+            input_len = len(first_input["decoder_prompt"]["prompt_token_ids"])
+
+        return input_len
 
     def _get_verbose_segments(
         self,
@@ -481,6 +369,11 @@ class OpenAISpeechToText(OpenAIServing):
     ) -> T | V | AsyncGenerator[str, None] | ErrorResponse:
         """Base method for speech-to-text operations like transcription and
         translation."""
+        if request.stream and request.use_beam_search:
+            return self.create_error_response(
+                "Streaming is not currently supported with beam search"
+            )
+
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -517,7 +410,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        engine_prompts, duration_s = await self._preprocess_speech_to_text(
+        engine_inputs, duration_s = await self._preprocess_speech_to_text(
             request=request,
             audio_data=audio_data,
             request_id=request_id,
@@ -526,6 +419,13 @@ class OpenAISpeechToText(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
+
+        input_len = (
+            OpenAISpeechToText._get_decoder_prompt_len(engine_inputs)
+            if request.use_beam_search
+            else 0
+        )
+
         # Unlike most decoder-only models, whisper generation length is not
         # constrained by the size of the input audio, which is mapped to a
         # fixed-size log-mel-spectogram. Still, allow for fewer tokens to be
@@ -533,24 +433,30 @@ class OpenAISpeechToText(OpenAIServing):
         max_tokens = get_max_tokens(
             max_model_len,
             request.max_completion_tokens,
-            0,
+            input_len,
             self.default_sampling_params,
         )
 
-        sampling_params = request.to_sampling_params(
-            max_tokens,
-            self.default_sampling_params,
-        )
+        if request.use_beam_search:
+            sampling_params = request.to_beam_search_params(
+                max_tokens, self.default_sampling_params
+            )
+        else:
+            sampling_params = request.to_sampling_params(
+                max_tokens,
+                self.default_sampling_params,
+            )
+
         if request.response_format == "verbose_json":
             sampling_params.logprobs = 1
 
         list_result_generator = []
-        for i, engine_prompt in enumerate(engine_prompts):
+        for i, engine_input in enumerate(engine_inputs):
             request_id_item = f"{request_id}_{i}"
 
             self._log_inputs(
                 request_id_item,
-                engine_prompt,
+                engine_input,
                 params=sampling_params,
                 lora_request=lora_request,
             )
@@ -561,13 +467,22 @@ class OpenAISpeechToText(OpenAIServing):
                 else await self._get_trace_headers(raw_request.headers)
             )
 
-            generator = self.engine_client.generate(
-                engine_prompt,
-                sampling_params,
-                request_id_item,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-            )
+            if isinstance(sampling_params, BeamSearchParams):
+                generator = self.beam_search(
+                    prompt=engine_input,
+                    params=sampling_params,
+                    request_id=request_id_item,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                )
+            else:
+                generator = self.engine_client.generate(
+                    engine_input,
+                    sampling_params,
+                    request_id_item,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                )
 
             list_result_generator.append(generator)
 

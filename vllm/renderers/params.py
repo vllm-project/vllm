@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -40,6 +40,34 @@ def merge_kwargs(
     return defaults | {k: v for k, v in overrides.items() if v not in unset_values}
 
 
+def recursively_merge_kwargs(
+    defaults: dict[str, Any] | None,
+    overrides: dict[str, Any] | None,
+    /,
+    *,
+    unset_values: tuple[object, ...] = (None, "auto"),
+) -> dict[str, Any]:
+    if defaults is None:
+        defaults = {}
+    if overrides is None:
+        overrides = {}
+
+    merged = dict(defaults)
+
+    for k, v in overrides.items():
+        if v in unset_values:
+            continue
+
+        if k in merged and isinstance(merged[k], dict) and isinstance(v, dict):
+            merged[k] = recursively_merge_kwargs(
+                merged[k], v, unset_values=unset_values
+            )
+        else:
+            merged[k] = v
+
+    return merged
+
+
 @dataclass(frozen=True)
 class ChatParams:
     """Configuration to control how to parse chat messages."""
@@ -56,12 +84,20 @@ class ChatParams:
     media_io_kwargs: dict[str, dict[str, Any]] | None = None
     """Per-modality kwargs for media I/O (loading/decoding images, videos, etc.)."""
 
+    mm_processor_kwargs: dict[str, Any] | None = None
+    """The kwargs to pass to the multi-modal processor."""
+
     def with_defaults(
         self,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         default_media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        default_mm_processor_kwargs: dict[str, Any] | None = None,
     ):
-        if not default_chat_template_kwargs and not default_media_io_kwargs:
+        if (
+            not default_chat_template_kwargs
+            and not default_media_io_kwargs
+            and not default_mm_processor_kwargs
+        ):
             return self
 
         return ChatParams(
@@ -74,6 +110,10 @@ class ChatParams:
             media_io_kwargs=merge_media_io_kwargs(
                 default_media_io_kwargs,
                 self.media_io_kwargs,
+            ),
+            mm_processor_kwargs=recursively_merge_kwargs(
+                default_mm_processor_kwargs,
+                self.mm_processor_kwargs,
             ),
         )
 
@@ -111,6 +151,14 @@ class TokenizeParams:
     Number of tokens to keep:
     - `None` means no truncation.
     - `-1` maps to `max_input_tokens`.
+    """
+
+    truncation_side: Literal["left", "right"] | None = None
+    """
+    Which side to truncate from when ``truncate_prompt_tokens`` is active:
+    - ``"right"`` keeps the first N tokens (truncate from the end).
+    - ``"left"``  keeps the last  N tokens (truncate from the start).
+    - ``None``    falls back to the tokenizer default.
     """
 
     do_lower_case: bool = False
@@ -231,6 +279,7 @@ class TokenizeParams:
             ),
             pad_prompt_tokens=pad_prompt_tokens,
             truncate_prompt_tokens=truncate_prompt_tokens,
+            truncation_side=self.truncation_side,
             do_lower_case=do_lower_case,
             add_special_tokens=add_special_tokens,
             needs_detokenization=needs_detokenization,
@@ -245,6 +294,16 @@ class TokenizeParams:
             # This prevents tokenization from taking up more resources than necessary
             # while still failing `self._token_len_check` as expected by users
             max_length = self.max_input_tokens + 1
+
+        # Left-side truncation requires the full token sequence so we can
+        # slice from the end in _token_truncation.  Disable HF-level
+        # truncation (which would incorrectly truncate from the right for
+        # pooling models) and let _token_truncation handle it.
+        if self.truncation_side == "left":
+            return dict(
+                truncation=False,
+                add_special_tokens=self.add_special_tokens,
+            )
 
         return dict(
             truncation=max_length is not None,
@@ -335,7 +394,10 @@ class TokenizeParams:
         if max_length == 0:
             return tokens[:0]
 
-        if getattr(tokenizer, "truncation_side", "left") == "left":
+        side = self.truncation_side or (
+            tokenizer.truncation_side if tokenizer is not None else None
+        )
+        if side == "left":
             return tokens[-max_length:]
 
         return tokens[:max_length]
