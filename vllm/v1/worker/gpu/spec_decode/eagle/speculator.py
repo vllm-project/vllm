@@ -10,6 +10,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
@@ -76,9 +77,16 @@ class EagleSpeculator:
             device=device,
         )
 
-        cache_draft_logits = self.speculative_config.rejection_sample_method != "strict"
+        self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
+            self.draft_model_config
+        )
+        if self.supports_mm_inputs:
+            self.inputs_embeds = torch.zeros(
+                self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
+            )
+
         self.draft_logits: torch.Tensor | None = None
-        if cache_draft_logits:
+        if self.speculative_config.rejection_sample_method == "probabilistic":
             self.draft_logits = torch.zeros(
                 self.max_num_reqs,
                 self.num_speculative_steps,
@@ -138,6 +146,7 @@ class EagleSpeculator:
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
@@ -149,10 +158,25 @@ class EagleSpeculator:
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
         ):
+            inputs_embeds = None
+            if self.supports_mm_inputs:
+                # Merge multimodal embeddings with input ids.
+                mm_embeds, is_mm_embed = mm_inputs or (None, None)
+                num_input_tokens = (
+                    is_mm_embed.shape[0] if is_mm_embed is not None else num_tokens
+                )
+                self.inputs_embeds[:num_input_tokens] = self.model.embed_input_ids(
+                    self.input_buffers.input_ids[:num_input_tokens],
+                    multimodal_embeddings=mm_embeds,
+                    is_multimodal=is_mm_embed,
+                )
+                inputs_embeds = self.inputs_embeds[:num_tokens]
+
             ret_hidden_states = self.model(
                 input_ids=self.input_buffers.input_ids[:num_tokens],
                 positions=self.input_buffers.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
+                inputs_embeds=inputs_embeds,
             )
         if self.method == "mtp":
             last_hidden_states = ret_hidden_states
@@ -254,6 +278,7 @@ class EagleSpeculator:
         num_tokens_across_dp: torch.Tensor | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of eagle's input_ids and
@@ -288,6 +313,7 @@ class EagleSpeculator:
             attn_metadata,
             slot_mappings,
             num_tokens_across_dp=num_tokens_across_dp,
+            mm_inputs=mm_inputs,
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
