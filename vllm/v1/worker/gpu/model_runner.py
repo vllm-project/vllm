@@ -1049,7 +1049,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     )
 
             with ec_context as ec_connector_output:
-                # run MM encoder (if needed) and get multimodal embeddings.
+                # Run MM encoder (if needed) and get multimodal embeddings.
+                # Only first PP rank prepares multimodal embeddings.
+                # NOTE(woosuk): We must call get_mm_embeddings even during dummy runs
+                # to obtain inputs_embeds, because the compiled model
+                # expects this input.
                 inputs_embeds = self.model_state.get_mm_embeddings(
                     scheduler_output.scheduled_encoder_inputs,
                     input_batch,
