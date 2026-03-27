@@ -252,7 +252,11 @@ class TorchProfilerWrapper(WorkerProfiler):
         rank = self.local_rank
         if profiler_config.torch_profiler_dump_cuda_time_total:
             profiler_dir = profiler_config.torch_profiler_dir
-            sort_key = "self_cuda_time_total"
+            sort_key = (
+                "self_cpu_time_total"
+                if self.dump_cpu_time_total
+                else "self_cuda_time_total"
+            )
             table = self.profiler.key_averages().table(sort_by=sort_key)
 
             # Skip file write for URI paths (gs://, s3://, etc.)
