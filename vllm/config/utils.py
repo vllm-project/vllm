@@ -13,7 +13,7 @@ import textwrap
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import MISSING, field, fields, is_dataclass
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, overload
 
 import torch
 from pydantic import ConfigDict
@@ -34,6 +34,16 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
+
+
+@overload
+def config(cls: type[ConfigT]) -> type[ConfigT]: ...
+
+
+@overload
+def config(
+    *, config: ConfigDict | None = None, **kwargs: Any
+) -> Callable[[type[ConfigT]], type[ConfigT]]: ...
 
 
 @dataclass_transform(field_specifiers=(PydanticField,))
@@ -58,8 +68,8 @@ def config(
     if config is not None:
         merged_config.update(config)
 
-    def decorator(cls):
-        return dataclass(cls, config=merged_config, **kwargs)
+    def decorator(cls: type[ConfigT]) -> type[ConfigT]:
+        return dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value]
 
     # Called with arguments: @config(config=...)
     if cls is None:
@@ -286,7 +296,15 @@ def normalize_value(x):
 
     # PretrainedConfig
     if hasattr(x, "to_json_string") and callable(x.to_json_string):
-        return x.to_json_string()
+        try:
+            return x.to_json_string()
+        except (TypeError, ValueError):
+            # to_json_string() may fail for trust-remote-code configs
+            # with non-JSON-serializable nested objects. Fall back to
+            # normalizing the dict representation recursively.
+            if hasattr(x, "to_dict") and callable(x.to_dict):
+                return normalize_value(x.to_dict())
+            raise
 
     # Unsupported type: e.g., modules, generators, open files, or objects
     # without a stable JSON/UUID representation. Hard-error to avoid
