@@ -21,6 +21,7 @@ CacheDType = Literal[
     "fp8_inc",
     "fp8_ds_mla",
     "int8_per_token",
+    "fp8_per_token",
 ]
 MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
@@ -222,19 +223,19 @@ class CacheConfig:
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
-        if cache_dtype.startswith("fp8"):
+        if cache_dtype in ("int8_per_token", "fp8_per_token"):
+            logger.info(
+                "Using %s data type to store kv cache. It reduces the GPU "
+                "memory footprint and boosts the performance. "
+                "Dynamic per-token scales will be computed at runtime.",
+                str(cache_dtype),
+            )
+        elif cache_dtype.startswith("fp8"):
             logger.info(
                 "Using %s data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
                 "Meanwhile, it may cause accuracy drop without a proper "
                 "scaling factor",
-                str(cache_dtype),
-            )
-        elif cache_dtype == "int8_per_token":
-            logger.info(
-                "Using %s data type to store kv cache. It reduces the GPU "
-                "memory footprint and boosts the performance. "
-                "Dynamic per-token scales will be computed at runtime.",
                 str(cache_dtype),
             )
         return cache_dtype

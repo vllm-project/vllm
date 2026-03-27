@@ -49,20 +49,20 @@ def _dequant_kv_tile(
     """Dequantize a loaded KV tile.
 
     Returns ``(dequantized, token_scales)``.  *token_scales* is only
-    meaningful when ``KV_QUANT_MODE == 2`` (per-token); callers gate
+    meaningful when ``KV_QUANT_MODE >= 2`` (per-token); callers gate
     its use on the same constexpr so the compiler eliminates dead code.
 
     All return paths produce ``(Q.dtype, float32)`` so that Triton's
     type checker is satisfied even for dead branches.
     """
-    # Dummy scales (float32) — never read when KV_QUANT_MODE != 2.
+    # Dummy scales (float32) — never read when KV_QUANT_MODE < 2.
     dummy_scales = tile_mask.to(tl.float32)
 
     if KV_QUANT_MODE == 1:  # FP8 per-tensor
         if Q.dtype.is_fp8():
             return data.to(Q.dtype), dummy_scales
         return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype), dummy_scales
-    if KV_QUANT_MODE == 2:  # per-token
+    if KV_QUANT_MODE >= 2:  # per-token (int8 or fp8)
         scale_idx = physical_block_idx * stride_s_blk + (seq_offset % BLOCK_SIZE)
         token_scales = tl.load(scale_cache_ptr + scale_idx, mask=tile_mask, other=1.0)
         return data.to(Q.dtype), token_scales
@@ -146,7 +146,7 @@ def kernel_unified_attention_2d(
     KV_QUANT_MODE: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
-    # Per-token scale caches (KV_QUANT_MODE == 2 only)
+    # Per-token scale caches (KV_QUANT_MODE >= 2: int8 or fp8 per-token)
     # Shape: [num_blocks, block_size] — one scale per token, shared across heads.
     k_scale_cache_ptr=None,
     v_scale_cache_ptr=None,
@@ -374,7 +374,7 @@ def kernel_unified_attention_2d(
         S += scale * tl.dot(Q, K)
 
         # Per-token quant: apply k_scale after dot product.
-        if KV_QUANT_MODE == 2:
+        if KV_QUANT_MODE >= 2:
             S *= k_token_scales[None, :]
 
         if USE_SOFTCAP:
@@ -440,7 +440,7 @@ def kernel_unified_attention_2d(
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
         # Per-token quant: apply v_scale to P instead of V.
-        if KV_QUANT_MODE == 2:
+        if KV_QUANT_MODE >= 2:
             P_v = (P * v_token_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
         else:
@@ -517,7 +517,7 @@ def kernel_unified_attention_3d(
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
     # KV cache quantization: 0=none, 1=fp8, 2=per-token
     KV_QUANT_MODE: tl.constexpr = 0,
-    # Per-token scale caches (KV_QUANT_MODE == 2 only)
+    # Per-token scale caches (KV_QUANT_MODE >= 2: int8 or fp8 per-token)
     # Shape: [num_blocks, block_size] — one scale per token, shared across heads.
     k_scale_cache_ptr=None,
     v_scale_cache_ptr=None,
@@ -753,7 +753,7 @@ def kernel_unified_attention_3d(
         S += scale * tl.dot(Q, K)
 
         # Per-token quant: apply k_scale after dot product.
-        if KV_QUANT_MODE == 2:
+        if KV_QUANT_MODE >= 2:
             S *= k_token_scales[None, :]
 
         if USE_SOFTCAP:
@@ -819,7 +819,7 @@ def kernel_unified_attention_3d(
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
         # Per-token quant: apply v_scale to P instead of V.
-        if KV_QUANT_MODE == 2:
+        if KV_QUANT_MODE >= 2:
             P_v = (P * v_token_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
         else:

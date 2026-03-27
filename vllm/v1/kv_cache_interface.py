@@ -37,12 +37,15 @@ class KVQuantMode(IntEnum):
     NONE = 0
     FP8_PER_TENSOR = 1  # per-tensor scales (current fp8 path)
     INT8_PER_TOKEN = 2  # per-token dynamic scales for int8
+    FP8_PER_TOKEN = 3  # per-token dynamic scales for fp8
 
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
     if kv_cache_dtype == "int8_per_token":
         return KVQuantMode.INT8_PER_TOKEN
+    if kv_cache_dtype == "fp8_per_token":
+        return KVQuantMode.FP8_PER_TOKEN
     if kv_cache_dtype.startswith("fp8"):
         return KVQuantMode.FP8_PER_TENSOR
     return KVQuantMode.NONE
@@ -54,7 +57,10 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
 
 def kv_cache_uses_per_token_scales(kv_cache_dtype: str) -> bool:
     """Return True if *kv_cache_dtype* needs per-token scales."""
-    return get_kv_quant_mode(kv_cache_dtype) == KVQuantMode.INT8_PER_TOKEN
+    return get_kv_quant_mode(kv_cache_dtype) in (
+        KVQuantMode.INT8_PER_TOKEN,
+        KVQuantMode.FP8_PER_TOKEN,
+    )
 
 
 @dataclass(frozen=True)
@@ -141,7 +147,10 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def packed_scale_bytes_per_block(self) -> int:
-        if self.kv_quant_mode == KVQuantMode.INT8_PER_TOKEN:
+        if self.kv_quant_mode in (
+            KVQuantMode.INT8_PER_TOKEN,
+            KVQuantMode.FP8_PER_TOKEN,
+        ):
             # 2 scales per token (K and V), each float32 (4 bytes).
             # Packed into the same allocation after each K/V data region.
             return 2 * self.block_size * get_dtype_size(torch.float32)

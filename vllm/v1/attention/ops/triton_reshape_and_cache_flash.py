@@ -246,6 +246,8 @@ def _reshape_cache_per_token(
 # appropriate fp8 torch dtype with its representable range).
 _PER_TOKEN_QUANT_PARAMS: dict[torch.dtype, tuple[float, float]] = {
     torch.int8: (127.0, -128.0),
+    torch.float8_e4m3fn: (448.0, -448.0),
+    torch.float8_e4m3fnuz: (240.0, -240.0),
 }
 
 

@@ -6581,10 +6581,13 @@ class GPUModelRunner(
                     )
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
-                    # For INT8_PER_TOKEN, scales are packed into the same
+                    # For per-token quant, scales are packed into the same
                     # allocation after each K/V data region.  Use as_strided
                     # to create a data-only view that skips the scale bytes.
-                    if kv_cache_spec.kv_quant_mode == KVQuantMode.INT8_PER_TOKEN:
+                    if kv_cache_spec.kv_quant_mode in (
+                        KVQuantMode.INT8_PER_TOKEN,
+                        KVQuantMode.FP8_PER_TOKEN,
+                    ):
                         dtype = kv_cache_spec.dtype
                         nkv = kv_cache_spec.num_kv_heads
                         hs = kv_cache_spec.head_size
@@ -6700,7 +6703,7 @@ class GPUModelRunner(
     ) -> dict[str, dict[str, torch.Tensor]]:
         """Create scale tensor views into the packed KV cache allocation.
 
-        For INT8_PER_TOKEN, per-token scales are stored directly after
+        For per-token quant (int8/fp8), scales are stored directly after
         each K/V data region within the same memory allocation.  This
         method creates ``as_strided`` views for the scale regions so
         that attention kernels can access them.  Because the scales
@@ -6723,7 +6726,10 @@ class GPUModelRunner(
             kv_cache_spec = group.kv_cache_spec
             if not isinstance(kv_cache_spec, AttentionSpec):
                 continue
-            if kv_cache_spec.kv_quant_mode != KVQuantMode.INT8_PER_TOKEN:
+            if kv_cache_spec.kv_quant_mode not in (
+                KVQuantMode.INT8_PER_TOKEN,
+                KVQuantMode.FP8_PER_TOKEN,
+            ):
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
