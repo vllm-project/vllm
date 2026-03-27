@@ -1636,11 +1636,13 @@ class Qwen3VLForConditionalGeneration(
             out_hidden_size=self.visual.out_hidden_size,
         )
 
-    def is_image_inputs(
+    def get_input_modality(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> bool:
-        return "image_grid_thw" in mm_kwargs
+    ) -> str:
+        if "image_grid_thw" in mm_kwargs:
+            return "image"
+        return "video"
 
     def get_encoder_cudagraph_budget_range(
         self,
@@ -1657,7 +1659,7 @@ class Qwen3VLForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
     ) -> torch.Tensor:
-        if self.is_image_inputs(mm_kwargs):
+        if self.get_input_modality(mm_kwargs) == "image":
             pixel_values = mm_kwargs["pixel_values"]
         else:
             pixel_values = mm_kwargs["pixel_values_videos"]
@@ -1667,12 +1669,10 @@ class Qwen3VLForConditionalGeneration(
     def _get_grid_thw_by_modality(
         self,
         mm_kwargs: dict[str, Any],
-        to_list: bool = False,
+        to_list: bool = True,
     ) -> list[tuple[int, int, int]]:
-        if self.is_image_inputs(mm_kwargs):
-            grid_thw = mm_kwargs["image_grid_thw"]
-        else:
-            grid_thw = mm_kwargs["video_grid_thw"]
+        input_modality = f"{self.get_input_modality(mm_kwargs)}_grid_thw"
+        grid_thw = mm_kwargs[input_modality]
 
         if to_list and not isinstance(grid_thw, list):
             grid_thw_list = grid_thw.tolist()
@@ -1684,21 +1684,21 @@ class Qwen3VLForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
     ) -> int:
-        return len(self._get_grid_thw_by_modality(mm_kwargs, to_list=True))
+        return len(self._get_grid_thw_by_modality(mm_kwargs))
 
     def get_encoder_cudagraph_per_item_output_tokens(
         self,
         mm_kwargs: dict[str, Any],
     ) -> list[int]:
         m = self.visual.spatial_merge_size
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs, to_list=True)
+        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
         return [t * (h // m) * (w // m) for t, h, w in grid_thw]
 
     def get_encoder_cudagraph_per_item_input_sizes(
         self,
         mm_kwargs: dict[str, Any],
     ) -> list[int]:
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs, to_list=True)
+        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
         return [t * h * w for t, h, w in grid_thw]
 
     def select_encoder_cudagraph_items(
@@ -1706,11 +1706,11 @@ class Qwen3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         indices: list[int],
     ) -> dict[str, Any]:
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs, to_list=True)
+        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
 
         if len(indices) == 0:
-            if self.is_image_inputs(mm_kwargs):
+            if self.get_input_modality(mm_kwargs) == "image":
                 return {
                     "pixel_values": pixel_values[:0],
                     "image_grid_thw": [],
@@ -1732,7 +1732,7 @@ class Qwen3VLForConditionalGeneration(
         )
         selected_grid = [grid_thw[i] for i in indices]
 
-        if self.is_image_inputs(mm_kwargs):
+        if self.get_input_modality(mm_kwargs) == "image":
             return {
                 "pixel_values": selected_pv,
                 "image_grid_thw": selected_grid,
@@ -1843,9 +1843,9 @@ class Qwen3VLForConditionalGeneration(
             EncoderCudaGraphReplayBuffers,
         )
 
-        grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs, to_list=True)
+        grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
 
-        if self.is_image_inputs(mm_kwargs):
+        if self.get_input_modality(mm_kwargs) == "image":
             buffers = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_batch_size=max_batch_size,
@@ -1864,7 +1864,7 @@ class Qwen3VLForConditionalGeneration(
         buffers: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
+        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)  # , to_list=False
         return self.visual(pixel_values, grid_thw, encoder_metadata=buffers)
 
     def encoder_eager_forward(
@@ -1872,7 +1872,7 @@ class Qwen3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
+        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)  # , to_list=False
         return self.visual(pixel_values, grid_thw)
 
     def _parse_and_validate_image_input(
