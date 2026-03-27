@@ -231,6 +231,25 @@ The most effective approach is to deploy vLLM behind a reverse proxy (such as ng
 - Blocks all other endpoints, including the unauthenticated inference and operational control endpoints
 - Implements additional authentication, rate limiting, and logging at the proxy layer
 
+## gRPC Server Authentication
+
+The gRPC server (`--grpc` flag, requires `pip install vllm[grpc]`) **does not support API key authentication**. The `--api-key` flag and `VLLM_API_KEY` environment variable have no effect when vLLM is running in gRPC mode.
+
+When `--grpc` is passed to `vllm serve`, the gRPC server runs as a replacement for the HTTP server. The gRPC server:
+
+- Does not implement any authentication mechanism (no interceptors)
+- Does not support TLS (`add_insecure_port()` only)
+- Accepts connections from any network client
+- Enables gRPC reflection, allowing clients to enumerate available services
+
+Passing `--api-key` together with `--grpc` is accepted by the CLI parser without error or warning, but the API key is silently ignored. Do not rely on `--api-key` to protect a gRPC deployment.
+
+### Recommended Mitigations
+
+1. **Network isolation**: Restrict access to the gRPC port using firewall rules or network policies so that only trusted clients can connect.
+2. **Reverse proxy with authentication**: Place the gRPC server behind a proxy (such as Envoy) that enforces authentication and TLS termination.
+3. **Kubernetes NetworkPolicy**: In Kubernetes deployments, use NetworkPolicy resources to restrict which pods can reach the gRPC port.
+
 ## Tool Server and MCP Security
 
 vLLM supports connecting to external tool servers via the `--tool-server` argument. This enables models to call tools through the Responses API (`/v1/responses`). Tool server support works with all models — it is not limited to specific model architectures.
