@@ -681,6 +681,7 @@ steps:
   - label: "Publish nightly ROCm image to DockerHub"
     depends_on:
       - build-rocm-release-image
+    if: build.env("NIGHTLY") == "1"
     agents:
       queue: small_cpu_queue_release
     commands:
