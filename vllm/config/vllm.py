@@ -89,25 +89,24 @@ IS_DENSE = False
 
 
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if either RMS norm or quant FP8 custom op is active;
-    otherwise Inductor handles fusion."""
+    """Disable by default - Inductor fusion outperforms hand-fused CUDA kernels.
 
-    return cfg.compilation_config.is_custom_op_enabled(
-        "rms_norm"
-    ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+    Benchmarks show 1.09x-1.54x speedup when Inductor handles RMSNorm+FP8Quant
+    fusion vs hand-fused CUDA kernels (rms_norm_static_fp8_quant, etc).
+    See: benchmarks/kernels/bench_decomp_custom_ops.py
+    """
+    return False
 
 
 def enable_act_fusion(cfg: "VllmConfig") -> bool:
+    """Disable by default except for nvfp4 - Inductor fusion outperforms hand-fused CUDA.
+
+    Benchmarks show 1.47x speedup when Inductor handles SiluAndMul+FP8Quant
+    fusion vs sequential CUDA kernels. Exception: nvfp4 still needs custom fusion
+    since Inductor cannot handle nvfp4 quantization.
+    See: benchmarks/kernels/bench_decomp_custom_ops.py
     """
-    Enable if either SiLU+Mul or quant FP8 custom op is active;
-    otherwise Inductor handles fusion.
-    Also enable for FP4 models as FP4 quant is always custom so Inductor cannot fuse it.
-    """
-    return (
-        cfg.compilation_config.is_custom_op_enabled("silu_and_mul")
-        or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
-        or (cfg.model_config is not None and cfg.model_config.is_nvfp4_quantized())
-    )
+    return (cfg.model_config is not None and cfg.model_config.is_nvfp4_quantized())
 
 
 def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:

@@ -192,9 +192,9 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             pass_name="activation_quant_fusion_pass"
         )
 
-        pattern_silu_mul_fp8 = SiluMulFp8StaticQuantPattern()
-        pattern_silu_mul_fp8.register(self.patterns)
-
+        # Only register nvfp4 pattern. FP8 SiluMul+Quant fusion is handled
+        # by Inductor via decomposition, which outperforms the hand-fused
+        # CUDA kernel. See benchmarks/kernels/bench_decomp_custom_ops.py.
         if silu_and_mul_nvfp4_quant_supported:
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
