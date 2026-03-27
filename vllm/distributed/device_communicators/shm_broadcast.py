@@ -41,6 +41,8 @@ from vllm.utils.network_utils import (
 if envs.VLLM_USE_MONITORX:
     from vllm.monitorx import monitorx
 
+MONITORX_TIMEOUT_SECONDS = 0.1
+
 if TYPE_CHECKING:
     from _typeshed import SizedBuffer
 
@@ -551,7 +553,7 @@ class MessageQueue:
                     return not (written_flag and read_count != self.buffer.n_reader)
 
                 if envs.VLLM_USE_MONITORX and not check():
-                    monitorx(metadata_buffer, check, timeout=0.01)
+                    monitorx(metadata_buffer, check, timeout=MONITORX_TIMEOUT_SECONDS)
 
                 if not check():
                     # this block is written and not read by all readers
@@ -675,7 +677,7 @@ class MessageQueue:
                     monitorx(
                         metadata_buffer[0 : self.local_reader_rank + 1],
                         check,
-                        timeout=0.01,
+                        timeout=MONITORX_TIMEOUT_SECONDS,
                     )
 
                 if not check():

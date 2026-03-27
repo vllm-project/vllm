@@ -19,6 +19,8 @@ extern "C" {
 #define CPU_SUPPORT_NONE 0
 #define CPU_SUPPORT_MONITORX 1
 
+#define MWAITX_DEFAULT_TIMEOUT_CYCLES 1000000
+
 typedef struct {
   unsigned int cpu_support;
   unsigned int max_monitor_line_size;
@@ -144,7 +146,7 @@ static PyObject* method_monitorx(PyObject* self, PyObject* args,
       // Run mwaitx with enabled timeout (bit 1). The actual timeout value
       // is not very important, we just want to ensure we don't lock up
       // here for too long.
-      Py_BEGIN_ALLOW_THREADS _mm_mwaitx((1 << 1), 0, 1000000);
+      Py_BEGIN_ALLOW_THREADS _mm_mwaitx((1 << 1), 0, MWAITX_DEFAULT_TIMEOUT_CYCLES);
       Py_END_ALLOW_THREADS
     }
 
