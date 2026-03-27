@@ -169,7 +169,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
-    VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "trtllm"
+    VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -1305,14 +1305,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ["throughput", "latency", "masked_gemm"],
     ),
     # Flashinfer fused allreduce backend.
-    # "auto" will default to "mnnvl", which performs mostly same/better than "trtllm".
-    # But "mnnvl" backend does not support fuse with quantization.
-    # TODO: Default is "trtllm" right now because "mnnvl" has issues with cudagraph:
-    # https://github.com/vllm-project/vllm/issues/35772
-    # Should switch back to "auto" if the issue is resolved.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_ALLREDUCE_BACKEND",
-        "trtllm",
+        "auto",
         ["auto", "trtllm", "mnnvl"],
     ),
     # Control the workspace buffer size for the FlashInfer backend.
