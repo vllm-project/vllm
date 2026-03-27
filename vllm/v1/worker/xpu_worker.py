@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import os
+import signal
 from typing import Any
 
 import torch
@@ -54,6 +55,9 @@ class XPUWorker(Worker):
             )
 
     def init_device(self):
+        # Ignore SIGPIPE to prevent TBX socket errors from killing the process
+        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+
         device = self.device_config.device
         if (
             isinstance(device, torch.device)
