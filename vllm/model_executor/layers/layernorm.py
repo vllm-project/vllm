@@ -602,6 +602,11 @@ class RMSNormGated(CustomOp):
             activation=self.activation,
         )
 
+    def forward_xpu(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.forward_cuda(x, z)
+
 
 class LayerNorm(nn.Module):
     """
