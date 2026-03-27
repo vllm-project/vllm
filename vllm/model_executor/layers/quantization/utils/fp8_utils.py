@@ -399,11 +399,15 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
         input_scale: torch.Tensor | None = None,
         bias: torch.Tensor | None = None,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         # View input as 2D matrix for fp8 methods
         input_2d = input.view(-1, input.shape[-1])
         output_shape = [*input.shape[:-1], weight.shape[0]]
-        output_dtype = input.dtype
+        # Use provided output_dtype, or default based on whether input is
+        # pre-quantized (bfloat16) or not (input.dtype)
+        if output_dtype is None:
+            output_dtype = input.dtype if input_scale is None else torch.bfloat16
 
         if should_use_flashinfer_for_blockscale_fp8_gemm(
             self.is_flashinfer_supported, output_dtype, input_2d, weight
@@ -426,8 +430,8 @@ class W8A8BlockFp8LinearOp:
             output = self._run_deepgemm(input_2d, weight, weight_scale)
         else:
             # AITER/Triton/Cutlass: supports pre-quantized input
-            output = self.w8a8_blockscale_op(
-                input_2d, weight, weight_scale, input_scale
+            output = self.w8a8_blockscale_op(  # type: ignore[call-arg]
+                input_2d, weight, weight_scale, input_scale, output_dtype
             )
 
         if bias is not None:
@@ -458,16 +462,19 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
         input_scale: torch.Tensor | None = None,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         if input_scale is None:
             # Quantize input if not already quantized
             assert self.input_quant_op is not None
             q_input, input_scale = self.input_quant_op(input_2d)
-            output_dtype = input_2d.dtype
+            if output_dtype is None:
+                output_dtype = input_2d.dtype
         else:
             # Use pre-quantized FP8 input directly
             q_input = input_2d
-            output_dtype = torch.bfloat16
+            if output_dtype is None:
+                output_dtype = torch.bfloat16
         if self.is_hopper:
             return torch.ops.vllm.padded_cutlass(
                 q_input,
@@ -493,6 +500,7 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
         input_scale: torch.Tensor | None = None,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         assert self.act_quant_group_shape == GroupShape(1, 128)
 
@@ -511,11 +519,13 @@ class W8A8BlockFp8LinearOp:
         if input_scale is not None:
             # Use pre-quantized FP8 input directly
             q_input = input_2d
-            output_dtype = torch.bfloat16
+            if output_dtype is None:
+                output_dtype = torch.bfloat16
         else:
             # Quantize input if not already quantized
             q_input, input_scale = self.input_quant_op(input_2d, use_triton=use_triton)
-            output_dtype = input_2d.dtype
+            if output_dtype is None:
+                output_dtype = input_2d.dtype
 
         return gemm_a8w8_blockscale_op(
             q_input,
@@ -532,16 +542,19 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
         input_scale: torch.Tensor | None = None,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         if input_scale is None:
             # Quantize input if not already quantized
             assert self.input_quant_op is not None
             q_input, input_scale = self.input_quant_op(input_2d)
-            output_dtype = input_2d.dtype
+            if output_dtype is None:
+                output_dtype = input_2d.dtype
         else:
             # Use pre-quantized FP8 input directly
             q_input = input_2d
-            output_dtype = torch.bfloat16
+            if output_dtype is None:
+                output_dtype = torch.bfloat16
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
             q_input,
             weight,
