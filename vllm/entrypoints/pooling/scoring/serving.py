@@ -7,13 +7,14 @@ from fastapi.responses import JSONResponse
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
+from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.renderers import BaseRenderer
 
-from .io_processor import BiEncoderIOProcessor
+from .io_processor import ScoringIOProcessors
 from .protocol import (
     RerankDocument,
     RerankRequest,
@@ -39,8 +40,11 @@ class ServingScores(PoolingServing):
         model_config: ModelConfig,
         renderer: BaseRenderer,
         chat_template_config: ChatTemplateConfig,
-    ) -> BiEncoderIOProcessor:
-        return BiEncoderIOProcessor(
+    ) -> PoolingIOProcessor:
+        score_type = model_config.score_type
+        assert score_type in ScoringIOProcessors
+        processor_cls = ScoringIOProcessors[score_type]
+        return processor_cls(
             model_config=model_config,
             renderer=renderer,
             chat_template_config=chat_template_config,

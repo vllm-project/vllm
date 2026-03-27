@@ -5,6 +5,7 @@
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
+from vllm.entrypoints.pooling.scoring.io_processor import ScoringIOProcessors
 from vllm.renderers import BaseRenderer
 from vllm.tasks import SupportedTask
 
@@ -25,10 +26,9 @@ def init_pooling_io_processors(
 
         processors.append(("embed", EmbedIOProcessor))
 
-    if model_config.score_type == "bi-encoder":
-        from vllm.entrypoints.pooling.scoring.io_processor import BiEncoderIOProcessor
-
-        processors.append(("bi-encoder", BiEncoderIOProcessor))
+    score_type = model_config.score_type
+    if score_type is not None and score_type in ScoringIOProcessors:
+        processors.append((score_type, ScoringIOProcessors[score_type]))
 
     return {
         task: processor_cls(

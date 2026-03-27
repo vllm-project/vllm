@@ -14,12 +14,16 @@ from vllm.entrypoints.pooling.typing import (
 )
 from vllm.inputs import EngineInput
 from vllm.renderers import TokenizeParams
-from vllm.tasks import PoolingTask
+from vllm.tasks import PoolingTask, ScoreType
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from .protocol import RerankRequest, ScoreRequest, ScoreResponse
 from .typing import ScoreInputs, ScoringData
-from .utils import validate_score_input
+from .utils import (
+    compute_maxsim_score,
+    score_data_to_prompts,
+    validate_score_input,
+)
 
 ScoringServeContext: TypeAlias = PoolingServeContext[ScoreResponse]
 
@@ -123,17 +127,14 @@ class BiEncoderIOProcessor(PoolingIOProcessor):
         self,
         scoring_data: ScoringData,
         tok_params: TokenizeParams,
-    ):
-        prompts: list[str] = []
-        for maybe_text in scoring_data.data_1 + scoring_data.data_2:
-            if not isinstance(maybe_text, str):
-                raise NotImplementedError(
-                    "Embedding scores currently do not support multimodal input."
-                )
-            prompts.append(maybe_text)
+    ) -> Sequence[EngineInput]:
+        data_1 = score_data_to_prompts(scoring_data.data_1, "query", self.model_config)
+        data_2 = score_data_to_prompts(
+            scoring_data.data_2, "document", self.model_config
+        )
 
         return self._preprocess_completion_offline(
-            prompts=prompts, tok_params=tok_params
+            prompts=data_1 + data_2, tok_params=tok_params
         )
 
     def _post_process(self, outputs: list[PoolingRequestOutput], offset: int):
@@ -165,3 +166,53 @@ class BiEncoderIOProcessor(PoolingIOProcessor):
                 )
             )
         return final_res_batch
+
+
+class LateInteractionIOProcessor(BiEncoderIOProcessor):
+    name = "late-interaction"
+    pooling_task: PoolingTask = "token_embed"
+
+    def _post_process(self, outputs: list[PoolingRequestOutput], offset: int):
+        # Split into query and document embeddings
+        emb_data_1 = outputs[:offset]
+        emb_data_2 = outputs[offset:]
+
+        # Expand queries if 1:N scoring
+        if len(emb_data_1) == 1:
+            emb_data_1 = emb_data_1 * len(emb_data_2)
+
+        tokenizer = self.renderer.get_tokenizer()
+
+        final_res_batch: list[PoolingRequestOutput] = []
+        padding: list[int] = []
+        if (pad_token_id := tokenizer.pad_token_id) is not None:
+            padding = [pad_token_id]
+
+        # Compute MaxSim scores
+        for emb_1, emb_2 in zip(emb_data_1, emb_data_2):
+            # emb_1.outputs.data: [query_len, dim]
+            # emb_2.outputs.data: [doc_len, dim]
+            q_emb = emb_1.outputs.data
+            d_emb = emb_2.outputs.data
+
+            maxsim_score = compute_maxsim_score(q_emb, d_emb)
+
+            tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids
+
+            final_res_batch.append(
+                PoolingRequestOutput(
+                    request_id=f"{emb_1.request_id}_{emb_2.request_id}",
+                    outputs=maxsim_score,
+                    prompt_token_ids=tokens,
+                    num_cached_tokens=emb_1.num_cached_tokens + emb_2.num_cached_tokens,
+                    finished=True,
+                )
+            )
+        return final_res_batch
+
+
+ScoringIOProcessors: dict[ScoreType, type[PoolingIOProcessor]] = {
+    "bi-encoder": BiEncoderIOProcessor,
+    "late-interaction": LateInteractionIOProcessor,
+    # "cross_encoder": CrossEncoderIOProcessor,
+}

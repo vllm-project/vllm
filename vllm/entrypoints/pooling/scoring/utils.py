@@ -1,8 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterable
 from typing import cast
 
 import torch
+
+from vllm import PromptType, TextPrompt
+from vllm.config import ModelConfig
+from vllm.entrypoints.chat_utils import (
+    BaseMultiModalItemTracker,
+    ChatCompletionContentPartParam,
+    ChatCompletionContentPartTextParam,
+    ConversationMessage,
+    MultiModalItemTracker,
+    _parse_chat_message_content_parts,
+)
+from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 
 from .typing import (
     ScoreContentPartParam,
@@ -78,3 +91,98 @@ def validate_score_input(
     score_input_2 = _validate_mm_score_input(data_2, is_multimodal_model, architecture)
     _validate_score_input_lens(score_input_1, score_input_2)
     return ScoringData(data_1=score_input_1, data_2=score_input_2)
+
+
+def score_data_to_prompts(
+    data_list: list[ScoreData],
+    role: str,
+    model_config: ModelConfig,
+) -> list[PromptType]:
+    """Convert a list of ScoreData into PromptType objects.
+
+    For plain text inputs, returns the string directly.
+    For multimodal inputs (list of content parts), parses them into
+    a :class:`TextPrompt` with attached ``multi_modal_data`` /
+    ``multi_modal_uuids``.
+
+    This is used by late-interaction scoring where each query/document
+    is encoded independently.
+    """
+    prompts: list[PromptType] = []
+    for data in data_list:
+        if isinstance(data, str):
+            prompts.append(data)
+        else:
+            text, mm_data, mm_uuids = parse_score_data_single(data, role, model_config)
+            prompt: TextPrompt = TextPrompt(prompt=text)
+            if mm_data is not None:
+                prompt["multi_modal_data"] = mm_data
+            if mm_uuids is not None:
+                prompt["multi_modal_uuids"] = mm_uuids
+            prompts.append(prompt)
+    return prompts
+
+
+def _ensure_str(content: list[ConversationMessage]) -> str:
+    """Extract a single string prompt from parsed conversation content."""
+    assert len(content) == 1
+    prompt = content[0]["content"]
+    if prompt is not None and isinstance(prompt, str):
+        return cast(str, prompt)
+    raise ValueError(f"Only string content is supported, but got {content}.")
+
+
+def _parse_score_content(
+    role: str,
+    data: ScoreData,
+    mm_tracker: BaseMultiModalItemTracker,
+) -> list[ConversationMessage]:
+    parts: Iterable[ChatCompletionContentPartParam]
+    if isinstance(data, str):
+        parts = [ChatCompletionContentPartTextParam(type="text", text=data)]
+    else:
+        parts = cast(Iterable[ChatCompletionContentPartParam], data)
+
+    mm_parser = mm_tracker.create_parser()
+
+    parse_res = _parse_chat_message_content_parts(
+        role=role,
+        parts=parts,
+        mm_tracker=mm_tracker,
+        wrap_dicts=False,
+        interleave_strings=False,
+    )
+
+    if parse_res:
+        return parse_res
+
+    mm_placeholder_storage = mm_parser.mm_placeholder_storage()
+
+    if (
+        len(mm_placeholder_storage) != 1
+        or len(next(iter(mm_placeholder_storage.values()))) != 1
+    ):
+        raise ValueError("Only one multi-modal item is supported")
+
+    return next(iter(mm_placeholder_storage.values()))[0]
+
+
+def parse_score_data_single(
+    data: ScoreData,
+    role: str,
+    model_config: ModelConfig,
+) -> tuple[str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
+    """Parse **one** ScoreData into a text prompt and its own multi-modal
+    data.
+
+    Unlike :func:`parse_score_data`, each call creates an **independent**
+    :class:`MultiModalItemTracker` so multi-modal items are kept separate.
+    This is the correct behaviour for late-interaction scoring, where
+    query and document are encoded independently.
+    """
+    mm_tracker = MultiModalItemTracker(model_config)
+    content = _parse_score_content(role, data, mm_tracker)
+
+    prompt = _ensure_str(content)
+    mm_items, mm_uuids = mm_tracker.resolve_items()
+    return prompt, mm_items, mm_uuids
