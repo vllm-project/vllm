@@ -253,8 +253,6 @@ void cutlass_gemm_blockwise_sm120_fp8_dispatch(torch::stable::Tensor& out,
   bool swap_ab = (M <= 64) || (M % 4 != 0);
 
   if (!swap_ab) {
-    // Use if constexpr to avoid instantiating the 64x64 tile config when
-    // scale factor layouts in the blockwise MMA collective).
     if (M <= 256) {
       using Gemm = typename sm120_blockwise_fp8_config_pingpong<OutType>::Gemm;
       return cutlass_gemm_caller_blockwise<Gemm>(
