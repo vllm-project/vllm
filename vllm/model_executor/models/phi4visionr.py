@@ -23,7 +23,6 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
-    ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
 )
@@ -52,6 +51,14 @@ logger = init_logger(__name__)
 
 IMAGE_TOKEN_INDEX = -200
 DEFAULT_IMAGE_TOKEN = "<image>"
+
+# The HF processor replaces "<image>" with IMAGE_TOKEN_INDEX (-200) in input_ids.
+# Negative token IDs cause OverflowError during decoding, so we remap to a real
+# in-vocabulary token.  The Phi-4-reasoning-vision tokenizer ships with reserved
+# dummy tokens (<|dummy_0|> … <|dummy_83|>); we reuse the first one as the
+# image placeholder.  This mirrors how Phi-3-vision uses its dedicated <|image|>
+# token (ID 32044).
+_IMAGE_TOKEN_ID = 100256  # <|dummy_0|> in the Phi-4 tokenizer
 
 
 # ---------------------------------------------------------------------------
@@ -148,17 +155,33 @@ class Phi4VisionRMultiModalProcessor(
             tok_kwargs=tok_kwargs,
         )
 
-        input_ids = processed["input_ids"]
-        assert isinstance(input_ids, torch.Tensor)
-        # The HF processor inserts IMAGE_TOKEN_INDEX (-200) as placeholder.
-        # Replace with a real token id that vLLM can handle during
-        # prompt-update matching. We use 0 as a temporary stand-in;
-        # _get_prompt_updates will expand these into the correct count.
-        input_ids = input_ids.clone()
-        input_ids.masked_fill_(input_ids == IMAGE_TOKEN_INDEX, 0)
-        processed["input_ids"] = input_ids
+        # The HF processor's tokenizer_image_token() replaces the "<image>"
+        # string with IMAGE_TOKEN_INDEX (-200) in input_ids.  This breaks
+        # vLLM's prompt-replacement pipeline which needs to find "<image>"
+        # as normal sub-tokens.  Re-tokenize with the plain tokenizer so
+        # that "<image>" stays as sub-tokens and can be located by
+        # PromptReplacement.
+        # NOTE: tokenizer.__call__() (not .encode()) must be used so that
+        # added/special tokens like <|user|>, <|end|> are kept as single IDs.
+        tokenizer = self.info.get_tokenizer()
+        new_ids = tokenizer(prompt).input_ids
+        processed["input_ids"] = torch.tensor([new_ids])
 
         return processed
+
+    def _hf_processor_applies_updates(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> bool:
+        # The HF processor replaces "<image>" with a single -200 placeholder
+        # but does NOT expand it into N vision-encoder tokens.  Since we also
+        # re-tokenize the prompt (see _call_hf_processor), prompt updates are
+        # never applied by the HF processor — vLLM handles the expansion via
+        # _apply_prompt_updates.
+        return False
 
     def _get_mm_fields_config(
         self,
@@ -178,13 +201,15 @@ class Phi4VisionRMultiModalProcessor(
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         def get_replacement(item_idx: int):
-            images = mm_items.get_items("image", ImageProcessorItems)
-            image_size = images.get_image_size(item_idx)
-            num_tokens = self.info.get_num_image_tokens(
-                image_width=image_size.width,
-                image_height=image_size.height,
-            )
-            return [0] * num_tokens
+            # Read the actual patch grid from the NaFlex processor's
+            # spatial_shapes output (same pattern as LFM2-VL).  This avoids
+            # predicting from raw image dimensions, which can diverge from
+            # the NaFlex resize/tile logic.
+            out_item = out_mm_kwargs["image"][item_idx]
+            spatial_shapes = out_item["spatial_shapes"].data
+            assert isinstance(spatial_shapes, torch.Tensor)
+            num_tokens = int(spatial_shapes.prod().item())
+            return [_IMAGE_TOKEN_ID] * num_tokens
 
         return [
             PromptReplacement(
@@ -208,6 +233,7 @@ class Phi4VisionRMultiModalProcessor(
 class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            "model.vision_tower.vision_tower.vision_model.head.": None,
             "model.vision_tower.vision_tower.": "vision_tower.",
             "model.mm_projector.0.": "multi_modal_projector.linear_1.",
             "model.mm_projector.2.": "multi_modal_projector.linear_2.",
@@ -274,7 +300,7 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.configure_mm_token_handling(
             vocab_size=config.vocab_size,  # type: ignore[attr-defined]
-            mm_token_ids=[],
+            mm_token_ids=[_IMAGE_TOKEN_ID],
         )
 
     def _packed_from_padded(
@@ -293,7 +319,12 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
         )
         cu_seqlens[1:] = valid_counts.cumsum(0)
         max_seqlen = valid_counts.max()
-        return pixel_values_packed, spatial_shapes, cu_seqlens, max_seqlen
+        return (
+            pixel_values_packed,
+            spatial_shapes.cpu(),
+            cu_seqlens,
+            max_seqlen,
+        )
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -320,6 +351,10 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
             max_seqlen=max_seqlen,
             select_layers=[-2],
         )
+
+        # Siglip2Model returns (1, total_tokens, hidden) — squeeze batch dim
+        if vision_features.dim() == 3:
+            vision_features = vision_features.squeeze(0)
 
         image_features = self.multi_modal_projector(vision_features)
 

@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 import pytest
 import regex as re
-from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from vllm.logprobs import SampleLogprobs
 from vllm.multimodal.image import rescale_image_size
@@ -16,11 +16,10 @@ from ....conftest import (
     PromptImageInput,
     VllmRunner,
 )
-from ....utils import large_gpu_test
+from ....utils import multi_gpu_test
 from ...utils import check_logprobs_close
 
 MODEL_ID = "microsoft/Phi-4-reasoning-vision-15B"
-models = [MODEL_ID]
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
     {
@@ -28,9 +27,13 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
         "cherry_blossom": "<|user|>\n<image>\nPlease infer the season with reason in details.<|end|>\n<|assistant|>\n",  # noqa: E501
     }
 )
-HF_MULTIIMAGE_IMAGE_PROMPT = "<|user|>\n<image>\n<image>\nDescribe these images.<|end|>\n<|assistant|>\n"  # noqa: E501
+HF_MULTIIMAGE_IMAGE_PROMPT = (
+    "<|user|>\n<image>\n<image>\nDescribe these images.<|end|>\n<|assistant|>\n"  # noqa: E501
+)
 
-target_dtype = "half"
+DTYPE = "half"
+MAX_TOKENS = 128
+NUM_LOGPROBS = 10
 
 
 def vllm_to_hf_output(
@@ -53,71 +56,93 @@ def vllm_to_hf_output(
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def run_test(
+def _build_single_image_inputs(
+    image_assets,
+) -> list[tuple[list[str], PromptImageInput]]:
+    """Build single-image inputs for all size_factors at once."""
+    images = [asset.pil_image for asset in image_assets]
+    all_inputs: list[tuple[list[str], PromptImageInput]] = []
+    for size_factors in [[1.0], [0.25, 0.5, 1.0]]:
+        for image, prompt in zip(images, HF_IMAGE_PROMPTS):
+            all_inputs.append(
+                (
+                    [prompt for _ in size_factors],
+                    [rescale_image_size(image, f) for f in size_factors],
+                )
+            )
+    return all_inputs
+
+
+def _build_multi_image_inputs(
+    image_assets,
+) -> list[tuple[list[str], PromptImageInput]]:
+    """Build multi-image inputs for all size_factors at once."""
+    images = [asset.pil_image for asset in image_assets]
+    all_inputs: list[tuple[list[str], PromptImageInput]] = []
+    for size_factors in [[1.0], [1.0, 1.0, 1.0], [0.25, 0.5, 1.0]]:
+        all_inputs.append(
+            (
+                [HF_MULTIIMAGE_IMAGE_PROMPT for _ in size_factors],
+                [
+                    [rescale_image_size(image, factor) for image in images]
+                    for factor in size_factors
+                ],
+            )
+        )
+    return all_inputs
+
+
+def _run_and_compare(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    inputs: Sequence[tuple[list[str], PromptImageInput]],
+    all_inputs: Sequence[tuple[list[str], PromptImageInput]],
     model: str,
-    *,
     max_model_len: int,
-    dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
     mm_limit: int,
-    tensor_parallel_size: int,
-    distributed_executor_backend: str | None = None,
 ):
-    # NOTE: run vLLM first, then HF. vLLM needs a fresh process without
-    # cuda initialization; running HF first would hurt the multiprocessing
+    """Load each runner once, run all inputs, then compare."""
+    # NOTE: run vLLM first, then HF.  vLLM needs a fresh process without
+    # cuda initialization; running HF first would break the multiprocessing
     # backend with fork method.
     with vllm_runner(
         model,
         runner="generate",
         max_model_len=max_model_len,
         max_num_seqs=2,
-        dtype=dtype,
+        dtype=DTYPE,
         limit_mm_per_prompt={"image": mm_limit},
-        tensor_parallel_size=tensor_parallel_size,
-        distributed_executor_backend=distributed_executor_backend,
+        tensor_parallel_size=2,
         trust_remote_code=True,
-        enforce_eager=True,
     ) as vllm_model:
         vllm_outputs_per_case = [
             vllm_model.generate_greedy_logprobs(
                 prompts,
-                max_tokens,
-                num_logprobs=num_logprobs,
+                MAX_TOKENS,
+                num_logprobs=NUM_LOGPROBS,
                 images=images,
             )
-            for prompts, images in inputs
+            for prompts, images in all_inputs
         ]
-
-    # TODO: enable HF comparison once the custom model is compatible
-    pytest.skip(
-        "HF custom model for Phi-4-reasoning-vision is not yet compatible"
-    )
 
     hf_model_kwargs = {"_attn_implementation": "sdpa"}
     with hf_runner(
         model,
-        dtype=dtype,
+        dtype=DTYPE,
         model_kwargs=hf_model_kwargs,
-        auto_cls="AutoModelForCausalLM",
+        auto_cls=AutoModelForCausalLM,
         trust_remote_code=True,
     ) as hf_model:
         hf_outputs_per_case = [
             hf_model.generate_greedy_logprobs_limit(
                 prompts,
-                max_tokens,
-                num_logprobs=num_logprobs,
+                MAX_TOKENS,
+                num_logprobs=NUM_LOGPROBS,
                 images=images,
             )
-            for prompts, images in inputs
+            for prompts, images in all_inputs
         ]
 
-    for hf_outputs, vllm_outputs in zip(
-        hf_outputs_per_case, vllm_outputs_per_case
-    ):
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_case, vllm_outputs_per_case):
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=vllm_outputs,
@@ -126,101 +151,29 @@ def run_test(
         )
 
 
-@large_gpu_test(min_gb=48)
-@pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize(
-    "size_factors",
-    [
-        [1.0],
-        [1.0, 1.0, 1.0],
-        [0.25, 0.5, 1.0],
-    ],
-)
-@pytest.mark.parametrize("dtype", [target_dtype])
-@pytest.mark.parametrize("max_model_len", [4096])
-@pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("num_logprobs", [10])
-def test_models(
-    hf_runner,
-    vllm_runner,
-    image_assets,
-    model,
-    size_factors,
-    dtype: str,
-    max_model_len: int,
-    max_tokens: int,
-    num_logprobs: int,
-) -> None:
-    images = [asset.pil_image for asset in image_assets]
-
-    inputs_per_image = [
-        (
-            [prompt for _ in size_factors],
-            [rescale_image_size(image, factor) for factor in size_factors],
-        )
-        for image, prompt in zip(images, HF_IMAGE_PROMPTS)
-    ]
-
-    run_test(
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("model", [MODEL_ID])
+def test_models(hf_runner, vllm_runner, image_assets, model) -> None:
+    all_inputs = _build_single_image_inputs(image_assets)
+    _run_and_compare(
         hf_runner,
         vllm_runner,
-        inputs_per_image,
+        all_inputs,
         model,
-        dtype=dtype,
-        max_model_len=max_model_len,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
+        max_model_len=4096,
         mm_limit=1,
-        tensor_parallel_size=1,
     )
 
 
-@large_gpu_test(min_gb=48)
-@pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize(
-    "size_factors",
-    [
-        [1.0],
-        [1.0, 1.0, 1.0],
-        [0.25, 0.5, 1.0],
-    ],
-)
-@pytest.mark.parametrize("dtype", [target_dtype])
-@pytest.mark.parametrize("max_model_len", [8192])
-@pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("num_logprobs", [10])
-def test_multi_images_models(
-    hf_runner,
-    vllm_runner,
-    image_assets,
-    model,
-    size_factors,
-    dtype: str,
-    max_model_len: int,
-    max_tokens: int,
-    num_logprobs: int,
-) -> None:
-    images = [asset.pil_image for asset in image_assets]
-
-    inputs_per_case = [
-        (
-            [HF_MULTIIMAGE_IMAGE_PROMPT for _ in size_factors],
-            [
-                [rescale_image_size(image, factor) for image in images]
-                for factor in size_factors
-            ],
-        ),
-    ]
-
-    run_test(
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("model", [MODEL_ID])
+def test_multi_images_models(hf_runner, vllm_runner, image_assets, model) -> None:
+    all_inputs = _build_multi_image_inputs(image_assets)
+    _run_and_compare(
         hf_runner,
         vllm_runner,
-        inputs_per_case,
+        all_inputs,
         model,
-        dtype=dtype,
-        max_model_len=max_model_len,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
+        max_model_len=8192,
         mm_limit=2,
-        tensor_parallel_size=1,
     )
