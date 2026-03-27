@@ -54,6 +54,18 @@ elif sys.platform.startswith("linux") and os.getenv("VLLM_TARGET_DEVICE") is Non
     if torch.version.hip is not None:
         VLLM_TARGET_DEVICE = "rocm"
         logger.info("Auto-detected ROCm")
+    elif ROCM_HOME is not None and CUDA_HOME is None:
+        # When pip build isolation installs the CUDA variant of PyTorch from
+        # PyPI, torch.version.hip will be None even on a ROCm system.  Fall
+        # back to the environment: if ROCM_HOME is set and CUDA_HOME is not,
+        # this is clearly a ROCm build.  (Fixes #20639)
+        VLLM_TARGET_DEVICE = "rocm"
+        logger.warning(
+            "PyTorch reports CUDA, but ROCM_HOME is set (%s) and "
+            "CUDA_HOME is not.  Treating this as a ROCm build.  "
+            "Install the ROCm PyTorch wheel to avoid this fallback.",
+            ROCM_HOME,
+        )
     elif torch.version.xpu is not None:
         VLLM_TARGET_DEVICE = "xpu"
         logger.info("Auto-detected XPU")
@@ -796,6 +808,12 @@ def _is_cuda() -> bool:
 
 
 def _is_hip() -> bool:
+    if VLLM_TARGET_DEVICE == "rocm":
+        # When VLLM_TARGET_DEVICE is explicitly "rocm" (either user-set or
+        # auto-detected via ROCM_HOME fallback), trust it even if
+        # torch.version.hip is None (pip build-isolation can install the
+        # wrong PyTorch variant).
+        return True
     return (
         VLLM_TARGET_DEVICE == "cuda" or VLLM_TARGET_DEVICE == "rocm"
     ) and torch.version.hip is not None
