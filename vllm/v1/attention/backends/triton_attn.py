@@ -33,6 +33,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -54,6 +55,7 @@ class TritonAttentionMetadata:
     #                                   |-- query_len ---|
 
     num_actual_tokens: int  # Number of tokens excluding padding.
+    num_decode_tokens: int
     max_query_len: int
     query_start_loc: torch.Tensor
     max_seq_len: int
@@ -206,6 +208,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         fast_build: bool = False,
     ) -> TritonAttentionMetadata:
         num_actual_tokens = common_attn_metadata.num_actual_tokens
+        _, _, num_decode_tokens, _ = split_decodes_and_prefills(
+            common_attn_metadata)
         max_query_len = common_attn_metadata.max_query_len
 
         max_seq_len = common_attn_metadata.max_seq_len
@@ -233,6 +237,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
         attn_metadata = TritonAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
+            num_decode_tokens=num_decode_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,

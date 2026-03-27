@@ -239,17 +239,25 @@ class Gemma3DecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        max_steering_tokens: int = 1,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         self.layer_idx = extract_layer_index(prefix)
 
-        # Activation steering buffer. Unconditional addition in forward();
-        # zero buffer is a no-op. Updated via .copy_() between forward
-        # passes, compatible with torch.compile and CUDA graphs.
+        # Activation steering: vector buffer updated via .copy_() between
+        # forward passes, compatible with torch.compile and CUDA graphs.
         self.register_buffer(
             "steering_vector",
             torch.zeros(1, config.hidden_size),
+            persistent=False,
+        )
+        # Decode-only mask buffer, updated in-place by the model runner
+        # before each forward pass.  Shape (max_tokens, 1).
+        # 1.0 for decode positions, 0.0 for prefill/padding.
+        self.register_buffer(
+            "steering_decode_mask",
+            torch.zeros(max_steering_tokens, 1),
             persistent=False,
         )
 
@@ -308,11 +316,11 @@ class Gemma3DecoderLayer(nn.Module):
         )
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_feedforward_layernorm(hidden_states)
-        # Activation steering — applied via custom op so that
-        # torch.compile treats it as opaque and reads num_decode_tokens
-        # from forward context at runtime (not baked as a constant).
+        # Decode-only activation steering via custom op.  The op is a
+        # splitting point for torch.compile so the real Python runs at
+        # runtime, reading the live mask buffer (not a baked constant).
         hidden_states = torch.ops.vllm.apply_steering(
-            hidden_states, self.steering_vector
+            hidden_states, self.steering_vector, self.steering_decode_mask
         )
         return hidden_states, residual
 
@@ -327,6 +335,8 @@ class Gemma3Model(nn.Module):
         self.config = config
         self.quant_config = quant_config
 
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
@@ -336,7 +346,11 @@ class Gemma3Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Gemma3DecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                cache_config,
+                quant_config,
+                prefix=prefix,
+                max_steering_tokens=max_tokens,
             ),
             prefix=f"{prefix}.layers",
         )

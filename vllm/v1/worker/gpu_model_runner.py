@@ -3000,6 +3000,41 @@ class GPUModelRunner(
             return self.model.unwrap()
         return self.model
 
+    def _update_steering_decode_mask(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        """Update decode-only steering masks for the current batch.
+
+        Sets mask positions to 1.0 for decode tokens and 0.0 for
+        prefill/padding.  Each steerable decoder layer has its own mask
+        buffer; in-place updates are visible to CUDA graph replays.
+        """
+        masks = getattr(self, "_steering_masks", None)
+        if masks is None:
+            # First call — discover steerable layers.
+            model = self.get_model()
+            self._steering_masks = [
+                mod.steering_decode_mask
+                for mod in model.modules()
+                if hasattr(mod, "steering_decode_mask")
+                and hasattr(mod, "steering_vector")
+            ]
+            masks = self._steering_masks
+        if not masks:
+            return
+
+        # Count decode tokens: decodes are scheduled with 1 token each
+        # and are ordered first in the batch.
+        num_decode_tokens = sum(
+            1
+            for n in scheduler_output.num_scheduled_tokens.values()
+            if n == 1
+        )
+        for mask in masks:
+            mask.zero_()
+            if num_decode_tokens > 0:
+                mask[:num_decode_tokens].fill_(1.0)
+
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         model = self.get_model()
         supported_tasks = list[GenerationTask]()
@@ -3992,6 +4027,9 @@ class GPUModelRunner(
         has_encoder_input = (
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
+
+        # Update decode-only steering mask before forward.
+        self._update_steering_decode_mask(scheduler_output)
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.

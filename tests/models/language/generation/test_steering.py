@@ -51,8 +51,10 @@ def test_steering_changes_output(vllm_runner, monkeypatch, model: str) -> None:
             target_layer = max(layer_info.keys()) // 2
             hidden_size = layer_info[target_layer]
 
-            # 3. Set steering via WorkerBase (same path as HTTP API)
-            vec = [10.0] * hidden_size
+            # 3. Set steering via WorkerBase (same path as HTTP API).
+            #    With dummy (random) weights the magnitude must be large
+            #    enough to overcome noise in the logit space.
+            vec = [500.0] * hidden_size
             llm.llm.collective_rpc(
                 "set_steering_vectors",
                 args=({target_layer: vec}, False),
@@ -67,6 +69,7 @@ def test_steering_changes_output(vllm_runner, monkeypatch, model: str) -> None:
 
             # 4. Clear steering and verify output matches baseline
             llm.llm.collective_rpc("clear_steering_vectors")
+            assert llm.llm.reset_prefix_cache()
 
             restored = llm.llm.generate([prompt], sampling)
             restored_tokens = list(restored[0].outputs[0].token_ids)
