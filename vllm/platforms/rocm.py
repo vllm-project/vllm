@@ -273,13 +273,14 @@ def use_rocm_custom_paged_attention(
         # gfx12 (RDNA4) supports FP8 KV cache via software dequant
         fp8_ok = kv_cache_dtype in ("fp8", "fp8_e4m3") and _ON_GFX12
         block_size_ok = block_size == 16 or (_ON_GFX12 and block_size == 32)
+        gqa_min = 1 if _ON_GFX12 else 3
         return (
             _ON_GFX1X
             and (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
             and head_size == 128
             and block_size_ok
-            and (gqa_ratio >= 1 and gqa_ratio <= 16)
+            and (gqa_ratio >= gqa_min and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
             and alibi_slopes is None
             and (kv_cache_dtype == "auto" or fp8_ok)
