@@ -428,13 +428,9 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     assert quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
     assert quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
 
-    # Shape check: when weights are padded (e.g. hidden_size padded for
-    # GFX950 swizzle), unpadded_K_w1 carries the original dimension.
-    expected_K_w1 = unpadded_K_w1 if unpadded_K_w1 is not None else w1.shape[-2]
-    assert hidden_states.shape[-1] == expected_K_w1, (
-        f"hidden_states K={hidden_states.shape[-1]} != "
-        f"expected K={expected_K_w1} (w1 K={w1.shape[-2]})"
-    )
+    # Shape check: weights are padded (e.g. hidden_size padded for
+    # GFX950 swizzle).
+    assert hidden_states.shape[-1] == w1.shape[-2]
     assert w2.shape[-1] == w1.shape[1]
 
     E, _, N = w1.shape
@@ -493,12 +489,6 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         unpadded_N=unpadded_N_w2,
         unpadded_K=unpadded_K_w2,
     )
-
-    # When hidden_size was padded for alignment (e.g. GFX950 swizzle),
-    # the kernel output has the padded dimension. Slice back to the
-    # original hidden_size so downstream layers see the expected shape.
-    if unpadded_N_w2 is not None and intermediate_cache3.shape[-1] != unpadded_N_w2:
-        intermediate_cache3 = intermediate_cache3[..., :unpadded_N_w2].contiguous()
 
     return intermediate_cache3
 
