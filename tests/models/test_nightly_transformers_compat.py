@@ -14,6 +14,7 @@ The fix is to call check_transformers_version() with check_max_version=False in
 both test_initialization.py and test_transformers.py so that these models are
 exercised (not silently skipped) when running with nightly transformers.
 """
+
 import pytest
 
 import tests.models.registry as reg
@@ -87,9 +88,8 @@ def test_test_initialization_uses_check_max_version_false():
     with check_max_version=False so models are not skipped with nightly transformers.
     """
     import os
-    path = os.path.join(
-        os.path.dirname(__file__), "test_initialization.py"
-    )
+
+    path = os.path.join(os.path.dirname(__file__), "test_initialization.py")
     with open(path) as f:
         content = f.read()
 
@@ -105,9 +105,8 @@ def test_test_transformers_uses_check_max_version_false():
     check_transformers_version with check_max_version=False.
     """
     import os
-    path = os.path.join(
-        os.path.dirname(__file__), "test_transformers.py"
-    )
+
+    path = os.path.join(os.path.dirname(__file__), "test_transformers.py")
     with open(path) as f:
         content = f.read()
 
