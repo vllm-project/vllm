@@ -197,11 +197,40 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             stream.wait_event(last_event)
         with torch.cuda.stream(stream):
             start_event.record(stream)
-            for src_tensor, dst_tensor, block_size_in_bytes in zip(
+            for tensor_idx, (src_tensor, dst_tensor, block_size_in_bytes) in enumerate(zip(
                 self.src_tensors,
                 self.dst_tensors,
                 self.tensor_block_size_in_bytes,
-            ):
+            )):
+                # DEBUG TEST: bounds check before swap_blocks to diagnose
+                # MLA segfault — remove once root cause is fixed
+                src_total_bytes = src_tensor.numel() * src_tensor.element_size()
+                dst_total_bytes = dst_tensor.numel() * dst_tensor.element_size()
+                for i in range(src_to_dst_tensor.size(0)):
+                    src_block = src_to_dst_tensor[i][0].item()
+                    dst_block = src_to_dst_tensor[i][1].item()
+                    src_end = (src_block + 1) * block_size_in_bytes
+                    dst_end = (dst_block + 1) * block_size_in_bytes
+                    if src_end > src_total_bytes or dst_end > dst_total_bytes:
+                        logger.error(
+                            "BOUNDS CHECK FAILED tensor_idx=%d "
+                            "src_block=%d dst_block=%d "
+                            "block_size_in_bytes=%d "
+                            "src_shape=%s dst_shape=%s "
+                            "src_total_bytes=%d dst_total_bytes=%d "
+                            "src_end=%d dst_end=%d",
+                            tensor_idx, src_block, dst_block,
+                            block_size_in_bytes,
+                            src_tensor.shape, dst_tensor.shape,
+                            src_total_bytes, dst_total_bytes,
+                            src_end, dst_end,
+                        )
+                        raise RuntimeError(
+                            f"swap_blocks OOB: tensor {tensor_idx}, "
+                            f"src_block={src_block}, dst_block={dst_block}, "
+                            f"block_size={block_size_in_bytes}, "
+                            f"src_bytes={src_total_bytes}, dst_bytes={dst_total_bytes}"
+                        )
                 ops.swap_blocks(
                     src_tensor,
                     dst_tensor,
