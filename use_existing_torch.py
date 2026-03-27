@@ -5,16 +5,28 @@ import argparse
 import glob
 import sys
 
-# Only strip targeted libraries when checking prefix
+# Only strip targeted libraries when checking prefix.
+# pyproject.toml dependencies can appear with double or single quotes and
+# with or without spaces around the version operator, so we cover all variants.
 TORCH_LIB_PREFIXES = (
     # requirements/*.txt/in
     "torch=",
     "torchvision=",
     "torchaudio=",
-    # pyproject.toml
+    # pyproject.toml – double-quoted, with/without space
+    '"torch==',
     '"torch =',
+    '"torchvision==',
     '"torchvision =',
+    '"torchaudio==',
     '"torchaudio =',
+    # pyproject.toml – single-quoted, with/without space
+    "'torch==",
+    "'torch =",
+    "'torchvision==",
+    "'torchvision =",
+    "'torchaudio==",
+    "'torchaudio =",
 )
 
 # Prefixes for torch-only mode: strip only the core torch package version pin,
@@ -22,8 +34,12 @@ TORCH_LIB_PREFIXES = (
 TORCH_ONLY_PREFIXES = (
     # requirements/*.txt/in
     "torch=",
-    # pyproject.toml
+    # pyproject.toml – double-quoted, with/without space
+    '"torch==',
     '"torch =',
+    # pyproject.toml – single-quoted, with/without space
+    "'torch==",
+    "'torch =",
 )
 
 

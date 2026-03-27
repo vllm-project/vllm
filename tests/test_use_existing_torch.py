@@ -12,6 +12,7 @@ use_existing_torch.py without any flag, causing torchvision and comment lines
 to be incorrectly stripped from requirements/cuda.txt, breaking the Docker
 build for arm64 (GH200) targets.
 """
+
 import os
 import sys
 import textwrap
@@ -21,7 +22,6 @@ import pytest
 # Add repo root to path so we can import use_existing_torch directly
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from use_existing_torch import main
-
 
 SAMPLE_CUDA_TXT = textwrap.dedent("""\
     # Common dependencies
@@ -154,6 +154,7 @@ def test_gh200_ci_uses_torch_only_flag():
     assert lines_with_script, "run-gh200-test.sh must invoke use_existing_torch.py"
     for line in lines_with_script:
         assert "--torch-only" in line, (
-            f"run-gh200-test.sh calls use_existing_torch.py without --torch-only: {line!r}\n"
+            f"run-gh200-test.sh calls use_existing_torch.py without "
+            f"--torch-only: {line!r}\n"
             "This causes torchvision to be stripped, breaking the GH200 Docker build."
         )
