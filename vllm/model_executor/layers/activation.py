@@ -129,8 +129,13 @@ class SiluAndMul(CustomOp):
 
     def __init__(self, *, compile_native: bool = True):
         super().__init__(compile_native=compile_native)
-        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        if current_platform.is_cuda_alike():
             self.op = torch.ops._C.silu_and_mul
+        elif current_platform.is_xpu():
+            try:
+                self.op = torch.ops._C.silu_and_mul
+            except AttributeError:
+                self._forward_method = self.forward_native
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
 
@@ -148,7 +153,9 @@ class SiluAndMul(CustomOp):
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+        if hasattr(self, 'op'):
+            return self.forward_cuda(x)
+        return self.forward_native(x)
 
 
 # --8<-- [start:mul_and_silu]
@@ -167,8 +174,13 @@ class MulAndSilu(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        if current_platform.is_cuda_alike():
             self.op = torch.ops._C.mul_and_silu
+        elif current_platform.is_xpu():
+            try:
+                self.op = torch.ops._C.mul_and_silu
+            except AttributeError:
+                self._forward_method = self.forward_native
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
 
@@ -185,7 +197,9 @@ class MulAndSilu(CustomOp):
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+        if hasattr(self, 'op'):
+            return self.forward_cuda(x)
+        return self.forward_native(x)
 
 
 # --8<-- [start:gelu_and_mul_sparse]
@@ -266,15 +280,19 @@ class GeluAndMul(CustomOp):
         self.approximate = approximate
         if approximate not in ("none", "tanh"):
             raise ValueError(f"Unknown approximate mode: {approximate}")
-        if (
-            current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
-            or current_platform.is_xpu()
-        ):
+        if current_platform.is_cuda_alike() or current_platform.is_cpu():
             if approximate == "none":
                 self.op = torch.ops._C.gelu_and_mul
             elif approximate == "tanh":
                 self.op = torch.ops._C.gelu_tanh_and_mul
+        elif current_platform.is_xpu():
+            try:
+                if approximate == "none":
+                    self.op = torch.ops._C.gelu_and_mul
+                elif approximate == "tanh":
+                    self.op = torch.ops._C.gelu_tanh_and_mul
+            except AttributeError:
+                self._forward_method = self.forward_native
         if current_platform.is_rocm() and approximate == "tanh":
             logger.warning_once(
                 "[ROCm] PyTorch's native GELU with tanh approximation is unstable "
@@ -299,7 +317,9 @@ class GeluAndMul(CustomOp):
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+        if hasattr(self, 'op'):
+            return self.forward_cuda(x)
+        return self.forward_native(x)
 
     def extra_repr(self) -> str:
         return f"approximate={repr(self.approximate)}"
@@ -382,12 +402,13 @@ class NewGELU(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if (
-            current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
-            or current_platform.is_xpu()
-        ):
+        if current_platform.is_cuda_alike() or current_platform.is_cpu():
             self.op = torch.ops._C.gelu_new
+        elif current_platform.is_xpu():
+            try:
+                self.op = torch.ops._C.gelu_new
+            except AttributeError:
+                self._forward_method = self.forward_native
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -400,7 +421,9 @@ class NewGELU(CustomOp):
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+        if hasattr(self, 'op'):
+            return self.forward_cuda(x)
+        return self.forward_native(x)
 
 
 # --8<-- [start:gelu_fast]
@@ -410,12 +433,13 @@ class FastGELU(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if (
-            current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
-            or current_platform.is_xpu()
-        ):
+        if current_platform.is_cuda_alike() or current_platform.is_cpu():
             self.op = torch.ops._C.gelu_fast
+        elif current_platform.is_xpu():
+            try:
+                self.op = torch.ops._C.gelu_fast
+            except AttributeError:
+                self._forward_method = self.forward_native
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -427,7 +451,9 @@ class FastGELU(CustomOp):
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+        if hasattr(self, 'op'):
+            return self.forward_cuda(x)
+        return self.forward_native(x)
 
 
 # --8<-- [start:quick_gelu]
@@ -438,12 +464,13 @@ class QuickGELU(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if (
-            current_platform.is_cuda_alike()
-            or current_platform.is_cpu()
-            or current_platform.is_xpu()
-        ):
+        if current_platform.is_cuda_alike() or current_platform.is_cpu():
             self.op = torch.ops._C.gelu_quick
+        elif current_platform.is_xpu():
+            try:
+                self.op = torch.ops._C.gelu_quick
+            except AttributeError:
+                self._forward_method = self.forward_native
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -455,7 +482,9 @@ class QuickGELU(CustomOp):
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+        if hasattr(self, 'op'):
+            return self.forward_cuda(x)
+        return self.forward_native(x)
 
 
 # --8<-- [start:relu2]
