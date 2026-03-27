@@ -59,10 +59,11 @@ class NgramProposer:
         # propose_tokens) are actually reached and compiled. Previously,
         # empty sampled_token_ids caused propose() to skip all requests,
         # deferring JIT compilation to the first real inference call.
-        warmup_tokens = np.array([[1, 2, 1, 2]], dtype=np.int32)
+        pattern = np.arange(1, self.min_n + 1, dtype=np.int32)
+        warmup_tokens = np.tile(pattern, 2).reshape(1, -1)
         self.propose(
             [[0]],
-            np.array([4], dtype=np.int32),
+            np.array([warmup_tokens.shape[1]], dtype=np.int32),
             warmup_tokens,
         )
 
