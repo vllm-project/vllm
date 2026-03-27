@@ -399,6 +399,7 @@ def async_tp_pass_on_test_model(
     # configure vllm config for SequenceParallelismPass
     vllm_config = VllmConfig()
     vllm_config.compilation_config = CompilationConfig(
+        custom_ops=["none", "+quant_fp8"],
         pass_config=PassConfig(
             fuse_gemm_comms=True,
         ),
