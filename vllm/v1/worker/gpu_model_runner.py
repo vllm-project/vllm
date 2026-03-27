@@ -137,6 +137,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVQuantMode,
     MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
@@ -6572,8 +6573,7 @@ class GPUModelRunner(
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
-                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+                num_blocks = kv_cache_config.num_blocks
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     num_blocks_per_kv_block = (
@@ -6581,38 +6581,59 @@ class GPUModelRunner(
                     )
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
-                    kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        kernel_num_blocks,
-                        kernel_block_size,
-                        kv_cache_spec.num_kv_heads,
-                        kv_cache_spec.head_size,
-                        cache_dtype_str=self.cache_config.cache_dtype,
-                    )
-                    dtype = kv_cache_spec.dtype
-                    try:
-                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
-                        assert len(kv_cache_stride_order) == len(kv_cache_shape)
-                    except (AttributeError, NotImplementedError):
-                        kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-                    # The allocation respects the backend-defined stride order
-                    # to ensure the semantic remains consistent for each
-                    # backend. We first obtain the generic kv cache shape and
-                    # then permute it according to the stride order which could
-                    # result in a non-contiguous tensor.
-                    kv_cache_shape = tuple(
-                        kv_cache_shape[i] for i in kv_cache_stride_order
-                    )
-                    # Maintain original KV shape view.
-                    inv_order = [
-                        kv_cache_stride_order.index(i)
-                        for i in range(len(kv_cache_stride_order))
-                    ]
-                    kv_caches[layer_name] = (
-                        kv_cache_raw_tensors[layer_name]
-                        .view(dtype)
-                        .view(kv_cache_shape)
-                        .permute(*inv_order)
-                    )
+                    # For INT8_PER_TOKEN, scales are packed into the same
+                    # allocation after each K/V data region.  Use as_strided
+                    # to create a data-only view that skips the scale bytes.
+                    if kv_cache_spec.kv_quant_mode == KVQuantMode.INT8_PER_TOKEN:
+                        dtype = kv_cache_spec.dtype
+                        nkv = kv_cache_spec.num_kv_heads
+                        hs = kv_cache_spec.head_size
+                        bs = kernel_block_size
+                        dtype_sz = get_dtype_size(dtype)
+                        data_per_kv = bs * nkv * hs * dtype_sz
+                        scale_per_kv = bs * get_dtype_size(torch.float32)
+                        kv_half = data_per_kv + scale_per_kv
+                        full_block = 2 * kv_half
+                        kv_caches[layer_name] = torch.as_strided(
+                            raw_tensor.view(dtype),
+                            size=(kernel_num_blocks, 2, bs, nkv, hs),
+                            stride=(
+                                full_block // dtype_sz,
+                                kv_half // dtype_sz,
+                                nkv * hs,
+                                hs,
+                                1,
+                            ),
+                        )
+                    else:
+                        kv_cache_shape = attn_backend.get_kv_cache_shape(
+                            kernel_num_blocks,
+                            kernel_block_size,
+                            kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.head_size,
+                            cache_dtype_str=self.cache_config.cache_dtype,
+                        )
+                        dtype = kv_cache_spec.dtype
+                        try:
+                            kv_cache_stride_order = (
+                                attn_backend.get_kv_cache_stride_order()
+                            )
+                            assert len(kv_cache_stride_order) == len(kv_cache_shape)
+                        except (AttributeError, NotImplementedError):
+                            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+                        kv_cache_shape = tuple(
+                            kv_cache_shape[i] for i in kv_cache_stride_order
+                        )
+                        inv_order = [
+                            kv_cache_stride_order.index(i)
+                            for i in range(len(kv_cache_stride_order))
+                        ]
+                        kv_caches[layer_name] = (
+                            kv_cache_raw_tensors[layer_name]
+                            .view(dtype)
+                            .view(kv_cache_shape)
+                            .permute(*inv_order)
+                        )
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
@@ -6672,25 +6693,29 @@ class GPUModelRunner(
                         stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
                     )
 
-    def _allocate_auxiliary_buffers(
+    def _create_packed_scale_views(
         self,
         kv_caches: dict[str, torch.Tensor],
         kernel_block_sizes: list[int],
-    ) -> dict[str, dict[str, "torch.Tensor"]]:
-        """Allocate auxiliary buffers described by KVCacheSpec.
+    ) -> dict[str, dict[str, torch.Tensor]]:
+        """Create scale tensor views into the packed KV cache allocation.
 
-        Iterates attention groups, reads ``auxiliary_buffer_specs`` from each
-        spec, and allocates ``(kernel_num_blocks, *spec.shape_per_block)``
-        tensors using the kernel-level block dimensions.
+        For INT8_PER_TOKEN, per-token scales are stored directly after
+        each K/V data region within the same memory allocation.  This
+        method creates ``as_strided`` views for the scale regions so
+        that attention kernels can access them.  Because the scales
+        share the same underlying storage as the KV data, KV cache
+        transfers (e.g. for disaggregated prefill/decode) automatically
+        move the scales along with the data.
 
-        In hybrid models (HMA) with virtual block splitting, the
-        kernel block size may be smaller than the logical block size,
-        resulting in more (but smaller) physical blocks.  The auxiliary
-        buffers must match the physical layout so that kernels can index
-        them via the block table.
+        Per-block memory layout (int8 bytes)::
+
+            [K data: bs * nkv * hs][K scales: bs * 4]
+            [V data: bs * nkv * hs][V scales: bs * 4]
 
         Returns:
-            Mapping of layer_name -> {buffer_name -> tensor}.
+            Mapping of layer_name -> {"k_scale_cache": Tensor,
+            "v_scale_cache": Tensor}.
         """
         result: dict[str, dict[str, torch.Tensor]] = {}
         num_blocks = self.kv_cache_config.num_blocks
@@ -6698,34 +6723,59 @@ class GPUModelRunner(
             kv_cache_spec = group.kv_cache_spec
             if not isinstance(kv_cache_spec, AttentionSpec):
                 continue
-            # EncoderOnly and trailing groups may not have an entry
-            # in kernel_block_sizes (they are skipped during
-            # prepare_kernel_block_sizes).
+            if kv_cache_spec.kv_quant_mode != KVQuantMode.INT8_PER_TOKEN:
+                continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
 
-            # Compute kernel-level block dimensions for virtual splitting.
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
             ratio = kv_cache_spec.block_size // kernel_bs
             kernel_num_blocks = num_blocks * ratio
 
-            # Use the kernel-adjusted spec so shape_per_block reflects
-            # the physical block size rather than the logical one.
-            kernel_spec = kv_cache_spec.copy_with_new_block_size(kernel_bs)
-            aux_specs = kernel_spec.auxiliary_buffer_specs
-            if not aux_specs:
-                continue
+            num_kv_heads = kv_cache_spec.num_kv_heads
+            head_size = kv_cache_spec.head_size
+            dtype_size = get_dtype_size(kv_cache_spec.dtype)
+            scale_dtype_size = get_dtype_size(torch.float32)  # 4
+
+            # Bytes per K (or V) half-block: data + scales.
+            data_per_kv = kernel_bs * num_kv_heads * head_size * dtype_size
+            scale_per_kv = kernel_bs * scale_dtype_size
+            kv_half = data_per_kv + scale_per_kv
+            full_block = 2 * kv_half  # K+V
+
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
-                buffers: dict[str, torch.Tensor] = {}
-                for aux in aux_specs:
-                    buffers[aux.name] = torch.zeros(
-                        (kernel_num_blocks, *aux.shape_per_block),
-                        dtype=aux.dtype,
-                        device=self.device,
-                    )
-                result[layer_name] = buffers
+                kv_cache = kv_caches[layer_name]
+                raw = kv_cache.untyped_storage()
+
+                # Create float32 views into the scale regions via
+                # as_strided on the raw storage.  The underlying memory
+                # is shared with the int8 KV data tensor.
+                base_tensor = torch.tensor(
+                    [], dtype=torch.float32, device=self.device
+                ).set_(raw)
+
+                k_scales = torch.as_strided(
+                    base_tensor,
+                    size=(kernel_num_blocks, kernel_bs),
+                    stride=(full_block // scale_dtype_size, 1),
+                    storage_offset=data_per_kv // scale_dtype_size,
+                )
+                v_scales = torch.as_strided(
+                    base_tensor,
+                    size=(kernel_num_blocks, kernel_bs),
+                    stride=(full_block // scale_dtype_size, 1),
+                    storage_offset=(kv_half + data_per_kv) // scale_dtype_size,
+                )
+                # Zero-init the scales (important for unused slots).
+                k_scales.zero_()
+                v_scales.zero_()
+
+                result[layer_name] = {
+                    "k_scale_cache": k_scales,
+                    "v_scale_cache": v_scales,
+                }
         return result
 
     def initialize_kv_cache_tensors(
@@ -6782,14 +6832,16 @@ class GPUModelRunner(
             num_attn_module,
         )
 
-        # Allocate and bind auxiliary buffers (e.g. per-token scale caches).
+        # Create and bind packed scale views for per-token quantized caches.
+        # The scale tensors are as_strided views into the same allocation
+        # as the KV data, so transfers move everything together.
         forward_context = self.compilation_config.static_forward_context
-        aux_buffers = self._allocate_auxiliary_buffers(kv_caches, kernel_block_sizes)
-        # Propagate auxiliary buffers to shared KV cache layers.
+        scale_views = self._create_packed_scale_views(kv_caches, kernel_block_sizes)
+        # Propagate scale views to shared KV cache layers.
         for layer_name, target in self.shared_kv_cache_layers.items():
-            if target in aux_buffers:
-                aux_buffers[layer_name] = aux_buffers[target]
-        for layer_name, buffers in aux_buffers.items():
+            if target in scale_views:
+                scale_views[layer_name] = scale_views[target]
+        for layer_name, buffers in scale_views.items():
             forward_context[layer_name].impl.bind_auxiliary_buffers(buffers)
 
         return kv_caches

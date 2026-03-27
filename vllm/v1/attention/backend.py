@@ -730,13 +730,13 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         return get_kv_quant_mode(self.kv_cache_dtype)
 
     def bind_auxiliary_buffers(self, buffers: dict[str, torch.Tensor]) -> None:
-        """Bind pre-allocated auxiliary buffers (e.g. scale caches).
+        """Bind packed scale views (e.g. per-token scale caches).
 
         Called by the model runner after KV cache allocation.  The
-        *buffers* dict maps ``AuxBufferSpec.name`` to a pre-allocated
-        tensor of shape ``(num_blocks, *spec.shape_per_block)``.
+        *buffers* dict maps buffer names (e.g. ``"k_scale_cache"``)
+        to ``as_strided`` views into the packed KV cache allocation.
 
-        Override in subclasses that use auxiliary buffers.
+        Override in subclasses that use per-token quantization.
         """
 
     @abstractmethod

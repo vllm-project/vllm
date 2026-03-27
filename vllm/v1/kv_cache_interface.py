@@ -58,20 +58,6 @@ def kv_cache_uses_per_token_scales(kv_cache_dtype: str) -> bool:
 
 
 @dataclass(frozen=True)
-class AuxBufferSpec:
-    """Describes one auxiliary buffer allocated alongside the KV cache.
-
-    The model runner uses these specs to pre-allocate tensors of shape
-    ``(num_blocks, *shape_per_block)`` and bind them to the attention
-    implementation via ``AttentionImpl.bind_auxiliary_buffers()``.
-    """
-
-    name: str  # e.g. "k_scale_cache"
-    dtype: torch.dtype  # e.g. torch.float32
-    shape_per_block: tuple[int, ...]  # e.g. (block_size,)
-
-
-@dataclass(frozen=True)
 class KVCacheSpec:
     """
     A base class for specifying the KV cache format of one layer.
@@ -84,11 +70,32 @@ class KVCacheSpec:
     def page_size_bytes(self) -> int:
         """
         The size of a page with `block_size` tokens in bytes.
+        Does NOT include packed scale bytes — use
+        :attr:`allocation_size_per_block` for memory budgeting.
 
         Returns:
             The page size
         """
         raise NotImplementedError
+
+    @property
+    def packed_scale_bytes_per_block(self) -> int:
+        """Extra bytes per block for packed per-token scales.
+
+        Returns 0 by default.  Override in subclasses that pack
+        quantization scales into the KV cache allocation.
+        """
+        return 0
+
+    @property
+    def allocation_size_per_block(self) -> int:
+        """Total bytes to allocate per block: data + packed scales.
+
+        Use this (not ``page_size_bytes``) when computing how many
+        blocks fit in a given memory budget and when sizing raw
+        tensor allocations.
+        """
+        return self.page_size_bytes + self.packed_scale_bytes_per_block
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
@@ -98,39 +105,6 @@ class KVCacheSpec:
             The KV cache size in bytes
         """
         raise NotImplementedError
-
-    @property
-    def auxiliary_buffer_specs(self) -> list[AuxBufferSpec]:
-        """Structured descriptions of auxiliary buffers for this cache format.
-
-        Override in subclasses that need auxiliary buffers (e.g.
-        per-token quantization scale caches).  The model runner
-        allocates tensors of shape ``(num_blocks, *spec.shape_per_block)``
-        for each entry and binds them to the attention implementation.
-        """
-        return []
-
-    @property
-    def auxiliary_memory_per_block(self) -> int:
-        """Extra per-block memory not stored in the KV cache tensor itself.
-
-        Derived from :attr:`auxiliary_buffer_specs`.  Factored into the
-        block count calculation but NOT into ``page_size_bytes``.
-        """
-        return sum(
-            prod(s.shape_per_block) * get_dtype_size(s.dtype)
-            for s in self.auxiliary_buffer_specs
-        )
-
-    @property
-    def total_memory_per_block(self) -> int:
-        """Total per-block memory: KV cache tensor + auxiliary buffers.
-
-        Use this instead of ``page_size_bytes`` when computing
-        how many blocks fit in a given memory budget, so that
-        auxiliary buffers are never accidentally omitted.
-        """
-        return self.page_size_bytes + self.auxiliary_memory_per_block
 
     def copy_with_new_block_size(self, block_size: int) -> Self:
         """
@@ -166,22 +140,12 @@ class AttentionSpec(KVCacheSpec):
         return real_page_size
 
     @property
-    def auxiliary_buffer_specs(self) -> list[AuxBufferSpec]:
-        """Auxiliary buffers for quantized KV cache formats.
-
-        Each quantization mode defines its own set of auxiliary buffers.
-        The model runner allocates these and binds them to the attention
-        implementation via ``bind_auxiliary_buffers()``.
-        """
+    def packed_scale_bytes_per_block(self) -> int:
         if self.kv_quant_mode == KVQuantMode.INT8_PER_TOKEN:
-            # One float32 scale per token (shared across all KV heads).
-            shape = (self.block_size,)
-            return [
-                AuxBufferSpec("k_scale_cache", torch.float32, shape),
-                AuxBufferSpec("v_scale_cache", torch.float32, shape),
-            ]
-
-        return []
+            # 2 scales per token (K and V), each float32 (4 bytes).
+            # Packed into the same allocation after each K/V data region.
+            return 2 * self.block_size * get_dtype_size(torch.float32)
+        return 0
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -497,9 +461,9 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
 
     @property
-    def auxiliary_memory_per_block(self) -> int:
+    def allocation_size_per_block(self) -> int:
         return sum(
-            spec.auxiliary_memory_per_block for spec in self.kv_cache_specs.values()
+            spec.allocation_size_per_block for spec in self.kv_cache_specs.values()
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
