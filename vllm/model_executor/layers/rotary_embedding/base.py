@@ -261,17 +261,22 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         if key is None:
             return self.forward_native(positions, query, key)
         else:
-            from vllm import _custom_ops as ops
+            try:
+                from vllm import _custom_ops as ops
 
-            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-            ops.rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                cos_sin_cache,
-                self.is_neox_style,
-            )
+                cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+                ops.rotary_embedding(
+                    positions,
+                    query,
+                    key,
+                    self.head_size,
+                    cos_sin_cache,
+                    self.is_neox_style,
+                )
+            except (AttributeError, NotImplementedError):
+                # _C.rotary_embedding not registered on XPU simulators;
+                # fall back to pure-PyTorch implementation.
+                return self.forward_native(positions, query, key)
         return query, key
 
     def forward_cpu(

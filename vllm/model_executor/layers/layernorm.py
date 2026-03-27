@@ -386,7 +386,9 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.forward_cuda(x, residual)
+        # _C.rms_norm / _C.fused_add_rms_norm are not registered for XPU;
+        # use the pure-PyTorch path which works on any device.
+        return self.forward_native(x, residual)
 
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
