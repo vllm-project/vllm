@@ -234,7 +234,7 @@ class MistralToolParser(ToolParser):
         match tool_choice, json_schema is not None:
             case MistralToolChoiceEnum.none, True:
                 lark_grammar = grammar_factory.get_lark_for_json_schema(
-                    json_schema=json_schema
+                    template=template, json_schema=json_schema
                 )
             case _, _:
                 lark_grammar = grammar_factory.get_lark_from_jinja(
@@ -243,6 +243,7 @@ class MistralToolParser(ToolParser):
                     tools=tools,
                     json_schema=json_schema,
                     parallel_tool_calls=request.parallel_tool_calls,
+                    json_only=False,
                 )
 
         request.structured_outputs = StructuredOutputsParams(grammar=lark_grammar)
