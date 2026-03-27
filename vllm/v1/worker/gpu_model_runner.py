@@ -6779,9 +6779,7 @@ class GPUModelRunner(
 
         # Allocate and bind auxiliary buffers (e.g. per-token scale caches).
         forward_context = self.compilation_config.static_forward_context
-        aux_buffers = self._allocate_auxiliary_buffers(
-            kv_caches, kernel_block_sizes
-        )
+        aux_buffers = self._allocate_auxiliary_buffers(kv_caches, kernel_block_sizes)
         # Propagate auxiliary buffers to shared KV cache layers.
         for layer_name, target in self.shared_kv_cache_layers.items():
             if target in aux_buffers:

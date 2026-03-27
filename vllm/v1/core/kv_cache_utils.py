@@ -1142,8 +1142,7 @@ def get_kv_cache_config_from_groups(
         # Use the max across groups so every group's auxiliary
         # requirement is satisfied.
         effective_page_size = max(
-            group.kv_cache_spec.total_memory_per_block
-            for group in kv_cache_groups
+            group.kv_cache_spec.total_memory_per_block for group in kv_cache_groups
         )
         assert group_size > 0, "group_size must be greater than 0"
         num_blocks = get_num_blocks(

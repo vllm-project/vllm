@@ -499,8 +499,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     @property
     def auxiliary_memory_per_block(self) -> int:
         return sum(
-            spec.auxiliary_memory_per_block
-            for spec in self.kv_cache_specs.values()
+            spec.auxiliary_memory_per_block for spec in self.kv_cache_specs.values()
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
