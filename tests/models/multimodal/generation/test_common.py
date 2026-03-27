@@ -517,6 +517,12 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
+        # TODO: Remove skip once model has been upstreamed to Transformers
+        marks=[
+            pytest.mark.skip(
+                reason="Custom model code tries to access data from meta-tensor"
+            )
+        ],
     ),
     "intern_vl-video": VLMTestInfo(
         models=[
@@ -529,6 +535,12 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
         num_logprobs=10 if current_platform.is_rocm() else 5,
+        # TODO: Remove skip once model has been upstreamed to Transformers
+        marks=[
+            pytest.mark.skip(
+                reason="Custom model code tries to access data from meta-tensor"
+            )
+        ],
     ),
     "intern_vl-hf": VLMTestInfo(
         models=["OpenGVLab/InternVL3-1B-hf"],
@@ -575,6 +587,8 @@ VLM_TEST_SETTINGS = {
         hf_model_kwargs={"device_map": "auto"},
         patch_hf_runner=model_utils.isaac_patch_hf_runner,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        # TODO: Remove skip once model has been upstreamed to Transformers
+        marks=[pytest.mark.skip(reason="Custom model imports deleted object")],  # noqa: E501
     ),
     "kimi_vl": VLMTestInfo(
         models=["moonshotai/Kimi-VL-A3B-Instruct"],
@@ -943,6 +957,12 @@ VLM_TEST_SETTINGS = {
                 limit_mm_per_prompt={"image": 2},
             )
             for inp in custom_inputs.different_patch_input_cases_internvl()
+        ],
+        # TODO: Remove skip once model has been upstreamed to Transformers
+        marks=[
+            pytest.mark.skip(
+                reason="Custom model code tries to access data from meta-tensor"
+            )
         ],
     ),
     "llava_onevision-multiple-images": VLMTestInfo(
