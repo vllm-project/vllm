@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextvars
-import threading
 import time
 from abc import abstractmethod
-from collections.abc import Generator, Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -13,123 +11,74 @@ from typing import TYPE_CHECKING, Any, overload
 import torch
 from typing_extensions import TypeVar
 
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
-from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
     EmbeddingItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.renderers import TokenizeParams
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 from vllm.utils.jsontree import JSONTree, json_map_leaves
+from vllm.utils.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:
     from transformers.configuration_utils import PretrainedConfig
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
-    from vllm.config import ModelConfig, ObservabilityConfig
+    from vllm.config import ModelConfig
+    from vllm.renderers import TokenizeParams
 else:
     PretrainedConfig = object
     BatchFeature = object
     ProcessorMixin = object
 
     ModelConfig = object
-    ObservabilityConfig = object
+    TokenizeParams = object
 
 logger = init_logger(__name__)
 
 
-_request_id_context: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "_request_id_context", default=None
-)
-
-
-def get_current_request_id() -> str | None:
-    """Get the current request_id from the context, if available."""
-    return _request_id_context.get()
-
-
-@contextmanager
-def set_request_id(request_id: str) -> Generator[None, None, None]:
-    """Context manager to set the request_id for the current context."""
-    token = _request_id_context.set(request_id)
-    try:
-        yield
-    finally:
-        _request_id_context.reset(token)
-
-
 @dataclass
-class MultiModalProcessorTimingStats:
-    """Per-request timing statistics for multimodal processor stages."""
+class TimingContext:
+    """Helper class to record execution times during multi-modal processing."""
 
-    hf_processor_time: float = 0.0
-    """Time spent in HuggingFace processor calls (seconds)."""
+    enabled: bool = True
+    """If disabled, `TimingContext.record` becomes a no-op."""
 
-    hashing_time: float = 0.0
-    """Time spent computing multimodal item hashes (seconds)."""
+    stage_secs: dict[str, float] = field(default_factory=dict)
+    """The execution time (in seconds) for each processing stage."""
 
-    cache_lookup_time: float = 0.0
-    """Time spent in cache lookups and merges (seconds)."""
+    @property
+    def total_secs(self) -> float:
+        return sum(self.stage_secs.values())
 
-    prompt_update_time: float = 0.0
-    """Time spent applying prompt updates and finding placeholders (seconds)."""
+    @contextmanager
+    def record(self, stage: str):
+        """Record the execution time for a processing stage."""
+        if not self.enabled:
+            yield
+            return
 
-    preprocessor_total_time: float = 0.0
-    """Total preprocessing time (seconds)."""
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = time.perf_counter() - start_time
+            self.stage_secs.setdefault(stage, 0.0)
+            self.stage_secs[stage] += elapsed
 
-    def to_dict(self) -> dict[str, float]:
-        """Convert stats to a dictionary for JSON serialization."""
-        return {
-            "hf_processor_time": self.hf_processor_time,
-            "hashing_time": self.hashing_time,
-            "cache_lookup_time": self.cache_lookup_time,
-            "prompt_update_time": self.prompt_update_time,
-            "preprocessor_total_time": self.preprocessor_total_time,
+    def get_stats_dict(self):
+        stats_dict = {
+            f"{stage}_secs": time_s for stage, time_s in self.stage_secs.items()
         }
+        stats_dict["preprocessor_total_secs"] = self.total_secs
 
-
-@contextmanager
-def timed_preprocessor_operation(ctx: "InputProcessingContext", stage_name: str):
-    """
-    Context manager to time an operation using the context's timing stats.
-
-    The request_id is automatically retrieved from the context variable,
-    so it doesn't need to be passed as a parameter.
-
-    Args:
-        ctx: The InputProcessingContext containing the timing stats registry.
-        stage_name: Name of the stage being timed.
-    """
-    request_id = get_current_request_id()
-    if ctx is None or request_id is None:
-        yield
-        return
-
-    stats = ctx.get_timing_stats(request_id)
-    if stats is None:
-        yield
-        return
-
-    start_time = time.perf_counter()
-    try:
-        yield
-    finally:
-        elapsed = time.perf_counter() - start_time
-        if stage_name == "hf_processor":
-            stats.hf_processor_time += elapsed
-        elif stage_name == "hashing":
-            stats.hashing_time += elapsed
-        elif stage_name == "cache_lookup":
-            stats.cache_lookup_time += elapsed
-        elif stage_name == "prompt_update":
-            stats.prompt_update_time += elapsed
-        stats.preprocessor_total_time += elapsed
+        return stats_dict
 
 
 _T = TypeVar("_T")
@@ -149,21 +98,6 @@ class InputProcessingContext:
 
     tokenizer: TokenizerLike | None
     """The tokenizer used to tokenize the inputs."""
-
-    observability_config: "ObservabilityConfig | None" = field(
-        default=None, compare=False, repr=False
-    )
-    """Configuration for observability features."""
-
-    timing_stats_registry: dict[str, MultiModalProcessorTimingStats] = field(
-        default_factory=dict, compare=False, repr=False
-    )
-    """Registry for storing timing stats keyed by request_id."""
-
-    _timing_stats_registry_lock: threading.Lock = field(
-        default_factory=threading.Lock, compare=False, repr=False
-    )
-    """Lock for thread-safe access to timing_stats_registry."""
 
     def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
@@ -260,17 +194,18 @@ class InputProcessingContext:
 
             typ = ProcessorMixin
 
-        from vllm.tokenizers.mistral import MistralTokenizer
-
         tokenizer = self.tokenizer
-        if isinstance(tokenizer, MistralTokenizer):
-            tokenizer = tokenizer.transformers_tokenizer
+        if is_mistral_tokenizer(tokenizer):
+            tokenizer = tokenizer.transformers_tokenizer  # type: ignore[union-attr]
+
+        merged_kwargs = self.get_merged_mm_kwargs(kwargs)
+        merged_kwargs.pop("tokenizer", None)
 
         return cached_processor_from_config(
             self.model_config,
             processor_cls=typ,
             tokenizer=tokenizer,
-            **kwargs,
+            **merged_kwargs,
         )
 
     def init_processor(
@@ -283,12 +218,7 @@ class InputProcessingContext:
         Initialize a HuggingFace-like processor class, merging the
         keyword arguments with those in the model's configuration.
         """
-        mm_config = self.model_config.get_multimodal_config()
-        base_kwargs = mm_config.mm_processor_kwargs
-        if base_kwargs is None:
-            base_kwargs = {}
-
-        merged_kwargs = {**base_kwargs, **kwargs}
+        merged_kwargs = self.get_merged_mm_kwargs(kwargs)
 
         return typ(**merged_kwargs)
 
@@ -312,13 +242,13 @@ class InputProcessingContext:
 
     def call_hf_processor(
         self,
-        hf_processor: ProcessorMixin,
+        hf_processor: Callable[..., BatchFeature] | ProcessorMixin,
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
         *,
         num_tries: int = 1,
         max_tries: int = 5,
-    ) -> BatchFeature | JSONTree:
+    ) -> BatchFeature:
         """
         Call `hf_processor` on the prompt `data`
         (text, image, audio...) with configurable options `kwargs`.
@@ -333,9 +263,10 @@ class InputProcessingContext:
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
+        allowed_kwargs.setdefault("return_tensors", "pt")
 
         try:
-            output = hf_processor(**data, **allowed_kwargs, return_tensors="pt")
+            output = hf_processor(**data, **allowed_kwargs)
         except Exception as exc:
             # See https://github.com/huggingface/tokenizers/issues/537
             if (
@@ -371,7 +302,7 @@ class InputProcessingContext:
 
         if isinstance(output, BatchFeature):
             output_ = self._postprocess_output(output.data)
-            return BatchFeature(output_)
+            return BatchFeature(output_)  # type: ignore
 
         logger.warning_once(
             "%s did not return `BatchFeature`. "
@@ -380,72 +311,7 @@ class InputProcessingContext:
             type(hf_processor).__name__,
         )
 
-        return self._postprocess_output(output)
-
-    def get_timing_stats(
-        self, request_id: str
-    ) -> MultiModalProcessorTimingStats | None:
-        """
-        Get timing stats for a request.
-        """
-        if (
-            self.observability_config is None
-            or not self.observability_config.enable_mm_processor_stats
-        ):
-            return None
-        with self._timing_stats_registry_lock:
-            return self.timing_stats_registry.get(request_id)
-
-    def create_timing_stats(self, request_id: str) -> MultiModalProcessorTimingStats:
-        """
-        Create and store timing stats in the registry for a request.
-
-        This should be called at the start of processing for a request.
-        The stats object is created immediately and stored in the registry.
-        """
-        if (
-            self.observability_config is None
-            or not self.observability_config.enable_mm_processor_stats
-        ):
-            return MultiModalProcessorTimingStats()
-
-        with self._timing_stats_registry_lock:
-            if request_id in self.timing_stats_registry:
-                raise ValueError(
-                    f"Timing stats already exist for request_id: {request_id}"
-                )
-            stats = MultiModalProcessorTimingStats()
-            self.timing_stats_registry[request_id] = stats
-            return stats
-
-    def clear_timing_stats_registry(self) -> int:
-        """
-        Clear all stats from the registry. Returns the number of stats cleared.
-        """
-        if (
-            self.observability_config is None
-            or not self.observability_config.enable_mm_processor_stats
-        ):
-            return 0
-        with self._timing_stats_registry_lock:
-            count = len(self.timing_stats_registry)
-            self.timing_stats_registry.clear()
-            return count
-
-    def get_all_timing_stats(self) -> dict[str, dict[str, float]]:
-        """
-        Get all timing stats as a dictionary for API endpoints.
-        """
-        if (
-            self.observability_config is None
-            or not self.observability_config.enable_mm_processor_stats
-        ):
-            return {}
-        with self._timing_stats_registry_lock:
-            return {
-                rid: stats.to_dict()
-                for rid, stats in self.timing_stats_registry.items()
-            }
+        return self._postprocess_output(output)  # type: ignore
 
 
 class BaseProcessingInfo:
@@ -475,6 +341,8 @@ class BaseProcessingInfo:
 
     def get_default_tok_params(self) -> TokenizeParams:
         """Construct the default parameters for tokenization."""
+        from vllm.renderers import TokenizeParams
+
         model_config = self.ctx.model_config
         encoder_config = model_config.encoder_config or {}
 
@@ -587,8 +455,7 @@ class BaseProcessingInfo:
         validate: bool = True,
     ) -> MultiModalDataItems:
         """
-        Normalize
-        [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
+        Normalize [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
         to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
         before passing them to
         [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].

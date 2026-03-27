@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utilities for downloading and initializing model weights."""
 
+import asyncio
 import concurrent.futures
 import fnmatch
 import glob
@@ -9,6 +10,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Generator
@@ -29,11 +31,14 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm import envs
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
-from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.distributed import get_tensor_model_parallel_rank, get_world_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     get_quantization_config,
+)
+from vllm.model_executor.model_loader.ep_weight_filter import (
+    should_skip_weight,
 )
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
@@ -80,7 +85,18 @@ def enable_hf_transfer():
             pass
 
 
-enable_hf_transfer()
+def enable_xet_high_performance():
+    """automatically activates xet high performance mode"""
+    if "HF_XET_HIGH_PERFORMANCE" not in os.environ:
+        huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
+
+
+if hasattr(huggingface_hub.constants, "HF_XET_HIGH_PERFORMANCE"):
+    # Transformers v5
+    enable_xet_high_performance()
+else:
+    # Transformers v4
+    enable_hf_transfer()
 
 
 class DisabledTqdm(tqdm):
@@ -241,6 +257,8 @@ def convert_bin_to_safetensor_file(
 def get_quant_config(
     model_config: ModelConfig, load_config: LoadConfig
 ) -> QuantizationConfig:
+    if model_config.quantization is None:
+        raise ValueError("Model quantization method is not specified in the config.")
     quant_cls = get_quantization_config(model_config.quantization)
 
     # GGUF doesn't have config file
@@ -276,11 +294,26 @@ def get_quant_config(
         )
 
     if hf_quant_config is not None:
-        return quant_cls.from_config(hf_quant_config)
+        # For modelopt_mixed, config.json's quantization_config may or may
+        # not contain the per-layer quantized_layers map.  Newer checkpoints
+        # embed it directly; older ones keep it only in hf_quant_config.json.
+        # If it is missing, fall through to the file-based loading path.
+        if (
+            model_config.quantization == "modelopt_mixed"
+            and "quantized_layers" not in hf_quant_config
+        ):
+            pass  # fall through to file-based loading below
+        else:
+            return quant_cls.from_config(hf_quant_config)
 
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
     hf_overrides = model_config.hf_overrides
+    if not isinstance(hf_overrides, dict):
+        raise ValueError(
+            "hf_overrides must be a dict for get_quant_config "
+            "to get the quantization config from it."
+        )
     quantization_config_file = hf_overrides.get("quantization_config_file", None)
     if quantization_config_file is not None:
         if hasattr(quant_cls, "from_config_file"):
@@ -354,8 +387,8 @@ def get_quant_config(
 
         if model_config.quantization == "bitsandbytes":
             config["adapter_name_or_path"] = model_config.model
-        elif model_config.quantization == "modelopt":
-            if config["producer"]["name"] == "modelopt":
+        elif model_config.quantization in ("modelopt", "modelopt_mixed"):
+            if config.get("producer", {}).get("name") == "modelopt":
                 return quant_cls.from_config(config)
             else:
                 raise ValueError(
@@ -451,6 +484,7 @@ def download_weights_from_hf(
     cache_dir: str | None,
     allow_patterns: list[str],
     revision: str | None = None,
+    subfolder: str | None = None,
     ignore_patterns: str | list[str] | None = None,
 ) -> str:
     """Download model weights from Hugging Face Hub.
@@ -463,6 +497,8 @@ def download_weights_from_hf(
             weight files. Files matched by any of the patterns will be
             downloaded.
         revision (Optional[str]): The revision of the model.
+        subfolder (Optional[str]): The subfolder within the model repository
+            to download weights from.
         ignore_patterns (Optional[Union[str, list[str]]]): The patterns to
             filter out the weight files. Files matched by any of the patterns
             will be ignored.
@@ -477,7 +513,11 @@ def download_weights_from_hf(
         # so we only have to call snapshot_download once.
         try:
             fs = HfFileSystem()
-            file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
+            file_list = fs.ls(
+                os.path.join(model_name_or_path, subfolder or ""),
+                detail=False,
+                revision=revision,
+            )
 
             # If downloading safetensors and an index file exists, use the
             # specific file names from the index to avoid downloading
@@ -489,6 +529,7 @@ def download_weights_from_hf(
                     filename=SAFE_WEIGHTS_INDEX_NAME,
                     cache_dir=cache_dir,
                     revision=revision,
+                    subfolder=subfolder,
                 )
                 with open(index_path) as f:
                     weight_map = json.load(f)["weight_map"]
@@ -549,6 +590,7 @@ def download_safetensors_index_file_from_hf(
     model_name_or_path: str,
     index_file: str,
     cache_dir: str | None,
+    subfolder: str | None = None,
     revision: str | None = None,
 ) -> None:
     """Download hf safetensors index file from Hugging Face Hub.
@@ -558,6 +600,8 @@ def download_safetensors_index_file_from_hf(
         index_file (str): The safetensors index file name
         cache_dir (Optional[str]): The cache directory to store the model
             weights. If None, will use HF defaults.
+        subfolder (Optional[str]): The subfolder within the model repository
+            to download weights from.
         revision (Optional[str]): The revision of the model.
     """
     # Use file lock to prevent multiple processes from
@@ -570,6 +614,7 @@ def download_safetensors_index_file_from_hf(
                 filename=index_file,
                 cache_dir=cache_dir,
                 revision=revision,
+                subfolder=subfolder,
                 local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
             )
         # If file not found on remote or locally, we should not fail since
@@ -684,19 +729,155 @@ def np_cache_weights_iterator(
         yield name, torch.from_numpy(param)
 
 
+def _checkpoints_fit_in_ram(files: list[str], threshold: float = 0.9) -> bool:
+    """Return True if total size of *files* fits within *threshold* of available RAM."""
+    if not files:
+        return True
+    import psutil
+
+    total_size = sum(os.path.getsize(f) for f in files)
+    available_ram = psutil.virtual_memory().available
+    fits = total_size <= threshold * available_ram
+    if not fits:
+        logger.warning(
+            "NFS detected but checkpoint total size (%.2f GiB) exceeds "
+            "%.0f%% of available RAM (%.2f GiB). Skipping prefetching checkpoints.",
+            total_size / (1024**3),
+            threshold * 100,
+            available_ram / (1024**3),
+        )
+    return fits
+
+
+def _is_nfs_path(files: list[str]) -> bool:
+    """Check whether the first file in *files* resides on an NFS
+    filesystem (Linux only)."""
+    if not files:
+        return False
+    try:
+        # Only the first file is checked — all checkpoint shards reside
+        # in the same directory and therefore on the same filesystem.
+        resolved = os.path.realpath(files[0])
+        best_mount = ""
+        best_fstype = ""
+        # /proc/mounts may contain nested mount points (e.g. "/" -> ext4,
+        # "/data" -> nfs4, "/data/local" -> ext4).  We pick the entry with
+        # the longest matching mount_point — the same "longest prefix match"
+        # rule the kernel uses to decide which filesystem serves a path.
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mount_point, fstype = parts[1], parts[2]
+                if (
+                    resolved == mount_point
+                    or resolved.startswith(os.path.join(mount_point, ""))
+                ) and len(mount_point) > len(best_mount):
+                    best_mount = mount_point
+                    best_fstype = fstype
+        return best_fstype in ("nfs", "nfs4")
+    except Exception:
+        # /proc/mounts is Linux-specific; on other OSes (or if the read
+        # fails for any reason) we fall back to "not NFS" rather than
+        # crashing model loading.
+        return False
+
+
+def _prefetch_checkpoint(file_path: str) -> None:
+    """Prefetch a checkpoint file into the OS page cache.
+
+    Reads the file in 16MB blocks so the kernel caches its pages before
+    workers load the same file.
+    """
+    block_size = 16 * 1024 * 1024  # 16MB
+    with open(file_path, "rb") as f:
+        while f.read(block_size):
+            pass
+
+
+def _prefetch_all_checkpoints(sorted_files: list[str]) -> None:
+    """Start prefetching checkpoint files into page cache in a background thread."""
+    if torch.distributed.is_initialized():
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+    else:
+        rank = 0
+        world_size = 1
+    num_prefetch_threads = 8
+    paths_to_prefetch = sorted_files[rank::world_size]
+    total_for_rank = len(paths_to_prefetch)
+
+    async def _prefetch_all() -> None:
+        semaphore = asyncio.Semaphore(num_prefetch_threads)
+        completed = 0
+        next_log_pct = 10
+
+        async def prefetch_one(path: str) -> None:
+            nonlocal completed, next_log_pct
+            try:
+                async with semaphore:
+                    await asyncio.to_thread(_prefetch_checkpoint, path)
+                completed += 1
+                if total_for_rank > 0 and next_log_pct <= 100:
+                    pct = 100 * completed / total_for_rank
+                    if pct >= next_log_pct:
+                        logger.info(
+                            "Prefetching checkpoint files: %d%% (%d/%d)",
+                            next_log_pct,
+                            completed,
+                            total_for_rank,
+                        )
+                        next_log_pct += 10
+            except Exception:
+                logger.warning(
+                    "Failed to prefetch checkpoint file %r.", path, exc_info=True
+                )
+
+        await asyncio.gather(*(prefetch_one(p) for p in paths_to_prefetch))
+
+    def _run_prefetch() -> None:
+        start = time.perf_counter()
+        asyncio.run(_prefetch_all())
+        elapsed = time.perf_counter() - start
+        logger.info(
+            "Prefetching checkpoint files into page cache finished in %.2fs",
+            elapsed,
+        )
+
+    logger.info("Prefetching checkpoint files into page cache started (in background)")
+    threading.Thread(target=_run_prefetch, daemon=True).start()
+
+
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
-    safetensors_load_strategy: str = "lazy",
+    safetensors_load_strategy: str | None = None,
+    local_expert_ids: set[int] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model safetensor files."""
+    """Iterate over the weights in the model safetensor files.
+
+    When *local_expert_ids* is provided, expert weights not belonging to
+    this rank are skipped **before** reading from disk, which drastically
+    reduces storage I/O for MoE models under EP.
+    """
     loading_desc = "Loading safetensors checkpoint shards"
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
 
+    sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
+
+    should_prefetch = safetensors_load_strategy == "prefetch" or (
+        safetensors_load_strategy is None
+        and _is_nfs_path(sorted_files)
+        and _checkpoints_fit_in_ram(sorted_files)
+    )
+    if should_prefetch:
+        _prefetch_all_checkpoints(sorted_files)
+
     leftover_state_dict: dict[str, torch.Tensor] = {}
     for st_file in tqdm(
-        sorted(hf_weights_files, key=_natural_sort_key),
+        sorted_files,
         desc=loading_desc,
         disable=not enable_tqdm(use_tqdm_on_load),
         bar_format=_BAR_FORMAT,
@@ -704,7 +885,9 @@ def safetensors_weights_iterator(
         if safetensors_load_strategy == "eager":
             with open(st_file, "rb") as f:
                 state_dict = load(f.read())
-            yield from state_dict.items()
+            for name, param in state_dict.items():
+                if not should_skip_weight(name, local_expert_ids):
+                    yield name, param
         elif safetensors_load_strategy == "torchao":
             # we can't load flattened torchao tensor subclasses directly into the model
             # instead we reconstruct the subclasses here before returning
@@ -720,6 +903,8 @@ def safetensors_weights_iterator(
             with safe_open(st_file, framework="pt") as f:
                 state_dict = {}
                 for name in f.keys():  # noqa: SIM118
+                    if should_skip_weight(name, local_expert_ids):
+                        continue
                     state_dict[name] = f.get_tensor(name)
 
                 # update with leftover tensor data from previous iteration, if any
@@ -736,6 +921,8 @@ def safetensors_weights_iterator(
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
+                    if should_skip_weight(name, local_expert_ids):
+                        continue
                     param = f.get_tensor(name)
                     yield name, param
 
@@ -752,7 +939,9 @@ def multi_thread_safetensors_weights_iterator(
         return result
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(_load_file, st_file) for st_file in hf_weights_files]
+        # Note to use generator here so we do not store all the loaded files in memory
+        # at the same time, which can cause OOM for large models.
+        futures = (executor.submit(_load_file, st_file) for st_file in hf_weights_files)
         futures_iter = tqdm(
             concurrent.futures.as_completed(futures),
             total=len(hf_weights_files),
@@ -763,7 +952,9 @@ def multi_thread_safetensors_weights_iterator(
 
         for future in futures_iter:
             state_dict = future.result()
-            yield from state_dict.items()
+            del future
+            for key in list(state_dict):
+                yield key, state_dict.pop(key)
 
 
 def runai_safetensors_weights_iterator(
@@ -872,6 +1063,46 @@ def fastsafetensors_weights_iterator(
             loader.close()
 
 
+def instanttensor_weights_iterator(
+    hf_weights_files: list[str],
+    use_tqdm_on_load: bool,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Iterate over the weights in the model safetensor files
+    using instanttensor library."""
+    try:
+        import instanttensor
+    except ImportError as e:
+        raise ImportError(
+            "Please install instanttensor via `pip install instanttensor`"
+        ) from e
+
+    if not current_platform.is_cuda():
+        raise ValueError("InstantTensor requires NVIDIA GPUs")
+
+    try:
+        world_group = get_world_group()
+    except AssertionError:
+        # Entering here only in unit tests where the world group is not initialized.
+        process_group = None
+    else:
+        process_group = world_group.device_group if world_group.world_size > 1 else None
+
+    device = current_platform.current_device()
+
+    with instanttensor.safe_open(
+        hf_weights_files, framework="pt", device=device, process_group=process_group
+    ) as f:
+        yield from tqdm(
+            f.tensors(),
+            desc="Loading safetensors using InstantTensor loader",
+            disable=not enable_tqdm(use_tqdm_on_load),
+            bar_format=_BAR_FORMAT,
+            position=tqdm._get_free_pos(),
+            total=len(f.keys()),
+            mininterval=1.0,
+        )
+
+
 def pt_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
@@ -923,7 +1154,7 @@ def multi_thread_pt_weights_iterator(
 
 
 def get_gguf_extra_tensor_names(
-    gguf_file: str, gguf_to_hf_name_map: dict[str, str]
+    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
 ) -> list[str]:
     reader = gguf.GGUFReader(gguf_file)
     expected_gguf_keys = set(gguf_to_hf_name_map.keys())
@@ -933,7 +1164,7 @@ def get_gguf_extra_tensor_names(
 
 
 def get_gguf_weight_type_map(
-    gguf_file: str, gguf_to_hf_name_map: dict[str, str]
+    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
 ) -> dict[str, str]:
     """
     Return GGUF mapped weight's name and its quant type
@@ -947,7 +1178,7 @@ def get_gguf_weight_type_map(
 
 
 def gguf_quant_weights_iterator(
-    gguf_file: str, gguf_to_hf_name_map: dict[str, str]
+    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """
     Iterate over the quant weights in the model gguf files and convert
@@ -1117,40 +1348,47 @@ def initialize_single_dummy_weight(
     high: float = 1e-3,
     seed: int = 1234,
 ) -> None:
-    if torch.is_floating_point(param):
-        if current_platform.is_tpu():
-            generator = torch.Generator(device="cpu")
-            generator.manual_seed(seed)
-            # Note: The param.uniform_ function cannot be used in this
-            # context because it demands more TPU HBM than directly copying
-            # from a CPU tensor.
-            # Note: We avoid using torch.rank_like as it doesn't currently
-            # support the generator argument.
-            param.copy_(
-                (high - low)
-                * torch.rand(
-                    param.shape,
-                    generator=generator,
-                    dtype=param.dtype,
-                    layout=param.layout,
-                    requires_grad=param.requires_grad,
-                    device="cpu",
-                )
-                + low
-            )
-            torch._sync(param)
-            return
+    if not torch.is_floating_point(param):
+        if current_platform.is_rocm():
+            # On ROCm, integer params (e.g. GPTQ qweight/qzeros) are left
+            # as torch.empty() by default, giving non-deterministic values
+            # across processes. Zero them for reproducibility.
+            param.zero_()
+        return
 
-        generator = torch.Generator(device=param.data.device)
+    if current_platform.is_tpu():
+        generator = torch.Generator(device="cpu")
         generator.manual_seed(seed)
-        if torch.finfo(param.data.dtype).bits < 16:
-            # uniform_ doesn't support < 16-bit datatypes (FP8)
-            dtype = param.data.dtype
-            tmp_param = param.data.to(torch.float16)
-            tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
-            param.data.copy_(tmp_param)
-        else:
-            param.uniform_(low, high, generator=generator)
+        # Note: The param.uniform_ function cannot be used in this
+        # context because it demands more TPU HBM than directly copying
+        # from a CPU tensor.
+        # Note: We avoid using torch.rank_like as it doesn't currently
+        # support the generator argument.
+        param.copy_(
+            (high - low)
+            * torch.rand(
+                param.shape,
+                generator=generator,
+                dtype=param.dtype,
+                layout=param.layout,
+                requires_grad=param.requires_grad,
+                device="cpu",
+            )
+            + low
+        )
+        torch._sync(param)
+        return
+
+    generator = torch.Generator(device=param.data.device)
+    generator.manual_seed(seed)
+    if torch.finfo(param.data.dtype).bits < 16:
+        # uniform_ doesn't support < 16-bit datatypes (FP8)
+        dtype = param.data.dtype
+        tmp_param = param.data.to(torch.float16)
+        tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
+        param.data.copy_(tmp_param)
+    else:
+        param.uniform_(low, high, generator=generator)
 
 
 def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:

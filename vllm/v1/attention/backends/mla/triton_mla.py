@@ -5,6 +5,7 @@ from typing import ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -12,15 +13,13 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonImpl,
     MLACommonMetadata,
 )
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import triton
 from vllm.utils.platform_utils import get_cu_count
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
+    MultipleOf,
     is_quantized_kv_cache,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
@@ -32,8 +31,25 @@ class TritonMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
     ]
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
+
+    @classmethod
+    def supports_block_size(cls, block_size: int | None) -> bool:
+        if block_size is None:
+            return True
+        return block_size % 16 == 0
 
     @staticmethod
     def get_name() -> str:
@@ -95,10 +111,11 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TritonMLAImpl"
             )
 
+        # For FP8 KV cache, we dequantize to BF16 on load inside the
+        # Triton kernel. Tell the common layer not to quantize queries
+        # to FP8 — we handle FP8 KV cache with BF16 queries (Mode 1).
         if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "TritonMLA V1 with FP8 KV cache not yet supported"
-            )
+            self.supports_quant_query_input = False
 
         self._sm_count = get_cu_count()
 
@@ -124,9 +141,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        if self.kv_cache_dtype.startswith("fp8"):
-            raise NotImplementedError("FP8 Triton MLA not yet supported")
-
         if type(q) is tuple:
             q = torch.cat(q, dim=-1)
 
@@ -138,7 +152,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         )
         lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
 
-        if vllm_is_batch_invariant():
+        # For batch invariance, use only 1 split to ensure deterministic reduction
+        if envs.VLLM_BATCH_INVARIANT:
             num_kv_splits = 1
         else:
             # Minimum work per split
@@ -176,7 +191,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
         PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
 
-        # Run MQA
+        # Run MQA — always pass layer scales. When KV cache is
+        # BF16 the kernel's `if dtype.is_fp8()` check is a no-op.
         decode_attention_fwd(
             q,
             kv_c_and_k_pe_cache,
@@ -189,6 +205,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             num_kv_splits,
             self.scale,
             PAGE_SIZE,
+            k_scale=layer._k_scale,
+            v_scale=layer._k_scale,
             is_mla=True,
         )
 

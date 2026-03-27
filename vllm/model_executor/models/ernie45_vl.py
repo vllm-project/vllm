@@ -40,6 +40,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.attention import (
@@ -58,7 +59,6 @@ from vllm.model_executor.layers.rotary_embedding.common import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -829,16 +829,31 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         spatial_conv_size = hf_config.spatial_conv_size
         temporal_conv_size = hf_config.temporal_conv_size
 
+        if self.ctx.model_config.trust_remote_code:
+            # Defined in HF Hub repo
+            min_pixels_key = "min_pixels"
+            max_pixels_key = "max_pixels"
+        else:
+            # Defined in Transformers library (requires v5.0 or above)
+            min_pixels_key = "shortest_edge"
+            max_pixels_key = "longest_edge"
+
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
-        size = mm_kwargs.get("size", image_processor.size)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {min_pixels_key: override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {max_pixels_key: override_max_pixels}
 
         if do_resize:
             resized_height, resized_width = smart_resize(
                 height=image_height,
                 width=image_width,
                 factor=patch_size * spatial_conv_size,
-                min_pixels=size["min_pixels"],
-                max_pixels=size["max_pixels"],
+                min_pixels=size[min_pixels_key],
+                max_pixels=size[max_pixels_key],
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:
@@ -1168,8 +1183,7 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1179,8 +1193,8 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
         return {
             "image": self._get_dummy_images(
@@ -1207,49 +1221,33 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
         num_videos: int,
         overrides: VideoDummyOptions | None = None,
     ):
-        if overrides:
-            if overrides.num_frames:
-                if overrides.num_frames > num_frames:
-                    logger.warning(
-                        "video.num_frames override (%d) exceeds model's "
-                        "maximum number of frames (%d), will be ignored",
-                        overrides.num_frames,
-                        num_frames,
-                    )
-                num_frames = min(num_frames, overrides.num_frames)
-            if overrides.width:
-                if overrides.width > width:
-                    logger.warning(
-                        "video.width override (%d) exceeds model's "
-                        "maximum width (%d), will be ignored",
-                        overrides.width,
-                        width,
-                    )
-                width = min(width, overrides.width)
-            if overrides.height:
-                if overrides.height > height:
-                    logger.warning(
-                        "video.height override (%d) exceeds model's "
-                        "maximum height (%d), will be ignored",
-                        overrides.height,
-                        height,
-                    )
-                height = min(height, overrides.height)
-        num_frames = max(num_frames, 2)  # ernie4.5-vl requires at least 2 frames
+        # ernie4.5-vl requires at least 2 frames
+        num_frames = max(num_frames, 2)
+        if overrides and overrides.num_frames:
+            overrides.num_frames = max(overrides.num_frames, 2)
 
-        video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
+        videos = super()._get_dummy_videos(
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            num_videos=num_videos,
+            overrides=overrides,
+        )
+        videos = [v.copy() for v in videos]
+
         video_items = []
-        for i in range(num_videos):
+        for video in videos:
+            video_num_frames = video.shape[0]
             video_metadata = {
                 "fps": 2.0,
-                "duration": num_frames / 2.0,
-                "total_num_frames": num_frames,
-                "frames_indices": [i for i in range(num_frames)],
+                "duration": video_num_frames / 2.0,
+                "total_num_frames": video_num_frames,
+                "frames_indices": list(range(video_num_frames)),
                 "video_backend": "opencv",
                 "do_sample_frames": False,
             }
-            video_item = (video.copy(), video_metadata)
-            video_items.append(video_item)
+            video_items.append((video, video_metadata))
+
         return video_items
 
 
@@ -1359,7 +1357,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        """compute logits"""
         return self.language_model.compute_logits(hidden_states)
 
     def _vision_forward(
@@ -1650,7 +1647,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
             self._set_visual_token_mask(input_ids)
@@ -1663,7 +1659,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(
