@@ -311,13 +311,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # another offers more tokens (e.g. fast CPU cache vs slow disk).
         # Configured via "load_weight" in each connector's config.
         assert vllm_config.kv_transfer_config is not None
-        connectors_cfg = (
-            vllm_config.kv_transfer_config.kv_connector_extra_config
-            .get("connectors", [])
+        connectors_cfg = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
         )
         self._load_weights: list[float] = [
-            float(cfg.get("kv_connector_extra_config", {})
-                      .get("load_weight", 1.0))
+            float(cfg.get("kv_connector_extra_config", {}).get("load_weight", 1.0))
             for cfg in connectors_cfg
         ]
         # Pad if config is shorter than connectors (shouldn't happen)
@@ -328,7 +326,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # only works if all children also support it.
         if not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             non_hma = [
-                type(c).__name__ for c in self._connectors
+                type(c).__name__
+                for c in self._connectors
                 if not isinstance(c, SupportsHMA)
             ]
             if non_hma:
@@ -340,9 +339,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 )
 
         # Human-readable names for per-connector Prometheus labels.
-        self._connector_names: list[str] = [
-            type(c).__name__ for c in self._connectors
-        ]
+        self._connector_names: list[str] = [type(c).__name__ for c in self._connectors]
 
         # Per-connector selection stats; flushed via get_kv_connector_stats().
         self._selection_stats = _SelectionStats()
@@ -509,12 +506,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         if isinstance(kv_connector_metadata, set):
             # Stock vLLM path — forward the raw set to every child.
             for c in self._connectors:
-                c.handle_preemptions(kv_connector_metadata)
+                c.handle_preemptions(kv_connector_metadata)  # type: ignore[arg-type]
         else:
-            assert isinstance(kv_connector_metadata,
-                              MultiKVConnectorMetadata)
-            for c, cm in zip(self._connectors,
-                             kv_connector_metadata.metadata):
+            assert isinstance(kv_connector_metadata, MultiKVConnectorMetadata)
+            for c, cm in zip(self._connectors, kv_connector_metadata.metadata):
                 c.handle_preemptions(cm)
 
     def get_finished_count(self) -> int | None:
@@ -763,7 +758,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # 1. Already-instantiated KVConnectorStats objects (same process)
         # 2. Serialized dicts (cross-process after serialization)
         # We need to reconstruct proper KVConnectorStats objects from dicts
-        reconstructed_data = {}
+        reconstructed_data: dict[str, KVConnectorStats] = {}
         for connector_name, stats_value in data.items():
             # Selection stats are internal to MultiConnector — reconstruct
             # directly without going through KVConnectorFactory.

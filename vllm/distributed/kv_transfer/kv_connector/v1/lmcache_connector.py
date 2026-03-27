@@ -349,9 +349,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
         Called when a request has finished for all kv cache groups.
         Flatten per-group block IDs and delegate to request_finished.
         """
-        flat_block_ids = [
-            bid for group_ids in block_ids for bid in group_ids
-        ]
+        flat_block_ids = [bid for group_ids in block_ids for bid in group_ids]
         return self._lmcache_engine.request_finished(request, flat_block_ids)
 
     def take_events(self) -> Iterable["KVCacheEvent"]:

@@ -374,7 +374,8 @@ class OffloadingConnectorWorker:
             # we currently do not support job failures
             job_id = transfer_result.job_id
             logger.debug(
-                "offloading worker finished job_id=%s success=%s transfer_type=%s transfer_size=%s",
+                "offloading worker finished job_id=%s success=%s "
+                "transfer_type=%s transfer_size=%s",
                 job_id,
                 transfer_result.success,
                 transfer_result.transfer_type,

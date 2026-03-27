@@ -67,8 +67,8 @@ def expand_block_ids(
             assert block_offset + block_count <= block_size_factor
             base_block_id = block_id * block_size_factor
             output_end_idx = output_idx + block_count
-            output[output_idx:output_end_idx] = (
-                base_block_id + np.arange(block_offset, block_offset + block_count)
+            output[output_idx:output_end_idx] = base_block_id + np.arange(
+                block_offset, block_offset + block_count
             )
             output_idx = output_end_idx
         assert output_idx == len(output)
@@ -98,24 +98,16 @@ def build_transfer_indices(
     assert dst_blocks.ndim == 1
 
     src_block_offsets = (
-        src_spec.block_offsets
-        if isinstance(src_spec, GPULoadStoreSpec)
-        else None
+        src_spec.block_offsets if isinstance(src_spec, GPULoadStoreSpec) else None
     )
     src_block_counts = (
-        src_spec.block_counts
-        if isinstance(src_spec, GPULoadStoreSpec)
-        else None
+        src_spec.block_counts if isinstance(src_spec, GPULoadStoreSpec) else None
     )
     dst_block_offsets = (
-        dst_spec.block_offsets
-        if isinstance(dst_spec, GPULoadStoreSpec)
-        else None
+        dst_spec.block_offsets if isinstance(dst_spec, GPULoadStoreSpec) else None
     )
     dst_block_counts = (
-        dst_spec.block_counts
-        if isinstance(dst_spec, GPULoadStoreSpec)
-        else None
+        dst_spec.block_counts if isinstance(dst_spec, GPULoadStoreSpec) else None
     )
 
     src_sub_block_count = (

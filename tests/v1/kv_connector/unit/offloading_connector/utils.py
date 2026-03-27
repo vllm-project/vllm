@@ -52,10 +52,10 @@ from vllm.v1.kv_offload.worker.worker import (
     TransferResult,
     TransferSpec,
 )
-from vllm.v1.worker.utils import prepare_kernel_block_sizes
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.worker.utils import prepare_kernel_block_sizes
 
 
 class MockLoadStoreSpec(LoadStoreSpec):
@@ -533,10 +533,8 @@ def create_hybrid_vllm_config(
     hybrid_chunk_size: int | None = None,
     block_size: int = 16,
 ) -> VllmConfig:
-    vllm_config = create_vllm_config(
-        block_size=block_size, max_num_batched_tokens=1000
-    )
-    extra_config = {
+    vllm_config = create_vllm_config(block_size=block_size, max_num_batched_tokens=1000)
+    extra_config: dict[str, Any] = {
         "spec_name": "MockOffloadingSpec",
         "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",
     }

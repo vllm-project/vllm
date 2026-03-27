@@ -1123,12 +1123,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 logger.warning(
                     "Negative prompt_tokens_by_source[%s]=%d "
                     "(external KV transfer accounting skew), clamping to 0",
-                    source, value,
+                    source,
+                    value,
                 )
                 value = 0
-            self.counter_prompt_tokens_by_source[source][engine_idx].inc(
-                value
-            )
+            self.counter_prompt_tokens_by_source[source][engine_idx].inc(value)
         self.counter_prompt_tokens_cached[engine_idx].inc(pts.cached_tokens)
         self.counter_prompt_tokens_recomputed[engine_idx].inc(pts.recomputed_tokens)
         self.counter_generation_tokens[engine_idx].inc(

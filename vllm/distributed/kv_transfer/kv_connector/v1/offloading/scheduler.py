@@ -42,9 +42,7 @@ class OffloadingConnectorScheduler:
         self.num_kv_groups = len(self.gpu_block_sizes)
         self.hash_block_size = spec.hash_block_size
         self.offloaded_block_size = spec.offloaded_block_size
-        self.max_concurrent_loads = (
-            spec.vllm_config.scheduler_config.max_num_seqs
-        )
+        self.max_concurrent_loads = spec.vllm_config.scheduler_config.max_num_seqs
         self.hash_block_size_factor: int | None = None
         if not self.hybrid_offload_enabled:
             assert self.offloaded_block_size % self.hash_block_size == 0
@@ -149,7 +147,9 @@ class OffloadingConnectorScheduler:
                 end_gpu_block_idx = end_chunk_idx * group_factor
                 if include_block_indices:
                     block_indices.append(start_gpu_block_idx)
-                block_groups_list.append(group_block_ids[start_gpu_block_idx:end_gpu_block_idx])
+                block_groups_list.append(
+                    group_block_ids[start_gpu_block_idx:end_gpu_block_idx]
+                )
             flat_block_ids, group_sizes = self._flatten_block_groups(block_groups_list)
             return GPULoadStoreSpec(
                 flat_block_ids,
@@ -157,11 +157,11 @@ class OffloadingConnectorScheduler:
                 block_indices=tuple(block_indices) if include_block_indices else None,
             )
 
-        flat_block_ids: list[int] = []
+        flat_block_ids: list[int] = []  # type: ignore[no-redef]
         flat_block_offsets: list[int] = []
         flat_block_counts: list[int] = []
-        group_sizes: list[int] = []
-        block_indices: list[int] = []
+        group_sizes: list[int] = []  # type: ignore[no-redef]
+        block_indices: list[int] = []  # type: ignore[no-redef]
         planner = self._get_hybrid_planner()
         if start_chunk_idx == 0:
             group_start_tokens = tuple(0 for _ in range(self.num_kv_groups))
@@ -198,7 +198,7 @@ class OffloadingConnectorScheduler:
                 group_entry_count += 1
                 unit_idx += sub_block_count
 
-            group_sizes.append(group_entry_count)
+            group_sizes.append(group_entry_count)  # type: ignore[attr-defined]
 
         return GPULoadStoreSpec(
             flat_block_ids,
@@ -232,12 +232,12 @@ class OffloadingConnectorScheduler:
                 self._hybrid_hash_lists[req_id] = offloaded_hashes
             return islice(offloaded_hashes, start_idx, end_idx)
 
-        offloaded_hashes = BlockHashListWithBlockSize(
+        simple_hashes = BlockHashListWithBlockSize(
             req.block_hashes,
             self.hash_block_size,
             self.offloaded_block_size,
         )
-        return islice(offloaded_hashes, start_idx, end_idx)
+        return islice(simple_hashes, start_idx, end_idx)
 
     def _get_num_offloaded_blocks(self, request: Request) -> int:
         if self.hybrid_offload_enabled:
@@ -309,7 +309,9 @@ class OffloadingConnectorScheduler:
             num_computed_tokens,
         )
         min_hit_tokens = (
-            self.hash_block_size if self.hybrid_offload_enabled else self.offloaded_block_size
+            self.hash_block_size
+            if self.hybrid_offload_enabled
+            else self.offloaded_block_size
         )
         if num_hit_tokens < min_hit_tokens:
             return 0, False
@@ -345,7 +347,9 @@ class OffloadingConnectorScheduler:
         computed_tokens_per_group: list[int] = []
         for group_index, group_blocks in enumerate(blocks.blocks):
             num_computed_gpu_blocks = sum(
-                block.block_hash is not None for block in group_blocks if not block.is_null
+                block.block_hash is not None
+                for block in group_blocks
+                if not block.is_null
             )
             computed_tokens_per_group.append(
                 num_computed_gpu_blocks * self.gpu_block_sizes[group_index]
@@ -379,7 +383,9 @@ class OffloadingConnectorScheduler:
         # prepare_load (which consumes the iterable) and also used to
         # update _reqs_being_loaded without a second HybridChunkBlockHashList.
         block_hashes = list(
-            self._get_block_hashes(request, start_idx=start_block_idx, end_idx=num_blocks)
+            self._get_block_hashes(
+                request, start_idx=start_block_idx, end_idx=num_blocks
+            )
         )
 
         src_spec = self.manager.prepare_load(block_hashes)
@@ -424,7 +430,9 @@ class OffloadingConnectorScheduler:
                 continue
 
             new_block_hashes = list(
-                self._get_block_hashes(req, start_idx=start_block_idx, end_idx=num_blocks)
+                self._get_block_hashes(
+                    req, start_idx=start_block_idx, end_idx=num_blocks
+                )
             )
             store_output = self.manager.prepare_store(new_block_hashes)
             if store_output is None:
@@ -469,9 +477,7 @@ class OffloadingConnectorScheduler:
                 # etc.  The old code appended chunk-by-chunk which
                 # interleaved groups and caused mamba sub-block
                 # offsets to bleed into attention-group entries.
-                per_group_ids: list[list[int]] = [
-                    [] for _ in range(self.num_kv_groups)
-                ]
+                per_group_ids: list[list[int]] = [[] for _ in range(self.num_kv_groups)]
                 per_group_offsets: list[list[int]] = [
                     [] for _ in range(self.num_kv_groups)
                 ]
@@ -481,9 +487,7 @@ class OffloadingConnectorScheduler:
                 group_sizes = [0] * self.num_kv_groups
                 for src_spec_part in src_specs:
                     start = 0
-                    for group_index, group_size in enumerate(
-                        src_spec_part.group_sizes
-                    ):
+                    for group_index, group_size in enumerate(src_spec_part.group_sizes):
                         end = start + group_size
                         per_group_ids[group_index].extend(
                             src_spec_part.block_ids[start:end].tolist()
@@ -522,12 +526,16 @@ class OffloadingConnectorScheduler:
                         offloaded_block_idx = start_block_idx + idx
                         gpu_block_idx = offloaded_block_idx * group_factor
                         for i in range(group_factor):
-                            src_group_block_ids.append(group_block_ids[gpu_block_idx + i])
+                            src_group_block_ids.append(
+                                group_block_ids[gpu_block_idx + i]
+                            )
                     src_block_groups.append(src_group_block_ids)
-                flat_src_block_ids, group_sizes = self._flatten_block_groups(
+                flat_src_block_ids, src_group_sizes = self._flatten_block_groups(
                     src_block_groups
                 )
-                src_spec = GPULoadStoreSpec(flat_src_block_ids, group_sizes=group_sizes)
+                src_spec = GPULoadStoreSpec(
+                    flat_src_block_ids, group_sizes=src_group_sizes
+                )
 
             reqs_to_store[req_id] = (src_spec, dst_spec)
             self._reqs_being_stored[req_id] |= block_hashes_to_store
@@ -565,13 +573,9 @@ class OffloadingConnectorScheduler:
                 )
                 timed_out.add(req_id)
                 self._load_start_times.pop(req_id)
-                block_hashes = self._reqs_being_loaded.pop(
-                    req_id, None
-                )
+                block_hashes = self._reqs_being_loaded.pop(req_id, None)
                 if block_hashes and self._blocks_being_loaded:
-                    self._blocks_being_loaded.difference_update(
-                        block_hashes
-                    )
+                    self._blocks_being_loaded.difference_update(block_hashes)
 
         return timed_out
 

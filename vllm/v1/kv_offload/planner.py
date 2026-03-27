@@ -25,8 +25,7 @@ class HybridOffloadPlanner:
             raise ValueError("fixed_chunk_size must be positive")
         if self.fixed_chunk_size < self.hash_block_size:
             raise ValueError(
-                "fixed_chunk_size must be greater than or equal to "
-                "hash_block_size"
+                "fixed_chunk_size must be greater than or equal to hash_block_size"
             )
         if not self.gpu_block_sizes:
             raise ValueError("gpu_block_sizes must be non-empty")
@@ -85,9 +84,7 @@ class HybridOffloadPlanner:
     def group_hash_factors(self) -> tuple[int | None, ...]:
         return self._group_hash_factors  # type: ignore[attr-defined]
 
-    def group_covered_tokens_for_chunk_count(
-        self, chunk_count: int
-    ) -> tuple[int, ...]:
+    def group_covered_tokens_for_chunk_count(self, chunk_count: int) -> tuple[int, ...]:
         if chunk_count < 0:
             raise ValueError("chunk_count must be non-negative")
         logical_tokens = (
@@ -122,7 +119,7 @@ class HybridOffloadPlanner:
                 high = mid - 1
         return low
 
-    def storeable_prefix_tokens(self, request_tokens: int) -> int:
+    def storable_prefix_tokens(self, request_tokens: int) -> int:
         if request_tokens <= 0:
             return 0
         return self.loadable_prefix_tokens(

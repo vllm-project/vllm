@@ -38,7 +38,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             * vllm_config.parallel_config.world_size
         )
 
-        kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factor
+        kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factors[0]
         self.num_blocks = (
             int(cpu_bytes_to_use) // kv_bytes_per_offloaded_block
             if kv_bytes_per_offloaded_block > 0
@@ -62,7 +62,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             assert len(self.gpu_block_size) == 1
             gpu_block_size = self.gpu_block_size[0]
-            offloaded_block_size = gpu_block_size * self.block_size_factor
+            offloaded_block_size = gpu_block_size * self.block_size_factors[0]
 
             self._manager = CPUOffloadingManager(
                 block_size=offloaded_block_size,
@@ -98,6 +98,9 @@ class CPUOffloadingSpec(OffloadingSpec):
             self._handlers = CpuGpuOffloadingHandlers(
                 kv_caches=kv_caches,
                 block_size_factor=self.block_size_factor,
+                attn_backends=attn_backends,
+                gpu_block_size=gpu_block_size,
+                cpu_block_size=gpu_block_size * self.block_size_factors[0],
                 num_cpu_blocks=self.num_blocks,
             )
 

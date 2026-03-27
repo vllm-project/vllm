@@ -128,7 +128,9 @@ class OffloadingSpec(ABC):
                         "%d tokens before any offloading can occur. "
                         "Consider setting max_model_len to a multiple "
                         "of hybrid_chunk_size.",
-                        i, gbs, chunk_size_int,
+                        i,
+                        gbs,
+                        chunk_size_int,
                         gbs,
                     )
             self.hybrid_planner = HybridOffloadPlanner(
@@ -139,8 +141,10 @@ class OffloadingSpec(ABC):
             self.hybrid_offload_enabled = True
             self.group_hash_block_size = self.hybrid_planner.offload_unit_sizes
             max_model_len = vllm_config.model_config.max_model_len
-            if (self.hybrid_planner.first_hashable_chunk_idx
-                    * chunk_size_int >= max_model_len):
+            if (
+                self.hybrid_planner.first_hashable_chunk_idx * chunk_size_int
+                >= max_model_len
+            ):
                 logger.error(
                     "Hybrid offloading is effectively disabled: "
                     "first_hashable_chunk_idx=%d requires %d tokens "
@@ -148,8 +152,7 @@ class OffloadingSpec(ABC):
                     "stored. Set max_model_len to a multiple of "
                     "hybrid_chunk_size=%d (e.g. %d).",
                     self.hybrid_planner.first_hashable_chunk_idx,
-                    self.hybrid_planner.first_hashable_chunk_idx
-                    * chunk_size_int,
+                    self.hybrid_planner.first_hashable_chunk_idx * chunk_size_int,
                     max_model_len,
                     chunk_size_int,
                     (max_model_len // chunk_size_int) * chunk_size_int,
@@ -163,8 +166,7 @@ class OffloadingSpec(ABC):
                     chunk_size_int,
                     self.hybrid_planner.offload_unit_sizes,
                     self.hybrid_planner.first_hashable_chunk_idx,
-                    (self.hybrid_planner.first_hashable_chunk_idx + 1)
-                    * chunk_size_int,
+                    (self.hybrid_planner.first_hashable_chunk_idx + 1) * chunk_size_int,
                 )
         else:
             for block_size in self.gpu_block_size:
@@ -193,7 +195,7 @@ class OffloadingSpec(ABC):
             )
 
         if self.hybrid_offload_enabled:
-            self.offloaded_block_size = int(hybrid_chunk_size)
+            self.offloaded_block_size = int(hybrid_chunk_size)  # type: ignore[arg-type]
             self.block_size_factors = tuple(
                 self.offloaded_block_size // block_size
                 if self.offloaded_block_size % block_size == 0

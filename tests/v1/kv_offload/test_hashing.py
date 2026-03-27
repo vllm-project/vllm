@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import torch
 
+from vllm import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.kv_offload.hashing import HybridChunkBlockHashList, RequestBlockHashList
 from vllm.v1.request import Request
-from vllm import SamplingParams
 
 
 def make_request(num_tokens: int, block_size: int = 16) -> Request:

@@ -54,9 +54,9 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             for field in ("reqs_to_load", "reqs_to_store", "reqs_to_flush")
         ):
             return OffloadingConnectorMetadata(
-                reqs_to_load=metadata.reqs_to_load,
-                reqs_to_store=metadata.reqs_to_store,
-                reqs_to_flush=metadata.reqs_to_flush,
+                reqs_to_load=metadata.reqs_to_load,  # type: ignore[attr-defined]
+                reqs_to_store=metadata.reqs_to_store,  # type: ignore[attr-defined]
+                reqs_to_flush=metadata.reqs_to_flush,  # type: ignore[attr-defined]
             )
         raise TypeError(
             "OffloadingConnector requires metadata with reqs_to_load, "

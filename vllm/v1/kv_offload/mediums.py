@@ -66,9 +66,7 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
             else None
         )
         self.block_counts: np.ndarray | None = (
-            np.array(block_counts, dtype=np.int64)
-            if block_counts is not None
-            else None
+            np.array(block_counts, dtype=np.int64) if block_counts is not None else None
         )
 
     @staticmethod

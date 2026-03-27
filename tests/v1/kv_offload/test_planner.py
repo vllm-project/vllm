@@ -27,9 +27,7 @@ def test_fixed_chunk_rejects_non_positive_size():
 
 
 def test_fixed_chunk_rejects_smaller_than_hash_block_size():
-    with pytest.raises(
-        ValueError, match="greater than or equal to hash_block_size"
-    ):
+    with pytest.raises(ValueError, match="greater than or equal to hash_block_size"):
         HybridOffloadPlanner(
             hash_block_size=1056,
             gpu_block_sizes=(65536, 1056),
@@ -51,17 +49,17 @@ def test_fixed_chunk_leaves_indivisible_large_groups_unsplit():
     assert planner.chunk_count_for_tokens(50_000) == 1
 
 
-def test_storeable_prefix_uses_common_fully_covered_units():
+def test_storable_prefix_uses_common_fully_covered_units():
     planner = HybridOffloadPlanner(
         hash_block_size=16,
         gpu_block_sizes=(65536, 65536, 65536, 1056),
         fixed_chunk_size=16384,
     )
 
-    assert planner.storeable_prefix_tokens(10_000) == 0
-    assert planner.storeable_prefix_tokens(16_384) == 15_840
-    assert planner.storeable_prefix_tokens(20_000) == 16_384
-    assert planner.storeable_prefix_tokens(33_000) == 32_736
+    assert planner.storable_prefix_tokens(10_000) == 0
+    assert planner.storable_prefix_tokens(16_384) == 15_840
+    assert planner.storable_prefix_tokens(20_000) == 16_384
+    assert planner.storable_prefix_tokens(33_000) == 32_736
 
 
 def test_loadable_prefix_reconciles_existing_group_coverage():
