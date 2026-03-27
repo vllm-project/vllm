@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import datetime
+import threading
 from collections.abc import Iterable, Sequence
 from typing import Literal
 
@@ -24,6 +25,7 @@ from openai_harmony import (
 from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.logger import init_logger
+from vllm.utils.async_utils import make_async
 
 logger = init_logger(__name__)
 
@@ -34,6 +36,7 @@ REASONING_EFFORT = {
 }
 
 _harmony_encoding = None
+_harmony_encoding_lock = threading.Lock()
 
 # Builtin tools that should be included in the system message when
 # they are available and requested by the user.
@@ -60,7 +63,11 @@ def has_custom_tools(tool_types: set[str]) -> bool:
 def get_encoding():
     global _harmony_encoding
     if _harmony_encoding is None:
-        _harmony_encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+        with _harmony_encoding_lock:
+            if _harmony_encoding is None:
+                _harmony_encoding = load_harmony_encoding(
+                    HarmonyEncodingName.HARMONY_GPT_OSS
+                )
     return _harmony_encoding
 
 
@@ -322,6 +329,9 @@ def render_for_completion(messages: list[Message]) -> list[int]:
         conversation, Role.ASSISTANT
     )
     return token_ids
+
+
+render_for_completion_async = make_async(render_for_completion)
 
 
 def get_stop_tokens_for_assistant_actions() -> list[int]:

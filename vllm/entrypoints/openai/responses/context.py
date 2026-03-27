@@ -30,7 +30,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
     get_streamable_parser_for_assistant,
-    render_for_completion,
+    render_for_completion_async,
 )
 from vllm.entrypoints.openai.parser.responses_parser import (
     get_responses_parser_for_simple_context,
@@ -122,7 +122,7 @@ class ConversationContext(ABC):
         pass
 
     @abstractmethod
-    def render_for_completion(self) -> list[int]:
+    async def render_for_completion(self) -> list[int]:
         pass
 
     @abstractmethod
@@ -251,7 +251,7 @@ class SimpleContext(ConversationContext):
     async def call_tool(self) -> list[Message]:
         raise NotImplementedError("Should not be called.")
 
-    def render_for_completion(self) -> list[int]:
+    async def render_for_completion(self) -> list[int]:
         raise NotImplementedError("Should not be called.")
 
     async def init_tool_sessions(
@@ -474,7 +474,7 @@ class ParsableContext(ConversationContext):
             )
         return []
 
-    def render_for_completion(self):
+    async def render_for_completion(self):
         raise NotImplementedError("Should not be called.")
 
     async def init_tool_sessions(
@@ -708,8 +708,8 @@ class HarmonyContext(ConversationContext):
                 )
         raise ValueError("No tool call found")
 
-    def render_for_completion(self) -> list[int]:
-        return render_for_completion(self.messages)
+    async def render_for_completion(self) -> list[int]:
+        return await render_for_completion_async(self.messages)
 
     async def call_search_tool(
         self, tool_session: Union["ClientSession", Tool], last_msg: Message
@@ -912,11 +912,11 @@ class StreamingHarmonyContext(HarmonyContext):
     def is_assistant_action_turn(self) -> bool:
         return self.last_tok in self.encoding.stop_tokens_for_assistant_actions()
 
-    def render_for_completion(self) -> list[int]:
+    async def render_for_completion(self) -> list[int]:
         # now this list of tokens as next turn's starting tokens
         # `<|start|>assistant`,
         # we need to process them in parser.
-        rendered_tokens = super().render_for_completion()
+        rendered_tokens = await super().render_for_completion()
 
         last_n = -1
         to_process = []
