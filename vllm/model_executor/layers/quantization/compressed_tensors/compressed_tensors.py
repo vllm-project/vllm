@@ -16,6 +16,17 @@ from compressed_tensors.quantization import (
     QuantizationStrategy,
     QuantizationType,
 )
+
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    is_layer_skipped,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
+)
+
 from compressed_tensors.transform import TransformConfig
 
 from vllm.distributed import (
@@ -40,6 +51,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod,
+)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    cutlass_fp8_supported,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS,
@@ -877,7 +891,6 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
     def __init__(self, quantization_config: CompressedTensorsConfig):
         self.quantization_config = quantization_config
 
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if getattr(layer, "kernel", None) is not None:
             layer.kernel.process_weights_after_loading(layer)
@@ -909,12 +922,26 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             params_dtype=params_dtype,
             weight_loader=weight_loader,
         )
-        if isinstance(layer.scheme, CompressedTensorsW8A16Fp8) and current_platform.is_xpu():
-            from vllm.model_executor.layers.quantization.utils.quant_utils import kFp8StaticTensorSym
+
+        if isinstance(layer.scheme, CompressedTensorsW8A16Fp8):
+            if layer.scheme.is_static_input_scheme:
+                activation_quant_key = kFp8StaticTensorSym
+            elif cutlass_fp8_supported():
+                activation_quant_key = kFp8DynamicTokenSym
+            else:
+                activation_quant_key = kFp8DynamicTensorSym
+
+            strategy = layer.scheme.strategy
+            if strategy == QuantizationStrategy.BLOCK:
+                weight_quant_key = kFp8Static128BlockSym
+            elif strategy == QuantizationStrategy.CHANNEL:
+                weight_quant_key = kFp8StaticTensorSym
+            else:
+                weight_quant_key = kFp8StaticTensorSym
 
             layer.kernel = init_fp8_linear_kernel(
-                activation_quant_key=kFp8StaticTensorSym, # xpu
-                weight_quant_key=kFp8StaticTensorSym,     # xpu
+                activation_quant_key=activation_quant_key,
+                weight_quant_key=weight_quant_key,
                 out_dtype=torch.get_default_dtype(),
                 module_name=self.__class__.__name__,
             )

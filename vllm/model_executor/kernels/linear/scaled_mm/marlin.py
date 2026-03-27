@@ -77,6 +77,10 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
         else:
             w_q, *_ = self._get_layer_params(layer)
+
+            is_compressed_tensors = hasattr(layer, "scheme") and "CompressedTensors" in type(layer.scheme).__name__
+            if is_compressed_tensors:
+                replace_parameter(layer, "weight", w_q.t())
             # Compressed tensors transposes the weight to (K, N)
             # for channel and tensor quant strategies.
             # So we can skip the transpose if the layout is
@@ -84,7 +88,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             # TODO: Remove this check once the layouts have been
             # canonicalized to a standard (N, K) dimension. See issue
             # #33314 for more details.
-            if w_q.shape != (
+            elif w_q.shape != (
                 layer.input_size_per_partition,
                 layer.output_size_per_partition,
             ):
@@ -94,6 +98,18 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                     "weight",
                     w_q.t(),
                 )
+            if is_compressed_tensors and hasattr(layer, "logical_widths") and len(layer.logical_widths) > 1:
+                ws = getattr(layer, "weight_scale", None)
+                # 【关键修正】: 必须严格校验 ws 不为空，且元素数量恰好等于分片数(如 3)
+                # 这样才能防止报错，并彻底杜绝被错误地“二次展开”
+                if ws is not None and ws.numel() == len(layer.logical_widths):
+                    from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise
+                    print(f"replace weight_scale!!!!!!!!!!!")
+                    replace_parameter(
+                        layer,
+                        "weight_scale",
+                        convert_to_channelwise(ws, layer.logical_widths).data
+                    )
 
         layer.input_scale = None
         prepare_fp8_layer_for_marlin(
