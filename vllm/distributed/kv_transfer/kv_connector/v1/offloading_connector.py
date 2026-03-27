@@ -140,6 +140,18 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        # Flatten all group block_ids and delegate to single-group handler
+        assert self.connector_scheduler is not None
+        all_block_ids = [bid for group in block_ids for bid in group]
+        return self.connector_scheduler.request_finished(
+            request, all_block_ids
+        )
+
     def take_events(self) -> Iterable[KVCacheEvent]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.take_events()
