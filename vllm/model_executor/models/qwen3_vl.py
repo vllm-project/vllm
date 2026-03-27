@@ -1597,27 +1597,11 @@ class Qwen3VLForConditionalGeneration(
         )
 
         modalities = ["image"]
-        # NOTE: Video is excluded from CUDA graph modalities when EVS (Efficient
-        # Video Sampling) pruning is enabled, for two reasons:
-        # 1. Token count mismatch: when EVS is enabled the preprocessor
-        #    already reserves only `pruned_count` token slots in the LLM
-        #    sequence (via compute_retained_tokens_count). The CUDA graph
-        #    path calls encoder_cudagraph_forward directly and returns all
-        #    `full_count = t*(h//m)*(w//m)` ViT output tokens — it bypasses
-        #    embed_multimodal and therefore never runs
-        #    _postprocess_video_embeds_evs. Returning full-count embeddings
-        #    into pruned-count placeholder slots corrupts the LLM input.
-        # 2. Content-dependent dynamic indexing: compute_retention_mask
-        #    computes per-frame dissimilarity scores and selects which tokens
-        #    to keep via torch.argsort + boolean indexing. The resulting
-        #    gather indices vary for every video based on actual pixel content.
-        #    CUDA graphs record a fixed sequence of GPU operations; a
-        #    data-dependent dynamic selection cannot be captured or replayed.
-        #
-        # When EVS is disabled, video token counts are fully determined by
-        # grid_thw and the ViT output can be used directly, so the CUDA graph
-        # path is safe. Video falls back to the eager embed_multimodal path
-        # only when EVS is on.
+        # NOTE: When EVS (Efficient Video Sampling) pruning is enabled, the number
+        # of tokens becomes data-dependent (i.e., the retained tokens are
+        # dynamically selected based on inter-frame differences) and therefore
+        # cannot be captured by CUDA Graphs. As a result, video CUDA Graphs are
+        # only enabled when EVS is disabled.
         if not self.is_multimodal_pruning_enabled:
             modalities.append("video")
 
@@ -1871,6 +1855,8 @@ class Qwen3VLForConditionalGeneration(
         # Update cuda graph replay buffer cache with the newly computed buffers, so
         # that subsequent replays with the same grid_thw pattern can reuse them.
         self._replay_buffer_cache[cache_key] = result
+        # TODO(shen-shanshan): Move this caching mechanism to cuda graph interface
+        # and add cache eviction strategy.
         return result
 
     def encoder_cudagraph_forward(

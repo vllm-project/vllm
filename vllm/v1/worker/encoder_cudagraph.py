@@ -142,6 +142,7 @@ class EncoderCudaGraphManager:
         """Capture CUDA graph for a single token budget."""
         # Auto-infer: worst case = token_budget frames (each frame yields
         # >= 1 output token, so sum(T_i) <= token_budget by packing).
+        # TODO(shen-shanshan): optimize this auto-infer for max_frames.
         max_frames = (
             self.max_frames_per_batch if self.max_frames_per_batch > 0 else token_budget
         )
