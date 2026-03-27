@@ -234,6 +234,33 @@ pull_request_rules:
       add:
         - rocm
 
+- name: label-xpu
+  description: Automatically apply xpu label
+  conditions:
+    - label != stale
+    - or:
+      - files=vllm/model_executor/layers/fused_moe/xpu_fused_moe.py
+      - files=vllm/model_executor/kernels/linear/mixed_precision/xpu.py
+      - files=vllm/model_executor/kernels/linear/scaled_mm/xpu.py
+      - files=vllm/distributed/device_communicators/xpu_communicator.py
+      - files=vllm/v1/attention/backends/mla/xpu_mla_sparse.py
+      - files=vllm/v1/attention/ops/xpu_mla_sparse.py
+      - files=vllm/v1/worker/xpu_worker.py
+      - files=vllm/v1/worker/xpu_model_runner.py
+      - files=vllm/_xpu_ops.py
+      - files~=^vllm/lora/ops/xpu_ops
+      - files=vllm/lora/punica_wrapper/punica_xpu.py
+      - files=vllm/platforms/xpu.py
+      - title~=(?i)Intel gpu
+      - title~=(?i)XPU
+      - title~=(?i)Intel
+      - title~=(?i)BMG
+      - title~=(?i)Arc
+  actions:
+    label:
+      add:
+        - xpu
+
 - name: label-cpu
   description: Automatically apply cpu label
   conditions:
