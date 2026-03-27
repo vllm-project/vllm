@@ -119,7 +119,7 @@ async def transfer_run_periodically(
             # Execute one EPLB layer transfer per model forward pass. Each iteration
             # of this loop will copy the new set of expert weights into
             # model_state.expert_buffer, which will be consumed by the main thread in
-            # EplbState.step()
+            # move_to_workspace
             while model_state.rebalanced and layer_idx < current_num_layers:
                 (
                     is_unchanged,
