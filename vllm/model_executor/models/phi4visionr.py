@@ -191,7 +191,7 @@ class Phi4VisionRMultiModalProcessor(
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
             pixel_attention_mask=MultiModalFieldConfig.batched("image"),
-            spatial_shapes=MultiModalFieldConfig.batched("image"),
+            spatial_shapes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -321,7 +321,7 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
         max_seqlen = valid_counts.max()
         return (
             pixel_values_packed,
-            spatial_shapes.cpu(),
+            spatial_shapes,
             cu_seqlens,
             max_seqlen,
         )
