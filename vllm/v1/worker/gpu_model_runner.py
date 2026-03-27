@@ -208,7 +208,7 @@ from .utils import (
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-    from vllm.v1.worker.gpu.mm.encoder_cudagraph import EncoderCudaGraphManager
+    from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
 
@@ -5973,9 +5973,7 @@ class GPUModelRunner(
                 SupportsEncoderCudaGraph,
                 supports_encoder_cudagraph,
             )
-            from vllm.v1.worker.gpu.mm.encoder_cudagraph import (
-                EncoderCudaGraphManager,
-            )
+            from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
             raw_model = self.get_model()
             if supports_encoder_cudagraph(raw_model):
