@@ -15,7 +15,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import triton
-from vllm.utils.platform_utils import get_cu_count
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
@@ -117,7 +116,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             self.supports_quant_query_input = False
 
-        self._sm_count = get_cu_count()
+        self._sm_count = torch.cuda.get_device_properties(0).multi_processor_count
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
