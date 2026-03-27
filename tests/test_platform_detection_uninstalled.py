@@ -1,4 +1,3 @@
-
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
@@ -16,10 +15,7 @@ This regression test verifies that vllm_version_matches_substr() returns False
 (instead of raising) when the vllm package is not installed.
 """
 
-import sys
 from unittest.mock import patch
-
-import pytest
 
 
 def test_vllm_version_matches_substr_returns_false_when_not_installed():
@@ -29,16 +25,15 @@ def test_vllm_version_matches_substr_returns_false_when_not_installed():
     """
     from importlib.metadata import PackageNotFoundError
 
-    # Simulate vllm not being installed by patching importlib.metadata.version
+    # Simulate vllm not being installed by patching importlib.metadata.version.
+    # The patch works because vllm_version_matches_substr() dynamically imports
+    # `version` from `importlib.metadata` within its own scope on each call,
+    # so the patch is active when the function executes.
     with patch(
         "importlib.metadata.version",
         side_effect=PackageNotFoundError("vllm"),
     ):
-        # Re-import to pick up the patch
-        if "vllm.platforms" in sys.modules:
-            from vllm.platforms import vllm_version_matches_substr
-        else:
-            from vllm.platforms import vllm_version_matches_substr
+        from vllm.platforms import vllm_version_matches_substr
 
         # Should return False, not raise
         result = vllm_version_matches_substr("cpu")
@@ -55,6 +50,7 @@ def test_vllm_version_matches_substr_returns_true_when_matches():
     """
     with patch("importlib.metadata.version", return_value="0.7.0.cpu"):
         from vllm.platforms import vllm_version_matches_substr
+
         assert vllm_version_matches_substr("cpu") is True
 
 
@@ -65,4 +61,5 @@ def test_vllm_version_matches_substr_returns_false_when_no_match():
     """
     with patch("importlib.metadata.version", return_value="0.7.0"):
         from vllm.platforms import vllm_version_matches_substr
+
         assert vllm_version_matches_substr("cpu") is False
