@@ -780,6 +780,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Ernie4_5_VLMoeForConditionalGeneration": _HfExamplesInfo(
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         trust_remote_code=True,
+        revision="refs/pr/14",
     ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
