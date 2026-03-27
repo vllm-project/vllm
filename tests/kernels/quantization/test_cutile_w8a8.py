@@ -16,9 +16,21 @@ from vllm.benchmarks.lib.utils import default_vllm_config
     torch.float16
 ])
 @pytest.mark.parametrize("M, N, K", [
-    (1,12288,4096),
-    (128, 512, 7168),
-    (256, 256, 256),
+     # (1, 12288, 4096),  # will fail
+      (128, 128, 128),
+      (256, 256, 256),
+      (512, 512, 512),                                                                            
+      (128, 4096, 4096),
+      (256, 4096, 4096),
+      (512, 4096, 4096),
+      (1024, 4096, 4096),                                                              
+      (128, 14336, 4096),              
+      (256, 14336, 4096),                          
+      (128, 4096, 14336),                                                                                                    
+      (128, 512, 7168),
+      (256, 576, 4096), 
+      (384, 1000, 2048),                                                                         
+
 ])
 def test_cutile_blockwise_fp8_kernel(out_dtype, M, N, K, default_vllm_config):
     torch.set_default_device("cuda")

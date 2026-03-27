@@ -92,8 +92,8 @@ def matmul_kernel(A, B, As, Bs, C,
     dtype = ct.tfloat32 if A.dtype == ct.float32 else A.dtype
 
     for k_idx in range(num_tiles_k):
-        a_tile = ct.load(A, index=(bid_m, k_idx), shape=(TILE_M, TILE_K), padding_mode=zero_pad).astype(dtype)
-        b_tile = ct.load(B, index=(k_idx, bid_n), shape=(TILE_K, TILE_N), padding_mode=zero_pad).astype(dtype)
+        a_tile = ct.load(A, index=(bid_m, k_idx), shape=(TILE_M, TILE_K), padding_mode=zero_pad)
+        b_tile = ct.load(B, index=(k_idx, bid_n), shape=(TILE_K, TILE_N), padding_mode=zero_pad)
 
         a_scale = ct.load(As, index=(bid_m, k_idx), shape=(TILE_M, 1))
         b_scale = ct.load(Bs, index=(k_idx, bid_n), shape=(1, 1))
