@@ -4,6 +4,7 @@
 
 import copy
 import json as json_mod
+import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -288,6 +289,10 @@ class SamplingParams(
     thinking_token_budget: int | None = None
     """Maximum number of tokens allowed for thinking operations."""
 
+    steering_vectors: dict[int, list[float]] | None = None
+    """Per-request activation steering vectors. Keys are layer indices,
+    values are steering vectors of length hidden_size."""
+
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
     If such repetition is detected, generation will be ended early. LLMs can
@@ -327,6 +332,7 @@ class SamplingParams(
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
+        steering_vectors: dict[int, list[float]] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -368,6 +374,7 @@ class SamplingParams(
             extra_args=extra_args,
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
+            steering_vectors=steering_vectors,
         )
 
     def __post_init__(self) -> None:
@@ -517,6 +524,40 @@ class SamplingParams(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
             )
+
+        self._validate_steering_vectors()
+
+    def _validate_steering_vectors(self) -> None:
+        """Validate steering_vectors if provided."""
+        if self.steering_vectors is None:
+            return
+        if not isinstance(self.steering_vectors, dict):
+            raise ValueError(
+                "steering_vectors must be a dict mapping layer indices "
+                "to lists of floats."
+            )
+        for key, value in self.steering_vectors.items():
+            if not isinstance(key, int) or key < 0:
+                raise ValueError(
+                    f"steering_vectors keys must be non-negative integers, "
+                    f"got {key!r}."
+                )
+            if not isinstance(value, list):
+                raise ValueError(
+                    f"steering_vectors values must be lists of floats, "
+                    f"got {type(value).__name__} for layer {key}."
+                )
+            for i, v in enumerate(value):
+                if not isinstance(v, (int, float)):
+                    raise ValueError(
+                        f"steering_vectors[{key}][{i}] must be a finite "
+                        f"float, got {type(v).__name__}."
+                    )
+                if not math.isfinite(v):
+                    raise ValueError(
+                        f"steering_vectors[{key}][{i}] must be finite, "
+                        f"got {v}."
+                    )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:

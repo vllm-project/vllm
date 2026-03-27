@@ -56,6 +56,7 @@ from vllm.config import (
     ReasoningConfig,
     SchedulerConfig,
     SpeculativeConfig,
+    SteeringConfig,
     StructuredOutputsConfig,
     UVAOffloadConfig,
     VllmConfig,
@@ -523,6 +524,9 @@ class EngineArgs:
     lora_target_modules: list[str] | None = LoRAConfig.target_modules
     enable_tower_connector_lora: bool = LoRAConfig.enable_tower_connector_lora
     specialize_active_lora: bool = LoRAConfig.specialize_active_lora
+    # Steering fields
+    enable_steering: bool = False
+    max_steering_configs: int = SteeringConfig.max_steering_configs
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
@@ -1860,6 +1864,14 @@ class EngineArgs:
             else None
         )
 
+        steering_config = (
+            SteeringConfig(
+                max_steering_configs=self.max_steering_configs,
+            )
+            if self.enable_steering
+            else None
+        )
+
         if (
             lora_config is not None
             and speculative_config is not None
@@ -1975,6 +1987,7 @@ class EngineArgs:
             attention_config=attention_config,
             kernel_config=kernel_config,
             lora_config=lora_config,
+            steering_config=steering_config,
             speculative_config=speculative_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,

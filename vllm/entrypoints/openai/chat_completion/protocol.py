@@ -355,6 +355,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "can detect such behavior and terminate early, saving time and tokens.",
     )
 
+    steering_vectors: dict[int, list[float]] | None = Field(
+        default=None,
+        description="Per-request activation steering vectors. Keys are layer "
+        "indices, values are vectors of length hidden_size.",
+    )
+
     # --8<-- [end:chat-completion-extra-params]
 
     def build_chat_params(
@@ -521,6 +527,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
+            steering_vectors=self.steering_vectors,
         )
 
     @model_validator(mode="before")
