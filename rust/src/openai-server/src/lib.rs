@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 pub use config::Config;
+use futures::FutureExt as _;
 use tokio::net::TcpListener;
 use tracing::info;
 use vllm_chat::ChatLlm;
@@ -66,7 +67,15 @@ pub async fn serve<F>(config: Config, shutdown: F) -> Result<()>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let state = build_state(&config).await?;
+    // Wrap the shutdown signal in a `Shared` future so we can also check it
+    // during the (potentially long) startup handshake, not only during HTTP
+    // graceful shutdown.
+    let shutdown = shutdown.shared();
+
+    let state = tokio::select! {
+        result = build_state(&config) => result?,
+        _ = shutdown.clone() => return Ok(()),
+    };
     let listener = TcpListener::bind(config.bind_address()).await?;
     let bind_address = listener.local_addr()?;
     let model = state.model_id.clone();
