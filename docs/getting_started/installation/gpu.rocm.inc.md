@@ -172,8 +172,11 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
 --8<-- [end:build-wheel-from-source]
 --8<-- [start:pre-built-images]
 
-vLLM offers an official Docker image for deployment.
-The image can be used to run OpenAI compatible server and is available on Docker Hub as [vllm/vllm-openai-rocm](https://hub.docker.com/r/vllm/vllm-openai-rocm/tags).
+vLLM offers official Docker images for deployment.
+The images can be used to run OpenAI compatible server and are available on Docker Hub as [vllm/vllm-openai-rocm](https://hub.docker.com/r/vllm/vllm-openai-rocm/tags).
+
+- `vllm/vllm-openai-rocm:latest` — stable release
+- `vllm/vllm-openai-rocm:nightly` — preview build from the latest development branch, use this if you want the latest features and fixes
 
 ```bash
 docker run --rm \
@@ -186,47 +189,18 @@ docker run --rm \
     --env "HF_TOKEN=$HF_TOKEN" \
     -p 8000:8000 \
     --ipc=host \
-    vllm/vllm-openai-rocm:latest \
+    vllm/vllm-openai-rocm:<tag> \
     --model Qwen/Qwen3-0.6B
 ```
 
-A nightly Docker image is also available, built from the latest development branch:
+#### Use AMD's Docker Images (Deprecated)
 
-```bash
-docker run --rm \
-    --group-add=video \
-    --cap-add=SYS_PTRACE \
-    --security-opt seccomp=unconfined \
-    --device /dev/kfd \
-    --device /dev/dri \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
-    --env "HF_TOKEN=$HF_TOKEN" \
-    -p 8000:8000 \
-    --ipc=host \
-    vllm/vllm-openai-rocm:nightly \
-    --model Qwen/Qwen3-0.6B
-```
+!!! warning "Deprecated"
+    AMD's Docker images (`rocm/vllm` and `rocm/vllm-dev`) are deprecated in favor of the official vLLM Docker images above (`vllm/vllm-openai-rocm`). Please migrate to the official images.
 
-#### Use AMD's Docker Images
-
-Prior to January 20th, 2026 when the official docker images are available on [upstream vLLM docker hub](https://hub.docker.com/v2/repositories/vllm/vllm-openai-rocm/tags/), the [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
+Prior to January 20th, 2026 when the official docker images became available on [upstream vLLM docker hub](https://hub.docker.com/v2/repositories/vllm/vllm-openai-rocm/tags/), the [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offered a prebuilt, optimized
 docker image designed for validating inference performance on the AMD Instinct MI300X™ accelerator.
-AMD also offers nightly prebuilt docker image from [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev), which has vLLM and all its dependencies installed. The entrypoint of this docker image is `/bin/bash` (different from the vLLM's Official Docker Image).
-
-```bash
-docker pull rocm/vllm-dev:nightly # to get the latest image
-docker run -it --rm \
---network=host \
---group-add=video \
---ipc=host \
---cap-add=SYS_PTRACE \
---security-opt seccomp=unconfined \
---device /dev/kfd \
---device /dev/dri \
--v <path/to/your/models>:/app/models \
--e HF_HOME="/app/models" \
-rocm/vllm-dev:nightly
-```
+AMD also offered nightly prebuilt docker image from [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev), which has vLLM and all its dependencies installed. The entrypoint of this docker image is `/bin/bash` (different from the vLLM's Official Docker Image).
 
 !!! tip
     Please check [LLM inference performance validation on AMD Instinct MI300X](https://rocm.docs.amd.com/en/latest/how-to/performance-validation/mi300x/vllm-benchmark.html)
