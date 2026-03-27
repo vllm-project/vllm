@@ -48,6 +48,12 @@ def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]
     cache_entries: tuple[tuple | None, dict | None, Any] = []
     cache_size = 8
 
+    def _insert(args: tuple, kwargs: dict, result: Any) -> None:
+        nonlocal cache_entries
+        if len(cache_entries) >= cache_size:
+            cache_entries = cache_entries[1:]
+        cache_entries.append((args, kwargs, result))
+
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         nonlocal cache_entries, cache_size
@@ -69,17 +75,11 @@ def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]
                 return last_result
 
         result = fn(*args, **kwargs)
-
-        if len(cache_entries) >= cache_size:
-            cache_entries = cache_entries[1:]
-        cache_entries.append((args, kwargs, result))
+        _insert(args, kwargs, result)
         return result
 
     def register(result: Any, *args: Any, **kwargs: Any) -> None:
-        nonlocal cache_entries
-        if len(cache_entries) >= cache_size:
-            cache_entries = cache_entries[1:]
-        cache_entries.append((args, kwargs, result))
+        _insert(args, kwargs, result)
 
     wrapper.register = register  # type: ignore[attr-defined]
     return wrapper

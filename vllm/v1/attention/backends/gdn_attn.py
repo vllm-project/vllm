@@ -327,6 +327,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             from vllm.model_executor.layers.fla.ops.index import (
                 prepare_chunk_indices,
             )
+
+            # TODO: this is hardcoded across FLA ops (kda.py, chunk.py);
+            # consider extracting into a shared constant.
             chunk_size = 64
             chunk_indices = prepare_chunk_indices(
                 non_spec_query_start_loc_cpu, chunk_size
