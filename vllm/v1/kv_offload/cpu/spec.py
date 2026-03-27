@@ -25,6 +25,10 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
 
         # calculate kv_bytes_per_offloaded_block
+        # page_size_bytes is the total bytes per block across all layers
+        # in the group. For UniformTypeKVCacheSpecs this is already the
+        # sum of all per-layer page sizes. We only need to multiply by
+        # world_size (each TP rank stores its own copy).
         assert kv_cache_config is not None
         page_sizes = {
             kv_cache_group.kv_cache_spec.page_size_bytes
@@ -34,7 +38,6 @@ class CPUOffloadingSpec(OffloadingSpec):
         page_size_bytes = page_sizes.pop()
         kv_bytes_per_block = (
             page_size_bytes
-            * len(kv_cache_config.kv_cache_tensors)
             * vllm_config.parallel_config.world_size
         )
 
