@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
+import hashlib
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -93,6 +95,11 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+
+        # Per-request activation steering vectors.
+        self.steering_vectors: dict[int, list[float]] | None = None
+        if sampling_params is not None and sampling_params.steering_vectors:
+            self.steering_vectors = sampling_params.steering_vectors
 
         if pooling_params is not None:
             # Pooling models.
@@ -241,6 +248,14 @@ class Request:
     @property
     def has_encoder_inputs(self) -> bool:
         return self.num_encoder_inputs > 0
+
+    @cached_property
+    def steering_config_hash(self) -> int:
+        """0 if no per-request steering, else deterministic hash of vectors."""
+        if not self.steering_vectors:
+            return 0
+        data = str(sorted(self.steering_vectors.items())).encode()
+        return int(hashlib.sha256(data).hexdigest()[:16], 16)
 
     def get_skip_reading_prefix_cache(self) -> bool:
         if (

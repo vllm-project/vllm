@@ -45,6 +45,7 @@ from .profiler import ProfilerConfig
 from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
+from .steering import SteeringConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, replace
 from .weight_transfer import WeightTransferConfig
@@ -277,6 +278,8 @@ class VllmConfig:
     """Kernel configuration."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
+    steering_config: SteeringConfig | None = None
+    """Per-request activation steering configuration."""
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
     structured_outputs_config: StructuredOutputsConfig = Field(
@@ -398,6 +401,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.steering_config:
+            vllm_factors.append(self.steering_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.speculative_config:
