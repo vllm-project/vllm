@@ -1272,6 +1272,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 output_final_state=True,
                 cu_seqlens=non_spec_query_start_loc,
                 use_qk_l2norm_in_kernel=True,
+                state_dtype=ssm_state.dtype,
             )
             # Init cache
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
