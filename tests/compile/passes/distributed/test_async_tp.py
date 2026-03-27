@@ -449,7 +449,7 @@ def async_tp_pass_on_test_model(
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "test_model",
+    "test_case",
     [FLASHINFER_RS_CASE, FLASHINFER_AG_CASE],
 )
 @pytest.mark.parametrize("batch_size", [8])
