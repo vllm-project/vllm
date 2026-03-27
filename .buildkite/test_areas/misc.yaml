@@ -106,7 +106,7 @@ steps:
      # for basic
     - python3 basic/offline_inference/chat.py
     - python3 basic/offline_inference/generate.py --model facebook/opt-125m
-    - python3 basic/offline_inference/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
+    - python3 basic/offline_inference/generate.py --model meta-llama/Llama-3.1-8B-Instruct --cpu-offload-gb 4
     - python3 basic/offline_inference/classify.py
     - python3 basic/offline_inference/embed.py
     - python3 basic/offline_inference/score.py

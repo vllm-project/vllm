@@ -14,8 +14,8 @@ from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.utils.async_utils import merge_async_iterators
 
-MODEL_PATH = "zai-org/chatglm3-6b"
-LORA_RANK = 64
+MODEL_PATH = "Qwen/Qwen3-0.6B"
+LORA_RANK = 8
 DEFAULT_MAX_LORAS = 4 * 3
 
 
@@ -54,7 +54,7 @@ async def requests_processing_time(llm, lora_requests: list[LoRARequest]) -> flo
 
 
 @pytest.mark.asyncio
-async def test_add_lora(chatglm3_lora_files):
+async def test_add_lora(qwen3_lora_files):
     """
     The add_lora function is used to preload some LoRA adapters into the
     engine in anticipation of future requests using these adapters. To test
@@ -64,7 +64,7 @@ async def test_add_lora(chatglm3_lora_files):
     We measure the request processing time in both cases and expect the time
     to be lesser in the case with add_lora() calls.
     """
-    lora_requests: list[LoRARequest] = get_lora_requests(chatglm3_lora_files)
+    lora_requests: list[LoRARequest] = get_lora_requests(qwen3_lora_files)
 
     max_loras = len(set([lr.lora_int_id for lr in lora_requests]))
     # Create engine in eager-mode. Due to high max_loras, the CI can
@@ -76,7 +76,6 @@ async def test_add_lora(chatglm3_lora_files):
         max_lora_rank=LORA_RANK,
         max_model_len=128,
         gpu_memory_utilization=0.8,  # avoid OOM
-        trust_remote_code=True,
         enforce_eager=True,
     )
 

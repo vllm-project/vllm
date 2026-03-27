@@ -63,7 +63,7 @@ def test_mm_cache_stats(
     caplog_vllm,
 ):
     llm = LLM(
-        model="llava-hf/llava-1.5-7b-hf",
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
         max_model_len=4096,
         max_num_seqs=5,
         enforce_eager=True,

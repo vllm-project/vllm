@@ -18,7 +18,7 @@ vllm bench throughput --input-len 256 --output-len 256 --output-json throughput_
 bench_throughput_exit_code=$?
 
 # run server-based benchmarks and upload the result to buildkite
-vllm serve meta-llama/Llama-2-7b-chat-hf &
+vllm serve Qwen/Qwen3-0.6B &
 server_pid=$!
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 
@@ -28,10 +28,10 @@ vllm bench serve \
     --backend vllm \
     --dataset-name sharegpt \
     --dataset-path ./ShareGPT_V3_unfiltered_cleaned_split.json \
-    --model meta-llama/Llama-2-7b-chat-hf \
+    --model Qwen/Qwen3-0.6B \
     --num-prompts 20 \
     --endpoint /v1/completions \
-    --tokenizer meta-llama/Llama-2-7b-chat-hf \
+    --tokenizer Qwen/Qwen3-0.6B \
     --save-result \
     2>&1 | tee benchmark_serving.txt
 bench_serving_exit_code=$?
