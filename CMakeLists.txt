@@ -343,7 +343,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/w8a8/cutlass/scaled_mm_entry.cu"
     "csrc/quantization/fp4/nvfp4_quant_entry.cu"
     "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
-    "csrc/cutlass_extensions/common.cpp")
+    "csrc/cutlass_extensions/common.cpp"
+    "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_EXT_SRC}"
