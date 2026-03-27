@@ -126,9 +126,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         if lora_a_scale is not None:
             q = self._fp8_quantizer
-            x_fp8, a_scale = q.per_token_quant(x, group_k=q.shrink_group_k)
+            a_scale = q.per_token_scale(x, group_k=q.shrink_group_k)
             lora_shrink_fp8(
-                x_fp8,
+                x,
                 lora_a_stacked,
                 y,
                 *self.token_mapping_meta.meta_args(
@@ -140,6 +140,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 group_k=q.shrink_group_k,
                 group_n=q.shrink_group_n,
                 use_fp8_w8a8=True,
+                cast_type=True,
             )
         else:
             lora_shrink(
@@ -190,9 +191,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         if lora_b_scale is not None:
             q = self._fp8_quantizer
-            x_fp8, a_scale = q.per_token_quant_3d(x, group_k=q.expand_group_k)
+            a_scale = q.per_token_scale_3d(x, group_k=q.expand_group_k)
             lora_expand_fp8(
-                x_fp8,
+                x,
                 lora_b_stacked,
                 y,
                 *self.token_mapping_meta.meta_args(
@@ -205,6 +206,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 group_k=q.expand_group_k,
                 group_n=q.expand_group_n,
                 use_fp8_w8a8=True,
+                cast_type=True,
             )
         else:
             lora_expand(

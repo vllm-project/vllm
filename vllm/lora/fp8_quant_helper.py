@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 FP8 quantization helpers for LoRA weights and activations.
 
@@ -84,11 +86,17 @@ class FP8LoRAQuantizer:
                      weight's corresponding block size).
         """
         assert x.ndim == 2
+        a_scale = self.per_token_scale(x, group_k)
+        scale_inv = a_scale[:, :1]
+        x_fp8 = (x.float() / scale_inv).to(self.fp8_dtype)
+        return x_fp8, a_scale
+
+    def per_token_scale(self, x: torch.Tensor, group_k: int) -> torch.Tensor:
+        """Build per-token activation scales for a 2-D tensor."""
+        assert x.ndim == 2
         amax = x.float().abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
         scale_inv = (amax / self.fp8_max).to(torch.float32)
-        x_fp8 = (x.float() / scale_inv).to(self.fp8_dtype)
-        a_scale = self._make_a_scale(scale_inv.squeeze(1), x.size(1), group_k)
-        return x_fp8, a_scale
+        return self._make_a_scale(scale_inv.squeeze(1), x.size(1), group_k)
 
     def per_token_quant_3d(
         self, x: torch.Tensor, group_k: int
@@ -99,12 +107,18 @@ class FP8LoRAQuantizer:
         expand kernel indexes a_scale by token, not by slice).
         """
         assert x.ndim == 3
-        S, N, K = x.shape
+        a_scale = self.per_token_scale_3d(x, group_k)
+        scale_inv = a_scale[:, :1]
+        x_fp8 = (x.float() / scale_inv.unsqueeze(0)).to(self.fp8_dtype)
+        return x_fp8, a_scale
+
+    def per_token_scale_3d(self, x: torch.Tensor, group_k: int) -> torch.Tensor:
+        """Build shared per-token activation scales for a 3-D tensor."""
+        assert x.ndim == 3
+        _, _, K = x.shape
         amax = x.float().abs().amax(dim=(0, 2), keepdim=False).clamp(min=1e-12)
         scale_inv = (amax / self.fp8_max).to(torch.float32)
-        x_fp8 = (x.float() / scale_inv.unsqueeze(0).unsqueeze(2)).to(self.fp8_dtype)
-        a_scale = self._make_a_scale(scale_inv, K, group_k)
-        return x_fp8, a_scale
+        return self._make_a_scale(scale_inv, K, group_k)
 
     def _per_block_quantize(
         self, weight: torch.Tensor, block_size: tuple[int, int]
