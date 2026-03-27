@@ -48,6 +48,21 @@ class CPUOffloadingSpec(OffloadingSpec):
             else 0
         )
 
+        # TODO(debug): remove this diagnostic log after fixing off-by-one
+        from vllm.logger import init_logger as _init_logger
+        _logger = _init_logger(__name__)
+        _logger.info(
+            "CPUOffloadingSpec: cpu_bytes_to_use=%s page_size_bytes=%d "
+            "world_size=%d kv_bytes_per_block=%d block_size_factor=%d "
+            "num_blocks=%d num_kv_cache_groups=%d num_kv_cache_tensors=%d",
+            cpu_bytes_to_use, page_size_bytes,
+            vllm_config.parallel_config.world_size,
+            kv_bytes_per_block, self.block_size_factor,
+            self.num_blocks,
+            len(kv_cache_config.kv_cache_groups),
+            len(kv_cache_config.kv_cache_tensors),
+        )
+
         # scheduler-side
         self._manager: OffloadingManager | None = None
 
