@@ -222,7 +222,11 @@ def _make_event() -> torch.Event:
     """Create a ``torch.Event``, falling back to ``_DummyEvent`` on
     platforms that do not support it (e.g. XPU simulators)."""
     try:
-        return torch.Event()
+        ev = torch.Event()
+        # Verify the event actually works — on XPU simulators
+        # construction succeeds but record() fails with device_index=-1.
+        ev.record()
+        return ev
     except (RuntimeError, ValueError):
         return _DummyEvent()  # type: ignore[return-value]
 
