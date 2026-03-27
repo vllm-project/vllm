@@ -855,6 +855,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     ):
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
             layer=layer,
             w13=w13,
             w2=w2,
@@ -872,7 +873,14 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale", w2_scale)
 
         # Setup modular kernel.
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        self.moe_quant_config = make_fp8_moe_quant_config(
+            fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+            a1_scale=w13_input_scale,
+            a2_scale=w2_input_scale,
+        )
         assert self.experts_cls is not None
         self.moe_kernel = make_fp8_moe_kernel(
             moe_quant_config=self.moe_quant_config,
@@ -915,18 +923,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
-        w1_scale = layer.w13_weight_scale
-        w2_scale = layer.w2_weight_scale
-        a1_scale = layer.w13_input_scale
-        a2_scale = layer.w2_input_scale
-
-        return make_fp8_moe_quant_config(
-            fp8_backend=self.fp8_backend,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
+        assert self.moe_quant_config is not None, (
+            "moe_quant_config is not initialized, "
+            "process_weights_after_loading should be called first"
         )
+        return self.moe_quant_config
 
     def apply_monolithic(
         self,

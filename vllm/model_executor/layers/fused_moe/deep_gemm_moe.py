@@ -16,6 +16,9 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     deepgemm_moe_permute,
     deepgemm_unpermute_and_reduce,
 )
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoEPrepMixin,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -39,6 +42,34 @@ from vllm.utils.deep_gemm import (
 from vllm.utils.import_utils import has_deep_gemm
 
 logger = init_logger(__name__)
+
+
+class DeepGemmFp8PrepMixin(Fp8MoEPrepMixin):
+    """FP8 preparation shared by TritonOrDeepGemmExperts and
+    BatchedDeepGemmExperts."""
+
+    @classmethod
+    def prepare_fp8_weights(
+        cls,
+        layer: torch.nn.Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        block_shape: list[int] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            prepare_fp8_moe_layer_for_deepgemm,
+        )
+
+        assert block_shape is not None
+        return prepare_fp8_moe_layer_for_deepgemm(
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            tuple(block_shape),
+        )
 
 
 def _valid_deep_gemm_shape(M: int, N: int, K: int) -> bool:

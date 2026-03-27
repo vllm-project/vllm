@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     DeepGemmExperts,
+    DeepGemmFp8PrepMixin,
     _valid_deep_gemm,
     _valid_deep_gemm_shape,
 )
@@ -21,7 +22,7 @@ from vllm.utils.deep_gemm import (
 )
 
 
-class TritonOrDeepGemmExperts(FallbackExperts):
+class TritonOrDeepGemmExperts(FallbackExperts, DeepGemmFp8PrepMixin):
     """DeepGemm with fallback to Triton for low latency shapes."""
 
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
