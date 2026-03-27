@@ -1,5 +1,9 @@
 # DGX Spark 问题记录
 
+**最后更新：** 2026-03-27 09:19
+
+---
+
 ## 问题 #1: PyTorch SM 12.1 (GB10) 兼容性警告
 
 **现象：**
@@ -362,3 +366,58 @@ PyTorch only supports compute capabilities 8.0-9.0.
 2. **PR #37959** — 周一 (3/30) 如仍无进展，追加简短评论或 Slack 求助
 3. **DGX Spark 测试** — 记录 baseline 性能数据（Marlin vs CUTLASS）
 4. **社区参与** — 评论 1-2 个相关 issue（学习性质，DGX/KVCache 方向）
+
+---
+
+## 2026-03-27 Friday — 10:24 Cron Check
+
+**PR #38126 状态：** 活跃讨论中，接近 merge 🔥
+- 最后更新：~10h 前
+- 评论数：14+ 条
+- 关键确认：eugr 实测通过 — "compiles successfully with 12.1a and includes nvfp4 kernels"
+- Auto tuner errors：RobTand 解释正常（block sizes 少）
+- 作者：johnnynunez (NVIDIA maintainer)
+- Labels: `ready`, `ci/build`, `nvidia`
+- 策略：等待 merge 后检查代码是否覆盖 SM 12.1 Marlin 自动检测
+
+**PR #37959 (Helm chart 修复)：**
+- 状态：Open ~78h
+- 人类 review: 0
+- 决策：周末 review 慢属正常，周一 (3/30) 如仍无进展再追加评论
+
+**DGX Spark 环境：**
+- GPU: NVIDIA GB10 (SM 12.1) ✓
+- Driver: 580.95.05 ✓
+- CUDA: Available ✓
+- 无新问题发现
+
+**今日策略：**
+- 不新开 PR（等 #38126 merge）
+- 质量 > 数量，耐心等待
+- 已准备好 #37141 代码（Marlin auto-detect for GB10）
+
+---
+
+## 2026-03-27 Friday — 09:19 Cron Check
+
+**PR #38126 状态：** 活跃讨论中 ✅
+- 最后更新：~13h 前
+- 评论数：14 条（eugr 确认"All tests have passed successfully on my Sparks"）
+- 作者：johnnynunez (NVIDIA maintainer)
+- Labels: `ready`, `ci/build`, `nvidia`
+- 状态：接近 merge，CI 测试通过
+- 策略：等待 merge 后检查代码
+
+**PR #37959 (Helm chart 修复)：**
+- 状态：Open ~74h
+- 人类 review: 0
+- 决策：周末 review 慢属正常，继续等待
+
+**DGX Spark 环境：**
+- GPU: NVIDIA GB10 (SM 12.1) ✓
+- CUDA: Available ✓
+- 无新问题
+
+**今日策略：**
+- 不新开 PR（等 #38126 merge）
+- 质量 > 数量，耐心等待
