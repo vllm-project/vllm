@@ -437,6 +437,14 @@ class Fp8LinearMethod(LinearMethodBase):
         else:
             layer.input_scale = None
 
+        if self.use_marlin:
+            prepare_fp8_layer_for_marlin(
+                layer, size_k_first, input_dtype=self.marlin_input_dtype
+            )
+            # Activations not quantized for marlin.
+            del layer.input_scale
+            return
+
         if self.block_quant and self.use_deep_gemm:
             maybe_post_process_fp8_weight_block(layer)
 
