@@ -238,19 +238,12 @@ class _BaseFlashInferBMMFP8Model(torch.nn.Module):
             out_dtype=dtype,
             force_kernel=FlashInferFP8ScaledMMLinearKernel,
         )
-
-    @property
-    def weight(self) -> torch.Tensor:
-        return self.fp8_linear.weight
-
-    @property
-    def scale_a(self) -> torch.Tensor:
         assert self.fp8_linear.input_scale is not None
-        return self.fp8_linear.input_scale
-
-    @property
-    def scale_b(self) -> torch.Tensor:
-        return self.fp8_linear.weight_scale
+        self.weight = self.fp8_linear.weight
+        # Keep the runtime graph on scalar scales to match the FlashInfer
+        # exact pattern while still sourcing test params from TestFP8Layer.
+        self.scale_a = self.fp8_linear.input_scale[0]
+        self.scale_b = self.fp8_linear.weight_scale[0]
 
     def run_bmm_fp8(self, input: torch.Tensor) -> torch.Tensor:
         return torch.ops.vllm.bmm_fp8(
