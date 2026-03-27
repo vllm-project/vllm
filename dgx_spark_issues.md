@@ -327,11 +327,11 @@ PyTorch only supports compute capabilities 8.0-9.0.
 
 ---
 
-## 2026-03-27 Friday — 05:58 更新
+## 2026-03-27 Friday — 07:06 更新
 
 **PR #38126 状态：** 仍 open，**活跃讨论中** 🔥
-- 最后更新：~9h 前 (2026-03-26T20:52:26Z)
-- 评论数：14 条（持续增加，讨论活跃）
+- 最后更新：~10h 前 (2026-03-26T20:52:26Z)
+- 评论数：14 条（活跃讨论）
 - 作者：johnnynunez (NVIDIA maintainer)
 - Labels: `ready`, `ci/build`, `nvidia`
 - 关键进展：讨论持续进行中，接近 merge 状态
@@ -340,8 +340,8 @@ PyTorch only supports compute capabilities 8.0-9.0.
   - 如未覆盖 → 推进 #37141 (Marlin auto-detect for GB10)
 
 **PR #37959 (Helm chart 修复)：**
-- 状态：Open ~73h
-- 最后更新：~23h 前
+- 状态：Open ~74h
+- 最后更新：~24h 前
 - Labels: `bug`, `documentation`（仍缺 `ready`）
 - 人类 review: 0
 - 决策：周末 review 慢属正常，周一 (3/30) 如仍无进展再追加评论

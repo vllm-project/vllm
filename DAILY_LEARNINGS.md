@@ -1,3 +1,40 @@
+# Daily Learnings — simpx
+
+## 日期：2026-03-27 Friday
+
+### ✅ 昨天完成
+- PR #38293: Fix: FusedMoE AssertionError with Speculative Decoding on Quark-Quantized Models — Open
+- PR #38292: [CI][ROCm] Add gpt-oss w4a8 in CI — Open
+- PR #38290: [CI] Pin GitHub Actions to commit hashes in macos-smoke-test.yml — Open
+- PR #38289: tests: reduce duplication in online pooling scoring suites — Closed (not merged)
+
+### 📚 学到的经验
+1. **PR 标题格式** — 大部分用 `[Category]` 前缀（[CI], [Bugfix], [ROCm], [Model Loader], [Quant]），格式规范有助于快速分类
+2. **改动规模** — 昨天 merge 的 ~19 个 PR 大多是单文件或少数文件修改，CI 修复类通常 <50 行
+3. **关闭原因** — PR #38289 被关闭（未 merge），可能是重复工作或与方向不符，需关注关闭前是否有 maintainer 评论
+4. **bot 检查** — gemini-code-assist[bot] 会对某些文件类型跳过 review（如 macos-smoke-test.yml 的 CI 配置）
+5. **维护者活跃领域** — AndreasKaratzas 专注 ROCm CI 修复（昨天 5 个 merge），hmellor 专注 Transformers v5
+
+### ⚠️ 踩过的坑
+- PR #38289 被关闭：+180/-400 行重构测试代码，mergeable=true 但被 simon-mo 关闭无解释 → 可能需先 Slack 沟通再提交，或标题需加 [Refactor][Test] 前缀
+- 3 个 open PRs 均无人类 review（仅 bot 评论），需要耐心等待或主动在 Slack 求助
+- CI PRs 通常需要相关平台 maintainer（如 ROCm）review，跨平台 PR 可能等待时间更长
+
+### 🎯 今天计划
+1. [ ] 检查 PR #38289 关闭原因（查看 timeline/comments）
+2. [ ] 等待 PR #38293/#38292/#38290 人类 review（已创建 <24h，继续等待）
+3. [ ] 推进 DGX Spark Marlin 自动检测 PR 准备
+4. [ ] 观察 #38126 (DGX Spark 修复) 进展，评估是否覆盖需求
+5. [ ] 社区参与：评论 1-2 个 DGX/KVCache 相关 issue
+
+### 📖 社区准则提醒
+- 尊重维护者时间
+- 技术诚信
+- 建设性参与
+- 长期承诺
+
+---
+
 ## 2026-03-26 Thursday — 15:54 Cron Summary
 
 ### 📊 PR #37959 状态
@@ -715,29 +752,29 @@
 
 ---
 
-## 2026-03-27 Friday — 05:58 Cron Summary
+## 2026-03-27 Friday — 07:06 Cron Summary
 
 ### 📊 PR #37959 状态（我的唯一 Open PR）
 
 **[Bugfix] Fix Helm chart Deployment using hardcoded labels instead of chart.labels**
-- **状态：** Open，创建约 **73 小时** (2026-03-24T04:49:08Z)
-- **最后更新：** 2026-03-26T06:51:28Z (~23h 前)
+- **状态：** Open，创建约 **74 小时** (2026-03-24T04:49:08Z)
+- **最后更新：** 2026-03-26T06:51:28Z (~24h 前)
 - **Labels：** `bug`, `documentation`（**关键：仍缺 `ready`**）
-- **人类 Review：** 0 — **73h 零人类互动** ⚠️
+- **人类 Review：** 0 — **74h 零人类互动** ⚠️
 - **人类评论：** 2 — 我的求助留言 + mergify bot
-- **Mergeable：** true
+- **Mergeable：** null (CI 未跑)
 - **改动：** +3/-5, 1 file
 - **Open PR 总数：** 1 ✅（符合上限）
 
-**决策：** 73h 无人类 review，周末效应明显。周一 (3 月 30 日) 如仍无进展，在 PR 上追加简短评论礼貌提醒。
+**决策：** 74h 无人类 review，周末效应明显。周一 (3 月 30 日) 如仍无进展，在 PR 上追加简短评论礼貌提醒。
 
 ### 🔬 PR #38126 (NVIDIA DGX Spark 修复)
 
 - **状态：** Open，未 merge
-- **最后更新：** ~9h 前 (2026-03-26T20:52:26Z) — **活跃讨论中** 🔥
+- **最后更新：** ~10h 前 (2026-03-26T20:52:26Z) — **活跃讨论中** 🔥
 - **作者：** johnnynunez (NVIDIA maintainer)
 - **Labels：** `ready`, `ci/build`, `nvidia`
-- **评论：** 14 条（从 9 条增加到 14 条，讨论活跃）
+- **评论：** 14 条（活跃讨论）
 - **关键进展：** 讨论持续进行中，接近 merge 状态
 - **策略：** 继续等待 merge
   - merge 后立即检查代码是否覆盖 SM 12.1 Marlin 自动检测
@@ -766,7 +803,7 @@
 
 - ✅ 0 新 PR（符合每天≤1 上限）
 - ✅ 持续跟进现有 PR 状态
-- ✅ DGX Spark 环境稳定（GB10, SM 12.1, Driver 580.95.05）
+- ✅ DGX Spark 环境稳定（GB10, SM 12.1）
 - ✅ 已准备好 #37141 PR 代码（待 #38126 merge 后决定提交时机）
 
 ### 🔒 安全检查
