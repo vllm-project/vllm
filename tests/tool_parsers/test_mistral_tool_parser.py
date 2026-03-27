@@ -1162,13 +1162,10 @@ def test_adjust_request_unsupported_response_format(
     "so_kwargs,expected_json_schema",
     [
         ({"json_object": True}, _DEFAULT_JSON_SCHEMA),
-        ({"json": '{"type": "object"}'}, '{"type": "object"}'),
+        ({"json": '{"type": "object"}'}, {"type": "object"}),
         (
             {"json": {"type": "object", "properties": {"x": {"type": "integer"}}}},
-            json.dumps(
-                {"type": "object", "properties": {"x": {"type": "integer"}}},
-                ensure_ascii=False,
-            ),
+            {"type": "object", "properties": {"x": {"type": "integer"}}},
         ),
     ],
     ids=["json_object", "json_str", "json_dict"],
@@ -1213,10 +1210,7 @@ def test_adjust_request_structured_outputs_generates_grammar(
                     },
                 },
             },
-            json.dumps(
-                {"type": "object", "properties": {"x": {"type": "integer"}}},
-                ensure_ascii=False,
-            ),
+            {"type": "object", "properties": {"x": {"type": "integer"}}},
         ),
     ],
     ids=["json_object", "json_schema_with_schema"],
@@ -1268,7 +1262,7 @@ def test_adjust_request_tool_choice_none_with_json_schema_uses_json_schema_facto
         result = mistral_tool_parser.adjust_request(request)
 
         mock_json_schema.assert_called_once()
-        assert mock_json_schema.call_args.kwargs["json_schema"] == '{"type": "object"}'
+        assert mock_json_schema.call_args.kwargs["json_schema"] == {"type": "object"}
         mock_jinja.assert_not_called()
 
     assert result.structured_outputs is not None
@@ -1300,7 +1294,7 @@ def test_adjust_request_tool_choice_auto_with_json_schema_uses_jinja_factory(
         result = mistral_tool_parser.adjust_request(request)
 
         mock_jinja.assert_called_once()
-        assert mock_jinja.call_args.kwargs["json_schema"] == '{"type": "object"}'
+        assert mock_jinja.call_args.kwargs["json_schema"] == {"type": "object"}
         mock_json_schema.assert_not_called()
 
     assert result.structured_outputs is not None

@@ -49,9 +49,7 @@ logger = init_logger(__name__)
 
 ALPHANUMERIC = ascii_letters + digits
 
-_DEFAULT_JSON_SCHEMA = json.dumps(
-    {"anyOf": [{"type": "object"}, {"type": "array"}]}, ensure_ascii=False
-)
+_DEFAULT_JSON_SCHEMA = {"anyOf": [{"type": "object"}, {"type": "array"}]}
 
 
 class StreamingState(Enum):
@@ -170,17 +168,15 @@ class MistralToolParser(ToolParser):
                 request.skip_special_tokens = False
             return request
 
-        json_schema: str | None = None
+        json_schema: dict[str, Any] | None = None
         if structured_outputs is not None:
             if structured_outputs.json_object is not None:
                 json_schema = _DEFAULT_JSON_SCHEMA
             elif structured_outputs.json is not None:
                 if isinstance(structured_outputs.json, str):
-                    json_schema = structured_outputs.json
+                    json_schema = json.loads(structured_outputs.json)
                 else:
-                    json_schema = json.dumps(
-                        structured_outputs.json, ensure_ascii=False
-                    )
+                    json_schema = structured_outputs.json
             else:
                 raise ValueError(
                     "Unsupported request.structured_outputs for MistralToolParser. "
@@ -191,10 +187,7 @@ class MistralToolParser(ToolParser):
                 json_schema = _DEFAULT_JSON_SCHEMA
             elif response_format.type == "json_schema":
                 if response_format.json_schema is not None:
-                    json_schema = json.dumps(
-                        response_format.json_schema.json_schema,
-                        ensure_ascii=False,
-                    )
+                    json_schema = response_format.json_schema.json_schema
                 else:
                     json_schema = _DEFAULT_JSON_SCHEMA
             else:
@@ -210,9 +203,7 @@ class MistralToolParser(ToolParser):
         # TODO: Once unified parser, improve this.
         # The issue is figuring out when a model is a reasoning one or not.
         template = grammar_factory.select_jinja_template(
-            reasoning=request.include_reasoning
-            and request.reasoning_effort != "none"
-            and self.model_can_reason
+            reasoning=self.model_can_reason
         )
 
         tools = (
