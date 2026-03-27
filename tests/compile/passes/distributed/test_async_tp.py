@@ -222,6 +222,27 @@ FLASHINFER_RS_CASE = "flashinfer_rs"
 FLASHINFER_AG_CASE = "flashinfer_ag"
 
 
+def _flashinfer_bmm_reshape(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    bmm_result = torch.ops.vllm.bmm_fp8.default(
+        input.unsqueeze(0),
+        weight.unsqueeze(0),
+        scale_a,
+        scale_b,
+        dtype,
+        "auto",
+    )
+    return torch.ops.aten.reshape.default(
+        bmm_result,
+        [input.shape[0], weight.shape[1]],
+    )
+
+
 def _build_flashinfer_rs_case(
     dtype: torch.dtype,
     tp_world_size: int,
@@ -234,18 +255,7 @@ def _build_flashinfer_rs_case(
         scale_b: torch.Tensor,
     ):
         fp8_input = input.to(FP8_DTYPE)
-        bmm_result = torch.ops.vllm.bmm_fp8.default(
-            fp8_input.unsqueeze(0),
-            weight.unsqueeze(0),
-            scale_a,
-            scale_b,
-            dtype,
-            "auto",
-        )
-        mm_result = torch.ops.aten.reshape.default(
-            bmm_result,
-            [fp8_input.shape[0], weight.shape[1]],
-        )
+        mm_result = _flashinfer_bmm_reshape(fp8_input, weight, scale_a, scale_b, dtype)
         return torch.ops.vllm.reduce_scatter.default(
             mm_result,
             dim=0,
@@ -277,18 +287,7 @@ def _build_flashinfer_ag_case(
             world_size=tp_world_size,
             group_name=tp_group_name,
         )
-        bmm_result = torch.ops.vllm.bmm_fp8.default(
-            all_gather.unsqueeze(0),
-            weight.unsqueeze(0),
-            scale_a,
-            scale_b,
-            dtype,
-            "auto",
-        )
-        output = torch.ops.aten.reshape.default(
-            bmm_result,
-            [all_gather.shape[0], weight.shape[1]],
-        )
+        output = _flashinfer_bmm_reshape(all_gather, weight, scale_a, scale_b, dtype)
         q_size = hidden_size // 2
         kv_size = hidden_size // 4
         return torch.ops.aten.split_with_sizes.default(
