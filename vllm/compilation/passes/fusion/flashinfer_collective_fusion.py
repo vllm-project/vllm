@@ -100,8 +100,8 @@ class _BaseFlashInferPattern:
     def get_inputs(self) -> list[torch.Tensor]:
         input = torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
         weight = torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
-        scale_a = torch.tensor(1.0, device=self.device, dtype=torch.float32)
-        scale_b = torch.tensor(1.0, device=self.device, dtype=torch.float32)
+        scale_a = torch.ones(1, device=self.device, dtype=torch.float32)
+        scale_b = torch.ones(1, device=self.device, dtype=torch.float32)
         return [input, weight, scale_a, scale_b]
 
 
