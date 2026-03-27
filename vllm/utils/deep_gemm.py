@@ -128,9 +128,13 @@ def _import_deep_gemm():
     in the vLLM wheel.
     """
     try:
-        return importlib.import_module("deep_gemm")
+        module = importlib.import_module("deep_gemm")
+        logger.debug_once("Imported deep_gemm module from site-packages")
+        return module
     except ImportError:
-        return importlib.import_module("vllm.third_party.deep_gemm")
+        module = importlib.import_module("vllm.third_party.deep_gemm")
+        logger.debug_once("Imported deep_gemm module from vllm.third_party.deep_gemm")
+        return module
 
 
 def _lazy_init() -> None:
