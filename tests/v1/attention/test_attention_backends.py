@@ -318,6 +318,7 @@ def _test_backend_correctness(
     atol: float = 1e-2,
     rtol: float = 1e-2,
     tensor_parallel_size: int = 1,
+    attention_backend: AttentionBackendEnum | None = None,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -365,6 +366,7 @@ def _test_backend_correctness(
         block_size=block_size,
         num_gpu_blocks=8192,
         hf_config_override=hf_config_override,
+        attention_backend=attention_backend,
     )
     device = torch.device("cuda:0")
 
@@ -612,6 +614,7 @@ def test_causal_backend_correctness(
             causal_mask_mod,
             block_size=128,
             tensor_parallel_size=tensor_parallel_size,
+            attention_backend=AttentionBackendEnum.FLEX_ATTENTION,
         )
 
 
@@ -694,6 +697,7 @@ def test_sliding_window_backend_correctness(
             sliding_window_mask_mod_fn,
             block_size=128,
             tensor_parallel_size=tensor_parallel_size,
+            attention_backend=AttentionBackendEnum.FLEX_ATTENTION,
         )
 
 
