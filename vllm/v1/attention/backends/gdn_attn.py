@@ -334,7 +334,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             chunk_indices = prepare_chunk_indices(
                 non_spec_query_start_loc_cpu, chunk_size
             ).to(query_start_loc.device, non_blocking=True)
-            prepare_chunk_indices.register(
+            prepare_chunk_indices.register(  # type: ignore[attr-defined]
                 chunk_indices, non_spec_query_start_loc, chunk_size
             )
 
