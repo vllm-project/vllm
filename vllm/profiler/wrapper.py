@@ -250,27 +250,26 @@ class TorchProfilerWrapper(WorkerProfiler):
 
         profiler_config = self.profiler_config
         rank = self.local_rank
-        if profiler_config.torch_profiler_dump_cuda_time_total:
-            profiler_dir = profiler_config.torch_profiler_dir
+        if rank != 0:
+            # Only rank 0 dumps profiler tables to avoid file contention and redundant data
+            return
+        profiler_dir = profiler_config.torch_profiler_dir
+        if self.dump_cpu_time_total:
+            sort_key = "self_cpu_time_total"
+            table = self.profiler.key_averages().table(sort_by=sort_key, row_limit=50)
+        elif profiler_config.torch_profiler_dump_cuda_time_total:
             sort_key = "self_cuda_time_total"
             table = self.profiler.key_averages().table(sort_by=sort_key)
+        else:
+            return
 
             # Skip file write for URI paths (gs://, s3://, etc.)
             # as standard file I/O doesn't work with URI schemes
-            if not _is_uri_path(profiler_dir):
-                profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
-                with open(profiler_out_file, "w") as f:
-                    print(table, file=f)
+        if not _is_uri_path(profiler_dir):
+            profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
+            with open(profiler_out_file, "w") as f:
+                print(table, file=f)
 
-            # only print profiler results on rank 0
-            if rank == 0:
-                print(table)
-        if self.dump_cpu_time_total and rank == 0:
-            logger.info(
-                self.profiler.key_averages().table(
-                    sort_by="self_cpu_time_total", row_limit=50
-                )
-            )
 
     @override
     def _profiler_step(self) -> bool:
