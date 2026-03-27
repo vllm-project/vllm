@@ -382,7 +382,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   const int4* bias_ptr = (const int4*)b_bias;
   const float* a_s_ptr = (const float*)a_s;
   const int4* b_s_ptr = (const int4*)b_s;
-  const uint16_t* g_s_ptr = (const uint16_t*)g_s;
+  const float* g_s_ptr = (const float*)g_s;
   const int4* zp_ptr = (const int4*)zp;
   const int* g_idx_ptr = (const int*)g_idx;
   const int* perm_ptr = (const int*)perm;
@@ -759,7 +759,7 @@ torch::Tensor moe_wna16_marlin_gemm(
     TORCH_CHECK(b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn,
                 "global_scale can only be used for nvfp4 format.");
   } else {
-    global_scale = torch::empty({0}, options);
+    global_scale = torch::empty({0}, options_fp32);
     TORCH_CHECK(!(b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn),
                 "the global_scale parameter must be passed for nvfp4 format.");
   }
@@ -842,8 +842,8 @@ torch::Tensor moe_wna16_marlin_gemm(
 
   TORCH_CHECK(a_scales.scalar_type() == at::ScalarType::Float,
               "scalar type of a_scales must be float");
-  TORCH_CHECK(global_scale.scalar_type() == c.scalar_type(),
-              "scalar type of global_scale must be the same with c");
+  TORCH_CHECK(global_scale.scalar_type() == at::ScalarType::Float,
+              "scalar type of global_scale must be float");
   if (a_type.size_bits() == 16) {
     TORCH_CHECK(
         a.scalar_type() == c.scalar_type(),
