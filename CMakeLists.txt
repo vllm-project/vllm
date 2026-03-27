@@ -279,7 +279,7 @@ endif()
 # monitorx extension - TODO compiler flags for intrinsics
 #
 
-set(VLLM_MONTIORX_EXT_SRC
+set(VLLM_MONITORX_EXT_SRC
   "csrc/monitorx.cpp")
 
 set_gencode_flags_for_srcs(
@@ -289,7 +289,7 @@ define_extension_target(
   monitorx
   DESTINATION vllm
   LANGUAGE CXX
-  SOURCES ${VLLM_MONTIORX_EXT_SRC}
+  SOURCES ${VLLM_MONITORX_EXT_SRC}
   COMPILE_FLAGS "-mmwaitx"
   USE_SABI 3.11
   WITH_SOABI)
