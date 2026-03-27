@@ -85,7 +85,7 @@ async def test_bigger_truncation_size(client: openai.AsyncOpenAI):
     expected_message = (
         "truncate_prompt_tokens value is "
         "greater than max_model_len."
-        " Please, select a smaller truncation size."
+        " Please request a smaller truncation size."
     )
     assert error_details["message"] == expected_message
 

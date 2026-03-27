@@ -3658,7 +3658,7 @@ def test_prepend_skipped_requests_order():
     assert waiting_reqs == expected_waiting_reqs
 
 
-def test_remote_kv_promotion_keeps_fcfs_with_fsm_prefix():
+def test_remote_kv_promotion_keeps_fcfs_with_grammar_prefix():
     scheduler = create_scheduler(max_num_seqs=1)
     scheduler.connector = Mock()
     scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
@@ -3667,19 +3667,20 @@ def test_remote_kv_promotion_keeps_fcfs_with_fsm_prefix():
     for request in requests:
         scheduler.add_request(request)
 
-    req_fsm_1, req_fsm_2, req_remote, req_tail = list(scheduler.waiting)
+    req_grammar_1, req_grammar_2, req_remote, req_tail = list(scheduler.waiting)
 
-    # simulate two FSM requests at the waiting head that become ready now.
-    req_fsm_1.status = RequestStatus.WAITING_FOR_FSM
-    req_fsm_1.structured_output_request = Mock(grammar=object())
-    req_fsm_2.status = RequestStatus.WAITING_FOR_FSM
-    req_fsm_2.structured_output_request = Mock(grammar=object())
+    # simulate two structured-output grammar requests at the waiting head
+    # that become ready now.
+    req_grammar_1.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    req_grammar_1.structured_output_request = Mock(grammar=object())
+    req_grammar_2.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    req_grammar_2.structured_output_request = Mock(grammar=object())
 
     # simulate a remote-KV request that is ready to be promoted now.
     req_remote.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-    scheduler.waiting.remove_requests([req_fsm_1, req_fsm_2, req_remote])
-    scheduler.skipped_waiting.add_request(req_fsm_1)
-    scheduler.skipped_waiting.add_request(req_fsm_2)
+    scheduler.waiting.remove_requests([req_grammar_1, req_grammar_2, req_remote])
+    scheduler.skipped_waiting.add_request(req_grammar_1)
+    scheduler.skipped_waiting.add_request(req_grammar_2)
     scheduler.skipped_waiting.add_request(req_remote)
     scheduler.finished_recving_kv_req_ids.add(req_remote.request_id)
     scheduler._update_waiting_for_remote_kv = Mock()
@@ -3687,13 +3688,13 @@ def test_remote_kv_promotion_keeps_fcfs_with_fsm_prefix():
     output = scheduler.schedule()
 
     assert output.scheduled_new_reqs
-    assert output.scheduled_new_reqs[0].req_id == req_fsm_1.request_id
+    assert output.scheduled_new_reqs[0].req_id == req_grammar_1.request_id
     waiting_req_ids = [
         req.request_id
         for req in list(scheduler.skipped_waiting) + list(scheduler.waiting)
     ]
     assert waiting_req_ids == [
-        req_fsm_2.request_id,
+        req_grammar_2.request_id,
         req_remote.request_id,
         req_tail.request_id,
     ]
@@ -3706,28 +3707,32 @@ def test_fcfs_mixed_skipped_waiting_types_keep_order():
     mk_req = lambda req_id, num_tokens=1: create_requests(  # noqa: E731
         num_requests=1, num_tokens=num_tokens, req_ids=[req_id]
     )[0]
-    req_fsm, req_remote, req_stream = mk_req("fsm"), mk_req("remote"), mk_req("stream")
+    req_grammar, req_remote, req_stream = (
+        mk_req("grammar"),
+        mk_req("remote"),
+        mk_req("stream"),
+    )
     req_regular, req_tail = mk_req("regular", 20), mk_req("tail")
-    req_fsm.status = RequestStatus.WAITING_FOR_FSM
-    req_fsm.structured_output_request = Mock(grammar=None)
+    req_grammar.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    req_grammar.structured_output_request = Mock(grammar=None)
     req_remote.status = RequestStatus.WAITING_FOR_REMOTE_KVS
     req_stream.status = RequestStatus.WAITING_FOR_STREAMING_REQ
 
-    for req in (req_fsm, req_remote, req_stream, req_regular, req_tail):
+    for req in (req_grammar, req_remote, req_stream, req_regular, req_tail):
         scheduler.add_request(req)
     scheduler.schedule()
-    assert list(scheduler.skipped_waiting) == [req_fsm, req_remote, req_stream]
+    assert list(scheduler.skipped_waiting) == [req_grammar, req_remote, req_stream]
 
     scheduler.finish_requests(req_regular.request_id, RequestStatus.FINISHED_ABORTED)
     assert not scheduler.running
 
-    req_fsm.structured_output_request = Mock(grammar=object())
+    req_grammar.structured_output_request = Mock(grammar=object())
     scheduler.finished_recving_kv_req_ids.add(req_remote.request_id)
     req_stream.status = RequestStatus.WAITING
 
     second_output = scheduler.schedule()
     expected_order = [
-        req_fsm.request_id,
+        req_grammar.request_id,
         req_remote.request_id,
         req_stream.request_id,
         req_tail.request_id,
