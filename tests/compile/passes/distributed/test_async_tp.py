@@ -289,10 +289,9 @@ class TestAGFlashInferBMMFP8Model(_BaseFlashInferBMMFP8Model):
         )
         q_size = self.hidden_size // 2
         kv_size = self.hidden_size // 4
-        q, k, v = torch.ops.aten.split_with_sizes.default(
+        return torch.ops.aten.split_with_sizes.default(
             output, [q_size, kv_size, kv_size], -1
         )
-        return torch.ops.aten.cat.default([q, k, v], -1)
 
     def ops_in_model_before(self):
         return [torch.ops.vllm.all_gather.default]
