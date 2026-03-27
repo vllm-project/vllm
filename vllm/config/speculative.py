@@ -9,6 +9,7 @@ from pydantic import Field, SkipValidation, model_validator
 from typing_extensions import Self
 
 from vllm.config import LoadConfig
+from vllm.config.kernel import MoEBackend
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
@@ -57,7 +58,7 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
 ]
-RejectionSampleMethod = Literal["strict", "probabilistic"]
+RejectionSampleMethod = Literal["strict", "probabilistic", "synthetic"]
 
 
 @config
@@ -67,7 +68,7 @@ class SpeculativeConfig:
     enforce_eager: bool | None = None
     """Override the default enforce_eager from model_config"""
     # General speculative decoding control
-    num_speculative_tokens: int = Field(default=None, gt=0)
+    num_speculative_tokens: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
     model: str | None = None
@@ -89,10 +90,15 @@ class SpeculativeConfig:
     warn users when they mistakenly provide the wrong argument."""
 
     # Draft model configuration
-    quantization: me_quant.QuantizationMethods | None = None
+    quantization: me_quant.QuantizationMethods | str | None = None
     """Quantization method that was used to quantize the draft model weights.
     If `None`, we assume the model weights are not quantized. Note that it only
     takes effect when using the draft model-based speculative method."""
+    moe_backend: MoEBackend | None = None
+    """MoE backend to use for the draft model. When `None`, the draft model
+    inherits the target model's `--moe-backend` setting. Useful when the
+    drafter and generator require different MoE kernels (e.g. quantized
+    generator with unquantized drafter)."""
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
@@ -177,6 +183,13 @@ class SpeculativeConfig:
     or probabilistic rejection sampling. Both respect the target model
     distribution, but the latter yields a higher acceptance rate at the cost
     of more memory to cache draft logits."""
+
+    synthetic_acceptance_rate: float | None = None
+    """Average acceptance rate for synthetic rejection sampling. Draft
+    tokens are accepted with a position-dependent probability that decays
+    geometrically, calibrated so that the mean rate across all speculative
+    positions equals this value. Only used when rejection_sample_method
+    is 'synthetic'. Must be in [0, 1]."""
 
     def compute_hash(self) -> str:
         """
@@ -280,7 +293,7 @@ class SpeculativeConfig:
             )
 
         if (
-            hf_config.model_type == "nemotron_h"
+            hf_config.model_type in {"nemotron_h", "nemotron_h_puzzle"}
             and hasattr(hf_config, "num_nextn_predict_layers")
             and hf_config.num_nextn_predict_layers > 0
         ):
@@ -520,8 +533,10 @@ class SpeculativeConfig:
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):
-                    from vllm.transformers_utils.configs import SpeculatorsConfig
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
+                    from vllm.transformers_utils.configs.speculators import (
+                        SpeculatorsConfig,
+                    )
 
                     if isinstance(
                         self.draft_model_config.hf_config,
