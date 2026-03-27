@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -14,6 +15,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
+    AttentionBatch,
     build_attn_metadata,
     build_slot_mappings_by_layer,
     init_attn_backend,
@@ -69,6 +71,10 @@ class EagleSpeculator:
         self.temperature = torch.zeros(
             self.max_num_reqs, dtype=torch.float32, device=device
         )
+        self.decode_query_start_loc_np = np.arange(
+            self.max_num_reqs + 1, dtype=np.int32
+        )
+        self.decode_num_scheduled_tokens_np = np.ones(self.max_num_reqs, dtype=np.int32)
         self.seeds = torch.zeros(self.max_num_reqs, dtype=torch.int64, device=device)
         self.draft_tokens = torch.zeros(
             self.max_num_reqs,
@@ -396,22 +402,21 @@ class EagleSpeculator:
         attn_metadata_updated = None
         slot_mappings_updated = None
         if not (dummy_run and skip_attn_for_dummy_run):
-            query_start_loc_cpu = torch.arange(
-                num_reqs_padded + 1, dtype=torch.int32, device="cpu"
-            )
             block_tables = [
                 x[:num_reqs_padded] for x in self.block_tables.input_block_tables
             ]
-
-            # FIXME(woosuk): This is UNSAFE!!
             attn_metadata_updated = build_attn_metadata(
+                AttentionBatch(
+                    num_reqs=num_reqs_padded,
+                    num_reqs_after_padding=num_reqs_padded,
+                    num_tokens=num_reqs_padded,
+                    num_tokens_after_padding=num_reqs_padded,
+                    query_start_loc=self.input_buffers.query_start_loc,
+                    query_start_loc_np=self.decode_query_start_loc_np,
+                    seq_lens=self.input_buffers.seq_lens,
+                    num_scheduled_tokens=self.decode_num_scheduled_tokens_np,
+                ),
                 attn_groups=self.attn_groups,
-                num_reqs=num_reqs_padded,
-                num_tokens=num_reqs_padded,
-                query_start_loc_gpu=query_start_loc,
-                query_start_loc_cpu=query_start_loc_cpu,
-                max_query_len=1,
-                seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
                 max_seq_len=self.max_model_len,
                 block_tables=block_tables,
                 slot_mappings=slot_mappings,

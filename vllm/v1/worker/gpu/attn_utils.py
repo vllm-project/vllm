@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import Any, cast
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -16,6 +17,24 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+
+
+@dataclass
+class AttentionBatch:
+    """Minimal batch for build_attn_metadata (e.g., EAGLE decode phase)."""
+
+    num_reqs: int
+    num_reqs_after_padding: int
+    num_tokens: int
+    num_tokens_after_padding: int
+    query_start_loc: torch.Tensor
+    query_start_loc_np: np.ndarray
+    seq_lens: torch.Tensor
+    num_scheduled_tokens: np.ndarray
+    dcp_local_seq_lens: torch.Tensor | None = None
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -182,51 +201,60 @@ def build_slot_mappings_by_layer(
 
 
 def build_attn_metadata(
+    input_batch: "InputBatch | AttentionBatch",
     attn_groups: list[list[AttentionGroup]],
-    num_reqs: int,
-    num_tokens: int,
-    query_start_loc_gpu: torch.Tensor,
-    query_start_loc_cpu: torch.Tensor,
-    max_query_len: int,
-    seq_lens: torch.Tensor,
     max_seq_len: int,
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
-    dcp_local_seq_lens: torch.Tensor | None = None,
     encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]] | None = None,
+    include_padding: bool = True,
 ) -> dict[str, Any]:
-    seq_lens = seq_lens[:num_reqs]
+    num_groups = len(kv_cache_config.kv_cache_groups)
+    if num_groups == 0:
+        return {}
+
+    if include_padding:
+        num_reqs = input_batch.num_reqs_after_padding
+        num_tokens = input_batch.num_tokens_after_padding
+    else:
+        num_reqs = input_batch.num_reqs
+        num_tokens = input_batch.num_tokens
+    dcp_local_seq_lens = input_batch.dcp_local_seq_lens
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
 
-    attn_metadata: dict[str, Any] = {}
-    num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
-    for i in range(num_kv_cache_groups):
-        block_table = block_tables[i]
-        slot_mapping = slot_mappings[i]
+    common_attn_metadata = CommonAttentionMetadata(
+        query_start_loc=input_batch.query_start_loc[: num_reqs + 1],
+        query_start_loc_cpu=torch.from_numpy(
+            input_batch.query_start_loc_np[: num_reqs + 1]
+        ),
+        seq_lens=input_batch.seq_lens[:num_reqs],
+        max_seq_len=max_seq_len,
+        num_reqs=num_reqs,
+        num_actual_tokens=num_tokens,
+        max_query_len=int(input_batch.num_scheduled_tokens[:num_reqs].max()),
+        block_table_tensor=block_tables[0],
+        slot_mapping=slot_mappings[0],
+        causal=True,
+        dcp_local_seq_lens=dcp_local_seq_lens,
+    )
 
-        common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=query_start_loc_gpu,
-            query_start_loc_cpu=query_start_loc_cpu,
-            seq_lens=seq_lens,
-            max_seq_len=max_seq_len,
-            num_reqs=num_reqs,
-            num_actual_tokens=num_tokens,
-            max_query_len=max_query_len,
-            block_table_tensor=block_table,
-            slot_mapping=slot_mapping,
-            causal=True,
-            dcp_local_seq_lens=dcp_local_seq_lens,
-        )
-        if encoder_seq_lens and i in encoder_seq_lens:
+    attn_metadata: dict[str, Any] = {}
+    for i in range(num_groups):
+        if i > 0:
+            common_attn_metadata = replace(
+                common_attn_metadata,
+                block_table_tensor=block_tables[i],
+                slot_mapping=slot_mappings[i],
+            )
+        if encoder_seq_lens is not None and i in encoder_seq_lens:
             encoder_seq_lens_gpu, encoder_seq_lens_cpu = encoder_seq_lens[i]
             common_attn_metadata.encoder_seq_lens = encoder_seq_lens_gpu
             common_attn_metadata.encoder_seq_lens_cpu = encoder_seq_lens_cpu
 
         for attn_group in attn_groups[i]:
-            attn_metadata_builder = attn_group.get_metadata_builder(0)
-            metadata = attn_metadata_builder.build(
+            metadata = attn_group.get_metadata_builder(0).build(
                 common_prefix_len=0, common_attn_metadata=common_attn_metadata
             )
             for layer_name in attn_group.layer_names:
