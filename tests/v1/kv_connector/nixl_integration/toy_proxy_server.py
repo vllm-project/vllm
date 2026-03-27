@@ -272,6 +272,11 @@ async def handle_responses(request: Request):
     return await _handle_completions("/responses", request)
 
 
+@app.post("/v1/messages")
+async def handle_messages(request: Request):
+    return await _handle_completions("/messages", request)
+
+
 @app.get("/healthcheck")
 async def healthcheck():
     """Simple endpoint to check if the server is running."""
