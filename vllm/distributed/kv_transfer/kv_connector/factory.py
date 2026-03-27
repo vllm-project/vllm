@@ -119,7 +119,7 @@ class KVConnectorFactory:
                 connector_cls = getattr(connector_module, class_name)
             except AttributeError as e:
                 raise AttributeError(
-                    "Class %s not found in %s" % (class_name, connector_module_path)
+                    f"Class {class_name} not found in {connector_module_path}"
                 ) from e
             connector_cls = cast(type[KVConnectorBaseType], connector_cls)
             if not supports_kw(connector_cls, "kv_cache_config"):
