@@ -701,7 +701,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         self.mxfp4_backend: Mxfp4MoeBackend | None = None
         if self.ocp_mx_scheme == "w_mxfp4":
-            self.mxfp4_backend, _ = select_mxfp4_moe_backend(moe)
+            try:
+                self.mxfp4_backend, _ = select_mxfp4_moe_backend(moe)
+            except (NotImplementedError, ValueError) as e:
+                logger.warning_once(
+                    "No MXFP4 MoE backend supports the deployment "
+                    "configuration: %s. Falling back to emulation.",
+                    e,
+                )
 
         if self.input_quant is not None:
             self.static_input_scales = not self.input_quant.get("is_dynamic")
@@ -745,21 +752,25 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # internally, so the alignment check is skipped.
         if (
             not self.emulate
-            and self.use_rocm_aiter_moe
             and self.ocp_mx_scheme is not None
             and self.ocp_mx_scheme.startswith("w_mxfp4")
             and self.model_type != "gpt_oss"
-            and moe.intermediate_size_per_partition % CK_MXFP4_MOE_DIM_ALIGNMENT != 0
+            and (
+                moe.intermediate_size_per_partition % CK_MXFP4_MOE_DIM_ALIGNMENT != 0
+                or moe.hidden_dim % CK_MXFP4_MOE_DIM_ALIGNMENT != 0
+            )
         ):
             logger.warning_once(
                 "AITER CK MXFP4 MoE GEMM does not support "
-                "intermediate_size_per_partition=%d (not a multiple of %d). "
+                "intermediate_size_per_partition=%d, hidden_dim=%d "
+                "(both must be multiples of %d). "
                 "This typically happens when intermediate_size / "
                 "tensor_parallel_size produces an incompatible dimension. "
                 "Falling back to emulation mode. To avoid this overhead, "
                 "use a compatible tensor_parallel_size or set "
                 "VLLM_ROCM_USE_AITER_MOE=0.",
                 moe.intermediate_size_per_partition,
+                moe.hidden_dim,
                 CK_MXFP4_MOE_DIM_ALIGNMENT,
             )
             self.use_rocm_aiter_moe = False
