@@ -211,7 +211,7 @@ def select_mxfp4_moe_backend(
 
     # LoRA: separate experts backend path
     if config.is_lora_enabled:
-        if not current_platform.is_cuda():
+        if not current_platform.is_cuda() and not current_platform.is_xpu():
             # ROCm: Triton mxfp4 LoRA hits GPU memory faults due to
             # triton_kernels.tensor.Tensor / HIP read-only page issues
             # during weight swizzle and LoRA forward. Needs work from

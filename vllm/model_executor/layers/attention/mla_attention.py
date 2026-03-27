@@ -1039,7 +1039,7 @@ class QueryLenSupport(Enum):
 
 
 try:
-    from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+    from vllm.v1.attention.backends.fa_utils import (  # type: ignore[attr-defined]
         flash_attn_varlen_func,
     )
 

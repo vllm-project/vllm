@@ -36,7 +36,7 @@ def test_mixtral_lora(mixtral_lora_files, tp_size):
     if (
         torch.accelerator.device_count() < tp_size
         and tp_size > 1
-        and current_platform.is_cuda_alike()
+        and (current_platform.is_cuda_alike() or current_platform.is_xpu())
     ):
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
