@@ -46,7 +46,7 @@ MoveToBufferResult = tuple[np.ndarray, np.ndarray, RecvMetadata]
 
 
 @dataclass
-class AsyncEPLBLayerResult:
+class AsyncEplbLayerResult:
     """
     The result of one completed async EPLB layer transfer.
     """

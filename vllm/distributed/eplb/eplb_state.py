@@ -48,7 +48,7 @@ from .async_worker import start_async_worker
 from .eplb_utils import EplbEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
-    AsyncEPLBLayerResult,
+    AsyncEplbLayerResult,
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
@@ -184,7 +184,7 @@ class EplbModelState:
     """
     CUDA device index for the async EPLB worker thread.
     """
-    pending_result: AsyncEPLBLayerResult | None = None
+    pending_result: AsyncEplbLayerResult | None = None
     """
     Set by the async worker after all writes to expert_buffer are done. Consumed
     and reset to None by the main thread in move_to_workspace() after the contents of
@@ -764,7 +764,7 @@ class EplbState:
             )
 
     def _update_layer_mapping_from_new(
-        self, model_state: EplbModelState, result: AsyncEPLBLayerResult
+        self, model_state: EplbModelState, result: AsyncEplbLayerResult
     ) -> None:
         layer = result.layer_idx
 

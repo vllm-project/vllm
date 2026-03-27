@@ -15,7 +15,7 @@ from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
 
 from .eplb_utils import EplbEvent
-from .rebalance_execute import AsyncEPLBLayerResult, transfer_layer
+from .rebalance_execute import AsyncEplbLayerResult, transfer_layer
 
 if TYPE_CHECKING:
     from .eplb_state import EplbModelState, EplbState
@@ -138,7 +138,7 @@ async def transfer_run_periodically(
                 # it. Record is called by the main thread after move_from_buffer().
                 consumed_event = EplbEvent()
 
-                model_state.pending_result = AsyncEPLBLayerResult(
+                model_state.pending_result = AsyncEplbLayerResult(
                     layer_idx=layer_idx,
                     new_physical_to_logical_map=new_physical_to_logical_map[layer_idx],
                     is_unchanged=is_unchanged,
