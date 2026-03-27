@@ -418,19 +418,17 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         and gathering tensors across TP ranks outweighs the benefits.
 
         Returns False (SP disabled) when:
-        - Using piecewise compilation with non-concrete or TP-indivisible sizes
+        - Using piecewise compilation (SP is full-graph only)
         - min_token_num is None (SP disabled for this device/config)
         - The compile range starts below the minimum token threshold
         """
-        # For piecewise compilation (not using inductor graph partition),
-        # we need concrete sizes that are divisible by TP for correct splitting
+        # Piecewise compilation changes residual tensor sizes across
+        # subgraph boundaries, so only support SP on the whole graph.
         if (
             not self.compilation_config.use_inductor_graph_partition
             and self.compilation_config.splitting_ops
         ):
-            tp_size = get_tensor_model_parallel_world_size()
-            if not compile_range.is_single_size() or compile_range.end % tp_size != 0:
-                return False
+            return False
 
         # min_token_num is None when SP is disabled for this device/config
         # (e.g., non-CUDA platform, unsupported GPU, or small hidden_size)

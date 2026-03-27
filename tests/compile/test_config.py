@@ -387,8 +387,8 @@ def test_should_split():
         (None, 257, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
         # max from list
         ([1, 2, 4, 15], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
-        # filtered out 15 due to SP
-        ([1, 2, 4, 15], None, 2, True, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
+        # piecewise compilation disables SP, so sizes are not filtered by TP
+        ([1, 2, 4, 15], None, 2, True, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
         # limited by the max_tokens
         ([1, 2, 4, 15], None, 1, False, 8, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
         # the list should contain at least 1 element when use cudagraph
@@ -443,6 +443,38 @@ def test_cudagraph_sizes_post_init(
             vllm_config.compilation_config.max_cudagraph_capture_size
             == expected_max_size
         )
+
+
+def test_disable_sp_for_piecewise_compilation():
+    with patch("vllm.config.parallel.cuda_device_count_stateless", return_value=2):
+        compilation_config = CompilationConfig(
+            cudagraph_capture_sizes=[1, 2, 4, 15],
+            pass_config=PassConfig(
+                enable_sp=True,
+                fuse_gemm_comms=True,
+                fuse_norm_quant=True,
+                fuse_act_quant=True,
+                eliminate_noops=True,
+                sp_min_token_num=512,
+            ),
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        )
+        engine_args = EngineArgs(
+            model="facebook/opt-125m",
+            tensor_parallel_size=2,
+            max_num_seqs=128,
+            max_num_batched_tokens=2048,
+            compilation_config=compilation_config,
+        )
+        vllm_config = engine_args.create_engine_config()
+
+    assert not vllm_config.compilation_config.use_inductor_graph_partition
+    assert vllm_config.compilation_config.splitting_ops
+    assert not vllm_config.compilation_config.pass_config.enable_sp
+    assert not vllm_config.compilation_config.pass_config.fuse_gemm_comms
+    assert vllm_config.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 15]
+    assert vllm_config.compilation_config.max_cudagraph_capture_size == 15
+    assert 511 not in vllm_config.compilation_config.compile_ranges_endpoints
 
 
 def test_cached_compilation_config(default_vllm_config):

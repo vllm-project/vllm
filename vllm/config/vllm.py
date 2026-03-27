@@ -1028,7 +1028,6 @@ class VllmConfig:
             else:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
-            self._set_cudagraph_sizes()
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -1083,10 +1082,6 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        # Re-compute compile ranges after platform-specific config updates
-        # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
-        self._set_compile_ranges()
-
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (
             self.parallel_config.data_parallel_size
@@ -1097,6 +1092,13 @@ class VllmConfig:
             all2all_backend=self.parallel_config.all2all_backend,
             data_parallel_size=effective_dp_size,
         )
+        self._disable_sequence_parallelism_for_piecewise_compilation()
+
+        # Re-compute compile ranges after platform-specific config updates
+        # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
+        # and after finalizing splitting_ops / sequence parallelism state.
+        self._set_compile_ranges()
+        self._set_cudagraph_sizes()
 
         if self.compilation_config.pass_config.enable_sp:
             # With pipeline parallelism or dynamo partitioning,
@@ -1111,10 +1113,7 @@ class VllmConfig:
                     self.compilation_config.mode,
                 )
 
-            is_fullgraph = (
-                self.compilation_config.use_inductor_graph_partition
-                or len(self.compilation_config.splitting_ops or []) == 0
-            )
+            is_fullgraph = self._uses_full_graph_compilation()
             if self.parallel_config.pipeline_parallel_size > 1 or not is_fullgraph:
                 if "-rms_norm" not in self.compilation_config.custom_ops:
                     self.compilation_config.custom_ops.append("+rms_norm")
@@ -1306,6 +1305,30 @@ class VllmConfig:
             for size in possible_sizes
             if size % self.parallel_config.tensor_parallel_size == 0
         ]
+
+    def _uses_full_graph_compilation(self) -> bool:
+        return (
+            self.compilation_config.use_inductor_graph_partition
+            or len(self.compilation_config.splitting_ops or []) == 0
+        )
+
+    def _disable_sequence_parallelism_for_piecewise_compilation(self) -> None:
+        pass_config = self.compilation_config.pass_config
+        if not pass_config.enable_sp:
+            return
+
+        if (
+            self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+            or self._uses_full_graph_compilation()
+        ):
+            return
+
+        logger.warning_once(
+            "Sequence parallelism requires full-graph compilation; "
+            "disabling it for piecewise compilation."
+        )
+        pass_config.enable_sp = False
+        pass_config.fuse_gemm_comms = False
 
     def _set_max_num_scheduled_tokens(self):
         """
