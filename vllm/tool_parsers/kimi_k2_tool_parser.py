@@ -241,6 +241,25 @@ class KimiK2ToolParser(ToolParser):
             self.token_buffer = buffered_text  # Use cleaned buffer
             self.section_char_count = 0  # Reset counter for new section
 
+            # If section marker is in current delta, extract and return
+            # pre-marker content. This prevents legitimate content from being
+            # suppressed as "header noise".
+            # Note: We only check current delta, not buffer, because if the
+            # marker was split across deltas, pre-content was already returned.
+            # Find the earliest occurrence of any variant to handle edge cases
+            # where multiple variants might appear in the same delta.
+            first_marker_pos = -1
+            for variant in self.tool_calls_start_token_variants:
+                pos = delta_text.find(variant)
+                if pos != -1:
+                    if first_marker_pos == -1 or pos < first_marker_pos:
+                        first_marker_pos = pos
+
+            if first_marker_pos != -1:
+                pre_section_content = delta_text[:first_marker_pos]
+                if pre_section_content.strip():
+                    return DeltaMessage(content=pre_section_content)
+
         if found_section_end and self.in_tool_section:
             logger.debug("Detected section end marker")
             # CRITICAL: Don't exit early if tool_call_end is in this chunk.

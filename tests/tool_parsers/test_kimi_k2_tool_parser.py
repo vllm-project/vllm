@@ -923,3 +923,93 @@ def test_streaming_multiple_tool_calls_not_leaked(kimi_k2_tool_parser):
 
     # Legitimate content preserved
     assert "compare" in full_content.lower() or len(all_content) > 0
+
+
+def test_content_before_section_marker_same_delta(kimi_k2_tool_parser):
+    """
+    Test that content appearing BEFORE <|tool_calls_section_begin|> in the
+    same delta is NOT suppressed.
+
+    This reproduces the bug where content after </think> but before tool calls
+    was being lost because it arrived in the same chunk as the section marker.
+
+    Scenario: Model outputs "</think>Here is the answer<|tool_calls_section_begin|>..."
+    The "Here is the answer" must be returned as content, not suppressed.
+    """
+    kimi_k2_tool_parser.reset_streaming_state()
+
+    section_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_begin|>")
+
+    # Simulate the problematic scenario: content + section_begin in same delta
+    # This is what happens when reasoning ends and tool calls start close together
+    delta_with_content = "Here is my answer<|tool_calls_section_begin|>"
+
+    result = kimi_k2_tool_parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=delta_with_content,
+        delta_text=delta_with_content,
+        previous_token_ids=[],
+        current_token_ids=[1, 2, 3, section_begin_id],
+        delta_token_ids=[1, 2, 3, section_begin_id],
+        request=None,
+    )
+
+    # The content before the marker MUST be returned
+    assert result is not None, "Result should not be None"
+    assert result.content == "Here is my answer", (
+        f"Content before section marker was lost! Got: {result.content!r}"
+    )
+
+    # Parser should now be in tool section mode
+    assert kimi_k2_tool_parser.in_tool_section is True
+
+
+def test_content_before_section_marker_with_tool_call(kimi_k2_tool_parser):
+    """
+    Extended test: content + section_begin + tool_call_begin in same delta.
+
+    Verifies that:
+    1. Pre-section content is returned
+    2. Tool call processing continues correctly in subsequent calls
+    """
+    kimi_k2_tool_parser.reset_streaming_state()
+
+    section_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_begin|>")
+    tool_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_call_begin|>")
+    tool_end_id = kimi_k2_tool_parser.vocab.get("<|tool_call_end|>")
+    section_end_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_end|>")
+
+    all_content = []
+    all_tool_calls = []
+
+    # Delta 1: Content + section begin + start of tool call
+    delta1 = "The answer is 42<|tool_calls_section_begin|><|tool_call_begin|>"
+    deltas = [
+        (delta1, [1, 2, section_begin_id, tool_begin_id]),
+        ("get_answer:0 <|tool_call_argument_begin|>", [3, 4]),
+        ('{"value": 42}', [5, 6]),
+        (" <|tool_call_end|>", [tool_end_id]),
+        ("<|tool_calls_section_end|>", [section_end_id]),
+    ]
+
+    results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
+
+    for res in results:
+        if res:
+            if res.content:
+                all_content.append(res.content)
+            if res.tool_calls:
+                all_tool_calls.extend(res.tool_calls)
+
+    full_content = "".join(all_content)
+
+    # Pre-section content must be preserved
+    assert "The answer is 42" in full_content, (
+        f"Pre-section content was lost! Got: {full_content!r}"
+    )
+
+    # No tool markers should leak into content
+    assert "<|tool" not in full_content, f"Markers leaked: {full_content!r}"
+
+    # Tool calls should have been parsed (at least one)
+    assert len(all_tool_calls) > 0, "Tool calls were not parsed"
