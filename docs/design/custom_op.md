@@ -268,7 +268,7 @@ Currently, thanks to [vLLM's hardware-plugin mechanism](./plugin_system.md), the
 
 - **Official device plugins:** [vllm-ascend](https://github.com/vllm-project/vllm-ascend) (for Huawei Ascend NPU), [vllm-spyre](https://github.com/vllm-project/vllm-spyre)
 (for Spyre), [vllm-gaudi](https://github.com/vllm-project/vllm-gaudi) (for Intel Gaudi), [vllm-neuron](https://github.com/vllm-project/vllm-neuron) (for AWS Neuron), [vllm-meta](https://github.com/vllm-project/vllm-metal) (for Apple Silicon), etc.
-- **Non-official device plugins:** [vllm-metax](https://github.com/MetaX-MACA/vLLM-metax) (for MetaX GPU), [vllm-kunlun](https://github.com/baidu/vLLM-Kunlun) (for Baidu Kunlun XPU), etc.
+- **Non-official device plugins:** [vllm-metax](https://github.com/MetaX-MACA/vLLM-metax) (for MetaX GPU), [vllm-kunlun](https://github.com/baidu/vLLM-Kunlun) (for Baidu Kunlun XPU), [vllm-musa](https://github.com/MooreThreads/vllm-musa) (for Moore Threads GPU), etc.
 
 In this case, `CustomOp` can enable these hardware manufacturers to seamlessly replace vLLM's operations with their deep-optimized kernels for specific devices at runtime, by just registering an OOT `CustomOp` and implementing the `forward_oot()` method.
 
@@ -291,7 +291,7 @@ Taking `MMEncoderAttention` as an example:
 
         def __init__(...):
             super().__init__(...)
-        
+
         def forward_oot(...):
             # Call optimized device-specific kernels.
             ...
