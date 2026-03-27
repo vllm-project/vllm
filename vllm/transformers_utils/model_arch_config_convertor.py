@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import final
 
 import torch
-from huggingface_hub import constants
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import PretrainedConfig
 
@@ -18,27 +15,11 @@ from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     ConfigFormat,
-    try_get_safetensors_metadata,
+    get_safetensors_params_metadata,
 )
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
-
-
-@contextmanager
-def _maybe_patch_hf_hub_constants(config_format: ConfigFormat) -> Iterator[None]:
-    if config_format == "mistral":
-        hf_safetensors_single_file = constants.SAFETENSORS_SINGLE_FILE
-        hf_safetensors_index_file = constants.SAFETENSORS_INDEX_FILE
-        constants.SAFETENSORS_SINGLE_FILE = "consolidated.safetensors"
-        constants.SAFETENSORS_INDEX_FILE = "consolidated.safetensors.index.json"
-        try:
-            yield
-        finally:
-            constants.SAFETENSORS_SINGLE_FILE = hf_safetensors_single_file
-            constants.SAFETENSORS_INDEX_FILE = hf_safetensors_index_file
-    else:
-        yield
 
 
 class ModelArchConfigConvertorBase:
@@ -47,7 +28,10 @@ class ModelArchConfigConvertorBase:
         self.hf_text_config = hf_text_config
 
     def get_architectures(self) -> list[str]:
-        return getattr(self.hf_config, "architectures", [])
+        # Sometimes we get here from `vllm_config.with_hf_config(text_config)` where
+        # `text_config` is a sub-config from a multi-modal model. If this is the case,
+        # the sub-config will not have `architectures` and it will explicitly be `None`
+        return getattr(self.hf_config, "architectures", None) or []
 
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_hidden_layers", 0)
@@ -79,10 +63,10 @@ class ModelArchConfigConvertorBase:
         if getattr(self.hf_text_config, "hidden_size_per_head", None) is not None:
             return self.hf_text_config.hidden_size_per_head
 
+        if (total_num_attention_heads := self.get_total_num_attention_heads()) == 0:
+            return 0
         # FIXME(woosuk): This may not be true for all models.
-        return (
-            self.hf_text_config.hidden_size // self.hf_text_config.num_attention_heads
-        )
+        return self.get_hidden_size() // total_num_attention_heads
 
     def get_total_num_kv_heads(self) -> int:
         attributes = [
@@ -96,7 +80,7 @@ class ModelArchConfigConvertorBase:
         ]
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
-        default_factory = lambda: self.hf_text_config.num_attention_heads
+        default_factory = self.get_total_num_attention_heads
         return getattr_iter(
             self.hf_text_config, attributes, default_factory=default_factory
         )
@@ -147,7 +131,7 @@ class ModelArchConfigConvertorBase:
         hf_config: PretrainedConfig,
         model_id: str,
         revision: str | None,
-        config_format: ConfigFormat,
+        config_format: str | ConfigFormat,
     ):
         # NOTE: getattr(config, "dtype", torch.float32) is not correct
         # because config.dtype can be None.
@@ -164,15 +148,14 @@ class ModelArchConfigConvertorBase:
 
         # Try to read the dtype of the weights if they are in safetensors format
         if config_dtype is None:
-            with _maybe_patch_hf_hub_constants(config_format):
-                repo_mt = try_get_safetensors_metadata(model_id, revision=revision)
+            param_mt = get_safetensors_params_metadata(model_id, revision=revision)
 
-            if repo_mt and (files_mt := repo_mt.files_metadata):
+            if param_mt:
                 param_dtypes: set[torch.dtype] = {
-                    _SAFETENSORS_TO_TORCH_DTYPE[dtype_str]
-                    for file_mt in files_mt.values()
-                    for dtype_str in file_mt.parameter_count
-                    if dtype_str in _SAFETENSORS_TO_TORCH_DTYPE
+                    _SAFETENSORS_TO_TORCH_DTYPE[dtype]
+                    for info in param_mt.values()
+                    if (dtype := info.get("dtype", None))
+                    and dtype in _SAFETENSORS_TO_TORCH_DTYPE
                 }
 
                 if param_dtypes:
@@ -248,7 +231,7 @@ class ModelArchConfigConvertorBase:
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
         ):
-            return self.hf_text_config.kv_lora_rank is not None
+            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
         elif self.hf_text_config.model_type == "eagle":
             # if the model is an EAGLE module, check for the
             # underlying architecture
@@ -261,7 +244,7 @@ class ModelArchConfigConvertorBase:
                     "deepseek_v32",
                     "deepseek_mtp",
                 )
-                and self.hf_text_config.kv_lora_rank is not None
+                and getattr(self.hf_text_config, "kv_lora_rank", None) is not None
             )
         return False
 
@@ -318,6 +301,28 @@ class ModelArchConfigConvertorBase:
         )
 
         return model_arch_config
+
+
+class CohereAsrModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_total_num_attention_heads(self) -> int:
+        return self.hf_text_config.transf_decoder["config_dict"]["num_attention_heads"]
+
+    def get_head_size(self) -> int:
+        hidden_size = self.hf_text_config.transf_decoder["config_dict"]["hidden_size"]
+        num_attention_heads = self.hf_text_config.transf_decoder["config_dict"][
+            "num_attention_heads"
+        ]
+        return hidden_size // num_attention_heads
+
+    def get_total_num_kv_heads(self) -> int:
+        enc_num_kv_heads = self.hf_text_config.encoder["n_heads"]
+        dec_num_kv_heads = self.hf_text_config.transf_decoder["config_dict"][
+            "num_attention_heads"
+        ]
+        assert enc_num_kv_heads == dec_num_kv_heads, (
+            "Encoder and decoder must have the same number of kv heads"
+        )
+        return enc_num_kv_heads
 
 
 class MambaModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -445,6 +450,7 @@ class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
+    "cohere_asr": CohereAsrModelArchConfigConvertor,
     "mamba": MambaModelArchConfigConvertor,
     "falcon_mamba": MambaModelArchConfigConvertor,
     "timm_wrapper": TerratorchModelArchConfigConvertor,

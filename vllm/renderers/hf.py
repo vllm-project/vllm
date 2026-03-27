@@ -5,7 +5,7 @@ import itertools
 from collections import defaultdict, deque
 from collections.abc import Set
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, Literal, cast, overload
 
 import jinja2
 import jinja2.ext
@@ -25,24 +25,18 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.logger import init_logger
-from vllm.tokenizers import cached_get_tokenizer
-from vllm.tokenizers.hf import CachedHfTokenizer, HfTokenizer
+from vllm.tokenizers.hf import HfTokenizer
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
+from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
 
 from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
-
-if TYPE_CHECKING:
-    from vllm.multimodal.inputs import MultiModalDataDict, MultiModalUUIDDict
-else:
-    MultiModalDataDict = dict[str, Any]
-    MultiModalUUIDDict = dict[str, Any]
-
 
 logger = init_logger(__name__)
 
@@ -108,7 +102,9 @@ def resolve_chat_template(
 ) -> str | None:
     # 1st priority: The given chat template
     if chat_template is not None:
-        return chat_template
+        # Resolve template names (e.g. "tool_use") to actual Jinja content
+        # so that downstream kwargs detection can parse template variables.
+        return tokenizer.get_chat_template(chat_template, tools=tools)
 
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
@@ -439,6 +435,28 @@ def resolve_chat_template_kwargs(
     return {k: v for k, v in chat_template_kwargs.items() if k in accept_vars}
 
 
+@overload
+def safe_apply_chat_template(
+    model_config: "ModelConfig",
+    tokenizer: HfTokenizer,
+    conversation: list[ConversationMessage],
+    *,
+    tools: list[dict[str, Any]] | None = ...,
+    chat_template: str | None = ...,
+    tokenize: Literal[True] = ...,
+    **kwargs,
+) -> list[int]: ...
+@overload
+def safe_apply_chat_template(
+    model_config: "ModelConfig",
+    tokenizer: HfTokenizer,
+    conversation: list[ConversationMessage],
+    *,
+    tools: list[dict[str, Any]] | None = ...,
+    chat_template: str | None = ...,
+    tokenize: Literal[False] = ...,
+    **kwargs,
+) -> str: ...
 def safe_apply_chat_template(
     model_config: "ModelConfig",
     tokenizer: HfTokenizer,
@@ -488,9 +506,9 @@ def safe_apply_chat_template(
 
 
 def rebuild_mm_uuids_from_mm_data(
-    mm_uuids: "MultiModalUUIDDict",
-    mm_data: "MultiModalDataDict",
-) -> "MultiModalUUIDDict":
+    mm_uuids: MultiModalUUIDDict,
+    mm_data: MultiModalDataDict,
+) -> MultiModalUUIDDict:
     """Rebuild mm_uuids after vision_chunk processing.
 
     When videos are split into chunks, the original UUIDs need to be updated
@@ -523,7 +541,7 @@ def rebuild_mm_uuids_from_mm_data(
 
 
 def build_video_prompts_from_mm_data(
-    mm_data: "MultiModalDataDict",
+    mm_data: MultiModalDataDict,
 ) -> list[str]:
     """Build video prompts from vision_chunk data.
 
@@ -561,7 +579,7 @@ def build_video_prompts_from_mm_data(
 
 def replace_vision_chunk_video_placeholder(
     prompt_raw: str | list[int],
-    mm_data: "MultiModalDataDict",
+    mm_data: MultiModalDataDict,
     video_placeholder: str | None,
 ) -> str | list[int]:
     # get video placeholder, replace it with runtime video-chunk prompts
@@ -586,26 +604,6 @@ def replace_vision_chunk_video_placeholder(
 
 
 class HfRenderer(BaseRenderer[HfTokenizer]):
-    @classmethod
-    def from_config(  # type: ignore[override]
-        cls,
-        config: VllmConfig,
-        tokenizer_kwargs: dict[str, Any],
-    ) -> "HfRenderer":
-        model_config = config.model_config
-        if model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = cast(
-                HfTokenizer,
-                cached_get_tokenizer(
-                    tokenizer_cls=CachedHfTokenizer,  # type: ignore[type-abstract]
-                    **tokenizer_kwargs,
-                ),
-            )
-
-        return cls(config, tokenizer)
-
     def __init__(
         self,
         config: VllmConfig,
@@ -615,6 +613,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
         self.use_unified_vision_chunk = getattr(
             config.model_config.hf_config, "use_unified_vision_chunk", False
+        )
+
+        self._apply_chat_template_async = make_async(
+            safe_apply_chat_template, executor=self._executor
         )
 
     def render_messages(
@@ -635,6 +637,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
         prompt_raw = safe_apply_chat_template(
@@ -657,10 +661,13 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             video_placeholder = getattr(
                 model_config.hf_config, "video_placeholder", None
             )
-            prompt_raw = replace_vision_chunk_video_placeholder(
-                prompt_raw,
-                mm_data,
-                video_placeholder,
+            prompt_raw = cast(
+                list[int],
+                replace_vision_chunk_video_placeholder(
+                    prompt_raw,
+                    mm_data,
+                    video_placeholder,
+                ),
             )
 
         prompt = parse_dec_only_prompt(prompt_raw)
@@ -689,9 +696,11 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            media_io_kwargs=params.media_io_kwargs,
+            mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
-        prompt_raw = safe_apply_chat_template(
+        prompt_raw = await self._apply_chat_template_async(
             model_config,
             tokenizer,
             conversation,
@@ -709,10 +718,13 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             video_placeholder = getattr(
                 model_config.hf_config, "video_placeholder", None
             )
-            prompt_raw = replace_vision_chunk_video_placeholder(
-                prompt_raw,
-                mm_data,
-                video_placeholder,
+            prompt_raw = cast(
+                list[int],
+                replace_vision_chunk_video_placeholder(
+                    prompt_raw,
+                    mm_data,
+                    video_placeholder,
+                ),
             )
 
         prompt = parse_dec_only_prompt(prompt_raw)

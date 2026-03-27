@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
 class TrtLlmNvFp4ExpertsBase:
@@ -56,16 +57,35 @@ class TrtLlmNvFp4ExpertsBase:
             # g1_scale_c = a13_scale * w13_scale_2 / a2_scale
             self.g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
         else:
-            self.g1_scale_c = (
-                torch.ones_like(self.quant_config.a1_gscale)
-                * self.quant_config.a2_gscale
-            )
+            self.g1_scale_c = self.quant_config.a2_gscale.clone()
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+        layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+        # Recompute g1_scale_c since g1_alphas was just fused in-place.
+        # Register as a layer parameter so EPLB rearranges it alongside
+        # other expert weights.
+        assert self.quant_config.g1_alphas is not None
+        assert self.quant_config.a2_gscale is not None
+        if self.moe_config.is_act_and_mul:
+            g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
+        else:
+            g1_scale_c = self.quant_config.a2_gscale.clone()
+        layer.register_parameter(
+            "g1_scale_c",
+            torch.nn.Parameter(g1_scale_c, requires_grad=False),
+        )
+        self.g1_scale_c = layer.g1_scale_c
 
     @staticmethod
     def _supports_current_device() -> bool:
         """Supports only Blackwell-family GPUs."""
         p = current_platform
-        return p.is_cuda() and p.is_device_capability_family(100)
+        return (
+            p.is_cuda()
+            and p.is_device_capability_family(100)
+            and has_flashinfer_trtllm_fused_moe()
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -283,10 +303,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
             and self.routing_method_type != RoutingMethodType.Llama4
         )
 
-        # Prepare routing bias into kernel format.
-        routing_bias = e_score_correction_bias
-        if routing_bias is not None:
-            routing_bias = routing_bias.to(torch.bfloat16)
+        # Prepare router logits for kernel format.
         router_logits = (
             router_logits.to(torch.float32)
             if self.routing_method_type == RoutingMethodType.DeepSeekV3
@@ -296,7 +313,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         # Invoke kernel.
         return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
-            routing_bias=routing_bias,
+            routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
             hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).reshape(
                 *hidden_states.shape[:-1], -1

@@ -254,7 +254,6 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
                 w13, w13_scale, w2, w2_scale, is_act_and_mul, min_alignment
             )
         )
-        layer.intermediate_size_per_partition = padded_intermediate
         layer.moe_config.intermediate_size_per_partition = padded_intermediate
 
         w13, w13_scale, w2, w2_scale = prepare_static_weights_for_trtllm_fp4_moe(
@@ -267,16 +266,6 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
             num_experts=w13.size(0),
             is_gated_activation=is_gated,
         )
-
-        # We do not need to make this a parameter, because
-        # it is not used during the weight (re)-loading process.
-        if is_gated:
-            layer.g1_scale_c = a13_scale * w13_scale_2 / a2_scale
-        else:
-            layer.g1_scale_c = torch.ones_like(a13_scale) / a2_scale
-        layer.a1_gscale = 1.0 / a13_scale
-        layer.g1_alphas = a13_scale * w13_scale_2
-        layer.g2_alphas = a2_scale * w2_scale_2
     else:
         # Swizzle the block scales for other FI NVFP4 MoE kernels.
         w13_scale = swizzle_blockscale(w13_scale)

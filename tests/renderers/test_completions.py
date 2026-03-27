@@ -15,7 +15,6 @@ from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
-from vllm.tokenizers.registry import tokenizer_args_from_config
 
 MODEL_NAME = "openai-community/gpt2"
 
@@ -39,11 +38,18 @@ class MockModelConfig:
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    renderer_num_workers: int = 1
+
+
+@dataclass
+class MockParallelConfig:
+    _api_process_rank: int = 0
 
 
 @dataclass
 class MockVllmConfig:
     model_config: MockModelConfig
+    parallel_config: MockParallelConfig
 
 
 @dataclass
@@ -75,10 +81,8 @@ def _build_renderer(
     truncation_side: str = "left",
     max_chars_per_token: int = 1,
 ):
-    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
-
     renderer = HfRenderer(
-        MockVllmConfig(model_config),
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
         tokenizer=(
             None
             if model_config.skip_tokenizer_init
@@ -123,7 +127,7 @@ class TestValidatePrompt:
 
 
 class TestRenderPrompt:
-    def test_token_input(self):
+    def test_tokens_input(self):
         renderer = _build_renderer(MockModelConfig())
 
         tokens = [101, 7592, 2088]
@@ -333,7 +337,7 @@ class TestRenderPrompt:
                 TokenizeParams(max_total_tokens=100),
             )
 
-    def test_token_input_with_needs_detokenization(self):
+    def test_tokens_input_with_needs_detokenization(self):
         renderer = _build_renderer(MockModelConfig())
 
         tokens = [1, 2, 3, 4]
