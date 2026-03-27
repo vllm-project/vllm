@@ -848,10 +848,6 @@ class EplbState:
             ep_rank=ep_group.rank(),
         )
 
-        # Reset pending_result before ublocking the async worker
-        model_state.pending_result = None
-        result.consumed_event.record()
-
         self._update_layer_mapping_from_new(model_state, result)
         logger.debug(
             "model %s successfully move_to_workspace layer %d",
@@ -865,6 +861,10 @@ class EplbState:
                 model_state.model_name,
                 ep_group.rank(),
             )
+
+        # Reset pending_result before ublocking the async worker
+        model_state.pending_result = None
+        result.consumed_event.record()
 
     def _allreduce_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
         """

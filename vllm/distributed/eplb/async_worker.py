@@ -157,4 +157,5 @@ async def transfer_run_periodically(
                 # model_state.expert_buffer into
                 # model_state.model.expert_weights[layer_idx]
                 consumed_event.wait(stream=cuda_stream)
+                assert model_state.pending_result is None
                 layer_idx += 1
