@@ -260,10 +260,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
             )
 
-            # Step 2: Apply RMSNorm and optional FP8 quantization (ATOM pattern)
-            # Fusion is enabled when fuse_qknorm_quant=True (AITER + FP8 quant)
+            # Step 2: Apply RMSNorm and optional FP8 quantization
             if self.fuse_qknorm_quant:
-                # Fused RMSNorm + FP8 quantization on q_c and kv_c
+                # Fused RMSNorm + FP8 quantization
                 q_c_quantized, q_c_scale, kv_c_normed = _fuse_rmsnorm_quant(
                     q_c,
                     self.q_a_layernorm.weight,
@@ -271,17 +270,14 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                     kv_c,
                     self.kv_a_layernorm.weight,
                     self.kv_a_layernorm.variance_epsilon,
-                    dtype_quant=self.quant_dtype,  # dtypes.fp8
+                    dtype_quant=self.quant_dtype,
                     group_size=128,
                     output_unquantized_inp1=False,
                     transpose_scale=True,
                 )
-                # Pass quantized tensor + scale as separate parameters
-                # (ATOM pattern). The layer will skip internal quantization
-                # and use the pre-quantized input.
                 q = self.q_b_proj(q_c_quantized, x_scale=q_c_scale)[0]
             else:
-                # Unfused path: standard RMSNorm without quantization
+                # Unfused path: RMSNorm only
                 q_c = self.q_a_layernorm(q_c)
                 kv_c_normed = self.kv_a_layernorm(kv_c)
                 q = self.q_b_proj(q_c)[0]
