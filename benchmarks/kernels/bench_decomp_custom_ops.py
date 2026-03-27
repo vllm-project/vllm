@@ -476,6 +476,11 @@ def main():
 
 
 if __name__ == "__main__":
+    # Disable Inductor caches to prevent stale autotuner configs from
+    # contaminating results across shapes in --sweep mode.
+    import torch._inductor.config as inductor_config
+    inductor_config.force_disable_caches = True
+
     from vllm.config import VllmConfig, set_current_vllm_config
 
     with set_current_vllm_config(VllmConfig()):
