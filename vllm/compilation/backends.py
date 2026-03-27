@@ -20,7 +20,6 @@ import torch
 import torch.fx as fx
 from torch._dynamo.utils import dynamo_timed
 from torch._logging._internal import trace_structured
-from torch.fx._lazy_graph_module import _use_lazy_graph_module
 
 import vllm.envs as envs
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
@@ -528,7 +527,201 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
         graph.graph.erase_node(node)
 
 
+def _vllm_split_module(
+    gm: fx.GraphModule,
+    node_to_subgraph_id: dict[fx.Node, int],
+) -> fx.GraphModule:
+    """Lightweight graph splitter tailored for vllm.
+
+    Replaces torch.fx.passes.split_module.split_module with a 2-pass
+    implementation that skips autocast/grad handling, get_attr special-casing,
+    monotonicity checks, and topological sorting — none of which are needed
+    for vllm compilation graphs.
+
+    Pass 1: Walk nodes to detect cross-partition dependencies, propagate
+            SymInt symbols, and clone nodes into partition subgraphs.
+    Pass 2: Build the base (stitching) graph that calls each partition
+            submodule in order.
+    """
+    import sympy
+    from torch.fx.experimental.symbolic_shapes import free_symbols
+
+    # Partition data structures
+    partition_nodes: dict[int, list[fx.Node]] = defaultdict(list)
+    partition_graphs: dict[int, fx.Graph] = {}
+    partition_env: dict[int, dict[fx.Node, fx.Node]] = defaultdict(dict)
+    partition_inputs: dict[int, dict[str, fx.Node]] = defaultdict(
+        lambda: {}  # ordered dict (insertion order) of orig_name -> orig_node
+    )
+    partition_outputs: dict[int, dict[str, fx.Node]] = defaultdict(
+        lambda: {}  # ordered dict of orig_name -> orig_node
+    )
+    symbol_to_node: dict[sympy.Symbol, fx.Node] = {}
+
+    # Collect partition ordering from node_to_subgraph_id
+    seen_partitions: list[int] = []
+    seen_partitions_set: set[int] = set()
+
+    # === Pass 1: Dependency detection + node cloning ===
+
+    for node in gm.graph.nodes:
+        # Track SymInt symbol bindings (prefer earlier bindings)
+        if (
+            (val := node.meta.get("example_value")) is not None
+            and isinstance(val, (torch.SymInt, torch.SymFloat))
+            and isinstance(s0 := val.node.expr, sympy.Symbol)
+            and s0 not in symbol_to_node
+        ):
+            symbol_to_node[val.node.expr] = node
+
+        if node.op == "placeholder":
+            # Placeholders are added to partitions as needed below
+            continue
+
+        if node.op == "output":
+            # Record output dependencies
+            def _record_output_dep(n: fx.Node) -> fx.Node:
+                if hasattr(n, "_fx_partition"):
+                    pid = n._fx_partition
+                    partition_outputs[pid].setdefault(n.name, n)
+                return n
+
+            torch.fx.graph.map_arg(node.args[0], _record_output_dep)
+            continue
+
+        pid = node_to_subgraph_id[node]
+        node._fx_partition = pid  # type: ignore[attr-defined]
+
+        if pid not in seen_partitions_set:
+            seen_partitions.append(pid)
+            seen_partitions_set.add(pid)
+            partition_graphs[pid] = fx.Graph()
+
+        partition_nodes[pid].append(node)
+
+        # Detect cross-partition input dependencies
+        def _record_cross_dep(
+            def_node: fx.Node,
+            use_pid: int = pid,
+        ) -> fx.Node:
+            def_pid = getattr(def_node, "_fx_partition", None)
+
+            if def_pid != use_pid:
+                # Cross-partition edge: mark as output of source, input of dest
+                if def_pid is not None:
+                    partition_outputs[def_pid].setdefault(def_node.name, def_node)
+                partition_inputs[use_pid].setdefault(def_node.name, def_node)
+
+                # Propagate SymInt symbols as additional inputs/outputs
+                if (def_val := def_node.meta.get("example_value")) is not None:
+                    for s in sorted(free_symbols(def_val), key=str):
+                        s_node = symbol_to_node[s]
+                        partition_inputs[use_pid].setdefault(s_node.name, s_node)
+                        if s_node.op != "placeholder":
+                            s_pid = getattr(s_node, "_fx_partition", None)
+                            if s_pid is not None:
+                                partition_outputs[s_pid].setdefault(s_node.name, s_node)
+            return def_node
+
+        torch.fx.graph.map_arg(node.args, _record_cross_dep)
+        torch.fx.graph.map_arg(node.kwargs, _record_cross_dep)
+
+    # Create placeholder nodes in each partition for its inputs
+    for pid in seen_partitions:
+        g = partition_graphs[pid]
+        env = partition_env[pid]
+        for inp_name, orig_node in partition_inputs[pid].items():
+            placeholder = g.placeholder(inp_name, type_expr=orig_node.type)
+            placeholder.meta = orig_node.meta.copy()
+            env[orig_node] = placeholder
+
+    # Clone operational nodes into their partition graphs
+    for node in gm.graph.nodes:
+        if not hasattr(node, "_fx_partition"):
+            continue
+        pid = node._fx_partition
+        g = partition_graphs[pid]
+        env = partition_env[pid]
+
+        gathered_args = torch.fx.graph.map_arg(node.args, lambda n, _env=env: _env[n])
+        gathered_kwargs = torch.fx.graph.map_arg(
+            node.kwargs, lambda n, _env=env: _env[n]
+        )
+
+        new_node = g.create_node(
+            op=node.op,
+            target=node.target,
+            args=gathered_args,
+            kwargs=gathered_kwargs,
+            type_expr=node.type,
+        )
+        new_node.meta = node.meta.copy()
+        env[node] = new_node
+
+    # Set output nodes for each partition
+    for pid in seen_partitions:
+        g = partition_graphs[pid]
+        env = partition_env[pid]
+        out_nodes = partition_outputs[pid]
+        output_vals = tuple(env[orig_node] for orig_node in out_nodes.values())
+        if len(output_vals) == 1:
+            g.output(output_vals[0])
+        elif len(output_vals) > 1:
+            g.output(output_vals)
+        else:
+            g.output(())
+
+    # === Pass 2: Build base (stitching) graph ===
+
+    base_graph = fx.Graph()
+    base_env: dict[str, fx.Node] = {}
+    base_modules: dict[str, fx.GraphModule] = {}
+
+    # Add placeholders for original graph inputs
+    for node in gm.graph.nodes:
+        if node.op == "placeholder":
+            p = base_graph.placeholder(
+                node.target,
+                type_expr=node.type,  # type: ignore[arg-type]
+            )
+            p.meta = node.meta.copy()
+            base_env[node.name] = p
+
+    # Emit call_module for each partition in original order
+    for pid in seen_partitions:
+        submod_name = f"submod_{pid}"
+        base_modules[submod_name] = fx.GraphModule({}, partition_graphs[pid])
+
+        # Gather inputs for this partition from base_env
+        input_nodes = tuple(base_env[name] for name in partition_inputs[pid])
+        output_val = base_graph.call_module(submod_name, input_nodes)
+
+        out_names = list(partition_outputs[pid].keys())
+        if len(out_names) > 1:
+            output_val_proxy = torch.fx.proxy.Proxy(output_val)
+            for i, name in enumerate(out_names):
+                base_env[name] = output_val_proxy[i].node  # type: ignore[index]
+        elif len(out_names) == 1:
+            base_env[out_names[0]] = output_val
+
+    # Wire the final output
+    for node in gm.graph.nodes:
+        if node.op == "output":
+            base_graph.output(
+                torch.fx.graph.map_arg(node.args[0], lambda n: base_env[n.name])
+            )
+
+    return fx.GraphModule(base_modules, base_graph)
+
+
 def split_graph(
+    graph: fx.GraphModule, splitting_ops: list[str]
+) -> tuple[fx.GraphModule, list[SplitItem]]:
+    with dynamo_timed("compilation_split_graph"):
+        return _split_graph(graph, splitting_ops)
+
+
+def _split_graph(
     graph: fx.GraphModule, splitting_ops: list[str]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
     _decompose_size_nodes(graph)
@@ -570,17 +763,13 @@ def split_graph(
 
     _merge_empty_only_subgraphs(node_to_subgraph_id, split_op_graphs)
 
-    # `keep_original_order` is important!
-    # otherwise pytorch might reorder the nodes and
-    # the semantics of the graph will change when we
-    # have mutations in the graph
-    with _use_lazy_graph_module(True):
-        split_gm = torch.fx.passes.split_module.split_module(
-            graph,
-            None,
-            lambda node: node_to_subgraph_id[node],
-            keep_original_order=True,
-        )
+    # Early exit: if all nodes are in the same partition, skip splitting
+    unique_ids = set(node_to_subgraph_id.values())
+    if len(unique_ids) <= 1:
+        graph_id = next(iter(unique_ids)) if unique_ids else 0
+        return graph, [SplitItem("submod_0", graph_id, False, graph)]
+
+    split_gm = _vllm_split_module(graph, node_to_subgraph_id)
 
     outputs = []
 
