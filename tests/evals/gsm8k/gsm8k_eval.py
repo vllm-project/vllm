@@ -83,6 +83,8 @@ async def call_vllm_api(
     stop: list[str] | None = None,
     url: str | None = None,
     seed: int | None = None,
+    model: str = "gpt-oss-120b",
+    api_key: str | None = None,
 ) -> tuple[str, int]:
     """Call vLLM's OpenAI-compatible completions endpoint.
 
@@ -90,6 +92,7 @@ async def call_vllm_api(
         Tuple of (response_text, completion_tokens)
     """
     data = {
+        "model": model,
         "prompt": prompt,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -98,8 +101,14 @@ async def call_vllm_api(
     if seed is not None:
         data["seed"] = seed
 
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
     try:
-        async with session.post(f"{url}/v1/completions", json=data) as response:
+        async with session.post(
+            f"{url}/v1/completions", json=data, headers=headers
+        ) as response:
             response.raise_for_status()
             result = await response.json()
             text = result["choices"][0]["text"]
@@ -177,6 +186,8 @@ def evaluate_gsm8k(
     port: int = 8000,
     temperature: float = 0.0,
     seed: int | None = 42,
+    model: str = "gpt-oss-120b",
+    api_key: str | None = None,
 ) -> dict[str, float | int]:
     """
     Evaluate GSM8K accuracy using vLLM serve endpoint.
@@ -200,6 +211,8 @@ def evaluate_gsm8k(
                 stop=["Question", "Assistant:", "<|separator|>"],
                 url=base_url,
                 seed=seed,
+                model=model,
+                api_key=api_key,
             )
             states[i] = answer
             output_tokens[i] = tokens
@@ -281,6 +294,15 @@ def main() -> None:
         "--seed", type=int, default=42, help="Random seed for reproducibility"
     )
     parser.add_argument("--save-results", type=str, help="Save results to JSON file")
+    parser.add_argument(
+        "--model", type=str, default="gpt-oss-120b", help="Model name to query"
+    )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=os.environ.get("VLLM_API_KEY"),
+        help="API key for vLLM server (defaults to $VLLM_API_KEY)",
+    )
 
     args = parser.parse_args()
 
@@ -292,6 +314,8 @@ def main() -> None:
         port=args.port,
         temperature=args.temperature,
         seed=args.seed,
+        model=args.model,
+        api_key=args.api_key,
     )
 
     # Print results to terminal

@@ -117,6 +117,7 @@ repos:
     entry: tools/pre_commit/shellcheck.sh
     language: script
     types: [shell]
+    exclude: '^(\.buildkite/scripts/run-multi-node-test\.sh|tests/v1/kv_connector/nixl_integration/spec_decode_acceptance_test\.sh)$'
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/pre_commit/png-lint.sh

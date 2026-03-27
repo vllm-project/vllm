@@ -37,6 +37,131 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 logger = init_logger(__name__)
 
 
+# enum for mxfp4 backend
+class Mxfp4Backend(Enum):
+    NONE = 0
+
+    # FlashInfer Backend
+    SM100_FI_MXFP4_MXFP8_TRTLLM = 1
+    SM100_FI_MXFP4_MXFP8_CUTLASS = 2
+    SM100_FI_MXFP4_BF16 = 3
+    SM90_FI_MXFP4_BF16 = 4
+
+    # Marlin Backend
+    MARLIN = 5
+
+    # Triton Backend
+    TRITON = 6
+
+    CK = 7
+
+
+def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
+    """
+    Not all MXFP4 backends support LoRA. Select backends that are known to
+    have LoRA support.
+    """
+    if not current_platform.is_cuda():
+        return Mxfp4Backend.NONE
+
+    # If FlashInfer is not available, try either Marlin or Triton
+    triton_kernels_supported = (
+        has_triton_kernels()
+        # NOTE: triton_kernels are only confirmed to work on SM90, SM100,
+        # and SM120.
+        # SM110 fails with this error: https://github.com/vllm-project/vllm/issues/29317
+        # SM120 needs this fix: https://github.com/triton-lang/triton/pull/8498
+        and (
+            (9, 0) <= current_platform.get_device_capability() < (11, 0)
+            or (12, 0) <= current_platform.get_device_capability() <= (12, 1)
+        )
+    )
+    if envs.VLLM_MXFP4_USE_MARLIN is False and triton_kernels_supported:
+        logger.info_once("[get_mxfp4_backend_with_lora] Using Triton backend")
+        return Mxfp4Backend.TRITON
+
+    logger.info_once("[get_mxfp4_backend_with_lora] Using Marlin backend")
+    return Mxfp4Backend.MARLIN
+
+
+def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
+    # Backend Selection
+
+    if with_lora_support:
+        return get_mxfp4_backend_with_lora()
+
+    if current_platform.is_cuda():
+        if (
+            current_platform.is_device_capability(90)
+            and has_flashinfer()
+            and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
+        ):
+            logger.info_once("Using FlashInfer MXFP4 BF16 backend for SM90")
+            return Mxfp4Backend.SM90_FI_MXFP4_BF16
+        elif (
+            current_platform.is_device_capability_family(100)
+            and has_flashinfer()
+            and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS
+        ):
+            logger.info_once("Using FlashInfer MXFP4 MXFP8 CUTLASS backend for SM100")
+            return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
+        elif (
+            current_platform.is_device_capability_family(100)
+            and has_flashinfer()
+            and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+        ):
+            logger.info_once(
+                "Using FlashInfer MXFP4 MXFP8 TRTLLM backend for SM100", scope="local"
+            )
+            return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+        elif current_platform.is_device_capability_family(100) and has_flashinfer():
+            logger.info_once(
+                "Using FlashInfer MXFP4 BF16 backend for SM100, "
+                "For faster performance on SM100, consider setting "
+                "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1, though this may impact "
+                "accuracy."
+            )
+            return Mxfp4Backend.SM100_FI_MXFP4_BF16
+        elif (
+            current_platform.is_device_capability_family(100)
+            or current_platform.is_device_capability(90)
+        ) and not has_flashinfer():
+            logger.warning_once(
+                "MXFP4 MoE is enabled on Hopper/Blackwell but FlashInfer "
+                "is not available. This may result in degraded performance. "
+                "Please `pip install vllm[flashinfer]` for best results."
+            )
+
+        # If FlashInfer is not available, try either Marlin or Triton
+        triton_kernels_supported = (
+            has_triton_kernels()
+            # NOTE: triton_kernels are only confirmed to work on SM90 and SM100
+            # SM110 fails with this error: https://github.com/vllm-project/vllm/issues/29317
+            # SM120 needs this fix: https://github.com/triton-lang/triton/pull/8498
+            and (9, 0) <= current_platform.get_device_capability() < (11, 0)
+        )
+        if envs.VLLM_MXFP4_USE_MARLIN or not triton_kernels_supported:
+            logger.info_once("Using Marlin backend")
+            return Mxfp4Backend.MARLIN
+        else:
+            logger.info_once("Using Triton backend")
+            return Mxfp4Backend.TRITON
+    elif current_platform.is_xpu():
+        logger.info_once("Using xpu backend on XPU")
+        return Mxfp4Backend.MARLIN
+    elif current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        if rocm_aiter_ops.is_enabled() and on_gfx950():
+            logger.info_once("Using CK MXFP4 MoE backend (Aiter ROCm)")
+            return Mxfp4Backend.CK
+        elif has_triton_kernels():
+            logger.info_once("Using Triton backend")
+            return Mxfp4Backend.TRITON
+
+    return Mxfp4Backend.NONE
+
+
 class Mxfp4Config(QuantizationConfig):
     def __init__(self, ignored_layers: list[str] | None = None):
         super().__init__()

@@ -362,8 +362,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # marlin arches for fp8 input
   # - sm80 doesn't support fp8 computation
   # - sm90 and sm100 don't support QMMA.16832.F32.E4M3.E4M3 SAAS instruction
-  # so we only enable fp8 computation for SM89 (e.g. RTX 40x0)  and 12.0 (e.g. RTX 50x0)
-  cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0" "${CUDA_ARCHS}")
+  # so we only enable fp8 computation for SM89 (e.g. RTX 40x0) and 12.0/12.1 (e.g. RTX 50x0, GB10)
+  cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0;12.1" "${CUDA_ARCHS}")
   # marlin arches for other files
   cuda_archs_loose_intersection(MARLIN_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
 
@@ -781,6 +781,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       SRCS "${DSV3_FUSED_A_GEMM_SRC}"
       CUDA_ARCHS "${DSV3_FUSED_A_GEMM_ARCHS}")
     list(APPEND VLLM_EXT_SRC ${DSV3_FUSED_A_GEMM_SRC})
+    target_compile_definitions(${VLLM_EXT_NAME} PRIVATE ENABLE_DSV3_FUSED_A_GEMM)
     message(STATUS "Building dsv3_fused_a_gemm for archs: ${DSV3_FUSED_A_GEMM_ARCHS}")
   else()
     message(STATUS "Not building dsv3_fused_a_gemm as no compatible archs found "
@@ -1049,8 +1050,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # moe marlin arches for fp8 input
   # - sm80 doesn't support fp8 computation
   # - sm90 and sm100 don't support QMMA.16832.F32.E4M3.E4M3 SAAS instruction
-  # so we only enable fp8 computation for SM89 (e.g. RTX 40x0)  and 12.0 (e.g. RTX 50x0)
-  cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0" "${CUDA_ARCHS}")
+  # so we only enable fp8 computation for SM89 (e.g. RTX 40x0) and 12.0/12.1 (e.g. RTX 50x0, GB10)
+  cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0;12.1" "${CUDA_ARCHS}")
   # moe marlin arches for other files
   cuda_archs_loose_intersection(MARLIN_MOE_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
   if (MARLIN_MOE_OTHER_ARCHS)

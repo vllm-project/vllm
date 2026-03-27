@@ -770,7 +770,11 @@ if hasattr(torch.ops._C, "ggml_moe_a8_vec"):
 
 # cutlass
 def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
-    return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
+    try:
+        return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
+    except AttributeError:
+        logger.warning("CUTLASS FP4 ops not available - was vLLM built correctly?")
+        return False
 
 
 def cutlass_scaled_fp4_mm(
@@ -789,11 +793,21 @@ def cutlass_scaled_fp4_mm(
 
 
 def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
-    return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
+    try:
+        return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
+    except AttributeError:
+        logger.warning("CUTLASS FP8 ops not available - was vLLM built correctly?")
+        return False
 
 
 def cutlass_scaled_mm_supports_block_fp8(cuda_device_capability: int) -> bool:
-    return torch.ops._C.cutlass_scaled_mm_supports_block_fp8(cuda_device_capability)
+    try:
+        return torch.ops._C.cutlass_scaled_mm_supports_block_fp8(cuda_device_capability)
+    except AttributeError:
+        logger.warning(
+            "CUTLASS block FP8 ops not available - was vLLM built correctly?"
+        )
+        return False
 
 
 def cutlass_scaled_mm(
@@ -874,6 +888,14 @@ def cutlass_scaled_mm_azp(
     out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
     torch.ops._C.cutlass_scaled_mm_azp(out, a, b, scale_a, scale_b, azp_adj, azp, bias)
     return out.view(*target_shape)
+
+
+def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
+    try:
+        return torch.ops._C.cutlass_sparse_scaled_mm_supported(cuda_device_capability)
+    except AttributeError:
+        logger.warning("CUTLASS sparse ops not available - was vLLM built correctly?")
+        return False
 
 
 def cutlass_group_gemm_supported(cuda_device_capability: int) -> bool:
