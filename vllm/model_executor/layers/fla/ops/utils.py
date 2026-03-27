@@ -75,6 +75,13 @@ def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]
         cache_entries.append((args, kwargs, result))
         return result
 
+    def register(result: Any, *args: Any, **kwargs: Any) -> None:
+        nonlocal cache_entries
+        if len(cache_entries) >= cache_size:
+            cache_entries = cache_entries[1:]
+        cache_entries.append((args, kwargs, result))
+
+    wrapper.register = register  # type: ignore[attr-defined]
     return wrapper
 
 

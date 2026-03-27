@@ -319,6 +319,22 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         else:
             has_initial_state = None
 
+        if non_spec_query_start_loc_cpu is not None:
+            # NOTE:
+            # Pre-compute chunk_indices on CPU (avoiding GPU->CPU sync from
+            # .tolist()) and register the result in tensor_cache under the
+            # GPU cu_seqlens key so that downstream FLA ops hit the cache.
+            from vllm.model_executor.layers.fla.ops.index import (
+                prepare_chunk_indices,
+            )
+            chunk_size = 64
+            chunk_indices = prepare_chunk_indices(
+                non_spec_query_start_loc_cpu, chunk_size
+            ).to(query_start_loc.device, non_blocking=True)
+            prepare_chunk_indices.register(
+                chunk_indices, non_spec_query_start_loc, chunk_size
+            )
+
         # Function code counted on either presency non-spec decode or spec decode,
         # but not both.
         assert not (num_decodes > 0 and num_spec_decodes > 0), (
