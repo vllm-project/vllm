@@ -100,9 +100,17 @@ class MemorySnapshot:
         # After `torch.cuda.reset_peak_memory_stats()`,
         # `torch.cuda.memory_reserved()` will keep growing, and only shrink
         # when we call `torch.accelerator.empty_cache()` or OOM happens.
-        self.torch_peak = current_platform.memory_stats(device).get(
-            "allocated_bytes.all.peak", 0
-        )
+        try:
+            self.torch_peak = current_platform.memory_stats(device).get(
+                "allocated_bytes.all.peak", 0
+            )
+        except (RuntimeError, AttributeError, TypeError) as e:
+            if current_platform.is_xpu():
+                self.torch_peak = 0
+                logger.warning("XPU memory_stats raised %s: %s",
+                               type(e).__name__, e)
+            else:
+                raise e
 
         try:
             self.free_memory, self.total_memory = current_platform.mem_get_info(device)
@@ -151,7 +159,15 @@ class MemorySnapshot:
         # torch.cuda.memory_reserved() is how many bytes
         # PyTorch gets from cuda (by calling cudaMalloc, etc.)
         # this is used to measure the non-torch memory usage
-        self.torch_memory = current_platform.memory_reserved(device)
+        try:
+            self.torch_memory = current_platform.memory_reserved(device)
+        except (RuntimeError, AttributeError, TypeError) as e:
+            if current_platform.is_xpu():
+                self.torch_memory = 0
+                logger.warning("XPU memory_reserved raised %s: %s",
+                               type(e).__name__, e)
+            else:
+                raise e
 
         self.non_torch_memory = self.cuda_memory - self.torch_memory
         self.timestamp = time.time()
@@ -276,7 +292,13 @@ def memory_profiling(
     """
     gc.collect()
     torch.accelerator.empty_cache()
-    current_platform.reset_peak_memory_stats(baseline_snapshot.device_)
+    try:
+        current_platform.reset_peak_memory_stats(baseline_snapshot.device_)
+    except (RuntimeError, AttributeError, TypeError) as e:
+        if current_platform.is_xpu():
+            logger.warning("XPU reset_peak_memory_stats failed: %s", e)
+        else:
+            raise e
 
     result = MemoryProfilingResult(
         before_create=baseline_snapshot,

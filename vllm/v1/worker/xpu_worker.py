@@ -10,7 +10,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import TorchProfilerWrapper
-from vllm.utils.mem_utils import MemorySnapshot, format_gib
+from vllm.utils.mem_utils import (MemorySnapshot, format_gib,
+                                  memory_profiling)
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
@@ -98,7 +99,10 @@ class XPUWorker(Worker):
 
         # Now take memory snapshot after NCCL is initialized
         gc.collect()
-        torch.accelerator.empty_cache()
+        try:
+            torch.accelerator.empty_cache()
+        except RuntimeError as e:
+            logger.warning("torch.accelerator.empty_cache() failed: %s", e)
 
         # take current memory snapshot
         self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
@@ -120,3 +124,82 @@ class XPUWorker(Worker):
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
+
+    def determine_available_memory(self) -> int:
+        """Profiles the peak memory usage of the model to determine how much
+        memory can be used for KV cache without OOMs.
+
+        Overrides the GPU worker version to handle XPU simulator environments
+        where device memory APIs may fail (e.g. device index -1 errors).
+        """
+        if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
+            self.model_runner.profile_run()
+            logger.info(
+                "Reserved %s GiB for KV cache (kv_cache_memory_bytes).",
+                format_gib(kv_cache_memory_bytes),
+            )
+            return kv_cache_memory_bytes
+
+        try:
+            with memory_profiling(
+                self.init_snapshot,
+                weights_memory=int(self.model_runner.model_memory_usage),
+            ) as profile_result:
+                self.model_runner.profile_run()
+
+            self.non_torch_memory = profile_result.non_torch_increase
+            self.peak_activation_memory = profile_result.torch_peak_increase
+
+            free_gpu_memory = profile_result.after_profile.free_memory
+
+            if self.init_snapshot.free_memory >= free_gpu_memory:
+                self.available_kv_cache_memory_bytes = (
+                    self.requested_memory
+                    - profile_result.non_kv_cache_memory
+                )
+            else:
+                logger.warning(
+                    "Memory profiling inconsistency on XPU: "
+                    "init free=%s, after=%s. Using fallback.",
+                    format_gib(self.init_snapshot.free_memory),
+                    format_gib(free_gpu_memory),
+                )
+                self.available_kv_cache_memory_bytes = max(
+                    self.init_snapshot.free_memory // 2, 1 * 1024 * 1024
+                )
+
+            logger.info_once(
+                "Available KV cache memory: %s GiB",
+                format_gib(self.available_kv_cache_memory_bytes),
+                scope="local",
+            )
+            return int(self.available_kv_cache_memory_bytes)
+
+        except (RuntimeError, AssertionError) as e:
+            # On XPU simulators, memory profiling may fail due to device
+            # index issues or unsupported memory APIs.
+            logger.warning(
+                "XPU memory profiling failed: %s. "
+                "Running profile_run without memory tracking and using "
+                "fallback memory value.",
+                e,
+            )
+            try:
+                self.model_runner.profile_run()
+            except Exception as profile_err:
+                logger.warning(
+                    "XPU profile_run also failed: %s", profile_err
+                )
+
+            # Use a small fallback value for KV cache
+            fallback_bytes = max(
+                self.init_snapshot.free_memory // 2, 1 * 1024 * 1024
+            )
+            self.non_torch_memory = 0
+            self.peak_activation_memory = 0
+            self.available_kv_cache_memory_bytes = fallback_bytes
+            logger.warning(
+                "Using fallback KV cache memory: %s GiB",
+                format_gib(fallback_bytes),
+            )
+            return int(fallback_bytes)
