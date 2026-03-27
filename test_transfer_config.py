@@ -171,4 +171,63 @@ test_config(
     p_block_len=4096,
 )
 
+# 2p4d: D_TP=4, P_TP=2  (tp_ratio=2, D-replicated, P NOT replicated)
+# Key test: fa_read_targets must match kv_topo routing (d_rank // tp_ratio)
+for r in range(4):
+    c = test_config(
+        "2p4d",
+        d_tp=4,
+        p_tp=2,
+        d_rank=r,
+        d_block_len=4096,
+        p_block_len=4096,
+    )
+    expected_target = r // 2  # kv_topo: d_rank // tp_ratio
+    assert_eq(f"2p4d d{r} fa_read_targets", c.fa_read_targets, [expected_target])
+    assert_eq(f"2p4d d{r} is_d_replicated", c.is_d_replicated, True)
+    assert_eq(f"2p4d d{r} is_p_replicated", c.is_p_replicated, False)
+    # P rank has 1 head; offset must be 0 (relative to P's first head)
+    assert_eq(
+        f"2p4d d{r} fa_rank_offset",
+        c.fa_rank_offset(2048),
+        0,
+    )
+    assert_eq(
+        f"2p4d d{r} skip_fa(P{expected_target})",
+        c.should_skip_fa(expected_target),
+        False,
+    )
+
+# 4p8d: D_TP=8, P_TP=4  (both-replicated, tp_ratio=2)
+# Previously blocked by NotImplementedError.
+for r in range(8):
+    c = test_config(
+        "4p8d",
+        d_tp=8,
+        p_tp=4,
+        d_rank=r,
+        K=2,
+        d_block_len=4096,
+        p_block_len=4096,
+    )
+    expected_target = r // 2
+    assert_eq(f"4p8d d{r} fa_read_targets", c.fa_read_targets, [expected_target])
+    assert_eq(f"4p8d d{r} is_d_replicated", c.is_d_replicated, True)
+    assert_eq(f"4p8d d{r} is_p_replicated", c.is_p_replicated, True)
+    # P heads: P0->0, P1->0, P2->1, P3->1
+    # D heads: 0,0,0,0,1,1,1,1
+    d_head = r * 2 // 8
+    p_start = expected_target * 2 // 4
+    expected_offset = (d_head - p_start) * 2048
+    assert_eq(
+        f"4p8d d{r} fa_rank_offset",
+        c.fa_rank_offset(2048),
+        expected_offset,
+    )
+    assert_eq(
+        f"4p8d d{r} skip_fa(P{expected_target})",
+        c.should_skip_fa(expected_target),
+        False,
+    )
+
 print("\n\nAll assertions passed. Done.")

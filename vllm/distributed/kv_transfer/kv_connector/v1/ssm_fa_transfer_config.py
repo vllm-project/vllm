@@ -132,7 +132,13 @@ class HeteroTPTransferConfig:
             self.fa_read_targets = (
                 [0]
                 if self.use_mla
-                else [self.d_rank % self.p_tp if self.tp_ratio > 0 else self.d_rank]
+                # OLD: [self.d_rank % self.p_tp if self.tp_ratio > 0 ...]
+                # Must match kv_topo.get_target_remote_ranks which uses
+                # d_rank // tp_ratio.  The old d_rank % p_tp gave wrong
+                # targets for 2p4d (D_TP=4, P_TP=2, K=2) and similar.
+                else [
+                    self.d_rank // self.tp_ratio if self.tp_ratio > 0 else self.d_rank
+                ]
             )
         else:
             d_needs = _physical_head_range(self.d_tp, K, self.d_rank)
@@ -188,16 +194,24 @@ class HeteroTPTransferConfig:
 
     def _validate(self) -> None:
         """Cross-check internal consistency."""
-        # Both-replicated with D_TP > P_TP: fa_read_targets uses
-        # d_rank % p_tp which may target a P rank that doesn't hold
-        # the head this D rank needs.  fa_rank_offset would then
-        # read out-of-bounds.  Block until properly implemented.
+        # OLD: Both-replicated guard — was needed because d_rank % p_tp
+        # gave wrong FA targets.  Now fixed: fa_read_targets uses
+        # d_rank // tp_ratio (matches kv_topo routing) and
+        # fa_rank_offset uses relative head index.
+        # if self.is_d_replicated and self.is_p_replicated and self.tp_ratio > 0:
+        #     raise NotImplementedError(
+        #         f"Both-replicated hetero-TP with D_TP ({self.d_tp}) > "
+        #         f"P_TP ({self.p_tp}) > K ({self.K}) is not yet supported. "
+        #         f"The FA target selection (d_rank % p_tp) does not account "
+        #         f"for head placement when both sides replicate."
+        #     )
         if self.is_d_replicated and self.is_p_replicated and self.tp_ratio > 0:
-            raise NotImplementedError(
-                f"Both-replicated hetero-TP with D_TP ({self.d_tp}) > "
-                f"P_TP ({self.p_tp}) > K ({self.K}) is not yet supported. "
-                f"The FA target selection (d_rank % p_tp) does not account "
-                f"for head placement when both sides replicate."
+            logger.info(
+                "Both-replicated hetero-TP: D_TP=%d > P_TP=%d > K=%d. "
+                "Using d_rank // tp_ratio routing with relative head offset.",
+                self.d_tp,
+                self.p_tp,
+                self.K,
             )
 
         # FA targets must be a subset of transfer_targets
@@ -273,15 +287,23 @@ class HeteroTPTransferConfig:
         """Byte offset into P's FA block for this D rank.
 
         When D is replicated (D_TP > K), multiple D ranks share a head.
-        Uses contiguous GQA layout: head_idx = d_rank * K // D_TP.
+        Computes offset *relative to the target P rank's first head*
+        so it works regardless of how many heads P has.
         When neither side replicates, falls back to tp_rank % tp_ratio.
         Returns 0 when D does not index into P's block.
         """
         if self.use_mla or self.tp_ratio <= 0:
             return 0
         if self.is_d_replicated:
-            head_idx = self.d_rank * self.K // self.d_tp
-            return head_idx * remote_kv_block_len
+            # OLD: head_idx = self.d_rank * self.K // self.d_tp
+            #      return head_idx * remote_kv_block_len
+            # Bug: used absolute head index, which is out-of-bounds
+            # when P has fewer heads than head_idx (e.g. 2p4d P1
+            # has 1 head but head_idx=1 gives offset=block_len).
+            d_head = self.d_rank * self.K // self.d_tp
+            p_rank = self.fa_read_targets[0]
+            p_start = p_rank * self.K // self.p_tp
+            return (d_head - p_start) * remote_kv_block_len
         return self.d_rank % self.tp_ratio * remote_kv_block_len
 
     @property
