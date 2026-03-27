@@ -1,6 +1,5 @@
 model_name: "Qwen/Qwen3.5-35B-A3B"
-accuracy_threshold: 0.84
-tolerance: 0.03
+accuracy_threshold: 0.86
 num_questions: 1319
 num_fewshot: 5
 server_args: >-

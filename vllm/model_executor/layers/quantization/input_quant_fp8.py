@@ -91,7 +91,6 @@ class QuantFP8(CustomOp):
 
         if (
             self.is_group_quant
-            and self.use_ue8m0
             and self.use_deep_gemm_supported
             and (DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0)
         ):
