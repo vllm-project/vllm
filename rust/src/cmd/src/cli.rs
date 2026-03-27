@@ -9,7 +9,7 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use vllm_openai_server::Config;
 
-use crate::managed_engine::{MANAGED_ENGINE_HANDSHAKE_HOST, ManagedEngineConfig};
+use crate::managed_engine::ManagedEngineConfig;
 
 /// Top-level parser for the `vllm-rs` binary.
 #[derive(Debug, Parser)]
@@ -42,9 +42,6 @@ pub struct FrontendRuntimeArgs {
     /// HTTP bind port for the OpenAI-compatible server.
     #[arg(long, default_value_t = 8000)]
     pub port: u16,
-    /// Local host/IP announced to the headless engine for ZMQ sockets.
-    #[arg(long, env = "VLLM_HOST_IP", default_value = "127.0.0.1")]
-    pub engine_local_host: String,
     /// Maximum time to wait for the engine handshake to complete.
     #[arg(long, env = "VLLM_ENGINE_READY_TIMEOUT_S", default_value_t = 300)]
     pub ready_timeout_secs: u64,
@@ -64,14 +61,19 @@ pub struct FrontendRuntimeArgs {
 
 impl FrontendRuntimeArgs {
     /// Build one OpenAI-server runtime config for the resolved handshake address.
-    fn into_config(self, handshake_address: String, engine_count: usize) -> Config {
+    fn into_config(
+        self,
+        handshake_address: String,
+        engine_count: usize,
+        advertised_host: String,
+    ) -> Config {
         Config {
             handshake_address,
             engine_count,
             model: self.model,
             host: self.host,
             port: self.port,
-            engine_local_host: self.engine_local_host,
+            advertised_host,
             ready_timeout: Duration::from_secs(self.ready_timeout_secs),
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
@@ -85,6 +87,9 @@ impl FrontendRuntimeArgs {
 pub struct FrontendArgs {
     #[command(flatten)]
     pub runtime: FrontendRuntimeArgs,
+    /// Host/IP advertised by the frontend to headless engines for shared input/output ZMQ sockets.
+    #[arg(long, env = "VLLM_HOST_IP", default_value = "127.0.0.1")]
+    pub advertised_host: String,
     /// Headless vLLM engine handshake endpoint, for example `tcp://127.0.0.1:62100`.
     #[arg(long)]
     pub handshake_address: String,
@@ -96,8 +101,11 @@ pub struct FrontendArgs {
 impl FrontendArgs {
     /// Convert the CLI arguments into the OpenAI server's runtime config.
     pub fn into_config(self) -> Config {
-        self.runtime
-            .into_config(self.handshake_address, self.engine_count)
+        self.runtime.into_config(
+            self.handshake_address,
+            self.engine_count,
+            self.advertised_host,
+        )
     }
 }
 
@@ -106,14 +114,36 @@ impl FrontendArgs {
 pub struct ServeArgs {
     #[command(flatten)]
     pub runtime: FrontendRuntimeArgs,
+    /// Only launch the managed Python headless engine and do not start the Rust frontend.
+    #[arg(long)]
+    pub headless: bool,
     /// Python executable used to launch the managed headless vLLM engine.
     #[arg(long, env = "VLLM_RS_PYTHON", default_value = "python3")]
     pub python: String,
-    /// Optional loopback TCP port for the managed-engine handshake.
+    /// Host/IP used both for the managed-engine handshake endpoint and the frontend-advertised
+    /// input/output ZMQ socket addresses.
+    #[arg(
+        long = "data-parallel-address",
+        visible_alias = "handshake-host",
+        default_value = "127.0.0.1"
+    )]
+    pub handshake_host: String,
+    /// Optional TCP port for the managed-engine handshake / data-parallel RPC endpoint.
     ///
     /// When omitted, the CLI allocates an ephemeral port automatically.
-    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+    #[arg(
+        long = "data-parallel-rpc-port",
+        visible_alias = "handshake-port",
+        value_parser = clap::value_parser!(u16).range(1..)
+    )]
     pub handshake_port: Option<u16>,
+    /// Total number of data-parallel engines expected to join the shared handshake socket.
+    #[arg(
+        long = "data-parallel-size",
+        visible_alias = "engine-count",
+        default_value_t = 1
+    )]
+    pub engine_count: usize,
     /// Additional arguments forwarded to `python -m vllm.entrypoints.cli.main serve ...`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub python_args: Vec<String>,
@@ -122,7 +152,11 @@ pub struct ServeArgs {
 impl ServeArgs {
     /// Build the OpenAI-server runtime config that should connect to the managed engine.
     pub fn to_frontend_config(&self, handshake_address: String) -> Config {
-        self.runtime.clone().into_config(handshake_address, 1)
+        self.runtime.clone().into_config(
+            handshake_address,
+            self.engine_count,
+            self.handshake_host.clone(),
+        )
     }
 
     /// Build the managed Python-engine spawn configuration for one resolved handshake port.
@@ -136,8 +170,9 @@ impl ServeArgs {
         ManagedEngineConfig {
             python: self.python,
             model: self.runtime.model,
-            handshake_host: MANAGED_ENGINE_HANDSHAKE_HOST.to_string(),
+            handshake_host: self.handshake_host,
             handshake_port,
+            engine_count: self.engine_count,
             python_args,
         }
     }
@@ -148,7 +183,7 @@ mod tests {
     use clap::Parser as _;
     use expect_test::expect;
 
-    use super::Cli;
+    use super::{Cli, Command};
 
     #[test]
     fn serve_args_forward_python_flags_without_separator() {
@@ -173,7 +208,6 @@ mod tests {
                             model: "Qwen/Qwen3-0.6B",
                             host: "127.0.0.1",
                             port: 8000,
-                            engine_local_host: "127.0.0.1",
                             ready_timeout_secs: 300,
                             tool_call_parser: None,
                             reasoning_parser: None,
@@ -181,8 +215,11 @@ mod tests {
                                 512,
                             ),
                         },
+                        headless: false,
                         python: "../vllm/.venv/bin/python",
+                        handshake_host: "127.0.0.1",
                         handshake_port: None,
+                        engine_count: 1,
                         python_args: [
                             "--dtype",
                             "float16",
@@ -215,12 +252,12 @@ mod tests {
                             model: "Qwen/Qwen3-0.6B",
                             host: "127.0.0.1",
                             port: 8000,
-                            engine_local_host: "127.0.0.1",
                             ready_timeout_secs: 300,
                             tool_call_parser: None,
                             reasoning_parser: None,
                             max_model_len: None,
                         },
+                        advertised_host: "127.0.0.1",
                         handshake_address: "tcp://127.0.0.1:62100",
                         engine_count: 2,
                     },
@@ -228,5 +265,120 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&cli);
+    }
+
+    #[test]
+    fn serve_args_accept_handshake_aliases() {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--python",
+            "python3",
+            "--handshake-host",
+            "10.99.48.128",
+            "--handshake-port",
+            "13345",
+            "--engine-count",
+            "4",
+        ])
+        .unwrap();
+
+        expect![[r#"
+            Cli {
+                command: Serve(
+                    ServeArgs {
+                        runtime: FrontendRuntimeArgs {
+                            model: "Qwen/Qwen3-0.6B",
+                            host: "127.0.0.1",
+                            port: 8000,
+                            ready_timeout_secs: 300,
+                            tool_call_parser: None,
+                            reasoning_parser: None,
+                            max_model_len: None,
+                        },
+                        headless: false,
+                        python: "python3",
+                        handshake_host: "10.99.48.128",
+                        handshake_port: Some(
+                            13345,
+                        ),
+                        engine_count: 4,
+                        python_args: [],
+                    },
+                ),
+            }
+        "#]]
+        .assert_debug_eq(&cli);
+    }
+
+    #[test]
+    fn serve_args_accept_data_parallel_primary_flags() {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--data-parallel-address",
+            "10.99.48.128",
+            "--data-parallel-rpc-port",
+            "13345",
+            "--data-parallel-size",
+            "4",
+        ])
+        .unwrap();
+
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        assert!(!args.headless);
+        assert_eq!(args.handshake_host, "10.99.48.128");
+        assert_eq!(args.handshake_port, Some(13345));
+        assert_eq!(args.engine_count, 4);
+    }
+
+    #[test]
+    fn serve_args_accept_headless_mode() {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--headless"]).unwrap();
+
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        assert!(args.headless);
+    }
+
+    #[test]
+    fn serve_frontend_config_uses_dp_address_for_both_handshake_and_transport_host() {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--handshake-host",
+            "10.99.48.128",
+            "--engine-count",
+            "4",
+        ])
+        .unwrap();
+
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string());
+
+        expect![[r#"
+            Config {
+                handshake_address: "tcp://10.99.48.128:29550",
+                engine_count: 4,
+                model: "Qwen/Qwen3-0.6B",
+                host: "127.0.0.1",
+                port: 8000,
+                advertised_host: "10.99.48.128",
+                ready_timeout: 300s,
+                tool_call_parser: None,
+                reasoning_parser: None,
+                max_model_len: None,
+            }
+        "#]]
+        .assert_debug_eq(&config);
     }
 }

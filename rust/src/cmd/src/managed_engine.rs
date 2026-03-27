@@ -13,14 +13,10 @@ use tracing::info;
 
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
-/// Loopback host used for managed-mode handshake traffic between the Rust frontend
-/// and the Python headless engine.
-pub const MANAGED_ENGINE_HANDSHAKE_HOST: &str = "127.0.0.1";
 
-/// Allocate one ephemeral loopback TCP port for the managed headless-engine handshake.
-pub fn allocate_handshake_port() -> Result<u16> {
-    let listener = TcpListener::bind((MANAGED_ENGINE_HANDSHAKE_HOST, 0))
-        .context("failed to allocate loopback handshake port")?;
+/// Allocate one ephemeral TCP port for the managed headless-engine handshake on the given host.
+pub fn allocate_handshake_port(host: &str) -> Result<u16> {
+    let listener = TcpListener::bind((host, 0)).context("failed to allocate handshake port")?;
     let port = listener
         .local_addr()
         .context("failed to inspect allocated handshake listener address")?
@@ -36,11 +32,14 @@ pub struct ManagedEngineConfig {
     /// Model identifier passed to `vllm ... serve <model>`.
     pub model: String,
     /// Host portion of the headless-engine handshake endpoint.
-    ///
-    /// In managed mode this is always loopback and is not user-configurable.
     pub handshake_host: String,
     /// Port portion of the headless-engine handshake endpoint.
     pub handshake_port: u16,
+    /// Total number of engines expected on the shared handshake socket.
+    ///
+    /// Note: this does not mean that we will start this many engines. It can also be
+    /// `--data-parallel-size-local` if it's provided in `python_args`.
+    pub engine_count: usize,
     /// Extra CLI arguments forwarded verbatim to Python vLLM.
     pub python_args: Vec<String>,
 }
@@ -64,8 +63,8 @@ impl ManagedEngineConfig {
             .arg(&self.handshake_host)
             .arg("--data-parallel-rpc-port")
             .arg(self.handshake_port.to_string())
-            .arg("--data-parallel-size-local")
-            .arg("1")
+            .arg("--data-parallel-size")
+            .arg(self.engine_count.to_string())
             .args(&self.python_args);
         command
     }
@@ -226,7 +225,12 @@ mod tests {
             model: "Qwen/Qwen3-0.6B".to_string(),
             handshake_host: "127.0.0.1".to_string(),
             handshake_port: 62100,
+            engine_count: 4,
             python_args: vec![
+                "--data-parallel-size-local".to_string(),
+                "2".to_string(),
+                "--data-parallel-start-rank".to_string(),
+                "2".to_string(),
                 "--dtype".to_string(),
                 "float16".to_string(),
                 "--max-model-len".to_string(),
@@ -247,8 +251,12 @@ mod tests {
                 "127.0.0.1",
                 "--data-parallel-rpc-port",
                 "62100",
+                "--data-parallel-size",
+                "4",
                 "--data-parallel-size-local",
-                "1",
+                "2",
+                "--data-parallel-start-rank",
+                "2",
                 "--dtype",
                 "float16",
                 "--max-model-len",
@@ -260,7 +268,7 @@ mod tests {
 
     #[test]
     fn allocate_handshake_port_returns_non_zero_port() {
-        let port = allocate_handshake_port().unwrap();
+        let port = allocate_handshake_port("127.0.0.1").unwrap();
         assert_ne!(port, 0);
     }
 }

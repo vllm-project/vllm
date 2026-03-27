@@ -33,7 +33,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         handshake_address: config.handshake_address.clone(),
         engine_count: config.engine_count,
         model_name: config.model.clone(),
-        local_host: config.engine_local_host.clone(),
+        local_host: config.advertised_host.clone(),
         ready_timeout: config.ready_timeout,
         client_index: 0,
     })

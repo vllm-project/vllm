@@ -13,8 +13,8 @@ pub struct Config {
     pub host: String,
     /// HTTP bind port.
     pub port: u16,
-    /// Local host/IP used when connecting to the engine.
-    pub engine_local_host: String,
+    /// Host/IP advertised by the frontend to engines for shared input/output sockets.
+    pub advertised_host: String,
     /// Maximum time to wait for the engine to become ready.
     pub ready_timeout: Duration,
     /// Explicit tool call parser name, or `None` for model-based auto-detection.

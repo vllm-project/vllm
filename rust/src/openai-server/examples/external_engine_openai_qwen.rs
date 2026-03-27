@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         model: args.model,
         host: "127.0.0.1".to_string(),
         port,
-        engine_local_host: args.host,
+        advertised_host: args.host,
         ready_timeout: Duration::from_secs(args.ready_timeout_secs),
         tool_call_parser: None,
         reasoning_parser: None,

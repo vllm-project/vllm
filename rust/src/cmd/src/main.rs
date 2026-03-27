@@ -48,10 +48,10 @@ async fn main() -> Result<()> {
         Command::Serve(args) => {
             let handshake_port = match args.handshake_port {
                 Some(port) => port,
-                None => allocate_handshake_port()?,
+                None => allocate_handshake_port(&args.handshake_host)?,
             };
             let engine_config = args.clone().into_managed_engine_config(handshake_port);
-            let config = args.to_frontend_config(engine_config.handshake_address());
+            let handshake_address = engine_config.handshake_address();
 
             let engine = ManagedEngineHandle::spawn(engine_config)
                 .await
@@ -74,13 +74,21 @@ async fn main() -> Result<()> {
                 reason
             });
 
-            let serve_result =
-                vllm_openai_server::serve(config, shutdown_signal_rx.map(|_| ())).await;
+            let serve_result = if args.headless {
+                info!("running managed Python headless engine without Rust frontend");
+                let _ = shutdown_signal_rx.await;
+                Ok(())
+            } else {
+                let config = args.to_frontend_config(handshake_address);
+                vllm_openai_server::serve(config, shutdown_signal_rx.map(|_| ()))
+                    .await
+                    .inspect(|_| info!("OpenAI server shut down gracefully"))
+            };
+
             let shutdown_result = engine.shutdown().await;
             let shutdown_reason = shutdown_task.await.context("shutdown task join failed")?;
 
             serve_result?;
-            info!("OpenAI server shut down gracefully");
             shutdown_result?;
             info!("managed Python headless engine shut down gracefully");
 
