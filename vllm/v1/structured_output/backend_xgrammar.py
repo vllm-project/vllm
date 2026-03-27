@@ -155,6 +155,10 @@ class XgrammarGrammar(StructuredOutputGrammar):
             return False
         for token in tokens:
             if not self.matcher.accept_token(token):
+                # Keep vLLM-side termination state in sync with xgrammar matcher
+                # even when token acceptance fails (e.g., EOS was accepted and
+                # speculative decoding still sends extra tokens).
+                self._is_terminated = self.matcher.is_terminated()
                 logger.error(
                     "Failed to advance FSM for request %s "
                     "for tokens %s. Please file an issue.",
@@ -192,7 +196,6 @@ class XgrammarGrammar(StructuredOutputGrammar):
         self.matcher.fill_next_token_bitmask(bitmask, idx)
 
     def is_terminated(self) -> bool:
-        self._is_terminated = self.matcher.is_terminated()
         return self._is_terminated
 
     def reset(self):
