@@ -165,26 +165,45 @@ def get_all_max_shared_mem():
 # SM12x (desktop Blackwell: RTX 5090/5080, DGX Spark GB10) has capability
 # major=12, which trips the >= 9 checks designed for Hopper. SM12x needs
 # different NUM_WARPS tuning (8-warp configs give ~1.8x decode speedup).
-is_nvidia_hopper = is_nvidia and (
-    "NVIDIA H" in current_platform.get_device_name()
-    or (current_platform.has_device_capability(90)
-        and not current_platform.is_device_capability_family(120))
-)
-use_cuda_graph = is_nvidia and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
-is_gather_supported = hasattr(triton.language, "gather")
-# TMA code paths require significant shared memory for Triton autotuner
-# compilation. SM12x desktop GPUs have ~101KB SMEM which is insufficient,
-# causing OOM in fla/solve_tril. Use SMEM threshold so future GPUs with
-# sufficient memory automatically get TMA support regardless of arch.
 MIN_SMEM_FOR_TMA = 131072  # 128KB
-is_tma_supported = (
-    is_nvidia
-    and os.getenv("FLA_USE_TMA", "0") == "1"
-    and get_all_max_shared_mem()[0] >= MIN_SMEM_FOR_TMA
-    and (
+
+
+def check_nvidia_hopper(platform) -> bool:
+    """Check if the GPU should use Hopper-class NUM_WARPS tuning.
+
+    Returns True for SM9x–SM11x (Hopper and datacenter Blackwell),
+    False for SM12x (desktop Blackwell) which benefits from 8-warp configs.
+    """
+    return (
+        "NVIDIA H" in platform.get_device_name()
+        or (platform.has_device_capability(90)
+            and not platform.is_device_capability_family(120))
+    )
+
+
+def check_tma_supported(platform, max_shared_mem: int) -> bool:
+    """Check if TMA code paths should be enabled.
+
+    TMA code paths require significant shared memory for Triton autotuner
+    compilation. SM12x desktop GPUs have ~101KB SMEM which is insufficient,
+    causing OOM in fla/solve_tril. Uses SMEM threshold so future GPUs with
+    sufficient memory automatically get TMA support regardless of arch.
+    """
+    if max_shared_mem < MIN_SMEM_FOR_TMA:
+        return False
+    return (
         hasattr(triton.language, "_experimental_make_tensor_descriptor")
         or hasattr(triton.language, "make_tensor_descriptor")
     )
+
+
+is_nvidia_hopper = is_nvidia and check_nvidia_hopper(current_platform)
+use_cuda_graph = is_nvidia and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
+is_gather_supported = hasattr(triton.language, "gather")
+is_tma_supported = (
+    is_nvidia
+    and os.getenv("FLA_USE_TMA", "0") == "1"
+    and check_tma_supported(current_platform, get_all_max_shared_mem()[0])
 )
 
 

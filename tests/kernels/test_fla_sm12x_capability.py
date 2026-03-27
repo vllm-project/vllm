@@ -8,107 +8,92 @@ SM12x needs different NUM_WARPS tuning and has insufficient shared memory
 for TMA code paths.
 """
 
-import importlib
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from vllm.model_executor.layers.fla.ops.utils import (
+    MIN_SMEM_FOR_TMA,
+    check_nvidia_hopper,
+    check_tma_supported,
+)
 
-def _reload_utils(capability, device_name, max_shared_mem):
-    """Reload fla/ops/utils.py with mocked platform values.
 
-    Returns the reloaded module so callers can inspect is_nvidia_hopper
-    and is_tma_supported.
-    """
-    import vllm.model_executor.layers.fla.ops.utils as utils_mod
+def _make_platform(capability, device_name):
+    """Create a mock platform object with the given capability and name."""
+    major, minor = capability
+    cap_int = major * 10 + minor
 
-    mock_cap = (capability[0], capability[1])
-
-    def fake_has_device_capability(cap, device_id=0):
-        if isinstance(cap, tuple):
-            return mock_cap >= cap
-        return (mock_cap[0] * 10 + mock_cap[1]) >= cap
-
-    def fake_is_device_capability_family(cap, device_id=0):
-        return (mock_cap[0] * 10 + mock_cap[1]) // 10 == cap // 10
-
-    def fake_get_device_name(device_id=0):
-        return device_name
-
-    patches = [
-        patch.object(
-            type(utils_mod.current_platform),
-            "has_device_capability",
-            classmethod(lambda cls, cap, device_id=0:
-                        fake_has_device_capability(cap, device_id)),
+    return SimpleNamespace(
+        get_device_name=lambda device_id=0: device_name,
+        has_device_capability=lambda cap, device_id=0: (
+            (major, minor) >= cap if isinstance(cap, tuple)
+            else cap_int >= cap
         ),
-        patch.object(
-            type(utils_mod.current_platform),
-            "is_device_capability_family",
-            classmethod(lambda cls, cap, device_id=0:
-                        fake_is_device_capability_family(cap, device_id)),
+        is_device_capability_family=lambda cap, device_id=0: (
+            cap_int // 10 == cap // 10
         ),
-        patch.object(
-            type(utils_mod.current_platform),
-            "get_device_name",
-            classmethod(lambda cls, device_id=0:
-                        fake_get_device_name(device_id)),
-        ),
-        patch(
-            "vllm.model_executor.layers.fla.ops.utils.get_all_max_shared_mem",
-            return_value=[max_shared_mem],
-        ),
-    ]
-    for p in patches:
-        p.start()
-    try:
-        importlib.reload(utils_mod)
-        return utils_mod
-    finally:
-        for p in patches:
-            p.stop()
+    )
 
 
 @pytest.mark.parametrize(
-    "capability,device_name,smem_bytes,expected_hopper,expected_tma",
+    "capability,device_name,expected_hopper",
     [
-        # Ampere (SM80) — not Hopper, no TMA (also low SMEM for this test)
-        ((8, 0), "NVIDIA A100", 166912, False, False),
-        # Hopper (SM90) — is "Hopper-like", has TMA (228KB SMEM)
-        ((9, 0), "NVIDIA H100", 232448, True, True),
-        # Datacenter Blackwell (SM100) — "Hopper-like" per the range,
-        # has TMA with sufficient SMEM
-        ((10, 0), "NVIDIA B200", 232448, True, True),
-        ((11, 0), "NVIDIA B300", 232448, True, True),
-        # Desktop Blackwell RTX 5090 (SM120) — NOT Hopper-like, no TMA
-        # (101KB SMEM is below 128KB threshold)
-        ((12, 0), "NVIDIA GeForce RTX 5090", 101376, False, False),
-        # DGX Spark GB10 (SM121) — NOT Hopper-like, no TMA
-        ((12, 1), "Orin (nvgpu)", 101376, False, False),
-        # Hypothetical SM12x with datacenter-class SMEM — NOT Hopper-like,
-        # but TMA should be enabled since SMEM is sufficient
-        ((12, 0), "NVIDIA RTX Pro 6000", 232448, False, True),
+        # Ampere (SM80) — not Hopper
+        ((8, 0), "NVIDIA A100", False),
+        # Hopper (SM90)
+        ((9, 0), "NVIDIA H100", True),
+        # Datacenter Blackwell (SM100/SM110) — "Hopper-like" for warp tuning
+        ((10, 0), "NVIDIA B200", True),
+        ((11, 0), "NVIDIA B300", True),
+        # Desktop Blackwell (SM120) — NOT Hopper-like
+        ((12, 0), "NVIDIA GeForce RTX 5090", False),
+        # DGX Spark GB10 (SM121)
+        ((12, 1), "Orin (nvgpu)", False),
     ],
 )
-def test_fla_capability_classification(
-    capability: tuple[int, int],
-    device_name: str,
-    smem_bytes: int,
-    expected_hopper: bool,
-    expected_tma: bool,
-):
-    """Verify is_nvidia_hopper and is_tma_supported for various architectures.
-
-    Tests the actual module-level variables by reloading utils.py with mocked
-    platform values, rather than reimplementing the logic.
-    """
-    utils = _reload_utils(capability, device_name, smem_bytes)
-
-    assert utils.is_nvidia_hopper == expected_hopper, (
-        f"capability {capability} ({device_name}): is_nvidia_hopper should be "
-        f"{expected_hopper}, got {utils.is_nvidia_hopper}"
+def test_check_nvidia_hopper(capability, device_name, expected_hopper):
+    platform = _make_platform(capability, device_name)
+    assert check_nvidia_hopper(platform) == expected_hopper, (
+        f"capability {capability} ({device_name}): check_nvidia_hopper "
+        f"should be {expected_hopper}"
     )
-    assert utils.is_tma_supported == expected_tma, (
-        f"capability {capability} ({device_name}): is_tma_supported should be "
-        f"{expected_tma}, got {utils.is_tma_supported}"
-    )
+
+
+@pytest.mark.parametrize(
+    "smem_bytes,expected_tma",
+    [
+        # SM12x desktop: 101KB — below threshold
+        (101376, False),
+        # Hopper/datacenter Blackwell: 228KB — above threshold
+        (232448, True),
+        # Exactly at threshold
+        (MIN_SMEM_FOR_TMA, True),
+        # Just below threshold
+        (MIN_SMEM_FOR_TMA - 1, False),
+    ],
+)
+def test_check_tma_supported(smem_bytes, expected_tma):
+    platform = _make_platform((9, 0), "NVIDIA H100")
+    # Mock triton to have TMA descriptor support
+    with patch(
+        "vllm.model_executor.layers.fla.ops.utils.triton"
+    ) as mock_triton:
+        mock_triton.language = SimpleNamespace(
+            make_tensor_descriptor=lambda: None,
+        )
+        assert check_tma_supported(platform, smem_bytes) == expected_tma, (
+            f"smem={smem_bytes}: check_tma_supported "
+            f"should be {expected_tma}"
+        )
+
+
+def test_check_tma_no_triton_support():
+    """TMA should be False even with enough SMEM if triton lacks descriptors."""
+    platform = _make_platform((9, 0), "NVIDIA H100")
+    with patch(
+        "vllm.model_executor.layers.fla.ops.utils.triton"
+    ) as mock_triton:
+        mock_triton.language = SimpleNamespace()  # no TMA attrs
+        assert not check_tma_supported(platform, 232448)
