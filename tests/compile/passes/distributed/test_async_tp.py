@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from pathlib import Path
-
 import pytest
 import torch
+from torch.fx.experimental.proxy_tensor import make_fx
 
 import vllm.envs as envs
 from tests.compile.backend import TestBackend
@@ -310,8 +309,6 @@ class TestAGFlashInferBMMFP8Model(_BaseFlashInferBMMFP8Model):
         TestAGScaledMMModel,
         TestCutlassScaledMMRSModel,
         TestAGCutlassScaledMMModel,
-        TestFlashInferBMMFP8RSModel,
-        TestAGFlashInferBMMFP8Model,
     ],
 )
 @pytest.mark.parametrize("batch_size", [8])
@@ -342,12 +339,6 @@ def test_async_tp_pass_replace(
             "Only bf16 high precision output types are supported for "
             "per-token (row-wise) scaling"
         )
-
-    if test_model in (TestFlashInferBMMFP8RSModel, TestAGFlashInferBMMFP8Model):
-        if not hasattr(torch.ops.vllm, "bmm_fp8"):
-            pytest.skip("FlashInfer bmm_fp8 not available")
-        if dtype == torch.float16:
-            pytest.skip("FlashInfer FP8 async TP fusion requires bf16 output")
 
     num_processes = 2
 
@@ -404,7 +395,6 @@ def async_tp_pass_on_test_model(
     # configure vllm config for SequenceParallelismPass
     vllm_config = VllmConfig()
     vllm_config.compilation_config = CompilationConfig(
-        debug_dump_path=Path("/tmp/vllm_async_tp_test_dump"),
         pass_config=PassConfig(
             fuse_gemm_comms=True,
         ),
@@ -453,4 +443,92 @@ def async_tp_pass_on_test_model(
 
         # In post-nodes, fused_matmul_reduce_scatter or \
         # fused_all_gather_matmul should exist
+        backend.check_after_ops(model.ops_in_model_after())
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "test_model",
+    [TestFlashInferBMMFP8RSModel, TestAGFlashInferBMMFP8Model],
+)
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("seq_len", [16])
+@pytest.mark.parametrize("hidden_size", [16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
+def test_async_tp_pass_replace_flashinfer(
+    test_model: str,
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+):
+    if not hasattr(torch.ops.vllm, "bmm_fp8"):
+        pytest.skip("FlashInfer bmm_fp8 not available")
+
+    num_processes = 2
+
+    torch.multiprocessing.spawn(
+        flashinfer_async_tp_pass_on_test_model,
+        args=(num_processes, test_model, batch_size, seq_len, hidden_size, dtype),
+        nprocs=num_processes,
+    )
+
+
+def flashinfer_async_tp_pass_on_test_model(
+    local_rank: int,
+    world_size: int,
+    test_model_cls: torch.nn.Module,
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+):
+    set_random_seed(0)
+
+    device = torch.device(f"cuda:{local_rank}")
+    torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
+    torch.set_default_dtype(dtype)
+
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": "12346",
+        }
+    )
+
+    init_distributed_environment()
+
+    vllm_config = VllmConfig()
+    vllm_config.compilation_config = CompilationConfig(
+        pass_config=PassConfig(
+            fuse_gemm_comms=True,
+        ),
+    )
+    vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
+    vllm_config.model_config = ModelConfig(
+        model="RedHatAI/Llama-3.2-1B-Instruct-FP8",
+        trust_remote_code=True,
+        dtype=dtype,
+        seed=42,
+    )
+
+    with set_current_vllm_config(vllm_config):
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+        async_tp_pass = AsyncTPPass(vllm_config)
+        backend = TestBackend(async_tp_pass)
+        model = test_model_cls(hidden_size, dtype)
+        hidden_states = torch.randn(
+            (batch_size * seq_len, hidden_size), dtype=dtype, requires_grad=False
+        )
+        graph = make_fx(model, tracing_mode="fake")(hidden_states)
+        backend.post_pass(graph.graph)
+
+        assert async_tp_pass.matched_count == 1
+        backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
         backend.check_after_ops(model.ops_in_model_after())
