@@ -33,6 +33,9 @@ def warmup_kernels(
     tokens each. The second iteration simulates a decode step with all
     requests generating 1 token each.
     """
+    if model_runner.is_encoder_only:
+        return
+
     prompt_token_ids = [0, 1]
     prompt_len = len(prompt_token_ids)
     num_spec_steps = model_runner.num_speculative_steps
