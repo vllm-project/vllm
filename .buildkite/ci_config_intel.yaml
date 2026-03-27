@@ -4,7 +4,6 @@ job_dirs:
 run_all_patterns:
   - "docker/Dockerfile"
   - "CMakeLists.txt"
-  - "requirements/common.txt"
   - "requirements/xpu.txt"
   - "requirements/build.txt"
   - "requirements/test.txt"
