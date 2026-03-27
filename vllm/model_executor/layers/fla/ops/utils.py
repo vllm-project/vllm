@@ -148,23 +148,6 @@ is_amd = device_platform == "amd"
 is_intel = device_platform == "intel"
 is_nvidia = device_platform == "nvidia"
 is_intel_alchemist = is_intel and "Intel(R) Arc(TM) A" in torch.xpu.get_device_name(0)
-# SM12x (desktop Blackwell: RTX 5090/5080, DGX Spark GB10) has capability
-# major=12, which trips the >= 9 checks below. But SM12x is NOT Hopper —
-# it lacks TMA and needs different NUM_WARPS tuning. Restrict to SM9x-SM11x.
-is_nvidia_hopper = is_nvidia and (
-    "NVIDIA H" in torch.cuda.get_device_name(0)
-    or 9 <= torch.cuda.get_device_capability()[0] < 12
-)
-use_cuda_graph = is_nvidia and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
-is_gather_supported = hasattr(triton.language, "gather")
-is_tma_supported = (
-    is_nvidia_hopper
-    and os.getenv("FLA_USE_TMA", "0") == "1"
-    and (
-        hasattr(triton.language, "_experimental_make_tensor_descriptor")
-        or hasattr(triton.language, "make_tensor_descriptor")
-    )
-)
 
 
 def get_all_max_shared_mem():
@@ -177,6 +160,32 @@ def get_all_max_shared_mem():
         ]
     except BaseException:
         return [-1]
+
+
+# SM12x (desktop Blackwell: RTX 5090/5080, DGX Spark GB10) has capability
+# major=12, which trips the >= 9 checks designed for Hopper. SM12x needs
+# different NUM_WARPS tuning (8-warp configs give ~1.8x decode speedup).
+is_nvidia_hopper = is_nvidia and (
+    "NVIDIA H" in current_platform.get_device_name()
+    or (current_platform.has_device_capability(90)
+        and not current_platform.is_device_capability_family(120))
+)
+use_cuda_graph = is_nvidia and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
+is_gather_supported = hasattr(triton.language, "gather")
+# TMA code paths require significant shared memory for Triton autotuner
+# compilation. SM12x desktop GPUs have ~101KB SMEM which is insufficient,
+# causing OOM in fla/solve_tril. Use SMEM threshold so future GPUs with
+# sufficient memory automatically get TMA support regardless of arch.
+MIN_SMEM_FOR_TMA = 131072  # 128KB
+is_tma_supported = (
+    is_nvidia
+    and os.getenv("FLA_USE_TMA", "0") == "1"
+    and get_all_max_shared_mem()[0] >= MIN_SMEM_FOR_TMA
+    and (
+        hasattr(triton.language, "_experimental_make_tensor_descriptor")
+        or hasattr(triton.language, "make_tensor_descriptor")
+    )
+)
 
 
 class Backend(Enum):
