@@ -6732,7 +6732,14 @@ class GPUModelRunner(
 
             nkv = kv_cache_spec.num_kv_heads
             hs = kv_cache_spec.head_size
-            dtype = kv_cache_spec.dtype
+            # For FP8_PER_TOKEN, kv_cache_spec.dtype is uint8 (storage),
+            # but data views need the actual fp8 dtype for the kernel.
+            if kv_cache_spec.kv_quant_mode == KVQuantMode.FP8_PER_TOKEN:
+                from vllm.platforms import current_platform
+
+                dtype = current_platform.fp8_dtype()
+            else:
+                dtype = kv_cache_spec.dtype
             dtype_sz = get_dtype_size(dtype)
             scale_sz = get_dtype_size(torch.float32)  # 4
 
