@@ -4,7 +4,7 @@ use std::time::Duration;
 use futures::future::try_join_all;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
-use tracing::{info, trace};
+use tracing::{debug, info, trace};
 
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
 use crate::error::{Error, Result};
@@ -103,7 +103,7 @@ impl EngineCoreClient {
         let inner = Arc::new(ClientInner::new(
             connected.input_send,
             config.model_name.clone(),
-            engines.len(),
+            &engines,
         ));
         let output_task = AbortOnDropHandle::new(tokio::spawn(transport::run_output_loop(
             connected.output_socket,
@@ -113,11 +113,8 @@ impl EngineCoreClient {
             inner.clone(),
             output_rx,
         )));
-        let abort_task = AbortOnDropHandle::new(tokio::spawn(run_abort_loop(
-            inner.clone(),
-            engines.clone(),
-            abort_rx,
-        )));
+        let abort_task =
+            AbortOnDropHandle::new(tokio::spawn(run_abort_loop(inner.clone(), abort_rx)));
 
         Ok(Self {
             config,
@@ -151,7 +148,7 @@ impl EngineCoreClient {
     pub fn engine_identities(&self) -> Vec<&[u8]> {
         self.engines
             .iter()
-            .map(|engine| engine.engine_identity.as_slice())
+            .map(|engine| &*engine.engine_id)
             .collect()
     }
 
@@ -193,14 +190,16 @@ impl EngineCoreClient {
         );
 
         let request_id = req.request_id.clone();
-        let (engine_idx, rx) = self.inner.register_request(request_id.clone())?;
+        let (engine_id, rx) = self.inner.register_request(request_id.clone())?;
+        debug!(
+            request_id = req.request_id,
+            ?engine_id,
+            "registered request to engine"
+        );
+
         if let Err(error) = self
             .inner
-            .send_to_engine(
-                &self.engines[engine_idx].engine_identity,
-                EngineCoreRequestType::Add,
-                &req,
-            )
+            .send_to_engine(&engine_id, EngineCoreRequestType::Add, &req)
             .await
         {
             self.inner.rollback_request(&request_id);
@@ -224,9 +223,9 @@ impl EngineCoreClient {
             return Ok(());
         }
 
-        for (engine_idx, request_ids) in abortable {
+        for (engine_id, request_ids) in abortable {
             self.inner
-                .do_abort_requests(&self.engines[engine_idx].engine_identity, &request_ids)
+                .do_abort_requests(&engine_id, &request_ids)
                 .await?;
         }
         Ok(())
@@ -259,11 +258,7 @@ impl EngineCoreClient {
             // Return error immediately once we fail to send to any engine.
             // TODO: this operation is not atomic.
             self.inner
-                .send_to_engine(
-                    &engine.engine_identity,
-                    EngineCoreRequestType::Utility,
-                    &request,
-                )
+                .send_to_engine(&engine.engine_id, EngineCoreRequestType::Utility, &request)
                 .await?;
             pending_calls.push((call_id, rx));
         }

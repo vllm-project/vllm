@@ -31,9 +31,7 @@ pub enum Error {
     },
     #[error("engine input registration timed out after {timeout:?}")]
     InputRegistrationTimeout { timeout: Duration },
-    #[error(
-        "unexpected engine identity in startup handshake: expected {expected:?}, got {actual:?}"
-    )]
+    #[error("unexpected engine id in startup handshake: expected {expected:?}, got {actual:?}")]
     UnexpectedHandshakeIdentity { expected: Vec<u8>, actual: Vec<u8> },
     #[error("unexpected startup handshake message: {reason}")]
     UnexpectedHandshakeMessage { reason: String },

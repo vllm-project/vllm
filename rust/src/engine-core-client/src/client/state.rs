@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use itertools::Itertools;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::EngineId;
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::error::{Error, Result};
 use crate::protocol::{EngineCoreOutput, UtilityOutput};
+use crate::transport::ConnectedEngine;
 
 pub type OutputSender = mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>;
 pub type OutputReceiver = mpsc::UnboundedReceiver<Result<EngineCoreStreamOutput>>;
@@ -16,7 +17,7 @@ pub type UtilityReceiver = oneshot::Receiver<Result<UtilityOutput>>;
 #[derive(Debug)]
 struct TrackedRequest {
     sender: OutputSender,
-    engine_idx: usize,
+    engine_id: EngineId,
 }
 
 /// Internal registry for tracking active requests and their output stream senders.
@@ -27,30 +28,34 @@ struct TrackedRequest {
 pub struct RequestRegistry {
     closed: bool,
     requests: BTreeMap<String, TrackedRequest>,
-    in_flight_per_engine: Vec<usize>,
+    in_flight_per_engine: BTreeMap<EngineId, usize>,
 }
 
 impl RequestRegistry {
-    pub fn new(engine_count: usize) -> Self {
+    pub fn new(engines: &[ConnectedEngine]) -> Self {
         Self {
             closed: false,
             requests: BTreeMap::default(),
-            in_flight_per_engine: vec![0; engine_count],
+            in_flight_per_engine: engines
+                .iter()
+                .map(|engine| (engine.engine_id.clone(), 0))
+                .collect(),
         }
     }
 
     /// Register a newly added request. Create the per-request output channel bound to its
-    /// `request_id` and return the selected engine index.
-    pub fn register(&mut self, request_id: String) -> Result<(usize, OutputReceiver)> {
+    /// `request_id` and return the selected engine id.
+    pub fn register(&mut self, request_id: String) -> Result<(EngineId, OutputReceiver)> {
         if self.requests.contains_key(&request_id) {
             return Err(Error::DuplicateRequestId { request_id });
         }
 
         // Simple routing strategy: assign to the engine with the least in-flight requests.
-        let engine_idx = self
+        let engine_id = self
             .in_flight_per_engine
             .iter()
-            .position_min()
+            .min_by_key(|(_, in_flight)| *in_flight)
+            .map(|(engine_id, _)| engine_id.clone())
             .expect("request registry must contain at least one engine");
 
         let (tx, rx) = mpsc::unbounded_channel();
@@ -58,24 +63,27 @@ impl RequestRegistry {
             request_id,
             TrackedRequest {
                 sender: tx,
-                engine_idx,
+                engine_id: engine_id.clone(),
             },
         );
-        self.in_flight_per_engine[engine_idx] += 1;
+        *self
+            .in_flight_per_engine
+            .get_mut(&engine_id)
+            .expect("request registry must track all known engines") += 1;
 
-        Ok((engine_idx, rx))
+        Ok((engine_id, rx))
     }
 
     /// Filter the given request IDs to the subset that are still tracked as active and can be
     /// aborted, grouped by engine.
-    pub fn abortable_request_ids(&self, request_ids: &[String]) -> BTreeMap<usize, Vec<String>> {
+    pub fn abortable_request_ids(&self, request_ids: &[String]) -> BTreeMap<EngineId, Vec<String>> {
         let mut by_engine = BTreeMap::new();
         for request_id in request_ids {
             let Some(tracked) = self.requests.get(request_id.as_str()) else {
                 continue;
             };
             by_engine
-                .entry(tracked.engine_idx)
+                .entry(tracked.engine_id.clone())
                 .or_insert_with(Vec::new)
                 .push(request_id.clone());
         }
@@ -121,13 +129,13 @@ impl RequestRegistry {
 
     /// Remove one request from the local registry. Returns the tracked entry if it exists.
     #[must_use]
-    pub fn remove(&mut self, request_id: &str) -> Option<(OutputSender, usize)> {
+    pub fn remove(&mut self, request_id: &str) -> Option<(OutputSender, EngineId)> {
         let tracked = self.requests.remove(request_id)?;
-        self.in_flight_per_engine[tracked.engine_idx] = self.in_flight_per_engine
-            [tracked.engine_idx]
-            .checked_sub(1)
-            .expect("request registry must not underflow engine in-flight counts");
-        Some((tracked.sender, tracked.engine_idx))
+        *self
+            .in_flight_per_engine
+            .get_mut(&tracked.engine_id)
+            .expect("request registry must track all known engines") -= 1;
+        Some((tracked.sender, tracked.engine_id))
     }
 
     #[cfg(test)]
@@ -197,11 +205,16 @@ impl UtilityRegistry {
 #[cfg(test)]
 mod tests {
     use super::{RequestRegistry, UtilityRegistry};
+    use crate::EngineId;
     use crate::protocol::{EngineCoreFinishReason, EngineCoreOutput, UtilityOutput};
+    use crate::transport::ConnectedEngine;
 
     #[test]
     fn registry_rejects_duplicate_request_ids() {
-        let mut registry = RequestRegistry::new(1);
+        let mut registry = RequestRegistry::new(&[ConnectedEngine {
+            engine_id: EngineId::from(b"engine-0"),
+            ready_message: Default::default(),
+        }]);
         registry.register("req-1".to_string()).unwrap();
         let error = registry.register("req-1".to_string()).unwrap_err();
         assert!(matches!(
@@ -212,7 +225,10 @@ mod tests {
 
     #[test]
     fn registry_removes_finished_request_on_output() {
-        let mut registry = RequestRegistry::new(1);
+        let mut registry = RequestRegistry::new(&[ConnectedEngine {
+            engine_id: EngineId::from(b"engine-0"),
+            ready_message: Default::default(),
+        }]);
         registry.register("req-1".to_string()).unwrap();
 
         let sender = registry.sender_for_output(&EngineCoreOutput {
@@ -227,7 +243,10 @@ mod tests {
 
     #[test]
     fn registry_closes_all_requests_on_failure() {
-        let mut registry = RequestRegistry::new(1);
+        let mut registry = RequestRegistry::new(&[ConnectedEngine {
+            engine_id: EngineId::from(b"engine-0"),
+            ready_message: Default::default(),
+        }]);
         registry.register("req-1".to_string()).unwrap();
         registry.register("req-2".to_string()).unwrap();
 
@@ -238,15 +257,26 @@ mod tests {
     }
 
     #[test]
-    fn registry_tracks_engine_idx_per_request() {
-        let mut registry = RequestRegistry::new(2);
-        let (engine_0, _) = registry.register("req-1".to_string()).unwrap();
-        let (engine_1, _) = registry.register("req-2".to_string()).unwrap();
-        let (engine_0_again, _) = registry.register("req-3".to_string()).unwrap();
+    fn registry_tracks_engine_id_per_request() {
+        let engine_0 = EngineId::from(b"engine-0");
+        let engine_1 = EngineId::from(b"engine-1");
+        let mut registry = RequestRegistry::new(&[
+            ConnectedEngine {
+                engine_id: engine_0.clone(),
+                ready_message: Default::default(),
+            },
+            ConnectedEngine {
+                engine_id: engine_1.clone(),
+                ready_message: Default::default(),
+            },
+        ]);
+        let (chosen_0, _) = registry.register("req-1".to_string()).unwrap();
+        let (chosen_1, _) = registry.register("req-2".to_string()).unwrap();
+        let (chosen_0_again, _) = registry.register("req-3".to_string()).unwrap();
 
-        assert_eq!(engine_0, 0);
-        assert_eq!(engine_1, 1);
-        assert_eq!(engine_0_again, 0);
+        assert_eq!(chosen_0, engine_0);
+        assert_eq!(chosen_1, engine_1);
+        assert_eq!(chosen_0_again, engine_0);
 
         let grouped = registry.abortable_request_ids(&[
             "req-1".to_string(),
@@ -254,10 +284,10 @@ mod tests {
             "req-3".to_string(),
         ]);
         assert_eq!(
-            grouped.get(&0).unwrap(),
+            grouped.get(&engine_0).unwrap(),
             &vec!["req-1".to_string(), "req-3".to_string()]
         );
-        assert_eq!(grouped.get(&1).unwrap(), &vec!["req-2".to_string()]);
+        assert_eq!(grouped.get(&engine_1).unwrap(), &vec!["req-2".to_string()]);
     }
 
     #[test]

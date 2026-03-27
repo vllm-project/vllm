@@ -12,7 +12,7 @@ pub use client::{
     EngineCoreClient, EngineCoreClientConfig, EngineCoreOutputStream, EngineCoreStreamOutput,
 };
 pub use error::{Error, Result};
-pub use transport::ENGINE_CORE_DEAD_SENTINEL;
+pub use transport::{ENGINE_CORE_DEAD_SENTINEL, EngineId};
 
 #[cfg(test)]
 mod tests;

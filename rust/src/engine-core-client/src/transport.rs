@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Debug;
+use std::ops::Deref;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -7,7 +9,8 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{debug, error, info, trace, warn};
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
-use zeromq::{PullSocket, RouterSendHalf, RouterSocket, ZmqMessage};
+use zeromq::util::PeerIdentity;
+use zeromq::{PullSocket, RouterSendHalf, RouterSocket, ZmqError, ZmqMessage};
 
 use crate::error::{Error, Result};
 use crate::protocol::handshake::{HandshakeAddresses, HandshakeInitMessage, ReadyMessage};
@@ -18,11 +21,62 @@ use crate::protocol::{
 /// Dedicated single-frame sentinel emitted by Python `EngineCoreProc` when the engine dies.
 pub const ENGINE_CORE_DEAD_SENTINEL: &[u8] = b"ENGINE_CORE_DEAD";
 
+/// Opaque routing identity of one engine on the frontend transport.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EngineId(Bytes);
+
+impl Debug for EngineId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Display the engine id as a hex string for easier debugging.
+        write!(f, "EngineId({})", hex::encode(&self.0))
+    }
+}
+
+impl EngineId {
+    /// Convert the engine id into a ZMQ frame for sending.
+    pub fn to_frame(&self) -> Bytes {
+        self.0.clone()
+    }
+
+    /// Convert the engine id into a ZMQ frame for sending.
+    pub fn into_frame(self) -> Bytes {
+        self.0
+    }
+}
+
+impl Deref for EngineId {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl From<Vec<u8>> for EngineId {
+    fn from(value: Vec<u8>) -> Self {
+        Self(Bytes::from(value))
+    }
+}
+
+impl<const N: usize> From<&[u8; N]> for EngineId {
+    fn from(value: &[u8; N]) -> Self {
+        Self(Bytes::copy_from_slice(value))
+    }
+}
+
+impl TryFrom<EngineId> for PeerIdentity {
+    type Error = ZmqError;
+
+    fn try_from(value: EngineId) -> std::result::Result<Self, Self::Error> {
+        PeerIdentity::try_from(value.into_frame())
+    }
+}
+
 /// Per-engine handshake result collected while bootstrapping one shared transport.
 #[derive(Clone)]
 pub struct ConnectedEngine {
     /// The identity of the connected engine.
-    pub engine_identity: Vec<u8>,
+    pub engine_id: EngineId,
     /// The READY message received from the engine during the handshake.
     pub ready_message: ReadyMessage,
 }
@@ -86,9 +140,8 @@ pub async fn connect(
     // 3. Receive HELLO/READY from each engine on the shared handshake socket until all expected
     //    engines have completed startup. READY can arrive before later HELLOs, so startup must be
     //    driven by a single mixed-status loop.
-    let mut engines = Vec::with_capacity(engine_count);
-    let mut seen_identities = BTreeSet::new();
-    let mut ready_pending = BTreeMap::new();
+    let mut engines = BTreeMap::new();
+    let mut ready_pending = BTreeSet::new();
     while engines.len() < engine_count || !ready_pending.is_empty() {
         debug!(
             handshake_address,
@@ -103,61 +156,62 @@ pub async fn connect(
                 stage: "HELLO/READY",
                 timeout: ready_timeout,
             })??;
-        let (engine_identity, handshake_message) = decode_handshake_message(message, None)?;
+        let (engine_id, handshake_message) = decode_handshake_message(message, None)?;
         match handshake_message.status.as_deref() {
             Some("HELLO") => {
                 if engines.len() >= engine_count {
                     return Err(Error::UnexpectedHandshakeMessage {
                         reason: format!(
-                            "received HELLO for unexpected extra engine identity {engine_identity:?}"
+                            "received HELLO for unexpected extra engine id {engine_id:?}"
                         ),
                     });
                 }
-                if !seen_identities.insert(engine_identity.clone()) {
+                if engines.contains_key(&engine_id) {
                     return Err(Error::UnexpectedHandshakeMessage {
                         reason: format!(
-                            "duplicate engine identity {engine_identity:?} observed during startup handshake"
+                            "duplicate engine id {engine_id:?} observed during startup handshake"
                         ),
                     });
                 }
-                debug!(
-                    handshake_address,
-                    ?engine_identity,
-                    "received HELLO from engine"
-                );
+                debug!(handshake_address, ?engine_id, "received HELLO from engine");
 
                 send_init_message(
                     &mut handshake_socket,
-                    &engine_identity,
+                    &engine_id,
                     &input_address,
                     &output_address,
                 )
                 .await?;
-                debug!(handshake_address, ?engine_identity, "sent INIT to engine");
+                debug!(handshake_address, ?engine_id, "sent INIT to engine");
 
-                let engine_idx = engines.len();
-                engines.push(ConnectedEngine {
-                    engine_identity: engine_identity.clone(),
-                    // Haven't received READY yet, use a placeholder for now.
-                    ready_message: ReadyMessage::default(),
-                });
-                ready_pending.insert(engine_identity, engine_idx);
+                engines.insert(
+                    engine_id.clone(),
+                    ConnectedEngine {
+                        engine_id: engine_id.clone(),
+                        // Haven't received READY yet, use a placeholder for now.
+                        ready_message: ReadyMessage::default(),
+                    },
+                );
+                ready_pending.insert(engine_id);
             }
             Some("READY") => {
-                let Some(engine_idx) = ready_pending.remove(&engine_identity) else {
+                if !ready_pending.remove(&engine_id) {
                     return Err(Error::UnexpectedHandshakeMessage {
                         reason: format!(
-                            "received READY for unexpected or duplicate engine identity {engine_identity:?}"
+                            "received READY for unexpected or duplicate engine id {engine_id:?}"
                         ),
                     });
-                };
+                }
                 debug!(
                     handshake_address,
-                    ?engine_identity,
+                    ?engine_id,
                     ?handshake_message,
                     "received READY from engine"
                 );
-                engines[engine_idx].ready_message = handshake_message;
+                engines
+                    .get_mut(&engine_id)
+                    .expect("READY must only be accepted for a previously HELLO'd engine")
+                    .ready_message = handshake_message;
             }
             other => {
                 return Err(Error::UnexpectedHandshakeMessage {
@@ -168,6 +222,8 @@ pub async fn connect(
     }
 
     // 4. Wait for every engine to connect to the shared input socket and register itself.
+    let engines: Vec<_> = engines.into_values().collect();
+
     wait_for_input_registrations(&mut input_socket, &engines, ready_timeout).await?;
     debug!(
         engine_count = engines.len(),
@@ -211,8 +267,8 @@ async fn bind_local_sockets(
 /// Decode a handshake message and validate its structure and identity.
 fn decode_handshake_message(
     message: ZmqMessage,
-    expected_identity: Option<&[u8]>,
-) -> Result<(Vec<u8>, ReadyMessage)> {
+    expected_id: Option<&EngineId>,
+) -> Result<(EngineId, ReadyMessage)> {
     if message.len() != 2 {
         return Err(Error::UnexpectedHandshakeMessage {
             reason: format!("expected 2 frames, got {}", message.len()),
@@ -220,25 +276,25 @@ fn decode_handshake_message(
     }
 
     let frames = message.into_vec();
-    let actual_identity = frames[0].to_vec();
-    if let Some(expected_identity) = expected_identity
-        && actual_identity != expected_identity
+    let actual_id = EngineId(frames[0].clone());
+    if let Some(expected_id) = expected_id
+        && actual_id != *expected_id
     {
         return Err(Error::UnexpectedHandshakeIdentity {
-            expected: expected_identity.to_vec(),
-            actual: actual_identity,
+            expected: expected_id.to_vec(),
+            actual: actual_id.to_vec(),
         });
     }
 
     let handshake_message: ReadyMessage = decode_msgpack(&frames[1])?;
-    Ok((actual_identity, handshake_message))
+    Ok((actual_id, handshake_message))
 }
 
 /// Send an INIT message to the engine with the local socket addresses for the engine to connect to,
 /// using the handshake socket.
 async fn send_init_message(
     handshake_socket: &mut RouterSocket,
-    engine_identity: &[u8],
+    engine_id: &EngineId,
     input_address: &str,
     output_address: &str,
 ) -> Result<()> {
@@ -253,11 +309,8 @@ async fn send_init_message(
         parallel_config: Default::default(),
     };
     let payload = encode_msgpack(&init_message)?;
-    let message = ZmqMessage::try_from(vec![
-        Bytes::copy_from_slice(engine_identity),
-        Bytes::from(payload),
-    ])
-    .expect("handshake router messages must contain identity and payload");
+    let message = ZmqMessage::try_from(vec![engine_id.to_frame(), Bytes::from(payload)])
+        .expect("handshake router messages must contain identity and payload");
     handshake_socket.send(message).await?;
     Ok(())
 }
@@ -272,7 +325,7 @@ async fn wait_for_input_registrations(
 ) -> Result<()> {
     let mut pending = expected_engines
         .iter()
-        .map(|e| &e.engine_identity)
+        .map(|e| e.engine_id.clone())
         .collect::<BTreeSet<_>>();
 
     while !pending.is_empty() {
@@ -292,11 +345,11 @@ async fn wait_for_input_registrations(
         }
 
         let frames = registration.into_vec();
-        let actual_identity = frames[0].to_vec();
-        if !pending.remove(&actual_identity) {
+        let actual_id = EngineId(frames[0].clone());
+        if !pending.remove(&actual_id) {
             return Err(Error::UnexpectedHandshakeMessage {
                 reason: format!(
-                    "received input registration for unexpected engine identity {actual_identity:?}"
+                    "received input registration for unexpected engine id {actual_id:?}"
                 ),
             });
         }
@@ -313,19 +366,19 @@ async fn wait_for_input_registrations(
 /// Send an encoded message to the engine through the input socket.
 pub async fn send_message(
     input_send: &mut RouterSendHalf,
-    engine_identity: &[u8],
+    engine_id: &EngineId,
     request_type: Bytes,
     payload: Vec<u8>,
 ) -> Result<()> {
     let message = ZmqMessage::try_from(vec![
-        Bytes::copy_from_slice(engine_identity),
+        engine_id.to_frame(),
         request_type,
         Bytes::from(payload),
     ])
     .expect("router messages must contain identity and payload");
 
     trace!(
-        ?engine_identity,
+        ?engine_id,
         frame_count = message.len(),
         "sending ZMQ message"
     );

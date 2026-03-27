@@ -23,7 +23,7 @@ use crate::protocol::{
     decode_engine_core_outputs,
 };
 use crate::test_utils::{IpcNamespace, setup_mock_engine_with_init, spawn_mock_engine_task};
-use crate::{ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, Error};
+use crate::{ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId, Error};
 
 static TRACING: Once = Once::new();
 
@@ -224,7 +224,7 @@ async fn connect_client_with_ipc(
 
 fn spawn_mock_engine_task_with_init<F>(
     engine_handshake: String,
-    engine_identity: Vec<u8>,
+    engine_id: impl Into<EngineId>,
     run: F,
 ) -> (
     oneshot::Receiver<HandshakeInitMessage>,
@@ -242,9 +242,10 @@ where
 {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (init_tx, init_rx) = oneshot::channel();
+    let engine_id = engine_id.into();
     let engine_task = tokio::spawn(async move {
         let (init, mut dealer, mut push) =
-            setup_mock_engine_with_init(engine_handshake, engine_identity).await;
+            setup_mock_engine_with_init(engine_handshake, engine_id).await;
         let _ = init_tx.send(init);
         run(&mut dealer, &mut push).await;
         let _ = shutdown_rx.await;
@@ -351,11 +352,11 @@ async fn client_streams_outputs_per_request_and_ignores_other_messages() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-0".to_vec();
+    let engine_id = b"engine-0".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let add_1 = recv_engine_message(dealer).await;
@@ -533,11 +534,11 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-dup".to_vec();
+    let engine_id = b"engine-dup".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let add_1 = recv_engine_message(dealer).await;
@@ -616,11 +617,11 @@ async fn finished_requests_without_final_output_is_treated_as_unexpected_close()
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-finished-only".to_vec();
+    let engine_id = b"engine-finished-only".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;
@@ -685,11 +686,11 @@ async fn dropping_a_live_stream_triggers_abort() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-drop".to_vec();
+    let engine_id = b"engine-drop".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;
@@ -745,11 +746,11 @@ async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-fail".to_vec();
+    let engine_id = b"engine-fail".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let _ = recv_engine_message(dealer).await;
@@ -814,11 +815,11 @@ async fn is_sleeping_wrapper_sends_typed_request_and_returns_typed_response() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-utility-success".to_vec();
+    let engine_id = b"engine-utility-success".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let utility = recv_engine_message(dealer).await;
@@ -877,11 +878,11 @@ async fn call_utility_failure_message_surfaces_as_error() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-utility-fail".to_vec();
+    let engine_id = b"engine-utility-fail".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let utility = recv_engine_message(dealer).await;
@@ -944,11 +945,11 @@ async fn dispatcher_failure_propagates_to_waiting_utility_calls() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-utility-dispatcher-fail".to_vec();
+    let engine_id = b"engine-utility-dispatcher-fail".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let utility = recv_engine_message(dealer).await;
@@ -1042,11 +1043,11 @@ async fn engine_core_dead_sentinel_marks_client_unhealthy_and_sticks() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-dead".to_vec();
+    let engine_id = b"engine-dead".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |_dealer, push| {
             Box::pin(async move {
                 push.send(ZmqMessage::from(ENGINE_CORE_DEAD_SENTINEL.to_vec()))
@@ -1106,11 +1107,11 @@ async fn output_loop_failure_marks_client_unhealthy_and_records_first_error() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-output-failure".to_vec();
+    let engine_id = b"engine-output-failure".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |_dealer, push| {
             Box::pin(async move {
                 send_output_frames(
@@ -1165,11 +1166,11 @@ async fn client_decodes_multipart_logprob_outputs() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-multipart-logprobs".to_vec();
+    let engine_id = b"engine-multipart-logprobs".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;

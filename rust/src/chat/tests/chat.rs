@@ -289,11 +289,11 @@ fn sample_tool_request(request_id: &str) -> ChatRequest {
 async fn chat_streams_text_events() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-chat".to_vec();
+    let engine_id = b"engine-chat".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;
@@ -419,11 +419,11 @@ async fn chat_streams_text_events() {
 async fn chat_stream_waits_for_complete_utf8_before_emitting() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-chat-utf8".to_vec();
+    let engine_id = b"engine-chat-utf8".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let _ = recv_engine_message(dealer).await;
@@ -509,11 +509,11 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
 async fn chat_stream_flushes_held_text_on_finish() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-chat-final-flush".to_vec();
+    let engine_id = b"engine-chat-final-flush".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let _ = recv_engine_message(dealer).await;
@@ -620,11 +620,11 @@ fn backend_requires_a_template() {
 async fn chat_stream_reports_decode_failure_as_error_event() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-chat-decode-fail".to_vec();
+    let engine_id = b"engine-chat-decode-fail".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let _ = recv_engine_message(dealer).await;
@@ -679,11 +679,11 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
 async fn chat_stream_preserves_terminal_stop_token_when_requested() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-chat-include-stop".to_vec();
+    let engine_id = b"engine-chat-include-stop".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let _ = recv_engine_message(dealer).await;
@@ -768,11 +768,11 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
 async fn chat_stream_separates_reasoning_blocks_automatically() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-chat-reasoning".to_vec();
+    let engine_id = b"engine-chat-reasoning".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let _ = recv_engine_message(dealer).await;
@@ -911,11 +911,11 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
 async fn chat_collectors_return_structured_message_and_visible_text() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-chat-collect".to_vec();
+    let engine_id = b"engine-chat-collect".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let _ = recv_engine_message(dealer).await;
@@ -974,11 +974,11 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
 async fn chat_stream_parses_tool_calls_automatically() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-chat-tool".to_vec();
+    let engine_id = b"engine-chat-tool".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let _ = recv_engine_message(dealer).await;
@@ -1076,11 +1076,11 @@ async fn chat_stream_parses_tool_calls_automatically() {
 async fn chat_collect_message_preserves_tool_call_arguments_in_final_only_mode() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-chat-final-only-tool".to_vec();
+    let engine_id = b"engine-chat-final-only-tool".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let _ = recv_engine_message(dealer).await;
@@ -1152,11 +1152,11 @@ async fn chat_collect_message_preserves_tool_call_arguments_in_final_only_mode()
 async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-chat-logprobs".to_vec();
+    let engine_id = b"engine-chat-logprobs".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 for _ in 0..2 {
@@ -1341,9 +1341,9 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
 async fn chat_rejects_tool_parsing_without_model_hint() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-chat-tool-no-model".to_vec();
+    let engine_id = b"engine-chat-tool-no-model".to_vec();
     let (shutdown_tx, engine_task) =
-        spawn_mock_engine_task(handshake_address.clone(), engine_identity, |_, _| {
+        spawn_mock_engine_task(handshake_address.clone(), engine_id, |_, _| {
             Box::pin(async move {})
         });
 

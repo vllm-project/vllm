@@ -213,11 +213,11 @@ async fn generate_streams_delta_outputs() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-delta".to_vec();
+    let engine_id = b"engine-delta".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;
@@ -300,11 +300,11 @@ async fn generate_streams_delta_outputs() {
 async fn generate_streams_final_only_outputs() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-final".to_vec();
+    let engine_id = b"engine-final".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;
@@ -386,11 +386,11 @@ async fn generate_streams_final_only_outputs() {
 async fn generate_propagates_unexpected_close_errors() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-close".to_vec();
+    let engine_id = b"engine-close".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;
@@ -436,11 +436,11 @@ async fn generate_propagates_unexpected_close_errors() {
 async fn abort_forwards_to_engine_core_client() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-abort".to_vec();
+    let engine_id = b"engine-abort".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;
@@ -478,11 +478,11 @@ async fn abort_forwards_to_engine_core_client() {
 async fn dropping_a_live_generate_stream_triggers_abort() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-drop".to_vec();
+    let engine_id = b"engine-drop".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;
@@ -530,11 +530,11 @@ async fn dropping_a_live_generate_stream_triggers_abort() {
 async fn duplicate_request_ids_bubble_up_from_engine_core_client() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-dup".to_vec();
+    let engine_id = b"engine-dup".to_vec();
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;
@@ -599,12 +599,12 @@ async fn duplicate_request_ids_bubble_up_from_engine_core_client() {
 async fn generate_records_request_metrics_in_prometheus_output() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-metrics".to_vec();
+    let engine_id = b"engine-metrics".to_vec();
     let model_name = request_metrics_model_name("metrics-model");
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;
@@ -725,12 +725,12 @@ async fn generate_records_request_metrics_in_prometheus_output() {
 async fn dropping_stream_records_abort_terminal_request_metrics() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-metrics-drop".to_vec();
+    let engine_id = b"engine-metrics-drop".to_vec();
     let model_name = request_metrics_model_name("metrics-drop-model");
 
     let (shutdown_tx, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
-        engine_identity.clone(),
+        engine_id.clone(),
         |dealer, push| {
             Box::pin(async move {
                 let add = recv_engine_message(dealer).await;

@@ -1,4 +1,3 @@
-use std::convert::TryFrom;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -10,6 +9,7 @@ use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
 
+use crate::EngineId;
 use crate::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 
 /// Per-test IPC endpoint namespace backed by a unique temporary directory.
@@ -69,14 +69,14 @@ fn ready_message(status: &str) -> ReadyMessage {
 /// requests and the `PushSocket` used to send engine outputs back to the client.
 pub async fn setup_mock_engine_with_init(
     engine_handshake: String,
-    engine_identity: Vec<u8>,
+    engine_id: impl Into<EngineId>,
 ) -> (HandshakeInitMessage, DealerSocket, PushSocket) {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
+    let peer_identity = PeerIdentity::try_from(engine_id.into()).expect("peer id");
+
     let mut options = SocketOptions::default();
-    options.peer_identity(
-        PeerIdentity::try_from(engine_identity.clone()).expect("encode engine peer identity"),
-    );
+    options.peer_identity(peer_identity.clone());
     let mut handshake = DealerSocket::with_options(options);
     handshake
         .connect(&engine_handshake)
@@ -99,9 +99,7 @@ pub async fn setup_mock_engine_with_init(
         rmp_serde::from_slice(init_frames[0].as_ref()).expect("decode handshake init message");
 
     let mut input_options = SocketOptions::default();
-    input_options.peer_identity(
-        PeerIdentity::try_from(engine_identity).expect("encode input peer identity"),
-    );
+    input_options.peer_identity(peer_identity);
     let mut dealer = DealerSocket::with_options(input_options);
     dealer
         .connect(&init.addresses.inputs[0])
@@ -133,9 +131,9 @@ pub async fn setup_mock_engine_with_init(
 /// `PushSocket` used to send engine outputs back to the client.
 pub async fn setup_mock_engine(
     engine_handshake: String,
-    engine_identity: Vec<u8>,
+    engine_id: impl Into<EngineId>,
 ) -> (DealerSocket, PushSocket) {
-    let (_, dealer, push) = setup_mock_engine_with_init(engine_handshake, engine_identity).await;
+    let (_, dealer, push) = setup_mock_engine_with_init(engine_handshake, engine_id).await;
     (dealer, push)
 }
 
@@ -147,7 +145,7 @@ pub async fn setup_mock_engine(
 /// explicitly signals shutdown.
 pub fn spawn_mock_engine_task<F>(
     engine_handshake: String,
-    engine_identity: Vec<u8>,
+    engine_id: impl Into<EngineId>,
     run: F,
 ) -> (oneshot::Sender<()>, tokio::task::JoinHandle<()>)
 where
@@ -159,8 +157,9 @@ where
         + 'static,
 {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let engine_id = engine_id.into();
     let engine_task = tokio::spawn(async move {
-        let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+        let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_id).await;
         run(&mut dealer, &mut push).await;
         let _ = shutdown_rx.await;
     });

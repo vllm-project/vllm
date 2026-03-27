@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::convert::TryFrom;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,7 +22,7 @@ use vllm_engine_core_client::protocol::{
 };
 use vllm_engine_core_client::test_utils::IpcNamespace;
 use vllm_engine_core_client::{
-    ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig,
+    ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
 };
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
@@ -305,12 +304,14 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<Bytes> {
 
 async fn setup_mock_engine(
     engine_handshake: String,
-    engine_identity: Vec<u8>,
+    engine_id: impl Into<EngineId>,
 ) -> (DealerSocket, PushSocket) {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
+    let peer_identity = PeerIdentity::try_from(engine_id.into()).expect("peer id");
+
     let mut options = SocketOptions::default();
-    options.peer_identity(PeerIdentity::try_from(engine_identity.clone()).expect("peer id"));
+    options.peer_identity(peer_identity.clone());
     let mut handshake = DealerSocket::with_options(options);
     handshake
         .connect(&engine_handshake)
@@ -328,7 +329,7 @@ async fn setup_mock_engine(
         rmp_serde::from_slice(init_frames[0].as_ref()).expect("decode init");
 
     let mut input_options = SocketOptions::default();
-    input_options.peer_identity(PeerIdentity::try_from(engine_identity).expect("peer id"));
+    input_options.peer_identity(peer_identity);
     let mut dealer = DealerSocket::with_options(input_options);
     dealer
         .connect(&init.addresses.inputs[0])
@@ -430,21 +431,21 @@ impl ChatBackend for FailingDecodeChatBackend {
 }
 
 async fn test_models_with_engine_outputs_and_backend_inner(
-    engine_identity: &[u8],
+    engine_id: impl Into<EngineId>,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
     expected_prompt_token_ids: Option<Vec<u32>>,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, tokio::task::JoinHandle<()>) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = engine_identity.to_vec();
+    let engine_id = engine_id.into();
 
     let engine_task = tokio::spawn({
         let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
+        let engine_id = engine_id.clone();
         let expected_prompt_token_ids = expected_prompt_token_ids.clone();
         async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_id).await;
             let add = recv_engine_message(&mut dealer).await;
             let request: EngineCoreRequest =
                 rmp_serde::from_slice(&add[1]).expect("decode request");
@@ -485,20 +486,19 @@ async fn test_models_with_engine_outputs_and_backend_inner(
 }
 
 async fn test_models_with_engine_outputs_and_backend(
-    engine_identity: &[u8],
+    engine_id: impl Into<EngineId>,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, tokio::task::JoinHandle<()>) {
-    test_models_with_engine_outputs_and_backend_inner(engine_identity, output_specs, None, backend)
-        .await
+    test_models_with_engine_outputs_and_backend_inner(engine_id, output_specs, None, backend).await
 }
 
 async fn test_chat_with_engine_outputs(
-    engine_identity: &[u8],
+    engine_id: impl Into<EngineId>,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> (ChatLlm, tokio::task::JoinHandle<()>) {
     test_models_with_engine_outputs_and_backend(
-        engine_identity,
+        engine_id,
         output_specs,
         Arc::new(FakeChatBackend::new()),
     )
@@ -524,13 +524,13 @@ where
 {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-openai-health".to_vec();
+    let engine_id = b"engine-openai-health".to_vec();
 
     let engine_task = tokio::spawn({
         let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
+        let engine_id = engine_id.clone();
         async move {
-            let (_dealer, push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let (_dealer, push) = setup_mock_engine(engine_handshake, engine_id).await;
             script(push).await;
         }
     });
@@ -564,13 +564,13 @@ where
 {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-openai-admin".to_vec();
+    let engine_id = b"engine-openai-admin".to_vec();
 
     let engine_task = tokio::spawn({
         let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
+        let engine_id = engine_id.clone();
         async move {
-            let (dealer, push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let (dealer, push) = setup_mock_engine(engine_handshake, engine_id).await;
             script(dealer, push).await;
         }
     });
@@ -1030,13 +1030,13 @@ async fn non_stream_chat_returns_json_response() {
 async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-openai-chat-logprobs".to_vec();
+    let engine_id = b"engine-openai-chat-logprobs".to_vec();
 
     let engine_task = tokio::spawn({
         let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
+        let engine_id = engine_id.clone();
         async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_id).await;
             let add = recv_engine_message(&mut dealer).await;
             let request: EngineCoreRequest =
                 rmp_serde::from_slice(&add[1]).expect("decode request");
@@ -1707,13 +1707,13 @@ async fn non_stream_completions_echo_prepends_prompt_text() {
 async fn non_stream_completions_include_logprobs() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-openai-completion-logprobs".to_vec();
+    let engine_id = b"engine-openai-completion-logprobs".to_vec();
 
     let engine_task = tokio::spawn({
         let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
+        let engine_id = engine_id.clone();
         async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_id).await;
             let add = recv_engine_message(&mut dealer).await;
             let request: EngineCoreRequest =
                 rmp_serde::from_slice(&add[1]).expect("decode request");
@@ -1813,13 +1813,13 @@ async fn non_stream_completions_include_logprobs() {
 async fn non_stream_completions_include_prompt_logprobs() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-openai-completion-prompt-logprobs".to_vec();
+    let engine_id = b"engine-openai-completion-prompt-logprobs".to_vec();
 
     let engine_task = tokio::spawn({
         let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
+        let engine_id = engine_id.clone();
         async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_id).await;
             let add = recv_engine_message(&mut dealer).await;
             let request: EngineCoreRequest =
                 rmp_serde::from_slice(&add[1]).expect("decode request");
@@ -1930,13 +1930,13 @@ async fn non_stream_completions_include_prompt_logprobs() {
 async fn non_stream_chat_uses_final_only_output_kind() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-openai-chat-final-only".to_vec();
+    let engine_id = b"engine-openai-chat-final-only".to_vec();
 
     let engine_task = tokio::spawn({
         let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
+        let engine_id = engine_id.clone();
         async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_id).await;
             let add = recv_engine_message(&mut dealer).await;
             let request: EngineCoreRequest =
                 rmp_serde::from_slice(&add[1]).expect("decode request");
@@ -1993,13 +1993,13 @@ async fn non_stream_chat_uses_final_only_output_kind() {
 async fn non_stream_completions_use_final_only_output_kind() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-openai-completion-final-only".to_vec();
+    let engine_id = b"engine-openai-completion-final-only".to_vec();
 
     let engine_task = tokio::spawn({
         let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
+        let engine_id = engine_id.clone();
         async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_id).await;
             let add = recv_engine_message(&mut dealer).await;
             let request: EngineCoreRequest =
                 rmp_serde::from_slice(&add[1]).expect("decode request");
@@ -2390,13 +2390,13 @@ async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
 async fn tool_call_sse_chunks_can_carry_logprobs() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
-    let engine_identity = b"engine-openai-chat-tools-logprobs".to_vec();
+    let engine_id = b"engine-openai-chat-tools-logprobs".to_vec();
 
     let engine_task = tokio::spawn({
         let engine_handshake = handshake_address.clone();
-        let engine_identity = engine_identity.clone();
+        let engine_id = engine_id.clone();
         async move {
-            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_identity).await;
+            let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_id).await;
             let add = recv_engine_message(&mut dealer).await;
             let request: EngineCoreRequest =
                 rmp_serde::from_slice(&add[1]).expect("decode request");
