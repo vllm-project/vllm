@@ -36,14 +36,20 @@ MESSAGES = [
 ]
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
 @pytest.mark.parametrize(
     "model_name",
     [
         pytest.param("Qwen/Qwen3.5-4B", marks=[large_gpu_mark(min_gb=40)]),
         pytest.param(
             "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
-            marks=[large_gpu_mark(min_gb=80)] + multi_gpu_marks(num_gpus=4),
+            marks=[large_gpu_mark(min_gb=80)]
+            + multi_gpu_marks(num_gpus=4)
+            + [
+                pytest.mark.skipif(
+                    current_platform.is_rocm(),
+                    reason="modelopt quantization is not supported on ROCm",
+                )
+            ],
         ),
     ],
 )
