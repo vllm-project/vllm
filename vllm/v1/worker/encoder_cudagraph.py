@@ -256,7 +256,6 @@ class EncoderCudaGraphManager:
         input_key = self._get_input_key_by_modality(mm_kwargs)
         src = mm_kwargs[input_key]
         n = src.shape[0]
-        graph_meta.input_buffer.zero_()
         graph_meta.input_buffer[:n].copy_(src)
 
         # Copy metadata buffers using keys from config.buffer_keys.
