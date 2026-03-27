@@ -1501,6 +1501,13 @@ class Qwen3VLForConditionalGeneration(
         self.visual_dim = config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
+        # Cache for replay buffers keyed by (grid_thw pattern, modality,
+        # max_batch_size, max_frames_per_batch).  For video workloads where
+        # all frames share the same resolution the CPU-side NumPy work inside
+        # prepare_encoder_metadata is identical across requests, so we can
+        # reuse the already-computed tensors instead of recomputing them.
+        self._replay_buffer_cache: dict[tuple, Any] = {}
+
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
@@ -1844,8 +1851,19 @@ class Qwen3VLForConditionalGeneration(
         )
 
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
+        modality = self.get_input_modality(mm_kwargs)
 
-        if self.get_input_modality(mm_kwargs) == "image":
+        cache_key = (
+            tuple(tuple(thw) for thw in grid_thw_list),
+            modality,
+            # max_batch_size,
+            # max_frames_per_batch,
+        )
+        cached = self._replay_buffer_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if modality == "image":
             buffers = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_batch_size=max_batch_size,
@@ -1856,7 +1874,9 @@ class Qwen3VLForConditionalGeneration(
                 max_frames_per_batch=max_frames_per_batch,
             )
 
-        return EncoderCudaGraphReplayBuffers(buffers=buffers)
+        result = EncoderCudaGraphReplayBuffers(buffers=buffers)
+        self._replay_buffer_cache[cache_key] = result
+        return result
 
     def encoder_cudagraph_forward(
         self,
