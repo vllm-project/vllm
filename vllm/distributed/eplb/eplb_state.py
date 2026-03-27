@@ -832,7 +832,7 @@ class EplbState:
             is_unchanged=result.is_unchanged,
             is_received_locally=result.is_received_locally,
             recv_metadata=result.recv_metadata,
-            new_indices=result.new_physical_to_logical_map[result.layer_idx].numpy(),
+            new_indices=result.new_physical_to_logical_map.numpy(),
             ep_rank=ep_group.rank(),
         )
 
