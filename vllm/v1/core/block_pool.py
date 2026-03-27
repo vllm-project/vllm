@@ -328,10 +328,16 @@ class BlockPool:
         Returns:
             A list of new block.
         """
+        from vllm import envs
+
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        if envs.VLLM_CONTIGUOUS_BLOCKS:
+            ret = self.free_block_queue.popleft_contiguous_n(num_blocks)
+            assert ret is not None
+        else:
+            ret = self.free_block_queue.popleft_n(num_blocks)
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
@@ -480,8 +486,14 @@ class BlockPool:
         """Get the number of free blocks in the pool.
 
         Returns:
-            The number of free blocks.
+            The number of free blocks. When VLLM_CONTIGUOUS_BLOCKS is set,
+            returns the largest contiguous region instead (to reflect
+            actual allocatable capacity under fragmentation).
         """
+        from vllm import envs
+
+        if envs.VLLM_CONTIGUOUS_BLOCKS:
+            return self.free_block_queue.get_largest_contiguous()
         return self.free_block_queue.num_free_blocks
 
     def get_usage(self) -> float:

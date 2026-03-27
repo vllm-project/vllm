@@ -365,6 +365,32 @@ class FreeKVCacheBlockQueue:
             curr_block = curr_block.next_free_block
         return ret
 
+    def get_largest_contiguous(self) -> int:
+        """Get size of largest contiguous free region."""
+        free = self.get_all_free_blocks()
+        if not free:
+            return 0
+        ids = sorted(b.block_id for b in free)
+        max_run = cur_run = 1
+        for i in range(1, len(ids)):
+            cur_run = cur_run + 1 if ids[i] == ids[i - 1] + 1 else 1
+            max_run = max(max_run, cur_run)
+        return max_run
+
+    def popleft_contiguous_n(self, n: int) -> list[KVCacheBlock] | None:
+        """Pop n blocks with consecutive block_ids, or None if not possible."""
+        if n <= 0:
+            return []
+        if n > self.num_free_blocks:
+            return None
+        free = sorted(self.get_all_free_blocks(), key=lambda b: b.block_id)
+        for i in range(len(free) - n + 1):
+            if free[i + n - 1].block_id - free[i].block_id == n - 1:
+                for b in free[i : i + n]:
+                    self.remove(b)
+                return free[i : i + n]
+        return None  # No contiguous region (fragmentation)
+
 
 def need_extra_keys(request: Request) -> bool:
     """Check whether the blocks allocated to this request need extra hash keys.
