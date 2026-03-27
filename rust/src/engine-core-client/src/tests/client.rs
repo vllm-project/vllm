@@ -1393,7 +1393,7 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn multi_engine_abort_is_grouped_and_utility_hits_engine_zero_only() {
+async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
@@ -1457,6 +1457,28 @@ async fn multi_engine_abort_is_grouped_and_utility_hits_engine_zero_only() {
         b"engine-1".to_vec(),
         |dealer, push| {
             Box::pin(async move {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
+                let payload = decode_value(&utility[1]);
+                let array = match payload {
+                    Value::Array(array) => array,
+                    other => panic!("expected utility payload array, got {other:?}"),
+                };
+                let call_id = array[1].as_i64().expect("call_id");
+                assert_eq!(array[2], Value::from("is_sleeping"));
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        utility_output: Some(UtilityOutput {
+                            call_id,
+                            failure_message: None,
+                            result: Some(utility_result_value(true)),
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await;
+
                 let add_2 = recv_engine_message(dealer).await;
                 assert_eq!(add_2[0].as_ref(), &[0x00]);
                 let request_2: EngineCoreRequest = rmp_serde::from_slice(&add_2[1]).unwrap();

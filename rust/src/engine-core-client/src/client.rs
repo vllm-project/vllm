@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::future::try_join_all;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{info, trace};
@@ -231,7 +232,8 @@ impl EngineCoreClient {
         Ok(())
     }
 
-    /// Call a typed utility method on the engine.
+    /// Call a typed utility method on all connected engines, returning the first result if all
+    /// calls succeed or an error if any call fails.
     ///
     /// Callers should pass utility arguments using Rust tuple semantics so the encoded payload
     /// matches Python's `(client_index, call_id, method_name, args)` contract:
@@ -241,40 +243,47 @@ impl EngineCoreClient {
         T: serde::de::DeserializeOwned,
         A: serde::Serialize,
     {
-        let (call_id, rx) = self.inner.allocate_and_register_utility_call()?;
         trace!(
             method,
-            call_id,
             client_index = self.config.client_index,
+            engine_count = self.engines.len(),
             "sending utility request"
         );
 
-        let request =
-            EngineCoreUtilityRequest::new(self.config.client_index, call_id, method, args)?;
-        if let Err(error) = self
-            .inner
-            .send_to_engine(
-                &self.engines[0].engine_identity,
-                EngineCoreRequestType::Utility,
-                &request,
-            )
-            .await
-        {
-            self.inner.rollback_utility_call(call_id);
-            return Err(error);
+        let mut pending_calls = Vec::with_capacity(self.engines.len());
+        for engine in &self.engines {
+            let (call_id, rx) = self.inner.allocate_and_register_utility_call()?;
+            let request =
+                EngineCoreUtilityRequest::new(self.config.client_index, call_id, method, &args)?;
+
+            // Return error immediately once we fail to send to any engine.
+            // TODO: this operation is not atomic.
+            self.inner
+                .send_to_engine(
+                    &engine.engine_identity,
+                    EngineCoreRequestType::Utility,
+                    &request,
+                )
+                .await?;
+            pending_calls.push((call_id, rx));
         }
 
-        let output = match rx.await {
-            Ok(output) => output?,
-            Err(_) => {
-                return Err(Error::UtilityCallClosed {
+        // Wait for all engines to respond and return the first successful result.
+        // TODO: shall we check if all results match?
+        let futures = pending_calls.into_iter().map(|(call_id, rx)| async move {
+            rx.await
+                .map_err(|_| Error::UtilityCallClosed {
                     method: method.to_string(),
                     call_id,
-                });
-            }
-        };
+                })??
+                .into_typed_result(method)
+        });
+        let results = try_join_all(futures).await?;
 
-        output.into_typed_result(method)
+        Ok(results
+            .into_iter()
+            .next()
+            .expect("utility fanout must include at least one engine"))
     }
 
     /// Return whether the engine is currently sleeping at any level.

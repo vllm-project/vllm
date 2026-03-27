@@ -184,12 +184,6 @@ impl UtilityRegistry {
             .collect()
     }
 
-    /// Remove one utility call from the local registry. Returns the corresponding sender if exists.
-    #[must_use]
-    pub fn remove(&mut self, call_id: i64) -> Option<UtilitySender> {
-        self.utility_calls.remove(&call_id)
-    }
-
     #[cfg(test)]
     pub fn contains(&self, call_id: i64) -> bool {
         self.utility_calls.contains_key(&call_id)
@@ -203,7 +197,7 @@ impl UtilityRegistry {
 #[cfg(test)]
 mod tests {
     use super::{RequestRegistry, UtilityRegistry};
-    use crate::protocol::{EngineCoreFinishReason, EngineCoreOutput};
+    use crate::protocol::{EngineCoreFinishReason, EngineCoreOutput, UtilityOutput};
 
     #[test]
     fn registry_rejects_duplicate_request_ids() {
@@ -276,7 +270,15 @@ mod tests {
         assert_eq!(call_id_2, 2);
         assert!(registry.contains(1));
         assert!(registry.contains(2));
-        assert!(registry.remove(1).is_some());
+        assert!(
+            registry
+                .resolve(UtilityOutput {
+                    call_id: 1,
+                    failure_message: None,
+                    result: None,
+                })
+                .is_some()
+        );
         assert!(!registry.contains(1));
         assert!(registry.contains(2));
     }

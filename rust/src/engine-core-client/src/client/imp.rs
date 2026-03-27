@@ -69,11 +69,6 @@ impl ClientInner {
         let _ = self.request_reg.lock().remove(request_id);
     }
 
-    /// Undo a utility call registration when `call_utility()` fails before the engine accepts it.
-    pub fn rollback_utility_call(&self, call_id: i64) {
-        let _ = self.utility_reg.lock().remove(call_id);
-    }
-
     /// Filter the given request IDs to the subset that are still tracked as active and can be
     /// aborted, grouped by the engine that originally accepted them.
     pub fn abortable_request_ids(
