@@ -31,15 +31,15 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateResponseChoice,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.inputs.data import ProcessorInputs
+from vllm.inputs import mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     PlaceholderRange,
-    mm_inputs,
 )
+from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils.collection_utils import as_list
@@ -107,7 +107,7 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        engine_prompt: ProcessorInputs
+        engine_input: ProcessorInputs
         if request.features is not None:
             features = request.features
 
@@ -131,7 +131,7 @@ class ServingTokens(OpenAIServing):
                 for modality, hashes in features.mm_hashes.items():
                     mm_kwargs[modality] = [None] * len(hashes)
 
-            engine_prompt = mm_inputs(
+            engine_input = mm_input(
                 prompt_token_ids=request.token_ids,
                 mm_kwargs=MultiModalKwargsItems(mm_kwargs),
                 mm_hashes=features.mm_hashes,
