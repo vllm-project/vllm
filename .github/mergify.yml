@@ -235,7 +235,7 @@ pull_request_rules:
         - rocm
 
 - name: label-xpu
-  description: Automatically apply xpu label
+  description: Automatically apply intel-gpu label
   conditions:
     - label != stale
     - or:
@@ -259,7 +259,7 @@ pull_request_rules:
   actions:
     label:
       add:
-        - xpu
+        - intel-gpu
 
 - name: label-cpu
   description: Automatically apply cpu label
