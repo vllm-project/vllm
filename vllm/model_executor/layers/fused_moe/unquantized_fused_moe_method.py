@@ -290,7 +290,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 w2=layer.w2_weight,
             )
         elif current_platform.is_xpu():
-            # only support [E, K, N]
             w13 = layer.w13_weight
             w2 = layer.w2_weight
 
