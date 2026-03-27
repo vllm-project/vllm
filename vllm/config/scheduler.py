@@ -106,11 +106,12 @@ class SchedulerConfig:
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
     policy: SchedulerPolicy = "fcfs"
-    """The scheduling policy to use:\n
-    - "fcfs" means first come first served, i.e. requests are handled in order
-    of arrival.\n
+    """The scheduling policy to use:
+
+    - "fcfs" means first come first served, i.e. requests are handled in order 
+      of arrival.
     - "priority" means requests are handled based on given priority (lower
-    value means earlier handling) and time of arrival deciding any ties)."""
+      value means earlier handling) and time of arrival deciding any ties)."""
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
