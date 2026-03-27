@@ -109,9 +109,7 @@ class KVConnectorFactory:
         compat_sig = False
         connector_module_path = kv_transfer_config.kv_connector_module_path
         if connector_module_path is not None and not connector_module_path:
-            raise ValueError(
-                "kv_connector_module_path cannot be an empty string."
-            )
+            raise ValueError("kv_connector_module_path cannot be an empty string.")
         if connector_module_path:
             # External module path takes priority over internal registry.
             connector_module = importlib.import_module(connector_module_path)
