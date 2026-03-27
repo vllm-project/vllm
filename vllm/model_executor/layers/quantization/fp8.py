@@ -548,9 +548,15 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
             layer._loaded_numel += copy_numel_counter.copied_numel
 
             # if we have loaded all of the elements, call
-            # process_weights_after_loading
+            # process_weights_after_loading.
+            # Note: we use >= instead of == as a defensive measure. With
+            # TP > 1, the weight_loader narrows loaded_weight to the
+            # relevant shard before copy_, and CopyNumelCounter tracks
+            # only the actually-copied elements. Using >= guards against
+            # edge cases where copy_ numel tracking slightly overshoots
+            # (e.g. from internal copy_ calls in the weight_loader).
             target_loaded_numel = layer.weight.numel()
-            if layer._loaded_numel == target_loaded_numel:
+            if layer._loaded_numel >= target_loaded_numel:
                 self.process_weights_after_loading(layer)
 
                 # Prevent the usual `process_weights_after_loading` call from doing
@@ -1066,9 +1072,11 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             layer._loaded_numel += copy_numel_counter.copied_numel
 
             # if we have loaded all of the elements, call
-            # process_weights_after_loading
+            # process_weights_after_loading.
+            # Note: we use >= instead of == as a defensive measure
+            # (see comment in Fp8OnlineLinearMethod for details).
             target_loaded_numel = layer.w13_weight.numel() + layer.w2_weight.numel()
-            if layer._loaded_numel == target_loaded_numel:
+            if layer._loaded_numel >= target_loaded_numel:
                 self.process_weights_after_loading(layer)
 
                 # Prevent the usual `process_weights_after_loading` call
