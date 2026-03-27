@@ -316,11 +316,13 @@ class Gemma3DecoderLayer(nn.Module):
         )
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_feedforward_layernorm(hidden_states)
-        # Decode-only activation steering via custom op.  The op is a
-        # splitting point for torch.compile so the real Python runs at
-        # runtime, reading the live mask buffer (not a baked constant).
-        hidden_states = torch.ops.vllm.apply_steering(
-            hidden_states, self.steering_vector, self.steering_decode_mask
+        # Decode-only activation steering applied directly to the residual
+        # stream (post-MLP, pre-layernorm) to match the training-time
+        # injection point.  The custom op is a splitting point for
+        # torch.compile so the real Python runs at runtime, reading
+        # the live mask buffer (not a baked constant).
+        residual = torch.ops.vllm.apply_steering(
+            residual, self.steering_vector, self.steering_decode_mask
         )
         return hidden_states, residual
 
