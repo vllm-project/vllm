@@ -22,10 +22,51 @@ if current_platform.is_cuda():
     )
 
 elif current_platform.is_xpu():
-    from vllm import _custom_ops as ops
+    import torch
+
     from vllm._xpu_ops import xpu_ops
 
-    reshape_and_cache_flash = ops.reshape_and_cache_flash
+    # Try the compiled _C_cache_ops first; fall back to a pure-Python
+    # implementation for environments where the XPU kernels are absent
+    # (e.g. JGS / XPU simulators without vllm_xpu_kernels).
+    try:
+        from vllm import _custom_ops as ops
+
+        # Quick probe: will raise AttributeError if the op is missing.
+        _ = torch.ops._C_cache_ops.reshape_and_cache_flash  # noqa: B018
+        reshape_and_cache_flash = ops.reshape_and_cache_flash
+    except (AttributeError, ImportError):
+        logger.warning(
+            "_C_cache_ops.reshape_and_cache_flash not available; "
+            "using pure-Python fallback (slow, for simulator only)."
+        )
+
+        def reshape_and_cache_flash(  # type: ignore[misc]
+            key: "torch.Tensor",
+            value: "torch.Tensor",
+            key_cache: "torch.Tensor",
+            value_cache: "torch.Tensor",
+            slot_mapping: "torch.Tensor",
+            kv_cache_dtype: str,
+            k_scale: "torch.Tensor",
+            v_scale: "torch.Tensor",
+        ) -> None:
+            """Pure-Python scatter of key/value into paged KV caches.
+
+            Cache layout (NHD, flash): [num_blocks, block_size, num_heads, head_size]
+            slot_mapping: [num_actual_tokens]  (flat slot indices)
+            """
+            num_tokens = slot_mapping.shape[0]
+            block_size = key_cache.shape[1]
+            for i in range(num_tokens):
+                slot = slot_mapping[i].item()
+                if slot < 0:
+                    continue
+                block_idx = slot // block_size
+                block_offset = slot % block_size
+                key_cache[block_idx, block_offset].copy_(key[i])
+                value_cache[block_idx, block_offset].copy_(value[i])
+
     flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[assignment]
     get_scheduler_metadata = xpu_ops.get_scheduler_metadata  # type: ignore[assignment]
 elif current_platform.is_rocm():
