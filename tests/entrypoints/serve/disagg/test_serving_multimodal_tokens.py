@@ -14,6 +14,7 @@ import pytest_asyncio
 from PIL import Image
 from transformers import AutoConfig, AutoProcessor
 
+from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
 from vllm.entrypoints.serve.disagg.protocol import (
     MultiModalFeatures,
@@ -27,10 +28,9 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.utils import encode_image_url
 
-from ...utils import RemoteOpenAIServer
-
 MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 GEN_ENDPOINT = "/inference/v1/generate"
+RENDER_ENDPOINT = "/v1/chat/completions/render"
 
 
 @pytest.fixture(scope="module")
@@ -175,9 +175,6 @@ async def test_generate_endpoint(client, processor, model_config, test_image):
     assert "red" in text.lower(), (
         f"Expected model to identify the red image, got: {text!r}"
     )
-
-
-RENDER_ENDPOINT = "/v1/chat/completions/render"
 
 
 @pytest.mark.asyncio
