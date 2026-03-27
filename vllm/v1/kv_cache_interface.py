@@ -115,12 +115,22 @@ class KVCacheSpec:
         """Extra per-block memory not stored in the KV cache tensor itself.
 
         Derived from :attr:`auxiliary_buffer_specs`.  Factored into the
-        block count calculation but NOT into page_size_bytes.
+        block count calculation but NOT into ``page_size_bytes``.
         """
         return sum(
             prod(s.shape_per_block) * get_dtype_size(s.dtype)
             for s in self.auxiliary_buffer_specs
         )
+
+    @property
+    def total_memory_per_block(self) -> int:
+        """Total per-block memory: KV cache tensor + auxiliary buffers.
+
+        Use this instead of ``page_size_bytes`` when computing
+        how many blocks fit in a given memory budget, so that
+        auxiliary buffers are never accidentally omitted.
+        """
+        return self.page_size_bytes + self.auxiliary_memory_per_block
 
     def copy_with_new_block_size(self, block_size: int) -> Self:
         """
@@ -485,6 +495,13 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     @property
     def page_size_bytes(self) -> int:
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
+
+    @property
+    def auxiliary_memory_per_block(self) -> int:
+        return sum(
+            spec.auxiliary_memory_per_block
+            for spec in self.kv_cache_specs.values()
+        )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_num_pages = max(
