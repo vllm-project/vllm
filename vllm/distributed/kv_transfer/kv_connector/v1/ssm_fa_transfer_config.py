@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""HMA-aware transfer configuration for hetero-TP NIXL transfers.
+"""SSM+FA transfer configuration for hetero-TP NIXL transfers.
 
 Single source of truth for descriptor sizes and transfer targets when
 Prefill and Decode engines use different tensor-parallel sizes with
-Hybrid Memory Allocator (HMA) models (Mamba + Attention).
+hybrid SSM+Attention models (Mamba + FlashAttention).
 
 One instance per (D rank, P engine) handshake pair.  Queried by:
   - Local handle creation  (add_remote_agent → Path C)

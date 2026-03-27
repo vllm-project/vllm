@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, ".")
 
-from vllm.distributed.kv_transfer.kv_connector.v1.hma_transfer_config import (
+from vllm.distributed.kv_transfer.kv_connector.v1.ssm_fa_transfer_config import (
     HeteroTPTransferConfig,
 )
 
