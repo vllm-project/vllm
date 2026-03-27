@@ -832,3 +832,12 @@ def direct_register_custom_op(
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
+
+    # When running under VLLM_SIM_CPU_FALLBACK, all tensors live on CPU so
+    # we must also register the same implementation for the CPU dispatch key.
+    import os
+    if os.environ.get("VLLM_SIM_CPU_FALLBACK") == "1" and dispatch_key != "CPU":
+        try:
+            my_lib.impl(op_name, op_func, dispatch_key="CPU")
+        except Exception:
+            pass  # already registered or not applicable
