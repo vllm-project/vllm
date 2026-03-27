@@ -14,6 +14,8 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
 from vllm.entrypoints.pooling.typing import (
+    OfflineInputsContext,
+    OfflineOutputsContext,
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
     PoolingServeContext,
@@ -96,29 +98,25 @@ class PoolingIOProcessor:
     #######################################
     # offline APIs
 
-    def pre_process_offline(
-        self,
-        prompts: PromptType | Sequence[PromptType],
-        tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> Sequence[EngineInput]:
+    def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
         return self._preprocess_completion_offline(
-            prompts=prompts, tokenization_kwargs=tokenization_kwargs
+            prompts=ctx.prompts, tokenization_kwargs=ctx.tokenization_kwargs
         )
 
-    async def pre_process_offline_async(self, *args, **kwargs):
-        return self.pre_process_offline(*args, **kwargs)
+    async def pre_process_offline_async(self, ctx: OfflineInputsContext):
+        return self.pre_process_offline(ctx)
 
     def post_process_offline(
         self,
-        outputs: list[PoolingRequestOutput],
+        ctx: OfflineOutputsContext,
     ) -> list[PoolingRequestOutput]:
-        return outputs
+        return ctx.outputs
 
     async def post_process_offline_async(
         self,
-        outputs: list[PoolingRequestOutput],
+        ctx: OfflineOutputsContext,
     ) -> list[PoolingRequestOutput]:
-        return self.post_process_offline(outputs)
+        return self.post_process_offline(ctx)
 
     #######################################
     # helpers

@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeAlias, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
 
-from vllm import PoolingRequestOutput
+from vllm import PoolingRequestOutput, PromptType
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -32,6 +32,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
+from vllm.entrypoints.pooling.scoring.typing import ScoringOfflineInputs
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
 
@@ -84,3 +85,16 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+@dataclass
+class OfflineInputsContext:
+    prompts: PromptType | Sequence[PromptType] | ScoringOfflineInputs
+    tokenization_kwargs: dict[str, Any] | None = None
+    intermediates: Any | None = None
+
+
+@dataclass
+class OfflineOutputsContext:
+    outputs: list[PoolingRequestOutput]
+    intermediates: Any | None = None
