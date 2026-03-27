@@ -33,13 +33,6 @@ from vllm.utils.torch_utils import set_random_seed
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
-prompts = [
-    "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
-]
-
 
 class TestMMRSModel(torch.nn.Module):
     def __init__(self, hidden_size=16, dtype=torch.float16):
@@ -232,7 +225,8 @@ class _BaseFlashInferBMMFP8Model(torch.nn.Module):
         self.hidden_size = hidden_size
         self.dtype = dtype
         # Non-transposed weight [K, N] — FlashInfer uses [K, N] not [N, K].T
-        self.weight = torch.empty([hidden_size, hidden_size], dtype=FP8_DTYPE)
+        weight = torch.empty([hidden_size, hidden_size], dtype=torch.float16)
+        self.weight = weight.transpose(0, 1).to(FP8_DTYPE)
         # Per-tensor scalar scales
         self.scale_a = torch.tensor(1.0, dtype=torch.float32)
         self.scale_b = torch.tensor(1.0, dtype=torch.float32)
@@ -253,10 +247,10 @@ class TestFlashInferBMMFP8RSModel(_BaseFlashInferBMMFP8Model):
         return tensor_model_parallel_reduce_scatter(output, dim=0)
 
     def ops_in_model_before(self):
-        return []
+        return [torch.ops.vllm.reduce_scatter.default]
 
     def ops_in_model_after(self):
-        return []
+        return [torch.ops.vllm.fused_flashinfer_scaled_matmul_reduce_scatter.default]
 
 
 class TestAGFlashInferBMMFP8Model(_BaseFlashInferBMMFP8Model):
@@ -272,13 +266,16 @@ class TestAGFlashInferBMMFP8Model(_BaseFlashInferBMMFP8Model):
             self.dtype,
             "auto",
         ).view(all_gather.shape[0], self.weight.shape[1])
-        return output
+        q_size = self.hidden_size // 2
+        kv_size = self.hidden_size // 4
+        q, k, v = output.split([q_size, kv_size, kv_size], dim=-1)
+        return torch.cat((q, k, v), dim=-1)
 
     def ops_in_model_before(self):
-        return []
+        return [torch.ops.vllm.all_gather.default]
 
     def ops_in_model_after(self):
-        return []
+        return [torch.ops.vllm.fused_all_gather_flashinfer_scaled_matmul.default]
 
 
 @multi_gpu_test(num_gpus=2)

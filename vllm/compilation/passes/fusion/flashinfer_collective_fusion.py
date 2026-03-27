@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import operator
 from dataclasses import dataclass
 from typing import Literal
 
@@ -20,18 +21,9 @@ VIEW_LIKE_OPS = (
     torch.ops.aten.squeeze.default,
 )
 
-LAYOUT_PRESERVING_OPS = (
-    torch.ops.aten.contiguous.default,
-    torch.ops.aten.clone.default,
-)
-
 
 def _is_view_like(node: fx.Node) -> bool:
     return any(is_func(node, op) for op in VIEW_LIKE_OPS)
-
-
-def _is_passthrough(node: fx.Node) -> bool:
-    return _is_view_like(node) or any(is_func(node, op) for op in LAYOUT_PRESERVING_OPS)
 
 
 def _strip_view_like(node: fx.Node) -> fx.Node:
@@ -62,6 +54,13 @@ def _node_first_dim(node: fx.Node) -> object | None:
     if shape:
         return shape[0]
     return None
+
+
+def _single_user(node: fx.Node) -> fx.Node | None:
+    users = list(node.users)
+    if len(users) != 1:
+        return None
+    return users[0]
 
 
 def _dim_is_statically_lt(dim: int | torch.SymInt, threshold: int) -> bool:
@@ -155,6 +154,44 @@ def _parse_bmm_fp8(
     return a_2d, b_2d, a_scale, b_scale, out_dtype
 
 
+def _parse_exact_qkv_split(node: fx.Node) -> fx.Node | None:
+    if not is_func(node, torch.ops.aten.split_with_sizes.default):
+        return None
+
+    split_input = node.kwargs.get("self", node.args[0] if len(node.args) > 0 else None)
+    split_sizes = node.kwargs.get(
+        "split_sizes", node.args[1] if len(node.args) > 1 else None
+    )
+    dim = node.kwargs.get("dim", node.args[2] if len(node.args) > 2 else None)
+
+    if not isinstance(split_input, fx.Node):
+        return None
+
+    split_ndim = _node_ndim(split_input)
+    if split_ndim is not None and split_ndim != 2:
+        return None
+
+    if dim not in (-1, 1):
+        return None
+
+    if not isinstance(split_sizes, list | tuple) or len(split_sizes) != 3:
+        return None
+    if any(not isinstance(size, int | torch.SymInt) for size in split_sizes):
+        return None
+
+    shape = _node_shape(split_input)
+    if shape is not None and len(shape) == 2:
+        last_dim = shape[1]
+        if (
+            isinstance(last_dim, int)
+            and all(isinstance(size, int) for size in split_sizes)
+            and sum(split_sizes) != last_dim
+        ):
+            return None
+
+    return split_input
+
+
 @dataclass
 class _FlashInferCollectiveGemmMatch:
     kind: Literal["ag_bmm", "bmm_rs"]
@@ -164,68 +201,104 @@ class _FlashInferCollectiveGemmMatch:
     a_scale: object
     b_scale: object
     out_dtype: torch.dtype
-    collective_dim: int
-    world_size: int
-    group_name: str
     output_shape: list[object] | None = None
 
 
-def _find_bmm_reduce_scatter(
-    bmm_node: fx.Node,
-) -> tuple[fx.Node, fx.Node, object, object, object] | None:
-    worklist = list(bmm_node.users)
-    visited: set[fx.Node] = set()
-    rs_matches: list[tuple[fx.Node, fx.Node, object, object, object]] = []
+class FlashInferCollectiveGemmRewriter:
+    def __init__(self, tp_device_group_name: str) -> None:
+        self.tp_device_group_name = tp_device_group_name
 
-    while worklist:
-        user = worklist.pop()
-        if user in visited:
-            continue
-        visited.add(user)
+    def _match_exact_bmm_reduce_scatter(
+        self,
+        bmm_node: fx.Node,
+        a_2d: fx.Node,
+        b_2d: fx.Node,
+        a_scale: object,
+        b_scale: object,
+        out_dtype: torch.dtype,
+    ) -> _FlashInferCollectiveGemmMatch | None:
+        current = bmm_node
+        user = _single_user(current)
+        if user is not None and _is_view_like(user):
+            current = user
+            user = _single_user(current)
+
+        if user is None:
+            return None
 
         parsed_rs = _parse_reduce_scatter(user)
-        if parsed_rs is not None:
-            rs_input, dim, world_size, group_name = parsed_rs
-            rs_matches.append((user, rs_input, dim, world_size, group_name))
-            continue
+        if parsed_rs is None:
+            return None
+        rs_input, dim, world_size, group_name = parsed_rs
+        if rs_input is not current:
+            return None
+        if (
+            dim != 0
+            or not isinstance(world_size, int)
+            or not isinstance(group_name, str)
+        ):
+            return None
 
-        if _is_passthrough(user):
-            worklist.extend(user.users)
+        gemm_m = _node_first_dim(rs_input)
+        if (
+            gemm_m is not None
+            and isinstance(gemm_m, int | torch.SymInt)
+            and _dim_is_statically_lt(gemm_m, FLASHINFER_BMM_FP8_MIN_M)
+        ):
+            return None
 
-    if len(rs_matches) == 1:
-        return rs_matches[0]
-    return None
+        return _FlashInferCollectiveGemmMatch(
+            kind="bmm_rs",
+            replace_node=user,
+            a_2d=a_2d,
+            b_2d=b_2d,
+            a_scale=a_scale,
+            b_scale=b_scale,
+            out_dtype=out_dtype,
+            output_shape=_node_shape(rs_input),
+        )
 
+    def _match_exact_ag_qkv(
+        self,
+        bmm_node: fx.Node,
+        ag_input: fx.Node,
+        b_2d: fx.Node,
+        a_scale: object,
+        b_scale: object,
+        out_dtype: torch.dtype,
+    ) -> _FlashInferCollectiveGemmMatch | None:
+        qkv_output = _single_user(bmm_node)
+        if qkv_output is None or not _is_view_like(qkv_output):
+            return None
+        if _node_ndim(qkv_output) != 2:
+            return None
 
-def _find_ag_bmm_replace_target(bmm_node: fx.Node) -> fx.Node | None:
-    worklist = list(bmm_node.users)
-    visited: set[fx.Node] = set()
-    replace_targets: list[fx.Node] = []
+        split_node = _single_user(qkv_output)
+        if split_node is None:
+            return None
 
-    while worklist:
-        user = worklist.pop()
-        if user in visited:
-            continue
-        visited.add(user)
+        split_input = _parse_exact_qkv_split(split_node)
+        if split_input is not qkv_output:
+            return None
 
-        if not _is_passthrough(user):
-            continue
+        gemm_m = _node_first_dim(qkv_output)
+        if (
+            gemm_m is not None
+            and isinstance(gemm_m, int | torch.SymInt)
+            and _dim_is_statically_lt(gemm_m, FLASHINFER_BMM_FP8_MIN_M)
+        ):
+            return None
 
-        if _node_ndim(user) == 2:
-            replace_targets.append(user)
-            continue
+        return _FlashInferCollectiveGemmMatch(
+            kind="ag_bmm",
+            replace_node=qkv_output,
+            a_2d=ag_input,
+            b_2d=b_2d,
+            a_scale=a_scale,
+            b_scale=b_scale,
+            out_dtype=out_dtype,
+        )
 
-        worklist.extend(user.users)
-
-    if not replace_targets and _node_ndim(bmm_node) == 2:
-        replace_targets = [bmm_node]
-
-    if len(replace_targets) != 1:
-        return None
-    return replace_targets[0]
-
-
-class FlashInferCollectiveGemmRewriter:
     def _match_collective_gemm(
         self, bmm_node: fx.Node
     ) -> _FlashInferCollectiveGemmMatch | None:
@@ -237,31 +310,11 @@ class FlashInferCollectiveGemmRewriter:
         if out_dtype != torch.bfloat16:
             return None
 
-        rs_match = _find_bmm_reduce_scatter(bmm_node)
+        rs_match = self._match_exact_bmm_reduce_scatter(
+            bmm_node, a_2d, b_2d, a_scale, b_scale, out_dtype
+        )
         if rs_match is not None:
-            rs_node, rs_input, dim, world_size, group_name = rs_match
-            if dim == 0 and isinstance(world_size, int) and isinstance(group_name, str):
-                gemm_m = _node_first_dim(rs_input)
-                if (
-                    gemm_m is not None
-                    and isinstance(gemm_m, int | torch.SymInt)
-                    and _dim_is_statically_lt(gemm_m, FLASHINFER_BMM_FP8_MIN_M)
-                ):
-                    return None
-                output_shape = _node_shape(rs_input)
-                return _FlashInferCollectiveGemmMatch(
-                    kind="bmm_rs",
-                    replace_node=rs_node,
-                    a_2d=a_2d,
-                    b_2d=b_2d,
-                    a_scale=a_scale,
-                    b_scale=b_scale,
-                    out_dtype=out_dtype,
-                    collective_dim=0,
-                    world_size=world_size,
-                    group_name=group_name,
-                    output_shape=output_shape,
-                )
+            return rs_match
 
         ag_node = _strip_view_like(a_2d)
         parsed_ag = _parse_all_gather(ag_node)
@@ -275,28 +328,13 @@ class FlashInferCollectiveGemmRewriter:
         ):
             return None
 
-        target = _find_ag_bmm_replace_target(bmm_node)
-        if target is None:
-            return None
-        gemm_m = _node_first_dim(target)
-        if (
-            gemm_m is not None
-            and isinstance(gemm_m, int | torch.SymInt)
-            and _dim_is_statically_lt(gemm_m, FLASHINFER_BMM_FP8_MIN_M)
-        ):
-            return None
-
-        return _FlashInferCollectiveGemmMatch(
-            kind="ag_bmm",
-            replace_node=target,
-            a_2d=ag_input,
-            b_2d=b_2d,
-            a_scale=a_scale,
-            b_scale=b_scale,
-            out_dtype=out_dtype,
-            collective_dim=0,
-            world_size=world_size,
-            group_name=group_name,
+        return self._match_exact_ag_qkv(
+            bmm_node,
+            ag_input,
+            b_2d,
+            a_scale,
+            b_scale,
+            out_dtype,
         )
 
     def _lower_collective_gemm(
@@ -304,32 +342,21 @@ class FlashInferCollectiveGemmRewriter:
     ) -> None:
         if match.kind == "ag_bmm":
             with graph.inserting_before(match.replace_node):
-                gathered = graph.call_function(
-                    torch.ops.vllm.all_gather.default,
+                fused = graph.call_function(
+                    torch.ops.vllm.fused_all_gather_flashinfer_scaled_matmul.default,
                     args=(
                         match.a_2d,
-                        match.collective_dim,
-                        match.world_size,
-                        match.group_name,
-                    ),
-                )
-                bmm_output = graph.call_function(
-                    torch.ops.vllm.bmm_fp8.default,
-                    args=(
-                        graph.call_function(
-                            torch.ops.aten.unsqueeze.default, args=(gathered, 0)
-                        ),
-                        graph.call_function(
-                            torch.ops.aten.unsqueeze.default, args=(match.b_2d, 0)
-                        ),
+                        match.b_2d,
                         match.a_scale,
                         match.b_scale,
+                        0,
+                        self.tp_device_group_name,
                         match.out_dtype,
-                        "auto",
                     ),
                 )
                 mm_output = graph.call_function(
-                    torch.ops.aten.squeeze.dim, args=(bmm_output, 0)
+                    operator.getitem,
+                    args=(fused, 1),
                 )
             mm_output.meta = dict(match.replace_node.meta)
             match.replace_node.replace_all_uses_with(mm_output)
@@ -337,35 +364,23 @@ class FlashInferCollectiveGemmRewriter:
             return
 
         with graph.inserting_before(match.replace_node):
-            bmm_output = graph.call_function(
-                torch.ops.vllm.bmm_fp8.default,
+            fused = graph.call_function(
+                torch.ops.vllm.fused_flashinfer_scaled_matmul_reduce_scatter.default,
                 args=(
-                    graph.call_function(
-                        torch.ops.aten.unsqueeze.default, args=(match.a_2d, 0)
-                    ),
-                    graph.call_function(
-                        torch.ops.aten.unsqueeze.default, args=(match.b_2d, 0)
-                    ),
+                    match.a_2d,
+                    match.b_2d,
                     match.a_scale,
                     match.b_scale,
+                    "sum",
+                    0,
+                    0,
+                    self.tp_device_group_name,
+                    match.output_shape,
                     match.out_dtype,
-                    "auto",
                 ),
             )
-            mm_output = graph.call_function(
-                torch.ops.aten.squeeze.dim, args=(bmm_output, 0)
-            )
-            reduced = graph.call_function(
-                torch.ops.vllm.reduce_scatter.default,
-                args=(
-                    mm_output,
-                    match.collective_dim,
-                    match.world_size,
-                    match.group_name,
-                ),
-            )
-        reduced.meta = dict(match.replace_node.meta)
-        match.replace_node.replace_all_uses_with(reduced)
+        fused.meta = dict(match.replace_node.meta)
+        match.replace_node.replace_all_uses_with(fused)
         graph.erase_node(match.replace_node)
 
     def rewrite(self, graph: fx.Graph) -> int:
