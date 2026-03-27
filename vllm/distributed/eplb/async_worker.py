@@ -66,12 +66,6 @@ def run_rebalance_experts(
     assert model_state.eplb_stats is not None
     eplb_stats = model_state.eplb_stats
 
-    # Wait for the main thread's all-reduce and clone to complete before
-    # accessing the global_expert_load_window tensor.
-    assert model_state.window_ready_event is not None
-    model_state.window_ready_event.wait()
-    model_state.window_ready_event = None
-
     # Move the global expert load window to CPU for computation.
     with torch.cuda.stream(cuda_stream):
         global_expert_load_window = eplb_stats.global_expert_load_window.cpu()

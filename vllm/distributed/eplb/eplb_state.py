@@ -172,11 +172,6 @@ class EplbModelState:
     """
     The buffer to store the expert weights during transfer.
     """
-    window_ready_event: torch.cuda.Event | None
-    """
-    CUDA event recorded after all-reduce and clone on the main thread.
-    The async worker waits on this before accessing global_expert_load_window.
-    """
     rebalanced: bool
     """
     The flag indicates whether the experts rebalance have been computed.
@@ -439,7 +434,6 @@ class EplbState:
             model_name=model_config.model,
             model=model,
             expert_buffer=expert_buffer,
-            window_ready_event=None,
             rebalanced=False,
             eplb_stats=None,
             cuda_device_index=self.cuda_device_index,
@@ -750,12 +744,6 @@ class EplbState:
                     num_nodes=num_nodes,
                     num_gpus=num_gpus,
                 )
-                # Record event after clone to signal async worker
-                # that load stats data is ready
-                sync_event = torch.cuda.Event()
-                sync_event.record()
-                eplb_model_state.window_ready_event = sync_event
-
                 eplb_model_state.rebalanced = True
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
