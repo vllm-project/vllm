@@ -1535,7 +1535,7 @@ class SupportsEncoderCudaGraph(Protocol):
           (e.g. max_num_batched_tokens)
 
         Used when ``encoder_cudagraph_token_budgets`` and/or
-        ``encoder_cudagraph_max_images_per_batch`` are not explicitly
+        ``encoder_cudagraph_max_mm_items_per_batch`` are not explicitly
         specified by the user.
         """
         ...

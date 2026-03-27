@@ -505,7 +505,7 @@ class CompilationConfig:
     User-provided values override auto-inference.
     Example: [2048, 4096, 8192, 13824]"""
 
-    encoder_cudagraph_max_images_per_batch: int = 0
+    encoder_cudagraph_max_mm_items_per_batch: int = 0
     """Maximum number of images per batch for encoder CUDA graph capture.
     Determines the fixed batch size used during graph capture.
     If 0 (default), auto-inferred as max_budget // min_budget from the
@@ -959,10 +959,10 @@ class CompilationConfig:
         # Validate encoder CUDA graph configuration
         if (
             self.cudagraph_mm_encoder
-            and self.encoder_cudagraph_max_images_per_batch < 0
+            and self.encoder_cudagraph_max_mm_items_per_batch < 0
         ):
             raise ValueError(
-                "encoder_cudagraph_max_images_per_batch must be "
+                "encoder_cudagraph_max_mm_items_per_batch must be "
                 "non-negative (0 = auto-infer)"
             )
         if (

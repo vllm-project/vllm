@@ -1501,11 +1501,7 @@ class Qwen3VLForConditionalGeneration(
         self.visual_dim = config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
-        # Cache for replay buffers keyed by (grid_thw pattern, modality,
-        # max_batch_size, max_frames_per_batch).  For video workloads where
-        # all frames share the same resolution the CPU-side NumPy work inside
-        # prepare_encoder_metadata is identical across requests, so we can
-        # reuse the already-computed tensors instead of recomputing them.
+        # Cache for cuda graph replay buffers keyed by (modality, grid_thw_list).
         self._replay_buffer_cache: dict[tuple, Any] = {}
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
@@ -1670,21 +1666,16 @@ class Qwen3VLForConditionalGeneration(
             pixel_values = mm_kwargs["pixel_values"]
         else:
             pixel_values = mm_kwargs["pixel_values_videos"]
-
         return pixel_values
 
     def _get_grid_thw_by_modality(
         self,
         mm_kwargs: dict[str, Any],
-        to_list: bool = True,
     ) -> list[tuple[int, int, int]]:
         input_modality = f"{self.get_input_modality(mm_kwargs)}_grid_thw"
         grid_thw = mm_kwargs[input_modality]
-
-        if to_list and not isinstance(grid_thw, list):
-            grid_thw_list = grid_thw.tolist()
-            return grid_thw_list
-
+        if not isinstance(grid_thw, list):
+            grid_thw = grid_thw.tolist()
         return grid_thw
 
     def get_encoder_cudagraph_num_items(
@@ -1850,14 +1841,16 @@ class Qwen3VLForConditionalGeneration(
             EncoderCudaGraphReplayBuffers,
         )
 
-        grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
         modality = self.get_input_modality(mm_kwargs)
+        grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
 
+        # Cache keyed by (modality, grid_thw_list): identical grid shapes
+        # produce identical cu_seqlens, rotary embeddings, and positional
+        # embeddings, so the expensive CPU-side NumPy work inside
+        # prepare_encoder_metadata need only run once per unique shape.
         cache_key = (
-            tuple(tuple(thw) for thw in grid_thw_list),
             modality,
-            # max_batch_size,
-            # max_frames_per_batch,
+            tuple(tuple(thw) for thw in grid_thw_list),
         )
         cached = self._replay_buffer_cache.get(cache_key)
         if cached is not None:
@@ -1875,6 +1868,8 @@ class Qwen3VLForConditionalGeneration(
             )
 
         result = EncoderCudaGraphReplayBuffers(buffers=buffers)
+        # Update cuda graph replay buffer cache with the newly computed buffers, so
+        # that subsequent replays with the same grid_thw pattern can reuse them.
         self._replay_buffer_cache[cache_key] = result
         return result
 
@@ -1884,7 +1879,7 @@ class Qwen3VLForConditionalGeneration(
         buffers: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)  # , to_list=False
+        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
         return self.visual(pixel_values, grid_thw, encoder_metadata=buffers)
 
     def encoder_eager_forward(
@@ -1892,7 +1887,7 @@ class Qwen3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)  # , to_list=False
+        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
         return self.visual(pixel_values, grid_thw)
 
     def _parse_and_validate_image_input(
