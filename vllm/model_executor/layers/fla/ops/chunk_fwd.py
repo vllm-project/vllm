@@ -8,7 +8,6 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 
-import os
 
 import torch
 
@@ -18,7 +17,7 @@ from .index import prepare_chunk_indices
 from .op import exp
 from .wy_fast import recompute_w_u_fwd
 
-FLA_TRIL_PRECISION = os.environ.get("FLA_TRIL_PRECISION", "ieee")
+FLA_TRIL_PRECISION = "ieee"
 
 
 @triton.heuristics(
