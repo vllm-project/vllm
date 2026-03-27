@@ -48,6 +48,21 @@ class XPUModelRunner(GPUModelRunner):
         # FIXME: To be verified.
         self.cascade_attn_enabled = False
 
+    # ------------------------------------------------------------------
+    # CPU-fallback: after the parent loads weights (which land on XPU
+    # because VllmConfig.device_config is unchanged), move everything to
+    # CPU so that _dummy_run / profile_run / execute_model never
+    # dispatch SYCL kernels.
+    # ------------------------------------------------------------------
+    def load_model(self, load_dummy_weights: bool = False) -> None:
+        super().load_model(load_dummy_weights)
+        if self._sim_cpu_fallback and hasattr(self, "model"):
+            logger.warning(
+                "CPU fallback: moving model weights from %s to cpu",
+                next(self.model.parameters()).device,
+            )
+            self.model = self.model.to("cpu")
+
     def _sync_device(self) -> None:
         if self._sim_cpu_fallback:
             # Nothing to synchronize on CPU.
