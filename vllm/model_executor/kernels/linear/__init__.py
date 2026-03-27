@@ -139,7 +139,7 @@ _POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]
         # To be added
     ],
     PlatformEnum.XPU: [
-        # To be added
+        XPUFP8ScaledMMLinearKernel,
     ],
 }
 
@@ -185,7 +185,6 @@ def is_supported_and_can_implement_kernel(
     is_supported, failure_reason = kernel.is_supported(compute_capability)
     if not is_supported:
         return False, f"{kernel.__name__} {failure_reason}."
-
     can_implement, failure_reason = kernel.can_implement(config)
     if not can_implement:
         return (
