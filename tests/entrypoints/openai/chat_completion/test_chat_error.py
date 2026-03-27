@@ -55,6 +55,7 @@ class MockModelConfig:
     skip_tokenizer_init = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    renderer_num_workers: int = 1
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
