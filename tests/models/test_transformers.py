@@ -14,7 +14,15 @@ from .utils import check_embeddings_close, check_logprobs_close
 
 def get_model(arch: str) -> str:
     model_info = HF_EXAMPLE_MODELS.get_hf_info(arch)
-    model_info.check_transformers_version(on_fail="skip")
+    # Use check_max_version=False so that models with a max_transformers_version
+    # cap are NOT skipped when running with a nightly/dev transformers build.
+    # The nightly CI job intentionally runs against the latest transformers, so
+    # we want to exercise these models rather than silently skip them.
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
     return model_info.default
 
 
