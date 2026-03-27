@@ -6581,32 +6581,26 @@ class GPUModelRunner(
                     )
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
-                    # For per-token quant, scales are packed into the same
-                    # allocation after each K/V data region.  Use as_strided
-                    # to create a data-only view that skips the scale bytes.
+                    # For per-token quant, scales are packed into the
+                    # same allocation after each K/V data region.  Store
+                    # as a flat uint8 tensor so that KV cache transfers
+                    # move data + scales together with no gaps.
                     if kv_cache_spec.kv_quant_mode in (
                         KVQuantMode.INT8_PER_TOKEN,
                         KVQuantMode.FP8_PER_TOKEN,
                     ):
-                        dtype = kv_cache_spec.dtype
-                        nkv = kv_cache_spec.num_kv_heads
-                        hs = kv_cache_spec.head_size
                         bs = kernel_block_size
-                        dtype_sz = get_dtype_size(dtype)
-                        data_per_kv = bs * nkv * hs * dtype_sz
+                        dtype_sz = get_dtype_size(kv_cache_spec.dtype)
+                        data_per_kv = (
+                            bs
+                            * kv_cache_spec.num_kv_heads
+                            * kv_cache_spec.head_size
+                            * dtype_sz
+                        )
                         scale_per_kv = bs * get_dtype_size(torch.float32)
                         kv_half = data_per_kv + scale_per_kv
-                        full_block = 2 * kv_half
-                        kv_caches[layer_name] = torch.as_strided(
-                            raw_tensor.view(dtype),
-                            size=(kernel_num_blocks, 2, bs, nkv, hs),
-                            stride=(
-                                full_block // dtype_sz,
-                                kv_half // dtype_sz,
-                                nkv * hs,
-                                hs,
-                                1,
-                            ),
+                        kv_caches[layer_name] = raw_tensor.view(
+                            kernel_num_blocks, 2, kv_half
                         )
                     else:
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
@@ -6701,24 +6695,22 @@ class GPUModelRunner(
         kv_caches: dict[str, torch.Tensor],
         kernel_block_sizes: list[int],
     ) -> dict[str, dict[str, torch.Tensor]]:
-        """Create scale tensor views into the packed KV cache allocation.
+        """Create typed data and scale views into the packed KV cache.
 
-        For per-token quant (int8/fp8), scales are stored directly after
-        each K/V data region within the same memory allocation.  This
-        method creates ``as_strided`` views for the scale regions so
-        that attention kernels can access them.  Because the scales
-        share the same underlying storage as the KV data, KV cache
-        transfers (e.g. for disaggregated prefill/decode) automatically
-        move the scales along with the data.
+        The KV cache for per-token quant is a flat uint8 tensor shaped
+        ``(num_blocks, 2, kv_half_bytes)`` that covers both quantized
+        data and float32 per-token scales contiguously.  This method
+        creates ``as_strided`` views so kernels can access the data
+        portion (as the quantized dtype) and the scale portion (as
+        float32) separately.
 
-        Per-block memory layout (int8 bytes)::
+        Per kv-half memory layout::
 
-            [K data: bs * nkv * hs][K scales: bs * 4]
-            [V data: bs * nkv * hs][V scales: bs * 4]
+            [data: bs * nkv * hs bytes][scales: bs * 4 bytes]
 
         Returns:
-            Mapping of layer_name -> {"k_scale_cache": Tensor,
-            "v_scale_cache": Tensor}.
+            Mapping of layer_name -> {"key_data", "value_data",
+            "k_scale_cache", "v_scale_cache"}.
         """
         result: dict[str, dict[str, torch.Tensor]] = {}
         num_blocks = self.kv_cache_config.num_blocks
@@ -6738,16 +6730,16 @@ class GPUModelRunner(
             ratio = kv_cache_spec.block_size // kernel_bs
             kernel_num_blocks = num_blocks * ratio
 
-            num_kv_heads = kv_cache_spec.num_kv_heads
-            head_size = kv_cache_spec.head_size
-            dtype_size = get_dtype_size(kv_cache_spec.dtype)
-            scale_dtype_size = get_dtype_size(torch.float32)  # 4
+            nkv = kv_cache_spec.num_kv_heads
+            hs = kv_cache_spec.head_size
+            dtype = kv_cache_spec.dtype
+            dtype_sz = get_dtype_size(dtype)
+            scale_sz = get_dtype_size(torch.float32)  # 4
 
-            # Bytes per K (or V) half-block: data + scales.
-            data_per_kv = kernel_bs * num_kv_heads * head_size * dtype_size
-            scale_per_kv = kernel_bs * scale_dtype_size
+            data_per_kv = kernel_bs * nkv * hs * dtype_sz
+            scale_per_kv = kernel_bs * scale_sz
             kv_half = data_per_kv + scale_per_kv
-            full_block = 2 * kv_half  # K+V
+            full_block = 2 * kv_half
 
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
@@ -6755,30 +6747,43 @@ class GPUModelRunner(
                 kv_cache = kv_caches[layer_name]
                 raw = kv_cache.untyped_storage()
 
-                # Create float32 views into the scale regions via
-                # as_strided on the raw storage.  The underlying memory
-                # is shared with the int8 KV data tensor.
-                base_tensor = torch.tensor(
+                # Typed data views: (num_blocks, bs, nkv, hs) in quant dtype
+                base_q = torch.tensor([], dtype=dtype, device=self.device).set_(raw)
+                key_data = torch.as_strided(
+                    base_q,
+                    size=(kernel_num_blocks, kernel_bs, nkv, hs),
+                    stride=(full_block // dtype_sz, nkv * hs, hs, 1),
+                    storage_offset=0,
+                )
+                value_data = torch.as_strided(
+                    base_q,
+                    size=(kernel_num_blocks, kernel_bs, nkv, hs),
+                    stride=(full_block // dtype_sz, nkv * hs, hs, 1),
+                    storage_offset=kv_half // dtype_sz,
+                )
+
+                # Scale views: (num_blocks, bs) float32
+                base_f32 = torch.tensor(
                     [], dtype=torch.float32, device=self.device
                 ).set_(raw)
-
                 k_scales = torch.as_strided(
-                    base_tensor,
+                    base_f32,
                     size=(kernel_num_blocks, kernel_bs),
-                    stride=(full_block // scale_dtype_size, 1),
-                    storage_offset=data_per_kv // scale_dtype_size,
+                    stride=(full_block // scale_sz, 1),
+                    storage_offset=data_per_kv // scale_sz,
                 )
                 v_scales = torch.as_strided(
-                    base_tensor,
+                    base_f32,
                     size=(kernel_num_blocks, kernel_bs),
-                    stride=(full_block // scale_dtype_size, 1),
-                    storage_offset=(kv_half + data_per_kv) // scale_dtype_size,
+                    stride=(full_block // scale_sz, 1),
+                    storage_offset=(kv_half + data_per_kv) // scale_sz,
                 )
-                # Zero-init the scales (important for unused slots).
                 k_scales.zero_()
                 v_scales.zero_()
 
                 result[layer_name] = {
+                    "key_data": key_data,
+                    "value_data": value_data,
                     "k_scale_cache": k_scales,
                     "v_scale_cache": v_scales,
                 }

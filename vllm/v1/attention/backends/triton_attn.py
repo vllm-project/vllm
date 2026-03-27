@@ -359,12 +359,17 @@ class TritonAttentionBackend(AttentionBackend):
 
 
 class TritonAttentionImpl(AttentionImpl):
-    # Per-token scale caches, bound by the model runner via
-    # bind_auxiliary_buffers().  None when not using per-token quant.
+    # Per-token quant: typed data views and scale views, bound by the
+    # model runner via bind_auxiliary_buffers().  These are as_strided
+    # views into the flat packed KV cache tensor.
+    _key_data: torch.Tensor | None = None
+    _value_data: torch.Tensor | None = None
     _k_scale_cache: torch.Tensor | None = None
     _v_scale_cache: torch.Tensor | None = None
 
     def bind_auxiliary_buffers(self, buffers: dict[str, torch.Tensor]) -> None:
+        self._key_data = buffers.get("key_data")
+        self._value_data = buffers.get("value_data")
         self._k_scale_cache = buffers.get("k_scale_cache")
         self._v_scale_cache = buffers.get("v_scale_cache")
 
@@ -483,28 +488,22 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # For decoder and cross-attention, use KV cache as before
-        key_cache, value_cache = kv_cache.unbind(1)
-
-        # Per-token quantized KV cache: use per-token scale caches.
-        if self.kv_quant_mode == KVQuantMode.INT8_PER_TOKEN:
-            if key_cache.dtype != torch.int8:
-                key_cache = key_cache.view(torch.int8)
-                value_cache = value_cache.view(torch.int8)
-            k_descale = None
-            v_descale = None
-            k_scale_cache = self._k_scale_cache
-            v_scale_cache = self._v_scale_cache
-        elif self.kv_quant_mode == KVQuantMode.FP8_PER_TOKEN:
-            if key_cache.dtype != self.fp8_dtype:
-                key_cache = key_cache.view(self.fp8_dtype)
-                value_cache = value_cache.view(self.fp8_dtype)
+        # Per-token quantized KV cache: use cached typed data views
+        # and per-token scale caches (no unbind needed — views were
+        # created at init from the flat packed tensor).
+        if self.kv_quant_mode in (
+            KVQuantMode.INT8_PER_TOKEN,
+            KVQuantMode.FP8_PER_TOKEN,
+        ):
+            key_cache = self._key_data
+            value_cache = self._value_data
             k_descale = None
             v_descale = None
             k_scale_cache = self._k_scale_cache
             v_scale_cache = self._v_scale_cache
         # FP8 per-tensor / auto path (original flow).
         else:
+            key_cache, value_cache = kv_cache.unbind(1)
             if self.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR:
                 if key_cache.dtype != self.fp8_dtype:
                     key_cache = key_cache.view(self.fp8_dtype)
@@ -627,37 +626,25 @@ class TritonAttentionImpl(AttentionImpl):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return
-        # For decoder and cross-attention, use KV cache as before
-        key_cache, value_cache = kv_cache.unbind(1)
-
         # Reshape the input keys and values and store them in the cache.
         quant_mode = self.kv_quant_mode
-        if quant_mode == KVQuantMode.INT8_PER_TOKEN:
-            key_cache = key_cache.view(torch.int8)
-            value_cache = value_cache.view(torch.int8)
+        if quant_mode in (
+            KVQuantMode.INT8_PER_TOKEN,
+            KVQuantMode.FP8_PER_TOKEN,
+        ):
+            # Use cached typed data views into the flat packed tensor.
             triton_reshape_and_cache_flash_per_token_quant(
                 key,
                 value,
-                key_cache,
-                value_cache,
+                self._key_data,
+                self._value_data,
                 self._k_scale_cache,
                 self._v_scale_cache,
                 slot_mapping,
             )
             return
-        if quant_mode == KVQuantMode.FP8_PER_TOKEN:
-            key_cache = key_cache.view(self.fp8_dtype)
-            value_cache = value_cache.view(self.fp8_dtype)
-            triton_reshape_and_cache_flash_per_token_quant(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                self._k_scale_cache,
-                self._v_scale_cache,
-                slot_mapping,
-            )
-            return
+        # For decoder and cross-attention, use KV cache as before.
+        key_cache, value_cache = kv_cache.unbind(1)
         if quant_mode == KVQuantMode.FP8_PER_TENSOR:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
