@@ -20,7 +20,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from typing import Any, NamedTuple
 
@@ -47,6 +47,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import (
     DraftTokenIds,
+    ECConnectorOutput,
     KVConnectorOutput,
     ModelRunnerOutput,
     make_empty_encoder_model_runner_output,
@@ -1031,7 +1032,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.supports_mm_inputs and self.is_first_pp_rank:
             assert self.encoder_cache is not None
             encoder_outputs = self.encoder_cache.encoder_outputs
-            ec_context = nullcontext()
+            ec_context: AbstractContextManager[ECConnectorOutput | None] = nullcontext()  # type: ignore[assignment]
             mm_hashes_to_save: list[str] = []
             if (
                 not self.is_encoder_decoder
