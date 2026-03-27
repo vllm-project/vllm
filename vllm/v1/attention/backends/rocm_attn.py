@@ -414,6 +414,15 @@ class RocmAttentionImpl(AttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
+        # For cross-attention (encoder-decoder), the encoder K/V have already
+        # been written to the paged cache by CrossAttentionImpl before this
+        # forward call. Pass key=None so chunked_prefill_paged_decode reads
+        # exclusively from the cache instead of mixing cached and raw K/V
+        # (which would double-count some encoder tokens and miss others).
+        if self.attn_type == AttentionType.ENCODER_DECODER:
+            key = None
+            value = None
+
         # Compute attention and update output up to `num_actual_tokens`.
         chunked_prefill_paged_decode(
             query=query[:num_actual_tokens],

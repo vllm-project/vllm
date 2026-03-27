@@ -278,7 +278,12 @@ def chunked_prefill_paged_decode(
     if sliding_window is None or sliding_window <= 0:
         sliding_window = 0
 
-    if max_query_len > 1:
+    # Cross-attention: key is None means all K/V are already in the paged
+    # cache (populated by CrossAttentionImpl.do_kv_cache_update). Skip the
+    # prefill kernel which would incorrectly mix cached and "new" K/V.
+    is_cross_attn = key is None
+
+    if max_query_len > 1 and not is_cross_attn:
         context_attention_fwd(
             q=query,
             k=key,
@@ -331,6 +336,19 @@ def chunked_prefill_paged_decode(
 
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv), 16)
 
+    # The decode kernel (kernel_paged_attention_2d) skips sequences with
+    # query_len > 1 when filter_by_query_len=True, expecting the prefill
+    # kernel to handle them. Since we skipped the prefill kernel for
+    # cross-attention above, we need to make those multi-token sequences
+    # visible to the decode kernel. We do this by expanding metadata so
+    # each query token appears as its own single-token "sequence",
+    # duplicating the corresponding seq_lens and block_table entries.
+    if is_cross_attn and max_query_len > 1:
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+        seq_lens = seq_lens.repeat_interleave(query_lens)
+        block_table = block_table.repeat_interleave(query_lens, dim=0)
+        num_seqs = seq_lens.shape[0]  # now equals num_actual_tokens
+
     from vllm.platforms.rocm import use_rocm_custom_paged_attention
 
     use_custom = use_rocm_custom_paged_attention(
@@ -352,6 +370,11 @@ def chunked_prefill_paged_decode(
     # then our Triton path is forced.
     is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
     if not is_pow2:
+        use_custom = False
+    # Force Triton for cross-attention multi-token: the HIP C++ kernel uses
+    # query_start_loc to skip prefill tokens, but here we skipped the prefill
+    # kernel and expanded metadata to per-token instead.
+    if is_cross_attn and max_query_len > 1:
         use_custom = False
 
     if use_custom:
@@ -418,6 +441,11 @@ def chunked_prefill_paged_decode(
         else:
             processed_block_table = block_table.to(torch.int32)
 
+        # For cross-attention multi-token: metadata was expanded to per-token
+        # above, so each "seq" is one token. Use filter_by_query_len=False
+        # so the kernel treats seq_idx as a flat token index.
+        use_filter = not (is_cross_attn and max_query_len > 1)
+
         kernel_paged_attention_2d[
             (
                 num_seqs,
@@ -460,7 +488,7 @@ def chunked_prefill_paged_decode(
             stride_v_cache_1=value_cache.stride(1),
             stride_v_cache_2=value_cache.stride(2),
             stride_v_cache_3=value_cache.stride(3),
-            filter_by_query_len=True,
+            filter_by_query_len=use_filter,
             query_start_len_ptr=query_start_loc,
             USE_SINKS=sinks is not None,
             USE_FP8=output_scale is not None,
