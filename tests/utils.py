@@ -1384,9 +1384,6 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
         with suppress(RuntimeError):
             mp.set_start_method("spawn")
 
-        # Get the module
-        module_name = f.__module__
-
         # Create a process with environment variable set
         env = os.environ.copy()
         env["RUNNING_IN_SUBPROCESS"] = "1"
@@ -1402,7 +1399,17 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             env = dict(env or os.environ)
             env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
 
-            cmd = [sys.executable, "-m", f"{module_name}"]
+            # Use an inline script that reads the pickled function from
+            # stdin and calls it directly. This avoids depending on test
+            # files having an `if __name__ == "__main__":` block — without
+            # one, the old `python -m <module>` approach would exit 0
+            # without ever running the test (see issue #38097).
+            cmd = [
+                sys.executable, "-c",
+                "import sys, cloudpickle; "
+                "fn, _ = cloudpickle.loads(sys.stdin.buffer.read()); "
+                "fn()"
+            ]
 
             returned = subprocess.run(
                 cmd, input=input_bytes, capture_output=True, env=env
