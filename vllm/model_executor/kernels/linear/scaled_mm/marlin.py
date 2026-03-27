@@ -14,6 +14,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     is_fp8_marlin_supported,
     prepare_fp8_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
 )
@@ -100,11 +101,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 )
             if is_compressed_tensors and hasattr(layer, "logical_widths") and len(layer.logical_widths) > 1:
                 ws = getattr(layer, "weight_scale", None)
-                # 【关键修正】: 必须严格校验 ws 不为空，且元素数量恰好等于分片数(如 3)
-                # 这样才能防止报错，并彻底杜绝被错误地“二次展开”
                 if ws is not None and ws.numel() == len(layer.logical_widths):
-                    from vllm.model_executor.layers.quantization.utils.w8a8_utils import convert_to_channelwise
-                    print(f"replace weight_scale!!!!!!!!!!!")
                     replace_parameter(
                         layer,
                         "weight_scale",
