@@ -6698,6 +6698,11 @@ class GPUModelRunner(
             kv_cache_spec = group.kv_cache_spec
             if not isinstance(kv_cache_spec, AttentionSpec):
                 continue
+            # EncoderOnly and trailing groups may not have an entry
+            # in kernel_block_sizes (they are skipped during
+            # prepare_kernel_block_sizes).
+            if group.kv_cache_group_id >= len(kernel_block_sizes):
+                continue
 
             # Compute kernel-level block dimensions for virtual splitting.
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
