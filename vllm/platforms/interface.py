@@ -478,7 +478,8 @@ class Platform:
                 )
             cache_config.block_size = preferred
 
-        # Phase 2: Align for hybrid models (always runs, may increase block_size)
+        # Phase 2: Align block/mamba sizes for hybrid models
+        # (may override user settings).
         if model_config.is_hybrid:
             cls._align_hybrid_block_size(vllm_config, backend_cls)
 

@@ -114,10 +114,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         # recurrent state corrupts scales during the calibration pass.
         # See issue: https://github.com/vllm-project/vllm/issues/37554
 
-        # Save the user input before it gets modified by MambaModelConfig
-        cache_config.user_specified_mamba_block_size = (
-            cache_config.mamba_block_size is not None
-        )
         if cache_config.calculate_kv_scales:
             logger.warning(
                 "Disabling calculate_kv_scales for hybrid model '%s'. "

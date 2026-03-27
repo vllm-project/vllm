@@ -846,9 +846,9 @@ def test_hybrid_attention_mamba_tensor_shapes():
         # suppress var not used error
         assert fwd_context is not None
         vllm_ctx = vllm_config.compilation_config.static_forward_context
-        current_platform.update_block_size_for_backend(vllm_config)
 
         runner = GPUModelRunner(vllm_config, DEVICE)
+        current_platform.update_block_size_for_backend(vllm_config)
         kv_cache_spec = runner.get_kv_cache_spec()
 
         available_memory = 5 * GiB_bytes
