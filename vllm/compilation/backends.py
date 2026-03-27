@@ -516,16 +516,31 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
                     )
 
         # Replace size node in each user's args.
-        # Dynamo always passes size as a direct arg: view(clone, size)
-        # → view(clone, d0, d1, ...)
         for user in list(node.users):
-            new_args = []
-            for arg in user.args:
-                if arg is node:
-                    new_args.extend(dims)
-                else:
-                    new_args.append(arg)
-            user.args = tuple(new_args)
+            if (
+                user.op == "call_function"
+                and user.target is operator.getitem
+                and len(user.args) == 2
+                and user.args[0] is node
+            ):
+                # getitem(size, idx) → replace with dims[idx] directly.
+                idx = user.args[1]
+                assert isinstance(idx, int), (
+                    f"Expected literal int index for getitem on size(), "
+                    f"got {type(idx).__name__}: {idx}"
+                )
+                user.replace_all_uses_with(dims[idx])
+                graph.graph.erase_node(user)
+            else:
+                # User consumes the full size tuple (e.g. view(clone, size))
+                # → view(clone, d0, d1, ...)
+                new_args = []
+                for arg in user.args:
+                    if arg is node:
+                        new_args.extend(dims)
+                    else:
+                        new_args.append(arg)
+                user.args = tuple(new_args)
         graph.graph.erase_node(node)
 
 
