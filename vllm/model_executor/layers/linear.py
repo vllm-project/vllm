@@ -27,7 +27,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.utils import (
     dispatch_unquantized_gemm,
-    is_layer_moe_router_gate,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -228,11 +227,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         assert input_scale is None, (
             "UnquantizedLinearMethod does not support input_scale"
         )
-        if (
-            envs.VLLM_BATCH_INVARIANT
-            and current_platform.is_cuda_alike()
-            and is_layer_moe_router_gate(getattr(layer, "prefix", ""))
-        ):
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
             return linear_batch_invariant(x, layer.weight, bias)
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
