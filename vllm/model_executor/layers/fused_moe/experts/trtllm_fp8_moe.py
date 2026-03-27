@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import requests
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -27,7 +28,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Static,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.utils.flashinfer import (
+    FLASHINFER_CUBINS_REPOSITORY,
+    has_flashinfer_trtllm_fused_moe,
+)
 
 logger = init_logger(__name__)
 
@@ -66,7 +70,37 @@ class TrtLlmFp8ExpertsBase:
             p.is_cuda()
             and p.is_device_capability_family(100)
             and has_flashinfer_trtllm_fused_moe()
+            and TrtLlmFp8ExpertsBase._can_load_batched_gemm_enums()
         )
+
+    @staticmethod
+    def _can_load_batched_gemm_enums() -> bool:
+        try:
+            from flashinfer.artifacts import ArtifactPath
+            from flashinfer.jit import env as jit_env
+        except Exception:
+            return False
+
+        header_path = (
+            jit_env.FLASHINFER_CUBIN_DIR
+            / "flashinfer"
+            / "trtllm"
+            / "batched_gemm"
+            / "trtllmGen_bmm_export"
+            / "BatchedGemmEnums.h"
+        )
+        if header_path.is_file():
+            return True
+
+        probe_url = (
+            f"{FLASHINFER_CUBINS_REPOSITORY.rstrip('/')}/"
+            f"{ArtifactPath.TRTLLM_GEN_BMM}/include/trtllmGen_bmm_export/"
+            "BatchedGemmEnums.h"
+        )
+        try:
+            return requests.get(probe_url, timeout=60).status_code == 200
+        except Exception:
+            return False
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
