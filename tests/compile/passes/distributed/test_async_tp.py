@@ -8,6 +8,7 @@ import torch
 import vllm.envs as envs
 from tests.compile.backend import TestBackend
 from tests.utils import (
+    TestFP8Layer,
     multi_gpu_test,
 )
 from vllm.compilation.passes.fusion.collective_fusion import AsyncTPPass
@@ -26,6 +27,10 @@ from vllm.distributed import (
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
+)
+from vllm.model_executor.kernels.linear import FlashInferFP8ScaledMMLinearKernel
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
@@ -218,32 +223,51 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
 
 
 class _BaseFlashInferBMMFP8Model(torch.nn.Module):
-    """Base for FlashInfer bmm_fp8 test models (per-tensor scalar scales)."""
+    """Base for FlashInfer bmm_fp8 test models."""
+
+    quant_key = kFp8StaticTensorSym
 
     def __init__(self, hidden_size=16, dtype=torch.float16):
         super().__init__()
         self.hidden_size = hidden_size
         self.dtype = dtype
-        # Non-transposed weight [K, N] — FlashInfer uses [K, N] not [N, K].T
-        weight = torch.empty([hidden_size, hidden_size], dtype=torch.float16)
-        self.weight = weight.transpose(0, 1).to(FP8_DTYPE)
-        # Per-tensor scalar scales
-        self.scale_a = torch.tensor(1.0, dtype=torch.float32)
-        self.scale_b = torch.tensor(1.0, dtype=torch.float32)
+        self.fp8_linear = TestFP8Layer(
+            weight_shape=(hidden_size, hidden_size),
+            activation_quant_key=self.quant_key,
+            weight_quant_key=self.quant_key,
+            out_dtype=dtype,
+            force_kernel=FlashInferFP8ScaledMMLinearKernel,
+        )
 
+    @property
+    def weight(self) -> torch.Tensor:
+        return self.fp8_linear.weight
 
-class TestFlashInferBMMFP8RSModel(_BaseFlashInferBMMFP8Model):
-    def forward(self, input: torch.Tensor):
-        """bmm_fp8 + reduce_scatter — matches FlashInfer's traced pattern."""
-        fp8_input = input.to(FP8_DTYPE)
-        output = torch.ops.vllm.bmm_fp8(
-            fp8_input.unsqueeze(0),
+    @property
+    def scale_a(self) -> torch.Tensor:
+        assert self.fp8_linear.input_scale is not None
+        return self.fp8_linear.input_scale
+
+    @property
+    def scale_b(self) -> torch.Tensor:
+        return self.fp8_linear.weight_scale
+
+    def run_bmm_fp8(self, input: torch.Tensor) -> torch.Tensor:
+        return torch.ops.vllm.bmm_fp8(
+            input.unsqueeze(0),
             self.weight.unsqueeze(0),
             self.scale_a,
             self.scale_b,
             self.dtype,
             "auto",
-        ).view(fp8_input.shape[0], self.weight.shape[1])
+        ).view(input.shape[0], self.weight.shape[1])
+
+
+class TestFlashInferBMMFP8RSModel(_BaseFlashInferBMMFP8Model):
+    def forward(self, input: torch.Tensor):
+        """bmm_fp8 + reduce_scatter - matches FlashInfer's traced pattern."""
+        fp8_input = input.to(FP8_DTYPE)
+        output = self.run_bmm_fp8(fp8_input)
         return tensor_model_parallel_reduce_scatter(output, dim=0)
 
     def ops_in_model_before(self):
@@ -255,17 +279,10 @@ class TestFlashInferBMMFP8RSModel(_BaseFlashInferBMMFP8Model):
 
 class TestAGFlashInferBMMFP8Model(_BaseFlashInferBMMFP8Model):
     def forward(self, input: torch.Tensor):
-        """all_gather + bmm_fp8 — matches FlashInfer's traced pattern."""
+        """all_gather + bmm_fp8 - matches FlashInfer's traced pattern."""
         fp8_input = input.to(FP8_DTYPE)
         all_gather = tensor_model_parallel_all_gather(fp8_input, dim=0)
-        output = torch.ops.vllm.bmm_fp8(
-            all_gather.unsqueeze(0),
-            self.weight.unsqueeze(0),
-            self.scale_a,
-            self.scale_b,
-            self.dtype,
-            "auto",
-        ).view(all_gather.shape[0], self.weight.shape[1])
+        output = self.run_bmm_fp8(all_gather)
         q_size = self.hidden_size // 2
         kv_size = self.hidden_size // 4
         q, k, v = output.split([q_size, kv_size, kv_size], dim=-1)
