@@ -202,7 +202,7 @@ RUN git clone ${ROCSHMEM_REPO} \
  && bash ../scripts/build_configs/all_backends \
       -DCMAKE_INSTALL_PREFIX="${ROCSHMEM_DIR}" \
       -DROCM_PATH=/opt/rocm \
-      -DGPU_TARGETS="gfx942;gfx950" \
+      -DGPU_TARGETS="${DEEPEP_ROCM_ARCH}" \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DUSE_EXTERNAL_MPI=OFF
 
