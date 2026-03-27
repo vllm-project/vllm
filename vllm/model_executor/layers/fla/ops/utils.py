@@ -28,6 +28,9 @@ FLA_GDN_FIX_BT = os.getenv("FLA_GDN_FIX_BT", "0") == "1"
 
 SUPPRESS_LEVEL = int(os.getenv("GDN_RECOMPUTE_SUPPRESS_LEVEL", "0"))
 
+# Default chunk size used across FLA triton kernels (kda, chunk, chunk_o, etc.)
+FLA_CHUNK_SIZE = 64
+
 
 def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
     """

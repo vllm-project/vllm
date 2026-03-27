@@ -23,7 +23,7 @@ from .index import prepare_chunk_indices
 from .l2norm import l2norm_fwd
 from .op import exp, log
 from .solve_tril import solve_tril
-from .utils import is_amd
+from .utils import FLA_CHUNK_SIZE, is_amd
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
@@ -1178,7 +1178,7 @@ def chunk_kda_fwd(
     output_final_state: bool,
     cu_seqlens: torch.Tensor | None = None,
 ):
-    chunk_size = 64
+    chunk_size = FLA_CHUNK_SIZE
     g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens)
     # the intra Aqk is kept in fp32
     # the computation has very marginal effect on the entire throughput
