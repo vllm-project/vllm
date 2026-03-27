@@ -593,6 +593,25 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
     && flashinfer show-config
 
+# Pre-download FlashInfer TRTLLM BMM headers for air-gapped environments.
+# At runtime, MoE JIT compilation downloads these from edge.urm.nvidia.com
+# which fails without internet. This step caches them at build time.
+RUN python3 <<'PYEOF'
+from flashinfer.jit import env as jit_env
+from flashinfer.jit.cubin_loader import download_trtllm_headers, get_cubin
+from flashinfer.artifacts import ArtifactPath, CheckSumHash
+
+download_trtllm_headers(
+    'bmm',
+    jit_env.FLASHINFER_CUBIN_DIR / 'flashinfer' / 'trtllm' / 'batched_gemm' / 'trtllmGen_bmm_export',
+    f'{ArtifactPath.TRTLLM_GEN_BMM}/include/trtllmGen_bmm_export',
+    ArtifactPath.TRTLLM_GEN_BMM,
+    get_cubin(f'{ArtifactPath.TRTLLM_GEN_BMM}/checksums.txt', CheckSumHash.TRTLLM_GEN_BMM),
+)
+
+print('FlashInfer TRTLLM BMM headers downloaded successfully')
+PYEOF
+
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES
 # Pre-install these to avoid reinstalling on every vLLM wheel rebuild
