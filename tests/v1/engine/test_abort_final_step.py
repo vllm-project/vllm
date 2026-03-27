@@ -249,20 +249,30 @@ async def test_abort_during_final_step(async_scheduling: bool):
                         )
                     await asyncio.sleep(0.01)
 
-                 # Abort the request while execute_model is blocked
+                # Abort the request while execute_model is blocked
                 await engine.abort(request_id)
 
-                # Wait briefly to ensure the ABORT message has been received
-                # by the engine core's input socket thread and placed in the
-                # aborts_queue BEFORE we unblock execute_model. Without this
-                # sleep there is a race: abort_requests_async() returns as
-                # soon as the ZMQ message is sent, but the engine core thread
-                # may not have dequeued it yet, causing _process_aborts_queue()
-                # to see an empty queue when the model output arrives.
-                await asyncio.sleep(0.05)
+                # Use a deterministic synchronization barrier to ensure the
+                # ABORT message has been received and processed by the engine
+                # core BEFORE we unblock execute_model.
+                #
+                # abort_requests_async() is fire-and-forget: it returns as
+                # soon as the ZMQ message is sent, but the engine core input
+                # socket thread may not have dequeued it yet. A fixed sleep
+                # would be flaky on loaded systems.
+                #
+                # pause_scheduler_async() sends a UTILITY message that the
+                # engine core processes in the same input queue as ABORT
+                # messages, and it awaits an acknowledgment future. Because
+                # the engine core processes messages in FIFO order, when the
+                # pause ACK arrives we are guaranteed that the preceding ABORT
+                # message has already been placed in aborts_queue.
+                await engine.engine_core.pause_scheduler_async(mode="wait")
+                await engine.engine_core.resume_scheduler_async()
 
                 # Now unblock execute_model by deleting the file
-                # The abort should be processed before the model output
+                # The abort is guaranteed to be in aborts_queue before the
+                # model output is processed.
                 block_file.unlink()
 
                 # Wait for generation to complete
