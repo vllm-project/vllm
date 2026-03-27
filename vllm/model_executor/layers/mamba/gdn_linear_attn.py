@@ -664,16 +664,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         torch.accelerator.empty_cache()
 
-    def _qkvz_output_size(self) -> int:
-        """Per-rank output size of the qkvz projection (for gdn_in_proj fake impl).
-
-        The total is always key_dim*2 + value_dim*2, regardless of whether
-        weights are fused (in_proj_qkvz) or split (LoRA: in_proj_qkv + in_proj_z).
-        Computing directly from model dimensions avoids accessing layer attributes
-        that may not be present on LoRA wrapper classes.
-        """
-        return (self.key_dim * 2 + self.value_dim * 2) // self.tp_size
-
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
