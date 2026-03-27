@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
@@ -12,7 +10,6 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
-from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async
 
@@ -52,23 +49,6 @@ def safe_apply_chat_template(
 
 
 class MistralRenderer(BaseRenderer[MistralTokenizer]):
-    @classmethod
-    def from_config(  # type: ignore[override]
-        cls,
-        config: VllmConfig,
-        tokenizer_kwargs: dict[str, Any],
-    ) -> "MistralRenderer":
-        model_config = config.model_config
-        if model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = cached_get_tokenizer(
-                tokenizer_cls=MistralTokenizer,
-                **tokenizer_kwargs,
-            )
-
-        return cls(config, tokenizer)
-
     def __init__(
         self,
         config: VllmConfig,
@@ -76,9 +56,8 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
     ) -> None:
         super().__init__(config, tokenizer)
 
-        self._apply_chat_template_executor = ThreadPoolExecutor(max_workers=1)
         self._apply_chat_template_async = make_async(
-            safe_apply_chat_template, executor=self._apply_chat_template_executor
+            safe_apply_chat_template, executor=self._executor
         )
 
     def render_messages(

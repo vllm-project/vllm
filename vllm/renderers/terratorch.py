@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
 
-from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
@@ -21,18 +19,6 @@ logger = init_logger(__name__)
 
 
 class TerratorchRenderer(BaseRenderer):
-    @classmethod
-    def from_config(
-        cls,
-        config: VllmConfig,  # type: ignore[override]
-        tokenizer_kwargs: dict[str, Any],
-    ) -> "TerratorchRenderer":
-        model_config = config.model_config
-        if not model_config.skip_tokenizer_init:
-            raise ValueError("Terratorch renderer requires `skip_tokenizer_init=True`")
-
-        return cls(config, None)
-
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
