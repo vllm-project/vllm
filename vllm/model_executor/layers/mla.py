@@ -210,14 +210,12 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         self.prefix = prefix
 
-        # Determine if RMSNorm+Quant fusion should be enabled (ATOM pattern)
-        # Fusion is enabled when AITER is available and quantization is FP8
+        # Enable RMSNorm+Quant fusion when AITER is available with FP8
         self.quant_config = quant_config
         self.quant_dtype = None
         self.fuse_qknorm_quant = False
 
         if _AITER_AVAILABLE and quant_config is not None:
-            # Check if quant_config is FP8
             from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
             if isinstance(quant_config, Fp8Config):
