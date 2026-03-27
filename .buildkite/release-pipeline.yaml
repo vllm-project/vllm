@@ -90,6 +90,14 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+  - label: "Generate and upload wheel indices"
+    depends_on: "build-wheels"
+    allow_dependency_failure: true
+    agents:
+      queue: cpu_queue_release
+    commands:
+      - "bash .buildkite/scripts/generate-and-upload-nightly-index.sh"
+
   - group: "Build release Docker images"
     key: "build-release-images"
     steps:
