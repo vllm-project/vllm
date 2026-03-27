@@ -386,6 +386,9 @@ ENV MIOPEN_DEBUG_CONV_GEMM=0
 # will not be imported by other tests
 RUN mkdir src && mv vllm src/vllm
 
+# This is a workaround to ensure pytest exits with the correct status code in CI tests.
+RUN echo "import os\n\ndef pytest_sessionfinish(session, exitstatus):\n    os._exit(int(exitstatus))" > /vllm-workspace/conftest.py
+
 # -----------------------
 # Final vLLM image
 FROM base AS final
