@@ -40,6 +40,7 @@ import asyncio
 import base64
 import concurrent.futures
 import dataclasses
+import json
 import logging
 import os
 import pickle
@@ -79,6 +80,25 @@ class _TQStorageConfig:
     storage_unit_infos: Any | None = None
 
 
+def _deserialize_env_var(b64_str: str) -> Any:
+    """Deserialize a base64-encoded environment variable value.
+
+    Prefers JSON for security (avoids arbitrary code execution).  Falls
+    back to pickle for backward compatibility with older verl versions,
+    but logs a warning so operators know they should upgrade.
+    """
+    raw = base64.b64decode(b64_str)
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        logger.warning(
+            "TQMediaConnector: env var uses pickle serialization. "
+            "This is insecure — please upgrade verl to use JSON-based "
+            "serialize_tq_info(). Falling back to pickle.loads()."
+        )
+        return pickle.loads(raw)  # noqa: S301
+
+
 def _init_tq_client():
     """Initialise the per-process TQ client singleton (thread-safe).
 
@@ -110,7 +130,7 @@ def _init_tq_client():
 
         from transfer_queue import AsyncTransferQueueClient
 
-        controller_info = pickle.loads(base64.b64decode(controller_info_b64))
+        controller_info = _deserialize_env_var(controller_info_b64)
         storage_backend = os.environ.get(
             _ENV_TQ_STORAGE_BACKEND, "AsyncSimpleStorageManager"
         )
@@ -118,9 +138,7 @@ def _init_tq_client():
         storage_unit_infos = None
         storage_unit_infos_b64 = os.environ.get(_ENV_TQ_STORAGE_UNIT_INFOS)
         if storage_unit_infos_b64:
-            storage_unit_infos = pickle.loads(
-                base64.b64decode(storage_unit_infos_b64)
-            )
+            storage_unit_infos = _deserialize_env_var(storage_unit_infos_b64)
 
         client_id = f"vllm_tq_media_{os.getpid()}"
         client = AsyncTransferQueueClient(client_id, controller_info)
