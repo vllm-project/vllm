@@ -218,85 +218,86 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
         return [torch.ops.symm_mem.fused_all_gather_scaled_matmul.default]
 
 
-class _BaseFlashInferBMMFP8Model(torch.nn.Module):
-    """Base for FlashInfer bmm_fp8 test models."""
-
-    def __init__(self, hidden_size=16, dtype=torch.float16):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.dtype = dtype
-        self.register_buffer(
-            "weight", torch.rand([hidden_size, hidden_size]).to(FP8_DTYPE).t()
-        )
-        self.register_buffer("scale_a", torch.tensor(1.0, dtype=torch.float32))
-        self.register_buffer("scale_b", torch.tensor(1.0, dtype=torch.float32))
-        self.tp_world_size = get_tensor_model_parallel_world_size()
-        self.tp_group_name = get_tp_group().unique_name
+FLASHINFER_RS_CASE = "flashinfer_rs"
+FLASHINFER_AG_CASE = "flashinfer_ag"
 
 
-class TestFlashInferBMMFP8RSModel(_BaseFlashInferBMMFP8Model):
-    def forward(self, input: torch.Tensor):
-        """bmm_fp8 + reduce_scatter - matches FlashInfer's traced pattern."""
+def _build_flashinfer_rs_case(
+    dtype: torch.dtype,
+    tp_world_size: int,
+    tp_group_name: str,
+):
+    def fn(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+    ):
         fp8_input = input.to(FP8_DTYPE)
         bmm_result = torch.ops.vllm.bmm_fp8.default(
             fp8_input.unsqueeze(0),
-            self.weight.unsqueeze(0),
-            self.scale_a,
-            self.scale_b,
-            self.dtype,
+            weight.unsqueeze(0),
+            scale_a,
+            scale_b,
+            dtype,
             "auto",
         )
         mm_result = torch.ops.aten.reshape.default(
             bmm_result,
-            [fp8_input.shape[0], self.weight.shape[1]],
+            [fp8_input.shape[0], weight.shape[1]],
         )
         return torch.ops.vllm.reduce_scatter.default(
             mm_result,
             dim=0,
-            world_size=self.tp_world_size,
-            group_name=self.tp_group_name,
+            world_size=tp_world_size,
+            group_name=tp_group_name,
         )
 
-    def ops_in_model_before(self):
-        return [torch.ops.vllm.reduce_scatter.default]
-
-    def ops_in_model_after(self):
-        return [torch.ops.vllm.fused_flashinfer_scaled_matmul_reduce_scatter.default]
+    ops_before = [torch.ops.vllm.reduce_scatter.default]
+    ops_after = [torch.ops.vllm.fused_flashinfer_scaled_matmul_reduce_scatter.default]
+    return fn, ops_before, ops_after
 
 
-class TestAGFlashInferBMMFP8Model(_BaseFlashInferBMMFP8Model):
-    def forward(self, input: torch.Tensor):
-        """all_gather + bmm_fp8 - matches FlashInfer's traced pattern."""
+def _build_flashinfer_ag_case(
+    dtype: torch.dtype,
+    hidden_size: int,
+    tp_world_size: int,
+    tp_group_name: str,
+):
+    def fn(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+    ):
         fp8_input = input.to(FP8_DTYPE)
         all_gather = torch.ops.vllm.all_gather.default(
             fp8_input,
             dim=0,
-            world_size=self.tp_world_size,
-            group_name=self.tp_group_name,
+            world_size=tp_world_size,
+            group_name=tp_group_name,
         )
         bmm_result = torch.ops.vllm.bmm_fp8.default(
             all_gather.unsqueeze(0),
-            self.weight.unsqueeze(0),
-            self.scale_a,
-            self.scale_b,
-            self.dtype,
+            weight.unsqueeze(0),
+            scale_a,
+            scale_b,
+            dtype,
             "auto",
         )
         output = torch.ops.aten.reshape.default(
             bmm_result,
-            [all_gather.shape[0], self.weight.shape[1]],
+            [all_gather.shape[0], weight.shape[1]],
         )
-        q_size = self.hidden_size // 2
-        kv_size = self.hidden_size // 4
+        q_size = hidden_size // 2
+        kv_size = hidden_size // 4
         return torch.ops.aten.split_with_sizes.default(
             output, [q_size, kv_size, kv_size], -1
         )
 
-    def ops_in_model_before(self):
-        return [torch.ops.vllm.all_gather.default]
-
-    def ops_in_model_after(self):
-        return [torch.ops.vllm.fused_all_gather_flashinfer_scaled_matmul.default]
+    ops_before = [torch.ops.vllm.all_gather.default]
+    ops_after = [torch.ops.vllm.fused_all_gather_flashinfer_scaled_matmul.default]
+    return fn, ops_before, ops_after
 
 
 @multi_gpu_test(num_gpus=2)
@@ -318,7 +319,7 @@ class TestAGFlashInferBMMFP8Model(_BaseFlashInferBMMFP8Model):
 @pytest.mark.parametrize("dynamic", [True, False])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_async_tp_pass_replace(
-    test_model: str,
+    test_model: type[torch.nn.Module],
     batch_size: int,
     seq_len: int,
     hidden_size: int,
@@ -365,7 +366,7 @@ def test_async_tp_pass_replace(
 def async_tp_pass_on_test_model(
     local_rank: int,
     world_size: int,
-    test_model_cls: torch.nn.Module,
+    test_model_cls: type[torch.nn.Module],
     batch_size: int,
     seq_len: int,
     hidden_size: int,
@@ -449,7 +450,7 @@ def async_tp_pass_on_test_model(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "test_model",
-    [TestFlashInferBMMFP8RSModel, TestAGFlashInferBMMFP8Model],
+    [FLASHINFER_RS_CASE, FLASHINFER_AG_CASE],
 )
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [16])
@@ -457,7 +458,7 @@ def async_tp_pass_on_test_model(
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_async_tp_pass_replace_flashinfer(
-    test_model: str,
+    test_case: str,
     batch_size: int,
     seq_len: int,
     hidden_size: int,
@@ -470,7 +471,7 @@ def test_async_tp_pass_replace_flashinfer(
 
     torch.multiprocessing.spawn(
         flashinfer_async_tp_pass_on_test_model,
-        args=(num_processes, test_model, batch_size, seq_len, hidden_size, dtype),
+        args=(num_processes, test_case, batch_size, seq_len, hidden_size, dtype),
         nprocs=num_processes,
     )
 
@@ -478,7 +479,7 @@ def test_async_tp_pass_replace_flashinfer(
 def flashinfer_async_tp_pass_on_test_model(
     local_rank: int,
     world_size: int,
-    test_model_cls: torch.nn.Module,
+    test_case: str,
     batch_size: int,
     seq_len: int,
     hidden_size: int,
@@ -522,13 +523,37 @@ def flashinfer_async_tp_pass_on_test_model(
 
         async_tp_pass = AsyncTPPass(vllm_config)
         backend = TestBackend(async_tp_pass)
-        model = test_model_cls(hidden_size, dtype)
         hidden_states = torch.randn(
             (batch_size * seq_len, hidden_size), dtype=dtype, requires_grad=False
         )
-        graph = make_fx(model, tracing_mode="fake")(hidden_states)
+        weight = torch.empty([hidden_size, hidden_size], dtype=FP8_DTYPE)
+        scale_a = torch.tensor(1.0, dtype=torch.float32)
+        scale_b = torch.tensor(1.0, dtype=torch.float32)
+        tp_world_size = get_tensor_model_parallel_world_size()
+        tp_group_name = get_tp_group().unique_name
+
+        if test_case == FLASHINFER_RS_CASE:
+            fn, ops_before, ops_after = _build_flashinfer_rs_case(
+                dtype,
+                tp_world_size,
+                tp_group_name,
+            )
+        else:
+            fn, ops_before, ops_after = _build_flashinfer_ag_case(
+                dtype,
+                hidden_size,
+                tp_world_size,
+                tp_group_name,
+            )
+
+        graph = make_fx(fn, tracing_mode="fake")(
+            hidden_states,
+            weight,
+            scale_a,
+            scale_b,
+        )
         backend.post_pass(graph.graph)
 
         assert async_tp_pass.matched_count == 1
-        backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
-        backend.check_after_ops(model.ops_in_model_after())
+        backend.check_before_ops(ops_before, fully_replaced=False)
+        backend.check_after_ops(ops_after)
