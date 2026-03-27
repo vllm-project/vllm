@@ -777,6 +777,8 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
     def do_qk_norm_rope_kvcache_update(self,
         layer: AttentionLayer,
         qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
         positions: torch.Tensor,
         q_weight: torch.Tensor,
         k_weight: torch.Tensor,
@@ -787,9 +789,10 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         layer_slot_mapping: torch.Tensor,
     ):
         """
-        If `fused_qk_norm_rope_kvcache_supported` returns True, this method will be called
-        by torch.ops.vllm.fused_qk_norm_rope_and_unified_kv_cache_update
-        to perform the inplace QKNorm+RoPE and KV cache update.
+        If `fused_qk_norm_rope_kvcache_supported` returns True, this method
+        will be called by the fused custom op. Applies QK-norm + RoPE and
+        writes K/V to the KV cache. Results are written to the pre-allocated
+        q_out and k_out tensors; V is split from QKV at the graph level.
         """
         raise NotImplementedError
 

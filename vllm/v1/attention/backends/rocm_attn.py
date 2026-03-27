@@ -481,6 +481,64 @@ class RocmAttentionImpl(AttentionImpl):
                 layer._v_scale,
             )
 
+    def fused_qk_norm_rope_kvcache_supported(self):
+        return rocm_aiter_ops.is_enabled()
+
+    def do_qk_norm_rope_kvcache_update(self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        key_cache, value_cache = kv_cache.unbind(0)
+
+        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        if is_fp8_kv_cache:
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
+
+        num_heads_q = layer.num_heads
+        num_heads_k = layer.num_kv_heads
+        num_heads_v = layer.num_kv_heads
+        head_dim = layer.head_size
+        use_shuffle_layout = rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        block_size = key_cache.shape[1]
+        x = 16 // key_cache.element_size()
+
+        rocm_aiter_ops.hip_qk_norm_rope_and_cache(
+            qkv,
+            q_weight,
+            k_weight,
+            cos_sin_cache,
+            positions,
+            num_heads_q,
+            num_heads_k,
+            num_heads_v,
+            head_dim,
+            is_neox,
+            rms_norm_eps,
+            q_out,
+            key_cache,
+            value_cache,
+            layer_slot_mapping,
+            layer._k_scale,
+            layer._v_scale,
+            k_out,
+            None,
+            True,
+            use_shuffle_layout,
+            block_size,
+            x,
+        )
+
     def fused_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
 
