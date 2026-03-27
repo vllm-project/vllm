@@ -260,7 +260,7 @@ class _BaseFlashInferBMMFP8Model(torch.nn.Module):
             self.scale_b,
             self.dtype,
             "auto",
-        ).view(input.shape[0], self.weight.shape[1])
+        ).reshape(input.shape[0], self.weight.shape[1])
 
 
 class TestFlashInferBMMFP8RSModel(_BaseFlashInferBMMFP8Model):
