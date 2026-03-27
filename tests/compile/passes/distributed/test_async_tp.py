@@ -222,9 +222,8 @@ class _BaseFlashInferBMMFP8Model(torch.nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.dtype = dtype
-        # FlashInfer bmm_fp8 takes non-transposed [K, N] weights with per-tensor
-        # scalar scales.
-        self.weight = torch.empty([hidden_size, hidden_size], dtype=FP8_DTYPE)
+        # Match the layout used by the existing FlashInfer FP8 test helpers.
+        self.weight = torch.rand([hidden_size, hidden_size]).to(FP8_DTYPE).t()
         self.scale_a = torch.tensor(1.0, dtype=torch.float32)
         self.scale_b = torch.tensor(1.0, dtype=torch.float32)
 
