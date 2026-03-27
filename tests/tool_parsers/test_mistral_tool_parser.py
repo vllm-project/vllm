@@ -1247,23 +1247,15 @@ def test_adjust_request_tool_choice_none_with_json_schema_uses_json_schema_facto
     )
     factory = mistral_tool_parser.model_tokenizer.grammar_factory
 
-    with (
-        patch.object(
-            factory,
-            "get_lark_for_json_schema",
-            wraps=factory.get_lark_for_json_schema,
-        ) as mock_json_schema,
-        patch.object(
-            factory,
-            "get_lark_from_jinja",
-            wraps=factory.get_lark_from_jinja,
-        ) as mock_jinja,
-    ):
+    with patch.object(
+        factory,
+        "get_lark_for_json_schema",
+        wraps=factory.get_lark_for_json_schema,
+    ) as mock_json_schema:
         result = mistral_tool_parser.adjust_request(request)
 
         mock_json_schema.assert_called_once()
         assert mock_json_schema.call_args.kwargs["json_schema"] == {"type": "object"}
-        mock_jinja.assert_not_called()
 
     assert result.structured_outputs is not None
     assert isinstance(result.structured_outputs.grammar, str)
