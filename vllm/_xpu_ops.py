@@ -7,12 +7,116 @@ import torch
 
 try:
     from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+    _HAS_XPU_KERNELS = True
 except ImportError:
-    # Stub for environments without vllm_xpu_kernels (e.g. JGS simulator)
-    def flash_attn_varlen_func(**kwargs):
-        raise NotImplementedError(
-            "flash_attn_varlen_func requires vllm_xpu_kernels"
-        )
+    _HAS_XPU_KERNELS = False
+
+    def _flash_attn_varlen_sdpa_fallback(
+        *,
+        out: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor | None = None,
+        seqused_k: torch.Tensor | None = None,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        softmax_scale: float | None = None,
+        causal: bool = False,
+        block_table: torch.Tensor | None = None,
+        s_aux: torch.Tensor | None = None,
+        window_size: tuple[int, int] = (-1, -1),
+        return_softmax_lse: bool | None = False,
+        **kwargs,
+    ):
+        """Pure-PyTorch fallback for flash_attn_varlen_func.
+
+        Uses torch.nn.functional.scaled_dot_product_attention per-sequence.
+        Slow but works on any device (including XPU simulator).
+        """
+        import torch.nn.functional as F
+
+        num_heads_q = q.shape[1]
+        num_heads_k = k.shape[1]
+        head_dim = q.shape[2]
+
+        if softmax_scale is None:
+            softmax_scale = head_dim ** -0.5
+
+        batch_size = cu_seqlens_q.shape[0] - 1
+        lse_list = [] if return_softmax_lse else None
+
+        for i in range(batch_size):
+            q_start = cu_seqlens_q[i].item()
+            q_end = cu_seqlens_q[i + 1].item()
+            seq_len_q = q_end - q_start
+
+            if cu_seqlens_k is not None:
+                k_start = cu_seqlens_k[i].item()
+                k_end = cu_seqlens_k[i + 1].item()
+            else:
+                k_start = 0
+                k_end = max_seqlen_k
+
+            seq_len_k = k_end - k_start
+
+            # q: [total_q, num_heads, head_dim] → [1, num_heads, seq_len_q, head_dim]
+            q_i = q[q_start:q_end].transpose(0, 1).unsqueeze(0)
+
+            if block_table is not None:
+                # Paged KV cache: gather from pages
+                # k, v are cache tensors: [num_blocks, block_size, num_heads, head_dim]
+                page_table_i = block_table[i]
+                block_size = k.shape[1]
+                num_tokens = seq_len_k
+                # Flatten the page table into token indices
+                k_pages = []
+                v_pages = []
+                tokens_left = num_tokens
+                for page_idx in page_table_i:
+                    if tokens_left <= 0:
+                        break
+                    page = page_idx.item()
+                    take = min(block_size, tokens_left)
+                    k_pages.append(k[page, :take])  # [take, num_heads_k, head_dim]
+                    v_pages.append(v[page, :take])
+                    tokens_left -= take
+                k_i = torch.cat(k_pages, dim=0).transpose(0, 1).unsqueeze(0)
+                v_i = torch.cat(v_pages, dim=0).transpose(0, 1).unsqueeze(0)
+            else:
+                k_i = k[k_start:k_end].transpose(0, 1).unsqueeze(0)
+                v_i = v[k_start:k_end].transpose(0, 1).unsqueeze(0)
+
+            # GQA: repeat KV heads to match Q heads
+            if num_heads_q != num_heads_k:
+                repeat = num_heads_q // num_heads_k
+                k_i = k_i.repeat_interleave(repeat, dim=1)
+                v_i = v_i.repeat_interleave(repeat, dim=1)
+
+            # Use SDPA (works on CPU, CUDA, XPU)
+            attn_out = F.scaled_dot_product_attention(
+                q_i.to(torch.float32),
+                k_i.to(torch.float32),
+                v_i.to(torch.float32),
+                is_causal=causal and seq_len_q > 1,
+                scale=softmax_scale,
+            )
+
+            # attn_out: [1, num_heads, seq_len_q, head_dim] → [seq_len_q, num_heads, head_dim]
+            attn_out = attn_out.squeeze(0).transpose(0, 1).to(out.dtype)
+            out[q_start:q_end].copy_(attn_out)
+
+            if return_softmax_lse and lse_list is not None:
+                # Compute log-sum-exp for compatibility (approximate)
+                lse_i = torch.zeros(num_heads_q, seq_len_q, device=q.device, dtype=torch.float32)
+                lse_list.append(lse_i)
+
+        if return_softmax_lse:
+            return out, torch.cat(lse_list, dim=-1) if lse_list else None
+        return out
+
+    flash_attn_varlen_func = _flash_attn_varlen_sdpa_fallback
 
 from vllm.logger import init_logger
 
