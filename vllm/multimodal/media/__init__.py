@@ -24,5 +24,9 @@ __all__ = [
     "VideoMediaIO",
     "MEDIA_CONNECTOR_REGISTRY",
     "MediaConnector",
-    "TQMediaConnector",
 ]
+
+# Only export TQMediaConnector when the optional dependency is available,
+# so that ``from vllm.multimodal.media import *`` never exposes ``None``.
+if TQMediaConnector is not None:
+    __all__.append("TQMediaConnector")

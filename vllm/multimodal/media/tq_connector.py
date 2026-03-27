@@ -3,35 +3,55 @@
 TransferQueue MediaConnector for vLLM.
 
 Registers a "tq" connector into vLLM's MEDIA_CONNECTOR_REGISTRY so that
-vLLM can resolve ``tq://<partition_id>/<global_index>`` URLs transparently,
-just like ``http://`` or ``data:`` URLs.
+vLLM can resolve ``tq://<partition_id>/<batch_key>/<index>`` URLs
+transparently, just like ``http://`` or ``data:`` URLs.
 
 Usage:
     1. Set env var: ``VLLM_MEDIA_CONNECTOR=tq``
-    2. Pass image URLs like ``tq://mm_images/42`` in chat completion requests
-       or directly in ``image_data`` of ``generate()`` calls.
+    2. Pass image URLs like ``tq://mm_images/<batch_key>/0`` in chat
+       completion requests or directly in ``image_data`` of ``generate()``
+       calls.
     3. vLLM will fetch the image bytes from TransferQueue and decode them.
 
 The TQ client is lazily initialised on the first ``tq://`` request inside
 the **rank-0 vLLM server process** (the Ray actor that owns the engine).
 Connection details are read from environment variables injected by the
 verl trainer at launch time.
+
+Storage format
+--------------
+Images are stored in **batched** form by ``verl.utils.tq_multimodal``:
+
+*  A single TQ KV entry per batch, keyed by ``batch_key`` (a uuid4 hex).
+*  Fields inside the entry:
+
+   - ``pixel_flat``  – ``[1, total_elements]`` contiguous uint8 tensor of
+     all images' pixels concatenated.
+   - ``shapes``      – ``[1, N, 3]`` int64 tensor of ``[H, W, C]`` per image.
+   - ``offsets``     – ``[1, N]`` int64 tensor of byte offsets into
+     ``pixel_flat`` for each image.
+
+The ``<index>`` in the URL selects which image within the batch to decode.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import concurrent.futures
+import dataclasses
 import logging
 import os
+import pickle
 import threading
+from io import BytesIO
 from typing import Any, TypeVar
 
-import numpy as np
 from PIL import Image
 from urllib3.util import parse_url
 
-from .connector import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from .base import MediaIO
+from .connector import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 
 logger = logging.getLogger(__name__)
 
@@ -50,12 +70,25 @@ _ENV_TQ_STORAGE_UNIT_INFOS = "VERL_TQ_STORAGE_UNIT_INFOS"
 _ENV_TQ_STORAGE_BACKEND = "VERL_TQ_STORAGE_BACKEND"
 
 
+@dataclasses.dataclass(frozen=True)
+class _TQStorageConfig:
+    """Typed configuration object for ``initialize_storage_manager``."""
+
+    storage_backend: str
+    controller_info: Any
+    storage_unit_infos: Any | None = None
+
+
 def _init_tq_client():
     """Initialise the per-process TQ client singleton (thread-safe).
 
     Called lazily on the first ``tq://`` URL resolution.  All configuration
     is read from environment variables that the verl trainer injects into
     the Ray actor's ``runtime_env``.
+
+    Raises:
+        RuntimeError: If required environment variables are missing or if
+            TQ client initialisation fails.
     """
     global _tq_client
     if _tq_client is not None:
@@ -75,59 +108,74 @@ def _init_tq_client():
                 "the vLLM server."
             )
 
-        import base64
-        import pickle
-
         from transfer_queue import AsyncTransferQueueClient
 
         controller_info = pickle.loads(base64.b64decode(controller_info_b64))
-        storage_backend = os.environ.get(_ENV_TQ_STORAGE_BACKEND, "AsyncSimpleStorageManager")
+        storage_backend = os.environ.get(
+            _ENV_TQ_STORAGE_BACKEND, "AsyncSimpleStorageManager"
+        )
 
         storage_unit_infos = None
         storage_unit_infos_b64 = os.environ.get(_ENV_TQ_STORAGE_UNIT_INFOS)
         if storage_unit_infos_b64:
-            storage_unit_infos = pickle.loads(base64.b64decode(storage_unit_infos_b64))
+            storage_unit_infos = pickle.loads(
+                base64.b64decode(storage_unit_infos_b64)
+            )
 
         client_id = f"vllm_tq_media_{os.getpid()}"
         client = AsyncTransferQueueClient(client_id, controller_info)
 
-        # ``initialize_storage_manager`` expects a config-like object with
-        # attributes ``controller_info``, ``storage_unit_infos``, etc.
-        from types import SimpleNamespace
-
-        tq_config = SimpleNamespace(
+        tq_config = _TQStorageConfig(
             storage_backend=storage_backend,
             controller_info=controller_info,
             storage_unit_infos=storage_unit_infos,
         )
-        client.initialize_storage_manager(
-            manager_type=storage_backend,
-            config=tq_config,
-        )
+
+        try:
+            client.initialize_storage_manager(
+                manager_type=storage_backend,
+                config=tq_config,
+            )
+        except Exception:
+            logger.exception(
+                "TQMediaConnector: failed to initialise TQ storage manager"
+            )
+            raise
 
         _tq_client = client
-        logger.info("TQMediaConnector: TQ client initialised (pid=%s)", os.getpid())
+        logger.info(
+            "TQMediaConnector: TQ client initialised (pid=%s)", os.getpid()
+        )
 
     return _tq_client
 
 
-def _parse_tq_url(url: str) -> tuple[str, int]:
-    """Parse ``tq://<partition_id>/<global_index>`` into components.
+def _parse_tq_url(url: str) -> tuple[str, str, int]:
+    """Parse ``tq://<partition_id>/<batch_key>/<index>`` into components.
 
     Returns:
-        (partition_id, global_index)
+        (partition_id, batch_key, index)
     """
     url_spec = parse_url(url)
-    # url_spec.host = partition_id, url_spec.path = /<global_index>
+    # url_spec.host = partition_id, url_spec.path = /<batch_key>/<index>
     partition_id = url_spec.host or ""
     path = (url_spec.path or "").lstrip("/")
-    if not partition_id or not path:
+    parts = path.split("/") if path else []
+    if not partition_id or len(parts) != 2:
         raise ValueError(
             f"Invalid tq:// URL: {url!r}.  "
-            "Expected format: tq://<partition_id>/<global_index>"
+            "Expected format: tq://<partition_id>/<batch_key>/<index>"
         )
-    global_index = int(path)
-    return partition_id, global_index
+    batch_key = parts[0]
+    index = int(parts[1])
+    return partition_id, batch_key, index
+
+
+def _tensor_to_numpy(tensor):
+    """Safely convert a tensor (possibly on GPU) to a numpy array."""
+    if hasattr(tensor, "cpu"):
+        tensor = tensor.detach().cpu()
+    return tensor.numpy()
 
 
 # ---------------------------------------------------------------------------
@@ -179,45 +227,88 @@ class TQMediaConnector(MediaConnector):
     # -- TQ-specific helpers -----------------------------------------------
 
     def _load_from_tq_sync(self, url: str, media_io: MediaIO[_M]) -> _M:
-        """Synchronous fetch from TransferQueue."""
-        loop = asyncio.new_event_loop()
+        """Synchronous fetch from TransferQueue.
+
+        Reuses an existing event loop if one is running in the current
+        thread (e.g. Ray's asyncio loop); otherwise creates a temporary
+        loop.  This avoids the pitfall of ``asyncio.new_event_loop()``
+        conflicting with TQ client internals bound to another loop.
+        """
         try:
-            return loop.run_until_complete(self._load_from_tq_async(url, media_io))
-        finally:
-            loop.close()
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            # We are inside an async context (e.g. Ray actor).  Schedule the
+            # coroutine on the *existing* loop via a concurrent.futures.Future
+            # so that TQ client coroutines run on the same loop.
+            future: concurrent.futures.Future = asyncio.run_coroutine_threadsafe(
+                self._load_from_tq_async(url, media_io), loop
+            )
+            return future.result()
+        else:
+            # No running loop — safe to create a temporary one.
+            tmp_loop = asyncio.new_event_loop()
+            try:
+                return tmp_loop.run_until_complete(
+                    self._load_from_tq_async(url, media_io)
+                )
+            finally:
+                tmp_loop.close()
 
     async def _load_from_tq_async(self, url: str, media_io: MediaIO[_M]) -> _M:
         """Asynchronous fetch from TransferQueue.
 
-        The image is stored in TQ as a ``pixel_data`` field — a uint8 tensor
-        of shape ``[H, W, C]``.  We reconstruct it as a PIL Image and pass it
-        through ``media_io`` for mode conversion (e.g. RGBA → RGB).
+        Images are stored in batched form (see module docstring).  This
+        method retrieves the batch entry and extracts the single image at
+        the requested ``index``.
         """
-        partition_id, global_index = _parse_tq_url(url)
+        partition_id, batch_key, index = _parse_tq_url(url)
         client = _init_tq_client()
 
-        # Retrieve the metadata for this single image sample, then fetch data.
+        # Retrieve the batch entry by its explicit KV key.
         metadata = await client.async_kv_retrieve_meta(
-            keys=[str(global_index)],
+            keys=[batch_key],
             partition_id=partition_id,
             create=False,
         )
         td = await client.async_get_data(metadata)
 
-        # Expect a ``pixel_data`` field: uint8 tensor [H, W, C]
-        pixel_tensor = td["pixel_data"][0]  # first (and only) sample
-        pixel_np = pixel_tensor.numpy()
+        # Validate expected fields.
+        for field in ("pixel_flat", "shapes", "offsets"):
+            if field not in td:
+                available = list(td.keys()) if hasattr(td, "keys") else "N/A"
+                raise ValueError(
+                    f"TQ data for {url!r} does not contain '{field}' field.  "
+                    f"Available fields: {available}"
+                )
 
-        # Retrieve image dimensions from metadata (stored as custom_meta)
-        height, width = pixel_np.shape[0], pixel_np.shape[1]
-        channels = pixel_np.shape[2] if pixel_np.ndim == 3 else 1
-        mode = "RGB" if channels == 3 else ("RGBA" if channels == 4 else "L")
+        pixel_flat = td["pixel_flat"][0]   # [total_elements]
+        shapes = td["shapes"][0]           # [N, 3]
+        offsets_t = td["offsets"][0]        # [N]
+
+        # Bounds check on the requested index.
+        num_images = shapes.shape[0]
+        if index < 0 or index >= num_images:
+            raise IndexError(
+                f"Image index {index} out of range for batch with "
+                f"{num_images} images (URL: {url!r})"
+            )
+
+        h, w, c = (int(v) for v in shapes[index].tolist())
+        offset = int(offsets_t[index].item())
+        num_elements = h * w * c
+        pixel_data = pixel_flat[offset : offset + num_elements].reshape(h, w, c)
+        pixel_np = _tensor_to_numpy(pixel_data)
+
+        if c == 1:
+            pixel_np = pixel_np.squeeze(2)  # restore (H, W) for grayscale
+        mode = "RGB" if c == 3 else ("RGBA" if c == 4 else "L")
 
         image = Image.fromarray(pixel_np, mode=mode)
 
         # Run through media_io for mode conversion / wrapping with MediaWithBytes
-        from io import BytesIO
-
         buf = BytesIO()
         image.save(buf, format="PNG")
         image_bytes = buf.getvalue()
