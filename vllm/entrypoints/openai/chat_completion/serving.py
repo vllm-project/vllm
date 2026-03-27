@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Final
 
 import partial_json_parser
@@ -18,6 +19,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
     get_history_tool_calls_cnt,
+    get_tool_call_id_type,
     make_tool_call_id,
 )
 from vllm.entrypoints.logger import RequestLogger
@@ -61,7 +63,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
-from vllm.inputs.data import ProcessorInputs
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -151,15 +153,7 @@ class OpenAIServingChat(OpenAIServing):
                 get_stop_tokens_for_assistant_actions()
             )
 
-        # Handle tool call ID type for Kimi K2 (supporting test mocking via overrides)
-        hf_overrides = getattr(self.model_config, "hf_overrides", None)
-        if self.model_config.hf_text_config.model_type == "kimi_k2" or (
-            isinstance(hf_overrides, dict)
-            and hf_overrides.get("model_type") == "kimi_k2"
-        ):
-            self.tool_call_id_type = "kimi_k2"
-        else:
-            self.tool_call_id_type = "random"
+        self.tool_call_id_type = get_tool_call_id_type(self.model_config)
 
         # NOTE(woosuk): While OpenAI's chat completion API supports browsing
         # for some models, currently vLLM doesn't support it. Please use the
@@ -183,7 +177,7 @@ class OpenAIServingChat(OpenAIServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
+    ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """
         Validate the model and preprocess a chat completion request.
 
@@ -191,7 +185,7 @@ class OpenAIServingChat(OpenAIServing):
         engine-aware checks (LoRA model validation, engine health).
 
         Returns:
-            A tuple of (conversation, engine_prompts) on success,
+            A tuple of (conversation, engine_inputs) on success,
             or an ErrorResponse on failure.
         """
         error_check_ret = await self._check_model(request)
@@ -237,7 +231,7 @@ class OpenAIServingChat(OpenAIServing):
         if isinstance(result, ErrorResponse):
             return result
 
-        conversation, engine_prompts = result
+        conversation, engine_inputs = result
 
         request_id = (
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
@@ -257,13 +251,13 @@ class OpenAIServingChat(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
-        for i, engine_prompt in enumerate(engine_prompts):
-            prompt_token_ids = self._extract_prompt_components(engine_prompt).token_ids
+        for i, engine_input in enumerate(engine_inputs):
+            prompt_token_ids = self._extract_prompt_components(engine_input).token_ids
 
             # If we are creating sub requests for multiple prompts, ensure that they
             # have unique request ids.
             sub_request_id = (
-                request_id if len(engine_prompts) == 1 else f"{request_id}_{i}"
+                request_id if len(engine_inputs) == 1 else f"{request_id}_{i}"
             )
 
             max_tokens = get_max_tokens(
@@ -271,7 +265,7 @@ class OpenAIServingChat(OpenAIServing):
                 request.max_completion_tokens
                 if request.max_completion_tokens is not None
                 else request.max_tokens,
-                self._extract_prompt_len(engine_prompt),
+                self._extract_prompt_len(engine_input),
                 self.default_sampling_params,
                 self.override_max_tokens,
             )
@@ -289,7 +283,7 @@ class OpenAIServingChat(OpenAIServing):
 
             self._log_inputs(
                 sub_request_id,
-                engine_prompt,
+                engine_input,
                 params=sampling_params,
                 lora_request=lora_request,
             )
@@ -302,21 +296,24 @@ class OpenAIServingChat(OpenAIServing):
 
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(
-                    prompt=engine_prompt,
+                    prompt=engine_input,
                     request_id=sub_request_id,
                     params=sampling_params,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                 )
             else:
-                reasoning_ended = (
-                    reasoning_parser.is_reasoning_end(prompt_token_ids or [])
-                    if reasoning_parser
-                    else None
-                )
+                if not request.include_reasoning:
+                    reasoning_ended = True
+                elif reasoning_parser:
+                    reasoning_ended = reasoning_parser.is_reasoning_end(
+                        prompt_token_ids or []
+                    )
+                else:
+                    reasoning_ended = None
 
                 generator = self.engine_client.generate(
-                    engine_prompt,
+                    engine_input,
                     sampling_params,
                     sub_request_id,
                     lora_request=lora_request,
@@ -568,7 +565,7 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
                 tool_parsers: list[ToolParser | None] = [
-                    self.tool_parser(tokenizer)
+                    self.tool_parser(tokenizer, request.tools)
                 ] * num_choices
             else:
                 tool_parsers = [None] * num_choices
@@ -1092,6 +1089,7 @@ class OpenAIServingChat(OpenAIServing):
                         #   any tokens that were generated but previously
                         #   matched by partial json parsing
                         # only happens if we are NOT using structured outputs
+                        index = 0
                         auto_tools_called = False
                         if tool_parser:
                             auto_tools_called = len(tool_parser.prev_tool_call_arr) > 0
@@ -1100,15 +1098,14 @@ class OpenAIServingChat(OpenAIServing):
                                 if auto_tools_called
                                 else 0
                             )
-                        else:
-                            index = 0
-
-                        if (
+                        should_check = (
                             self._should_check_for_unstreamed_tool_arg_tokens(
                                 delta_message, output
                             )
-                            and tool_parser
-                        ):
+                        )
+                        # only check if there are any tool calls
+                        # detected by partial parsing
+                        if should_check and tool_parser and auto_tools_called:
                             latest_delta_len = 0
                             if (
                                 isinstance(
@@ -1289,7 +1286,12 @@ class OpenAIServingChat(OpenAIServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
 
-        assert final_res is not None
+        if final_res is None:
+            return self.create_error_response(
+                "No output received from the engine.",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
@@ -1329,7 +1331,7 @@ class OpenAIServingChat(OpenAIServing):
                             "Tokenizer not available when `skip_tokenizer_init=True`"
                         )
 
-                    tool_parser = self.tool_parser(tokenizer)
+                    tool_parser = self.tool_parser(tokenizer, request.tools)
                     # NOTE: We use token_ids for openai tool parser
                     tool_call_info = tool_parser.extract_tool_calls(
                         "",

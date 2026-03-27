@@ -54,6 +54,9 @@ elif sys.platform.startswith("linux") and os.getenv("VLLM_TARGET_DEVICE") is Non
     if torch.version.hip is not None:
         VLLM_TARGET_DEVICE = "rocm"
         logger.info("Auto-detected ROCm")
+    elif torch.version.xpu is not None:
+        VLLM_TARGET_DEVICE = "xpu"
+        logger.info("Auto-detected XPU")
     elif torch.version.cuda is not None:
         VLLM_TARGET_DEVICE = "cuda"
         logger.info("Auto-detected CUDA")
@@ -77,6 +80,66 @@ def is_ninja_available() -> bool:
 
 def is_freethreaded():
     return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+
+
+def should_bundle_tcmalloc() -> bool:
+    import platform
+
+    return (
+        VLLM_TARGET_DEVICE == "cpu"
+        and sys.platform.startswith("linux")
+        and platform.machine() in ("aarch64", "x86_64")
+    )
+
+
+def find_tcmalloc() -> Path | None:
+    try:
+        # get all shared libs the dynamic loader knows about
+        output = subprocess.check_output(
+            ["ldconfig", "-p"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return None
+
+    # search for libtcmalloc and libtcmalloc_minimal
+    for library_pattern in (
+        r"\blibtcmalloc_minimal\.so\.(\d+)\b",
+        r"\blibtcmalloc\.so\.(\d+)\b",
+    ):
+        candidates: list[tuple[int, Path]] = []
+        for line in output.splitlines():
+            match = re.search(library_pattern, line)
+            if match is None or "=>" not in line:
+                continue
+            candidate = Path(line.split("=>")[1].strip())
+            if candidate.exists():
+                candidates.append((int(match.group(1)), candidate))
+
+        if candidates:
+            # if multiple candidates are found, pick the one with the highest
+            # version number
+            return max(candidates, key=lambda item: item[0])[1]
+
+    return None
+
+
+def bundle_tcmalloc(build_lib: str) -> None:
+    tcmalloc_library = find_tcmalloc()
+    if tcmalloc_library is None:
+        logger.warning(
+            "Failed to locate tcmalloc. For best performance, "
+            "please install tcmalloc (e.g. `sudo apt-get "
+            "install -y --no-install-recommends libtcmalloc-minimal4`)"
+        )
+        return
+
+    bundle_dir = os.path.join(build_lib, "vllm", "libs")
+    os.makedirs(bundle_dir, exist_ok=True)
+    bundle_path = os.path.join(bundle_dir, tcmalloc_library.name)
+    shutil.copy2(tcmalloc_library, bundle_path)
+    logger.info("Bundled tcmalloc into wheel: %s", bundle_path)
 
 
 class CMakeExtension(Extension):
@@ -281,6 +344,10 @@ class cmake_build_ext(build_ext):
     def run(self):
         # First, run the standard build_ext command to compile the extensions
         super().run()
+
+        # bundle tcmalloc into CPU wheels for best OOB perf
+        if should_bundle_tcmalloc():
+            bundle_tcmalloc(self.build_lib)
 
         # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
         # directory so that they can be included in the editable build
@@ -597,6 +664,7 @@ class precompiled_wheel_utils:
             with zipfile.ZipFile(wheel_path) as wheel:
                 files_to_copy = [
                     "vllm/_C.abi3.so",
+                    "vllm/_C_stable_libtorch.abi3.so",
                     "vllm/_moe_C.abi3.so",
                     "vllm/_flashmla_C.abi3.so",
                     "vllm/_flashmla_extension_C.abi3.so",
@@ -657,13 +725,18 @@ class precompiled_wheel_utils:
     def get_base_commit_in_main_branch() -> str:
         try:
             # Get the latest commit hash of the upstream main branch.
-            resp_json = subprocess.check_output(
-                [
-                    "curl",
-                    "-s",
-                    "https://api.github.com/repos/vllm-project/vllm/commits/main",
+            curl_cmd = [
+                "curl",
+                "-s",
+                "https://api.github.com/repos/vllm-project/vllm/commits/main",
+            ]
+            github_token = os.getenv("GH_TOKEN", os.getenv("GITHUB_TOKEN"))
+            if github_token:
+                curl_cmd += [
+                    "-H",
+                    f"Authorization: token {github_token}",
                 ]
-            ).decode("utf-8")
+            resp_json = subprocess.check_output(curl_cmd).decode("utf-8")
             upstream_main_commit = json.loads(resp_json)["sha"]
             print(f"Upstream main branch latest commit: {upstream_main_commit}")
 
@@ -927,10 +1000,15 @@ if _is_cpu():
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
+    # also _is_hip() once https://github.com/vllm-project/vllm/issues/35163 is
+    # fixed
+    if _is_cuda():
+        ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
 
 package_data = {
     "vllm": [
         "py.typed",
+        "libs/*.so*",
         "model_executor/layers/fused_moe/configs/*.json",
         "model_executor/layers/quantization/utils/configs/*.json",
         "entrypoints/serve/instrumentator/static/*.js",
@@ -966,17 +1044,19 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
+        # AMD Zen CPU optimizations via zentorch
+        "zen": ["zentorch"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.2.2"],
         "instanttensor": ["instanttensor >= 0.1.5"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
-            "librosa",
+            "av",
+            "resampy",
             "scipy",
             "soundfile",
             "mistral_common[audio]",
-            "av",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         "flashinfer": [],  # Kept for backwards compatibility

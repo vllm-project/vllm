@@ -9,6 +9,7 @@
 #
 # Build targets:
 #   vllm-openai (default): used for serving deployment
+#   vllm-openai-zen: vLLM from source + zentorch from PyPI via vllm[zen]
 #   vllm-test: used for CI tests
 #   vllm-dev: used for development
 #
@@ -160,7 +161,7 @@ RUN ln -s /usr/bin/clangd-14 /usr/bin/clangd
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -e tests/vllm_test_utils
+    uv pip install --no-build-isolation -e tests/vllm_test_utils
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
@@ -220,5 +221,21 @@ LABEL ai.vllm.build.target-arch="${TARGETARCH}"
 LABEL ai.vllm.build.cpu-x86="${VLLM_CPU_X86:-false}"
 LABEL ai.vllm.build.cpu-arm-bf16="${VLLM_CPU_ARM_BF16:-false}"
 LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
+
+ENTRYPOINT ["vllm", "serve"]
+
+
+######################### ZEN CPU PYPI IMAGE #########################
+FROM vllm-openai AS vllm-openai-zen
+
+ARG TARGETARCH
+
+RUN if [ "$TARGETARCH" != "amd64" ]; then \
+        echo "ERROR: vllm-openai-amd only supports --platform=linux/amd64"; \
+        exit 1; \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install "vllm[zen]"
 
 ENTRYPOINT ["vllm", "serve"]

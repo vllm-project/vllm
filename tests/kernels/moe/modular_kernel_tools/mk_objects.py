@@ -33,7 +33,10 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.flashinfer import (
+    has_flashinfer_cutlass_fused_moe,
+    has_flashinfer_nvlink_one_sided,
+)
 from vllm.utils.import_utils import (
     has_aiter,
     has_deep_ep,
@@ -196,10 +199,10 @@ register_experts(
 
 # Disable on blackwell for now
 if has_deep_ep() and not current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
         DeepEPHTPrepareAndFinalize,
     )
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
         DeepEPLLPrepareAndFinalize,
     )
 
@@ -234,15 +237,15 @@ if has_mori():
     )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import (  # noqa: E501
-        FlashInferA2APrepareAndFinalize,
-    )
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
+        FlashInferNVLinkTwoSidedPrepareAndFinalize,
+    )
 
     register_prepare_and_finalize(
-        FlashInferA2APrepareAndFinalize,
+        FlashInferNVLinkTwoSidedPrepareAndFinalize,
         standard_format,
         nvfp4_types + fp8_types,
         blocked_quantization_support=True,
@@ -263,6 +266,36 @@ else:
     FlashInferCutlassMoEPrepareAndFinalize = None
     FlashInferExperts = None
 
+if (
+    has_flashinfer_nvlink_one_sided()
+    and has_flashinfer_cutlass_fused_moe()
+    and current_platform.has_device_capability(100)
+):
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one_sided import (  # noqa: E501
+        FlashInferNVLinkOneSidedPrepareAndFinalize,
+    )
+
+    register_prepare_and_finalize(
+        FlashInferNVLinkOneSidedPrepareAndFinalize,
+        standard_format,
+        nvfp4_types,
+        blocked_quantization_support=False,
+        backend="flashinfer_nvlink_one_sided",
+        supports_apply_weight_on_input=False,
+    )
+
+if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+        TrtLlmNvFp4ExpertsModular,
+    )
+
+    register_experts(
+        TrtLlmNvFp4ExpertsModular,
+        standard_format,
+        nvfp4_types,
+        blocked_quantization_support=False,
+        supports_expert_map=True,
+    )
 
 if has_aiter():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
