@@ -78,7 +78,6 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
-
 class Qwen3NextSparseMoeBlock(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -197,7 +196,6 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             )
 
         return final_hidden_states.view(orig_shape)
-
 
 
 class Qwen3NextAttention(nn.Module):

@@ -887,7 +887,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 assert state_indices_tensor_p is not None
                 assert block_size is not None
 
-                mixed_qkv_prefill = mixed_qkv_non_spec[attn_metadata.num_decode_tokens :]
+                mixed_qkv_prefill = mixed_qkv_non_spec[
+                    attn_metadata.num_decode_tokens :
+                ]
                 mixed_qkv_prefill_T = mixed_qkv_prefill.transpose(0, 1)
 
                 # For mixed batches, slice tensors to only include prefills
