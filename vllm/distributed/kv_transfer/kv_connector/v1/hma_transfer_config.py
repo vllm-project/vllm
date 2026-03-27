@@ -188,6 +188,18 @@ class HeteroTPTransferConfig:
 
     def _validate(self) -> None:
         """Cross-check internal consistency."""
+        # Both-replicated with D_TP > P_TP: fa_read_targets uses
+        # d_rank % p_tp which may target a P rank that doesn't hold
+        # the head this D rank needs.  fa_rank_offset would then
+        # read out-of-bounds.  Block until properly implemented.
+        if self.is_d_replicated and self.is_p_replicated and self.tp_ratio > 0:
+            raise NotImplementedError(
+                f"Both-replicated hetero-TP with D_TP ({self.d_tp}) > "
+                f"P_TP ({self.p_tp}) > K ({self.K}) is not yet supported. "
+                f"The FA target selection (d_rank % p_tp) does not account "
+                f"for head placement when both sides replicate."
+            )
+
         # FA targets must be a subset of transfer_targets
         tt_set = set(self.transfer_targets)
         for t in self.fa_read_targets:
