@@ -68,10 +68,12 @@ bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability) {
   // so the Python-side backend selector does not choose CUTLASS and then hit
   // TORCH_CHECK_NOT_IMPLEMENTED (or worse, fall through to Marlin).
 #if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100
-  if (cuda_device_capability >= 100 && cuda_device_capability < 120) return true;
+  if (cuda_device_capability >= 100 && cuda_device_capability < 120)
+    return true;
 #endif
 #if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120
-  if (cuda_device_capability >= 120 && cuda_device_capability < 130) return true;
+  if (cuda_device_capability >= 120 && cuda_device_capability < 130)
+    return true;
 #endif
   return false;
 }
