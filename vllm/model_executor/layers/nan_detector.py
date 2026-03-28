@@ -161,35 +161,26 @@ class NaNDetector:
         """Check *tensor* for NaN/Inf, writing per-token flags.
 
         Uses ``torch.isfinite`` -- all ops stay on GPU, no D2H sync.
-        CUDA-graph compatible (fixed output address).
+        CUDA-graph compatible and fullgraph=True safe.
+
+        FP8 tensors are cast to float16 before checking since
+        ``torch.isfinite`` doesn't support FP8 dtypes.
 
         Args:
-            tensor: 2-D ``[num_tokens, hidden_size]`` tensor to check.
+            tensor: ``[num_tokens, ...]`` tensor to check.
             checkpoint_idx: index returned by :meth:`register`.
         """
         if self._nan_flags is None:
             return
-        _check_tensor_impl(
-            tensor, self._nan_flags, checkpoint_idx
+        num_tokens = tensor.shape[0]
+        t = tensor.view(num_tokens, -1)
+        if t.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz,
+                       torch.float8_e5m2, torch.float8_e5m2fnuz):
+            t = t.to(torch.float16)
+        has_bad = (~torch.isfinite(t)).any(dim=1)
+        self._nan_flags[checkpoint_idx, :num_tokens].bitwise_or_(
+            has_bad.to(torch.int8)
         )
-
-
-@torch.compiler.disable
-def _check_tensor_impl(
-    tensor: torch.Tensor,
-    nan_flags: torch.Tensor,
-    checkpoint_idx: int,
-) -> None:
-    num_tokens = tensor.shape[0]
-    t = tensor.view(num_tokens, -1)
-    # torch.isfinite doesn't support FP8 — cast to float first.
-    if t.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz,
-                   torch.float8_e5m2, torch.float8_e5m2fnuz):
-        t = t.to(torch.float16)
-    has_bad = (~torch.isfinite(t)).any(dim=1)
-    nan_flags[checkpoint_idx, :num_tokens].bitwise_or_(
-        has_bad.to(torch.int8)
-    )
 
     # ------------------------------------------------------------------
     # Post-forward checking
