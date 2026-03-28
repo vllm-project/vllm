@@ -177,13 +177,7 @@ class CompletionRequest(OpenAIBaseModel):
         "can detect such behavior and terminate early, saving time and tokens.",
     )
 
-    steering_vectors: dict[int, list[float]] | None = Field(
-        default=None,
-        description="Per-request activation steering vectors. Keys are layer "
-        "indices, values are vectors of length hidden_size.",
-    )
-
-    steering_hook_vectors: dict[str, dict[int, list[float]]] | None = Field(
+    steering_vectors: dict[str, dict[int, list[float]]] | None = Field(
         default=None,
         description="Per-request activation steering vectors keyed by hook "
         "point name (pre_attn, post_attn, post_mlp_pre_ln, "
@@ -337,7 +331,6 @@ class CompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
             steering_vectors=self.steering_vectors,
-            steering_hook_vectors=self.steering_hook_vectors,
         )
 
     @model_validator(mode="before")

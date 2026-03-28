@@ -1066,10 +1066,7 @@ class GPUModelRunner(
         if getattr(self, "_steering_manager", None) is not None:
             for req_id in scheduler_output.finished_req_ids:
                 req_state = self.requests.get(req_id)
-                if (
-                    req_state is not None
-                    and req_state.steering_config_hash != 0
-                ):
+                if req_state is not None and req_state.steering_config_hash != 0:
                     self._steering_manager.release_config(
                         req_state.steering_config_hash
                     )
@@ -1179,44 +1176,16 @@ class GPUModelRunner(
             self.late_interaction_runner.register_request(req_id, pooling_params)
 
             # Register per-request steering config if present.
-            # Build a merged hook-point dict from legacy steering_vectors
-            # (maps to post_mlp_pre_ln) and new steering_hook_vectors.
             if (
                 getattr(self, "_steering_manager", None) is not None
                 and new_req_data.steering_config_hash != 0
                 and new_req_data.sampling_params is not None
             ):
-                from vllm.model_executor.layers.steering import (
-                    DEFAULT_HOOK_POINT,
-                )
-
                 sp = new_req_data.sampling_params
-                merged_hook_vectors: dict[
-                    str, dict[int, list[float]]
-                ] = {}
-
-                # Legacy steering_vectors → default hook point
-                legacy_vecs = getattr(sp, "steering_vectors", None)
-                if legacy_vecs:
-                    merged_hook_vectors[DEFAULT_HOOK_POINT.value] = dict(
-                        legacy_vecs
-                    )
-
-                # New per-hook-point vectors (from API layer)
-                hook_vecs = getattr(
-                    sp, "steering_hook_vectors", None
-                )
-                if hook_vecs:
-                    for hp, vecs in hook_vecs.items():
-                        if hp in merged_hook_vectors:
-                            merged_hook_vectors[hp].update(vecs)
-                        else:
-                            merged_hook_vectors[hp] = dict(vecs)
-
-                if merged_hook_vectors:
+                if sp.steering_vectors:
                     self._steering_manager.register_config(
                         new_req_data.steering_config_hash,
-                        merged_hook_vectors,
+                        sp.steering_vectors,
                     )
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
@@ -3055,9 +3024,7 @@ class GPUModelRunner(
             return self.model.unwrap()
         return self.model
 
-    def _update_steering_buffers(
-        self, scheduler_output: "SchedulerOutput"
-    ) -> None:
+    def _update_steering_buffers(self, scheduler_output: "SchedulerOutput") -> None:
         """Update per-layer steering tables and the shared steering index.
 
         Lazily initializes the SteeringManager on first call.  Each step:
@@ -3077,21 +3044,16 @@ class GPUModelRunner(
                 if not hasattr(mod, "layer_idx"):
                     continue
                 has_any_table = any(
-                    hasattr(mod, attr)
-                    for attr in HOOK_POINT_TABLE_ATTR.values()
+                    hasattr(mod, attr) for attr in HOOK_POINT_TABLE_ATTR.values()
                 )
                 if has_any_table:
                     steerable[mod.layer_idx] = mod
             self._steerable_layers = steerable
 
             if steerable:
-                steering_config = getattr(
-                    self.vllm_config, "steering_config", None
-                )
+                steering_config = getattr(self.vllm_config, "steering_config", None)
                 max_configs = (
-                    steering_config.max_steering_configs
-                    if steering_config
-                    else 0
+                    steering_config.max_steering_configs if steering_config else 0
                 )
                 from vllm.v1.worker.steering_manager import SteeringManager
 
@@ -3117,9 +3079,7 @@ class GPUModelRunner(
             return
 
         # 1. Populate steering tables
-        self._steering_manager.populate_steering_tables(
-            self._steerable_layers
-        )
+        self._steering_manager.populate_steering_tables(self._steerable_layers)
 
         # 2. Build steering index
         # Get the shared steering_index buffer (all layers share one tensor)
@@ -3154,17 +3114,13 @@ class GPUModelRunner(
 
             if is_decode:
                 if steering_hash != 0:
-                    row = self._steering_manager.get_row_for_config(
-                        steering_hash
-                    )
+                    row = self._steering_manager.get_row_for_config(steering_hash)
                 else:
                     row = 1  # global-only
                 steering_index[token_offset] = row
             else:
                 # Prefill tokens: no steering
-                steering_index[
-                    token_offset : token_offset + n_tokens
-                ] = 0
+                steering_index[token_offset : token_offset + n_tokens] = 0
 
             token_offset += n_tokens
 

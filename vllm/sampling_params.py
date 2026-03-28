@@ -289,14 +289,10 @@ class SamplingParams(
     thinking_token_budget: int | None = None
     """Maximum number of tokens allowed for thinking operations."""
 
-    steering_vectors: dict[int, list[float]] | None = None
-    """Per-request activation steering vectors. Keys are layer indices,
-    values are steering vectors of length hidden_size."""
-
-    steering_hook_vectors: dict[str, dict[int, list[float]]] | None = None
-    """Per-request activation steering vectors keyed by hook point name,
-    then layer index. Valid hook points: pre_attn, post_attn,
-    post_mlp_pre_ln, post_mlp_post_ln."""
+    steering_vectors: dict[str, dict[int, list[float]]] | None = None
+    """Per-request activation steering vectors keyed by hook point name
+    (pre_attn, post_attn, post_mlp_pre_ln, post_mlp_post_ln), then
+    layer index. Values are vectors of length hidden_size."""
 
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
@@ -337,10 +333,7 @@ class SamplingParams(
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
-        steering_vectors: dict[int, list[float]] | None = None,
-        steering_hook_vectors: (
-            dict[str, dict[int, list[float]]] | None
-        ) = None,
+        steering_vectors: dict[str, dict[int, list[float]]] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -383,7 +376,6 @@ class SamplingParams(
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
             steering_vectors=steering_vectors,
-            steering_hook_vectors=steering_hook_vectors,
         )
 
     def __post_init__(self) -> None:
@@ -537,67 +529,55 @@ class SamplingParams(
         self._validate_steering_vectors()
 
     def _validate_steering_vectors(self) -> None:
-        """Validate steering_vectors and steering_hook_vectors if provided."""
-        if self.steering_vectors is not None:
-            self._validate_layer_vector_dict(
-                self.steering_vectors, "steering_vectors"
-            )
-        if self.steering_hook_vectors is not None:
-            self._validate_steering_hook_vectors()
+        """Validate steering_vectors if provided.
 
-    @staticmethod
-    def _validate_layer_vector_dict(
-        d: dict[int, list[float]], field_name: str
-    ) -> None:
-        """Validate a dict mapping layer indices to float vectors."""
-        if not isinstance(d, dict):
-            raise ValueError(
-                f"{field_name} must be a dict mapping layer indices "
-                "to lists of floats."
-            )
-        for key, value in d.items():
-            if not isinstance(key, int) or key < 0:
-                raise ValueError(
-                    f"{field_name} keys must be non-negative integers, "
-                    f"got {key!r}."
-                )
-            if not isinstance(value, list):
-                raise ValueError(
-                    f"{field_name} values must be lists of floats, "
-                    f"got {type(value).__name__} for layer {key}."
-                )
-            for i, v in enumerate(value):
-                if not isinstance(v, (int, float)):
-                    raise ValueError(
-                        f"{field_name}[{key}][{i}] must be a finite "
-                        f"float, got {type(v).__name__}."
-                    )
-                if not math.isfinite(v):
-                    raise ValueError(
-                        f"{field_name}[{key}][{i}] must be finite, "
-                        f"got {v}."
-                    )
-
-    def _validate_steering_hook_vectors(self) -> None:
-        """Validate steering_hook_vectors if provided."""
+        Expected format: ``{hook_point: {layer_idx: [floats]}}``.
+        """
+        if self.steering_vectors is None:
+            return
         from vllm.model_executor.layers.steering import VALID_HOOK_POINT_NAMES
 
-        if not isinstance(self.steering_hook_vectors, dict):
+        if not isinstance(self.steering_vectors, dict):
             raise ValueError(
-                "steering_hook_vectors must be a dict mapping hook point "
+                "steering_vectors must be a dict mapping hook point "
                 "names to dicts of layer vectors."
             )
-        for hook_name, layer_vecs in self.steering_hook_vectors.items():
+        for hook_name, layer_vecs in self.steering_vectors.items():
             if hook_name not in VALID_HOOK_POINT_NAMES:
                 raise ValueError(
-                    f"steering_hook_vectors key {hook_name!r} is not a "
+                    f"steering_vectors key {hook_name!r} is not a "
                     f"valid hook point. Valid values: "
                     f"{sorted(VALID_HOOK_POINT_NAMES)}."
                 )
-            self._validate_layer_vector_dict(
-                layer_vecs,
-                f"steering_hook_vectors[{hook_name!r}]",
-            )
+            if not isinstance(layer_vecs, dict):
+                raise ValueError(
+                    f"steering_vectors[{hook_name!r}] must be a dict "
+                    f"mapping layer indices to lists of floats."
+                )
+            for key, value in layer_vecs.items():
+                if not isinstance(key, int) or key < 0:
+                    raise ValueError(
+                        f"steering_vectors[{hook_name!r}] keys must be "
+                        f"non-negative integers, got {key!r}."
+                    )
+                if not isinstance(value, list):
+                    raise ValueError(
+                        f"steering_vectors[{hook_name!r}][{key}] must "
+                        f"be a list of floats, got "
+                        f"{type(value).__name__}."
+                    )
+                for i, v in enumerate(value):
+                    if not isinstance(v, (int, float)):
+                        raise ValueError(
+                            f"steering_vectors[{hook_name!r}][{key}]"
+                            f"[{i}] must be a finite float, got "
+                            f"{type(v).__name__}."
+                        )
+                    if not math.isfinite(v):
+                        raise ValueError(
+                            f"steering_vectors[{hook_name!r}][{key}]"
+                            f"[{i}] must be finite, got {v}."
+                        )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:

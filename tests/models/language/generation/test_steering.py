@@ -52,9 +52,7 @@ def test_steering_changes_output(vllm_runner, monkeypatch, model: str) -> None:
                 model = worker.model_runner.get_model()
                 for mod in model.modules():
                     if hasattr(mod, _VEC_ATTR) and hasattr(mod, "layer_idx"):
-                        layers[mod.layer_idx] = getattr(
-                            mod, _VEC_ATTR
-                        ).shape[1]
+                        layers[mod.layer_idx] = getattr(mod, _VEC_ATTR).shape[1]
                 return layers
 
             layer_info = llm.llm.collective_rpc(_discover)[0]
@@ -121,9 +119,7 @@ def test_per_request_steering_via_sampling_params(
                 model_inst = worker.model_runner.get_model()
                 for mod in model_inst.modules():
                     if hasattr(mod, _VEC_ATTR) and hasattr(mod, "layer_idx"):
-                        layers[mod.layer_idx] = getattr(
-                            mod, _VEC_ATTR
-                        ).shape[1]
+                        layers[mod.layer_idx] = getattr(mod, _VEC_ATTR).shape[1]
                 return layers
 
             layer_info = llm.llm.collective_rpc(_discover)[0]
@@ -134,7 +130,9 @@ def test_per_request_steering_via_sampling_params(
             steered_sampling = SamplingParams(
                 max_tokens=10,
                 temperature=0.0,
-                steering_vectors={target_layer: [500.0] * hidden_size},
+                steering_vectors={
+                    _HP: {target_layer: [500.0] * hidden_size},
+                },
             )
 
             steered = llm.llm.generate([prompt], steered_sampling)
@@ -170,7 +168,6 @@ def test_per_request_steering_concurrent_with_cuda_graphs(
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
         prompt = "What does the fox say? " * 32
-        base_sampling = SamplingParams(max_tokens=10, temperature=0.0)
 
         with vllm_runner(
             model,
@@ -185,12 +182,8 @@ def test_per_request_steering_concurrent_with_cuda_graphs(
                 layers = {}
                 model_inst = worker.model_runner.get_model()
                 for mod in model_inst.modules():
-                    if hasattr(mod, _VEC_ATTR) and hasattr(
-                        mod, "layer_idx"
-                    ):
-                        layers[mod.layer_idx] = getattr(
-                            mod, _VEC_ATTR
-                        ).shape[1]
+                    if hasattr(mod, _VEC_ATTR) and hasattr(mod, "layer_idx"):
+                        layers[mod.layer_idx] = getattr(mod, _VEC_ATTR).shape[1]
                 return layers
 
             layer_info = llm.llm.collective_rpc(_discover)[0]
@@ -202,12 +195,16 @@ def test_per_request_steering_concurrent_with_cuda_graphs(
             steer_pos = SamplingParams(
                 max_tokens=10,
                 temperature=0.0,
-                steering_vectors={target_layer: [500.0] * hidden_size},
+                steering_vectors={
+                    _HP: {target_layer: [500.0] * hidden_size},
+                },
             )
             steer_neg = SamplingParams(
                 max_tokens=10,
                 temperature=0.0,
-                steering_vectors={target_layer: [-500.0] * hidden_size},
+                steering_vectors={
+                    _HP: {target_layer: [-500.0] * hidden_size},
+                },
             )
 
             # 3. Send all three simultaneously so they batch together
