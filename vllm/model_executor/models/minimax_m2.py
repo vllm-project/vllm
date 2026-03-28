@@ -127,7 +127,8 @@ class MiniMaxM2MoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-
+        if num_tokens <= 32:
+            pass
         # router_logits: (num_tokens, n_experts)
         # Dtype conversion (bf16->fp32) is handled inside the kernel.
         router_logits, _ = self.gate(hidden_states)

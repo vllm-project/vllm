@@ -188,17 +188,19 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
 
 #define INSTANTIATE_ALL(T)                                                     \
   INSTANTIATE(T, 1)                                                            \
-  INSTANTIATE(T, 2) INSTANTIATE(T, 3) INSTANTIATE(T, 4) INSTANTIATE(T, 5)      \
-      INSTANTIATE(T, 6) INSTANTIATE(T, 7) INSTANTIATE(T, 8) INSTANTIATE(       \
-          T, 9) INSTANTIATE(T, 10) INSTANTIATE(T, 11) INSTANTIATE(T, 12)       \
-          INSTANTIATE(T, 13) INSTANTIATE(T, 14) INSTANTIATE(T, 15)             \
-              INSTANTIATE(T, 16) INSTANTIATE(T, 17) INSTANTIATE(T, 18)         \
-                  INSTANTIATE(T, 19) INSTANTIATE(T, 20) INSTANTIATE(T, 21)     \
-                      INSTANTIATE(T, 22) INSTANTIATE(T, 23) INSTANTIATE(T, 24) \
-                          INSTANTIATE(T, 25) INSTANTIATE(T, 26)                \
-                              INSTANTIATE(T, 27) INSTANTIATE(T, 28)            \
-                                  INSTANTIATE(T, 29) INSTANTIATE(T, 30)        \
-                                      INSTANTIATE(T, 31) INSTANTIATE(T, 32)
+  INSTANTIATE(T, 2)                                                            \
+  INSTANTIATE(T, 3) INSTANTIATE(T, 4) INSTANTIATE(T, 5) INSTANTIATE(T, 6)      \
+      INSTANTIATE(T, 7) INSTANTIATE(T, 8) INSTANTIATE(T, 9) INSTANTIATE(T, 10) \
+          INSTANTIATE(T, 11) INSTANTIATE(T, 12) INSTANTIATE(T, 13)             \
+              INSTANTIATE(T, 14) INSTANTIATE(T, 15) INSTANTIATE(T, 16)         \
+                  INSTANTIATE(T, 17) INSTANTIATE(T, 18) INSTANTIATE(T, 19)     \
+                      INSTANTIATE(T, 20) INSTANTIATE(T, 21) INSTANTIATE(T, 22) \
+                          INSTANTIATE(T, 23) INSTANTIATE(T, 24)                \
+                              INSTANTIATE(T, 25) INSTANTIATE(T, 26)            \
+                                  INSTANTIATE(T, 27) INSTANTIATE(T, 28)        \
+                                      INSTANTIATE(T, 29) INSTANTIATE(T, 30)    \
+                                          INSTANTIATE(T, 31)                   \
+                                              INSTANTIATE(T, 32)
 
 INSTANTIATE_ALL(float)
 INSTANTIATE_ALL(__nv_bfloat16)

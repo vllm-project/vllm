@@ -15,8 +15,8 @@ static constexpr int FP32_NUM_EXPERTS = 256;
 static constexpr int FP32_HIDDEN_DIM = 3072;
 static constexpr int FP32_MAX_TOKENS = 32;
 
-// Forward declarations for both input types
-template <typename InputT, int kNumTokens>
+// Forward declarations — 4 template params must match fp32_router_gemm.cu
+template <typename InputT, int kNumTokens, int kNumExperts, int kHiddenDim>
 void invokeFp32RouterGemm(float* output, InputT const* mat_a,
                           float const* mat_b, cudaStream_t stream);
 
@@ -26,7 +26,8 @@ struct Fp32LoopUnroller {
   static void unroll(int num_tokens, float* output, InputT const* mat_a,
                      float const* mat_b, cudaStream_t stream) {
     if (num_tokens == kBegin) {
-      invokeFp32RouterGemm<InputT, kBegin>(output, mat_a, mat_b, stream);
+      invokeFp32RouterGemm<InputT, kBegin, FP32_NUM_EXPERTS, FP32_HIDDEN_DIM>(
+          output, mat_a, mat_b, stream);
     } else {
       Fp32LoopUnroller<InputT, kBegin + 1, kEnd>::unroll(num_tokens, output,
                                                          mat_a, mat_b, stream);
@@ -39,7 +40,8 @@ struct Fp32LoopUnroller<InputT, kEnd, kEnd> {
   static void unroll(int num_tokens, float* output, InputT const* mat_a,
                      float const* mat_b, cudaStream_t stream) {
     if (num_tokens == kEnd) {
-      invokeFp32RouterGemm<InputT, kEnd>(output, mat_a, mat_b, stream);
+      invokeFp32RouterGemm<InputT, kEnd, FP32_NUM_EXPERTS, FP32_HIDDEN_DIM>(
+          output, mat_a, mat_b, stream);
     } else {
       throw std::invalid_argument(
           "fp32_router_gemm: num_tokens must be in [1, 32]");
