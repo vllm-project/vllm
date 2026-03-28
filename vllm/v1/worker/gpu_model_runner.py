@@ -1985,7 +1985,11 @@ class GPUModelRunner(
         self.seq_lens[:num_reqs] = (
             self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
         )
-        self.seq_lens[num_reqs:].fill_(0)
+        # Use 1 instead of 0 to prevent NaN from empty softmax in
+        # attention kernels for padding requests. With seq_lens=0, the
+        # softmax has no elements, producing NaN that contaminates real
+        # tokens via NVFP4 128-row GEMM tiles.
+        self.seq_lens[num_reqs:].fill_(1)
 
         self.input_batch.block_table.compute_slot_mapping(
             num_reqs,
@@ -5367,7 +5371,7 @@ class GPUModelRunner(
                 else:
                     seq_lens = max_query_len  # type: ignore[assignment]
                 self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
-                self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
+                self.optimistic_seq_lens_cpu[num_reqs:].fill_(1)
                 self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
 
                 cum_num_tokens = self._get_cumsum_and_arange(
