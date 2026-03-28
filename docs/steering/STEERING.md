@@ -1,6 +1,6 @@
 # Live Activation Steering
 
-This document describes the current activation steering implementation in this vLLM fork.
+This document describes the activation steering implementation in this vLLM fork.
 
 ## Overview
 
@@ -10,72 +10,103 @@ Activation steering modifies model hidden states at runtime by adding pre-comput
 - **Safety interventions**: Modifying activations to reduce harmful outputs
 - **Behavioral control**: Adjusting style, tone, or content properties
 
+Steering supports two modes:
+- **Global steering**: Server-wide vectors applied to all requests (via HTTP API)
+- **Per-request steering**: Different vectors per request (via `SamplingParams.steering_vectors`)
+
+Both modes are additive — when a request has per-request steering and global steering is also active, the effective vector is `global + per_request`.
+
 ## Architecture
 
-The implementation uses a **stateful buffer pattern** with four components:
+The implementation uses a **request-indexed gather** pattern with five components:
 
 ```
-                  API Layer                    Worker Layer                 Model Layer
-          ┌─────────────────────┐    ┌──────────────────────────┐    ┌──────────────────────┐
-          │  POST /v1/steering/ │    │  WorkerBase              │    │  Gemma3DecoderLayer   │
-          │  set / clear / GET  │───>│  set_steering_vectors()  │───>│  steering_vector buf  │
-          │                     │    │  clear_steering_vectors() │    │  [1, hidden_size]     │
-          │  Two-phase validate │    │  get_steering_status()   │    │                       │
-          │  + apply via lock   │    │  _steerable_layers()     │    │  apply_steering op    │
-          └─────────────────────┘    └──────────────────────────┘    └──────────────────────┘
-                                              │                               │
-                                     collective_rpc()                  ForwardContext
-                                     (all workers)               (reads num_decode_tokens)
+    API Layer                    Config                    Scheduler
+┌──────────────────┐    ┌───────────────────┐    ┌──────────────────────────┐
+│ POST /v1/steering│    │ SteeringConfig     │    │ Admission control        │
+│ set / clear / GET│    │ --enable-steering  │    │ scheduled_steering_      │
+│                  │    │ --max-steering-    │    │   configs: set[int]      │
+│ SamplingParams.  │    │   configs 4        │    │ skipped_waiting queue    │
+│ steering_vectors │    └───────────────────┘    └──────────────────────────┘
+└──────────────────┘              │                          │
+         │                        ▼                          ▼
+         │              ┌───────────────────┐    ┌──────────────────────────┐
+         └─────────────>│ SteeringManager    │    │ InputBatch               │
+                        │ register/release   │    │ request_steering_config_ │
+                        │ populate_tables()  │    │   hash[req_idx]          │
+                        │ global_vectors     │    └──────────────────────────┘
+                        └───────────────────┘              │
+                                 │                          ▼
+                        ┌───────────────────────────────────────────────────┐
+                        │ Gemma3DecoderLayer (per layer)                    │
+                        │   steering_vector:  (1, H)  ← global API writes  │
+                        │   steering_table:   (max_configs+2, H)           │
+                        │   steering_index:   (max_tokens,)  ← shared      │
+                        │                                                   │
+                        │   apply_steering(residual, table, index)         │
+                        │   = residual + table[index[:N]]                  │
+                        └───────────────────────────────────────────────────┘
 ```
 
-### 1. Model Layer — Buffer + Custom Op
+### 1. Steering Table (Per-Layer Buffer)
 
-Each steerable decoder layer has a non-persistent `steering_vector` buffer of shape `[1, hidden_size]`, initialized to zeros. During forward, the buffer is unconditionally added to hidden states via a custom op:
+Each steerable decoder layer has a `steering_table` buffer of shape `(max_steering_configs + 2, hidden_size)`:
 
-```python
-# In Gemma3DecoderLayer.__init__()
-self.register_buffer("steering_vector", torch.zeros(1, config.hidden_size), persistent=False)
+| Row | Contents | When used |
+|-----|----------|-----------|
+| 0 | Zeros | Prefill tokens, padding |
+| 1 | Global steering vector | Decode tokens without per-request steering |
+| 2+ | Global + per-request combined | Decode tokens with per-request steering |
 
-# In Gemma3DecoderLayer.forward(), after MLP + post_feedforward_layernorm
-hidden_states = torch.ops.vllm.apply_steering(hidden_states, self.steering_vector)
+The table is populated by `SteeringManager.populate_steering_tables()` before each forward pass.
+
+### 2. Steering Index (Shared Buffer)
+
+A single `steering_index` tensor of shape `(max_tokens,)` is shared across all decoder layers (same backing tensor). Each position maps a token to its steering table row:
+
+```
+Token positions: [decode₁, decode₂, prefill₁, prefill₂, decode₃]
+steering_index:  [   2,       1,        0,        0,       3    ]
 ```
 
-The unconditional addition is required by two constraints:
-- **`@support_torch_compile`**: Data-dependent branching (`if steering is not None`) causes graph breaks. The forward path must be identical whether steering is active or not.
-- **CUDA graphs**: Registered buffers have stable addresses that persist across graph replays. Values are updated between replays via `.copy_()`.
+Updated in-place by the model runner before each forward pass.
 
-When steering is inactive, the zero buffer makes the addition a no-op.
+### 3. Custom Op — Indexed Gather
 
-### 2. Custom Op — Decode-Only Masking
-
-The `apply_steering` op is registered via `direct_register_custom_op` so `torch.compile` treats it as opaque. At runtime it reads `num_decode_tokens` from the `ForwardContext` to apply steering only to decode tokens (the first N rows of the hidden states tensor):
+The `apply_steering` custom op is registered as a splitting point for `torch.compile`:
 
 ```python
 # vllm/model_executor/layers/steering.py
-def apply_steering(hidden_states, steering_vector):
-    num_decode_tokens = get_num_decode_tokens(default=0)
-    decode_mask = (torch.arange(hidden_states.shape[0], device=hidden_states.device)
-                   < num_decode_tokens).unsqueeze(1)
-    return hidden_states + decode_mask.to(hidden_states.dtype) * steering_vector
+def apply_steering(hidden_states, steering_table, steering_index):
+    return hidden_states + steering_table[steering_index[:N]].to(hidden_states.dtype)
 ```
 
-Reading from forward context at runtime (rather than accepting `num_decode_tokens` as a parameter) avoids the value being baked into the compiled graph as a constant.
+The splitting point ensures the Python implementation runs at runtime between compiled graph segments, reading live buffer values rather than baked-in constants. This is the same mechanism used by attention ops.
 
-### 3. Worker Layer — Buffer Management
+### 4. SteeringManager — Vector Lifecycle
+
+`SteeringManager` (`vllm/v1/worker/steering_manager.py`) tracks per-request steering configs:
+
+- **Register**: Assigns a table row to a config hash, stores vectors, increments refcount
+- **Release**: Decrements refcount, frees row when it hits 0
+- **Deduplication**: Requests with identical vectors share a table row (same hash = same row)
+- **Global sync**: Caches global vectors set via the HTTP API, includes them in combined rows
+
+### 5. Worker Layer — Global API
 
 `WorkerBase` provides three RPC-callable methods that discover steerable layers by walking the model's module tree (looking for modules with both `steering_vector` and `layer_idx` attributes):
 
-- **`set_steering_vectors(vectors_data, validate_only)`** — Validates vector dimensions and finiteness, then copies scaled vectors into buffers. The `validate_only` flag supports two-phase commit.
-- **`clear_steering_vectors()`** — Zeros all steering buffers.
+- **`set_steering_vectors(vectors_data, validate_only)`** — Validates vector dimensions and finiteness, then copies vectors into `steering_vector` buffers. Notifies SteeringManager of global changes.
+- **`clear_steering_vectors()`** — Zeros all `steering_vector` buffers. Notifies SteeringManager.
 - **`get_steering_status()`** — Returns `{layer_idx: {"norm": float}}` for non-zero layers.
 
-### 4. API Layer — REST Endpoints
+### 6. API Layer — REST Endpoints
 
 Three endpoints under `/v1/steering/`, gated behind `VLLM_SERVER_DEV_MODE`. See [API.md](API.md) for details.
 
 ## Intervention Point
 
-Steering is applied in `Gemma3DecoderLayer.forward()` after the MLP and `post_feedforward_layernorm`, before the return:
+Steering is applied in `Gemma3DecoderLayer.forward()` to the raw residual stream, after the MLP and `post_feedforward_layernorm`:
 
 ```
 input_layernorm(hidden_states, residual)
@@ -90,7 +121,7 @@ mlp(hidden_states)
     ↓
 post_feedforward_layernorm(hidden_states)
     ↓
-apply_steering(hidden_states, steering_vector)    ← HERE
+apply_steering(residual, steering_table, steering_index)    ← HERE
     ↓
 return hidden_states, residual
 ```
@@ -101,20 +132,28 @@ The next layer's `input_layernorm(hidden_states, residual)` fuses the residual a
 
 | File | Purpose |
 |------|---------|
-| `vllm/model_executor/layers/steering.py` | Custom op definition (`apply_steering`) |
-| `vllm/model_executor/models/gemma3.py` | Buffer registration and op call in forward |
-| `vllm/v1/worker/worker_base.py` | Worker methods for set/clear/status |
-| `vllm/forward_context.py` | `get_num_decode_tokens()` helper |
+| `vllm/config/steering.py` | `SteeringConfig` with `max_steering_configs` |
+| `vllm/model_executor/layers/steering.py` | Custom op definition (`apply_steering` indexed gather) |
+| `vllm/model_executor/models/gemma3.py` | Buffer registration (`steering_table`, `steering_index`, `steering_vector`) and op call |
+| `vllm/v1/worker/steering_manager.py` | `SteeringManager` — config registration, refcounting, table population |
+| `vllm/v1/worker/worker_base.py` | Worker methods for global set/clear/status |
+| `vllm/v1/worker/gpu_model_runner.py` | `_update_steering_buffers()` — per-step table and index updates |
+| `vllm/v1/worker/gpu_input_batch.py` | Per-request `steering_config_hash` tracking in InputBatch |
+| `vllm/v1/core/sched/scheduler.py` | Admission control for `max_steering_configs` capacity |
+| `vllm/sampling_params.py` | `steering_vectors` field on `SamplingParams` |
+| `vllm/v1/request.py` | `steering_config_hash` cached property |
+| `vllm/engine/arg_utils.py` | `--enable-steering` and `--max-steering-configs` CLI args |
 | `vllm/entrypoints/serve/steering/api_router.py` | REST endpoints |
 | `vllm/entrypoints/serve/steering/protocol.py` | `SetSteeringRequest` schema |
+| `vllm/config/compilation.py` | `vllm::apply_steering` in `splitting_ops` |
 
 ## Current Limitations
 
-- **Gemma 3 only** — no other model has the steering buffer or op import.
+- **Gemma 3 only** — no other model has the steering buffers wired in.
 - **Decode-only** — prefill tokens are not steered.
-- **Global steering** — all requests in a batch see the same vectors. No per-request steering.
 - **Post-MLP only** — no pre-attention or post-attention intervention points.
-- **Dev mode only** — API endpoints require `VLLM_SERVER_DEV_MODE=1`.
+- **Dev mode only** — global HTTP API endpoints require `VLLM_SERVER_DEV_MODE=1`.
+- **Spec decode** — the decode detection heuristic (`n_tokens == 1`) doesn't work with speculative decoding.
 
 ## Adding Steering to a New Model
 
@@ -125,22 +164,32 @@ To add steering to another model family (e.g., Llama, Qwen):
    import vllm.model_executor.layers.steering  # noqa: F401  # registers custom op
    ```
 
-2. **Add `layer_idx` and buffer** in the decoder layer `__init__`:
+2. **Add buffers** in the decoder layer `__init__`:
    ```python
    self.layer_idx = extract_layer_index(prefix)
    self.register_buffer("steering_vector", torch.zeros(1, config.hidden_size), persistent=False)
+   self.register_buffer("steering_table", torch.zeros(max_steering_configs + 2, config.hidden_size), persistent=False)
+   self.register_buffer("steering_index", torch.zeros(max_steering_tokens, dtype=torch.long), persistent=False)
    ```
 
-3. **Call the op** in `forward()`, after the MLP (and post-MLP layernorm if the model has one):
+3. **Call the op** in `forward()`, on the residual stream after the MLP:
    ```python
-   hidden_states = torch.ops.vllm.apply_steering(hidden_states, self.steering_vector)
+   residual = torch.ops.vllm.apply_steering(residual, self.steering_table, self.steering_index)
    ```
 
-No changes to the worker or API layers are needed — `_steerable_layers()` discovers any module with both `steering_vector` and `layer_idx` automatically.
+4. **Share the steering_index** across all layers in the model `__init__`:
+   ```python
+   if self.layers:
+       shared_idx = self.layers[0].steering_index
+       for layer in self.layers[1:]:
+           layer.steering_index = shared_idx
+   ```
+
+The model runner and worker code is model-agnostic — it discovers steerable layers by walking the module tree for modules that have both `steering_table` and `layer_idx` attributes.
 
 ## Related Docs
 
 - [API.md](API.md) — REST endpoint details and usage examples
-- [BATCHING.md](BATCHING.md) — vLLM batching internals (context for per-request steering)
-- [ROADMAP.md](ROADMAP.md) — Phased plan for per-request steering, multi-model support, etc.
-- [TODO.md](TODO.md) — Known bugs and open issues
+- [BATCHING.md](BATCHING.md) — vLLM batching internals
+- [ROADMAP.md](ROADMAP.md) — Phased plan for multi-model support, additional intervention points
+- [EXTRACTION.md](EXTRACTION.md) — Extracting activations for SAE training

@@ -336,8 +336,6 @@ outputs = collector.collect(["Hello world"], SamplingParams(max_tokens=100))
 
 ## Related Resources
 
-- [Live Activation Steering](STEERING.md) - Modifying activations for steering and intervention
-- [Steering API Implementation](API.md) - Exposing steering via the vLLM API
-- [Architecture Overview](design/arch_overview.md) - vLLM system architecture
-- [HuggingFace Integration](design/huggingface_integration.md) - Model loading and configuration
+- [Live Activation Steering](STEERING.md) - Modifying activations for steering and intervention (global + per-request)
+- [Steering API](API.md) - REST endpoints and SamplingParams usage
 - Eagle3 implementation in `vllm/v1/worker/gpu/spec_decode/eagle/` - Reference for aux_hidden_states usage

@@ -6,36 +6,15 @@ This document describes the phased implementation plan for activation steering i
 
 ### Registered Buffer Pattern (Unconditional Addition)
 
-All approaches in this roadmap use **pre-allocated registered buffers** with unconditional addition. This is driven by two hard constraints:
+All phases use **pre-allocated registered buffers** with unconditional addition. This is driven by two hard constraints:
 
 1. **`@support_torch_compile`**: Model classes like `Gemma3Model` are decorated with `@support_torch_compile`, which traces the entire forward pass into a computation graph. Data-dependent branching (`if steering is not None`) causes graph breaks or dead code elimination. The forward path must be identical whether steering is active or not.
 
-2. **CUDA graph compatibility**: CUDA graphs capture kernel launches with fixed tensor addresses. Registered buffers have stable addresses that persist across graph replays. Values can be updated between replays via `.copy_()`.
-
-The pattern:
-
-```python
-# Buffer initialized to zeros - addition is a no-op when not steering
-self.register_buffer('steering_post_mlp', torch.zeros(...), persistent=False)
-
-# In forward - always executes, zero buffer = no effect
-hidden_states = hidden_states + self.steering_post_mlp
-```
-
-This is the same pattern vLLM uses for LoRA weight buffers with CUDA graphs.
+2. **CUDA graph compatibility**: CUDA graphs capture kernel launches with fixed tensor addresses. Registered buffers have stable addresses that persist across graph replays. Values can be updated between replays via in-place operations.
 
 ### Residual Stream Targeting
 
-Steering vectors are added to the raw residual stream, not before normalization layers. In Gemma 3, the decoder layer flow is:
-
-```
-hidden_states, residual = pre_feedforward_layernorm(hidden_states, residual)
-hidden_states = mlp(hidden_states)
-hidden_states = post_feedforward_layernorm(hidden_states)  # Gemma 3-specific
-return hidden_states, residual
-```
-
-The next layer's `input_layernorm(hidden_states, residual)` fuses the residual add: `residual = hidden_states + residual`. Adding the steering vector to `hidden_states` after `post_feedforward_layernorm` places it directly into the residual stream without passing through any additional normalization. This matches where Gemma 3 SAEs are trained (on the residual stream).
+Steering vectors are added to the raw residual stream, not before normalization layers. The next layer's `input_layernorm(hidden_states, residual)` fuses the residual add, placing the steering vector directly into the residual stream. This matches where Gemma 3 SAEs are trained.
 
 ### Steering Vectors, Not SAE Encode/Decode
 
@@ -47,81 +26,42 @@ The implementation passes pre-computed steering vectors (e.g., SAE decoder colum
 
 **Goal**: Validate that steering works end-to-end with Gemma 3 using broadcast steering vectors.
 
-**Status**: Implemented with deviations from the original plan noted below.
-
-### Scope
-
-- **Model**: Gemma 3 only
-- **Intervention point**: Post-MLP only (after `post_feedforward_layernorm`)
-- **Phase**: Decode only
-- **Granularity**: Broadcast — same steering vector applied to all requests in batch
-- **Buffer shape**: `[1, hidden_size]` per steered layer (~7 KB each, negligible memory)
-
 ### What was built
 
-The implementation differs from the original plan in two ways:
+- Global steering via `steering_vector` buffer `(1, hidden_size)` per layer
+- Custom op `apply_steering` registered as torch.compile splitting point
+- REST API (`POST /v1/steering/set`, `/clear`, `GET /v1/steering`) with two-phase validate-then-apply
+- Decode-only mask buffer to prevent steering during prefill
 
-1. **Custom op instead of bare addition**: Instead of `hidden_states = hidden_states + self.steering_post_mlp`, steering uses `torch.ops.vllm.apply_steering` registered via `direct_register_custom_op`. This makes the op opaque to `torch.compile` so it can read `num_decode_tokens` from `ForwardContext` at runtime without baking the value as a constant.
-
-2. **API exposure included**: REST endpoints (`/v1/steering/set`, `/clear`, GET `/v1/steering`) were built in Phase 1 rather than deferred. They use a two-phase validate-then-apply flow via `collective_rpc` for pipeline-parallel safety.
-
-See [STEERING.md](STEERING.md) for full architecture details and [API.md](API.md) for endpoint documentation.
+See [MVP_IMPLEMENTATION.md](MVP_IMPLEMENTATION.md) for detailed implementation notes.
 
 ---
 
-## Phase 2: Per-Request Steering
+## Phase 2: Per-Request Steering — DONE
 
-**Goal**: Different requests in a batch receive different steering vectors and scaling factors.
+**Goal**: Different requests in a batch receive different steering vectors.
 
-### Scope Changes
+### What was built
 
-- **Buffer shape**: `[1, hidden_size]` → `[max_num_tokens, hidden_size]` per steered layer
-- **Memory**: ~56 MB per steered layer (Gemma 3 27B, `max_num_batched_tokens=8192`, bf16)
-- **New bookkeeping**: Per-request steering config tracked through `InputBatch`
+Replaced the broadcast pattern with a **request-indexed gather** approach:
 
-### Key Implementation Points
+- **Steering table** `(max_configs + 2, hidden_size)` per layer — row 0=zeros, row 1=global, rows 2+=global+per_request
+- **Steering index** `(max_tokens,)` shared across all layers — maps each token to its table row
+- **SteeringManager** — config registration with reference counting, table population, global vector caching
+- **InputBatch tracking** — `steering_config_hash` per request for efficient dedup
+- **Scheduler admission control** — `max_steering_configs` capacity check (LoRA pattern)
+- **SamplingParams.steering_vectors** — per-request field, also passable via OpenAI `extra_body`
+- **Additive combination** — global + per_request vectors summed in table rows
+- **`--enable-steering` / `--max-steering-configs`** CLI flags
 
-**Decode batch layout**: During decode, `hidden_states[i]` = request `i` (one token per request). The steering buffer row `i` holds request `i`'s vector (or zeros). No `query_start_loc` indexing needed.
+### Memory
 
-**Mixed prefill+decode batches**: In continuous batching, a step can contain both prefill tokens (new request) and decode tokens (ongoing requests). For decode-only steering, prefill tokens get zero rows in the buffer. This works naturally — just zero the buffer and scatter only decode requests' vectors.
+| Config | Per Layer (Gemma 3 4B, bf16) | 26 Layers |
+|--------|------------------------------|-----------|
+| `max_steering_configs=4` (default) | 6 rows × 3072 × 2B = ~36 KB | ~940 KB |
+| `max_steering_configs=16` | 18 rows × 3072 × 2B = ~108 KB | ~2.8 MB |
 
-**Continuous batching lifecycle**:
-- Request joins → scatter its steering vector into its batch index row
-- Request finishes → row gets overwritten by next request (or zeroed)
-- No interference with continuous batching; steering is per-token independent
-
-**CUDA graph padding**: Buffer is `[max_num_tokens, hidden_size]`. Padded entries beyond `num_tokens_padded` are zeros. The CUDA graph captures the full addition at the padded size.
-
-### Data Flow
-
-Per-request steering configs need to flow through the full request pipeline:
-
-```
-API Request (steering_vectors, steering_scales)
-  → SamplingParams or SteeringParams
-    → EngineCoreRequest
-      → SchedulerOutput / NewRequestData
-        → InputBatch (per-request state arrays)
-          → Model Runner (scatter into buffers before forward)
-```
-
-This follows the same pattern as LoRA adapter tracking in `InputBatch`.
-
-### API Exposure
-
-Expose steering via the OpenAI-compatible API as vLLM extension fields:
-
-```python
-# Client usage
-response = client.chat.completions.create(
-    model="google/gemma-3-27b-it",
-    messages=[...],
-    extra_body={
-        "steering_vectors": {20: vector.tolist()},
-        "steering_scales": {20: 1.5},
-    }
-)
-```
+The request-indexed gather approach is dramatically cheaper than the per-token buffer approach originally considered (~56 MB/layer for max_tokens=8192).
 
 ---
 
@@ -129,11 +69,13 @@ response = client.chat.completions.create(
 
 **Goal**: Support pre-attention and post-attention steering in addition to post-MLP.
 
+**Status**: Not started.
+
 ### Scope Changes
 
-- Add `steering_pre_attn` and `steering_post_attn` registered buffers
-- Same unconditional addition pattern at each intervention point
-- Per-request capable (reuses Phase 2 scatter infrastructure)
+- Add `steering_table_pre_attn` and `steering_table_post_attn` buffers
+- Same indexed-gather pattern at each intervention point
+- Per-request capable (reuses Phase 2 infrastructure)
 
 ### Gemma 3 Intervention Points
 
@@ -154,17 +96,7 @@ mlp(hidden_states)
   ↓
 post_feedforward_layernorm(hidden_states)
   ↓
-[steering_post_mlp]          ← after MLP (Phase 1)
-```
-
-### API Extension
-
-```python
-extra_body={
-    "steering_vectors": {20: vector.tolist()},
-    "steering_scales": {20: 1.5},
-    "steering_position": "post_mlp",  # or "pre_attn", "post_attn"
-}
+[steering_post_mlp]          ← after MLP (current)
 ```
 
 ---
@@ -172,6 +104,8 @@ extra_body={
 ## Phase 4: Prefill Steering
 
 **Goal**: Apply steering during the prefill phase, not just decode.
+
+**Status**: Not started.
 
 ### Key Challenge: Prefix Caching
 
@@ -181,20 +115,9 @@ Steering modifies the residual stream, which changes all downstream KV cache ent
 2. **Include steering config in cache key** — correct but expensive (different steering = different cache entries, low hit rate)
 3. **Only steer non-cached tokens** — inconsistent behavior across the sequence, not recommended
 
-Option 1 is the likely initial approach. Option 2 may be viable if steering configs are commonly reused across requests.
-
 ### Per-Request Prefill Complexity
 
-During prefill, requests have variable token counts. The steering buffer must expand per-request vectors to per-token using `query_start_loc`:
-
-```python
-# For each request i:
-#   start = query_start_loc[i]
-#   end = query_start_loc[i + 1]
-#   steering_buffer[start:end] = request_i_steering_vector
-```
-
-This scatter is more complex than decode (where it's 1:1) but follows established patterns in vLLM (see LoRA kernel metadata in `vllm/lora/ops/triton_ops/`).
+During prefill, requests have variable token counts. The `steering_index` already handles this — prefill tokens map to row 0 (zeros). To enable prefill steering, prefill tokens would instead map to the request's assigned row, same as their decode tokens.
 
 ---
 
@@ -202,15 +125,16 @@ This scatter is more complex than decode (where it's 1:1) but follows establishe
 
 **Goal**: Extend steering to all major model families.
 
+**Status**: Not started.
+
 ### Change Per Model
 
-The same ~4-line pattern applied to each model's `DecoderLayer`:
+Each model's `DecoderLayer` needs:
 
 1. `self.layer_idx = extract_layer_index(prefix)` in `__init__`
-2. `self.register_buffer('steering_post_mlp', zeros(1, hidden_size), persistent=False)` in `__init__`
-3. `hidden_states = hidden_states + self.steering_post_mlp` in `forward`
-
-Most models have their own `DecoderLayer` (60+ implementations). The change is nearly identical across all of them — a tractable repetitive refactor.
+2. Register `steering_vector`, `steering_table`, and `steering_index` buffers
+3. Call `torch.ops.vllm.apply_steering(residual, self.steering_table, self.steering_index)` in `forward`
+4. Share `steering_index` across layers in the model class
 
 ### Model-Specific Considerations
 
@@ -221,12 +145,8 @@ Most models have their own `DecoderLayer` (60+ implementations). The change is n
 
 ---
 
-## Memory Budget Summary
+## Phase 6: Named Steering Configs
 
-| Phase | Buffer Shape | Per Layer (Gemma 3 27B, bf16) | 5 Steered Layers |
-|-------|-------------|-------------------------------|-------------------|
-| 1 (broadcast) | `[1, 3584]` | 7 KB | 35 KB |
-| 2 (per-request) | `[max_tokens, 3584]` | ~56 MB (`max=8192`) | ~280 MB |
-| 3 (3 intervention points) | 3x Phase 2 | ~168 MB | ~840 MB |
+**Goal**: Pre-register steering configs with names (like LoRA adapters) for efficient reuse.
 
-Phase 3 memory is significant. Consider allocating buffers only for intervention points actually in use, gated by a startup configuration flag (not runtime branching in the forward pass).
+**Status**: Not started. The SteeringManager's hash-based deduplication and row assignment already lays the groundwork for this — adding a `name → hash` registry would be straightforward.

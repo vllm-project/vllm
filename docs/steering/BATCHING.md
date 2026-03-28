@@ -293,77 +293,54 @@ Memory: [tokens_for_op0..., tokens_for_op1..., tokens_for_op2...]
 Index:  token_indices_sorted[op_start_loc[op_id] + local_idx]
 ```
 
-## Example: Per-Request Steering Vectors
+## Example: Per-Request Steering (Actual Implementation)
 
-A complete pattern for applying different steering vectors to different requests:
+The per-request steering implementation uses a **request-indexed gather** pattern rather than a Triton kernel. This approach is simpler, CUDA graph compatible, and leverages the torch.compile splitting point mechanism.
+
+### Per-Layer Buffers
 
 ```python
-@dataclass
-class SteeringMetadata:
-    # Per-request: which steering vector (-1 = none)
-    request_steering_idx: torch.Tensor   # [num_reqs]
-
-    # Per-request: scale factor
-    request_steering_scale: torch.Tensor # [num_reqs]
-
-
-@triton.jit
-def apply_steering_kernel(
-    hidden_ptr,                  # [num_tokens, hidden_dim]
-    steering_vectors_ptr,        # [num_vectors, hidden_dim]
-    query_start_loc_ptr,         # [num_reqs + 1]
-    request_steering_idx_ptr,    # [num_reqs]
-    request_steering_scale_ptr,  # [num_reqs]
-    num_reqs,
-    HIDDEN_DIM: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    req_idx = tl.program_id(0)
-    if req_idx >= num_reqs:
-        return
-
-    # Check if this request has steering
-    steering_idx = tl.load(request_steering_idx_ptr + req_idx)
-    if steering_idx == -1:
-        return
-
-    scale = tl.load(request_steering_scale_ptr + req_idx)
-
-    # Get token range for this request
-    start = tl.load(query_start_loc_ptr + req_idx)
-    end = tl.load(query_start_loc_ptr + req_idx + 1)
-
-    steering_base = steering_idx * HIDDEN_DIM
-
-    # Apply steering to each token
-    for token_offset in range(end - start):
-        token_idx = start + token_offset
-        hidden_base = token_idx * HIDDEN_DIM
-
-        for d in tl.range(0, HIDDEN_DIM, BLOCK_D):
-            offs = d + tl.arange(0, BLOCK_D)
-            mask = offs < HIDDEN_DIM
-
-            h = tl.load(hidden_ptr + hidden_base + offs, mask=mask)
-            s = tl.load(steering_vectors_ptr + steering_base + offs, mask=mask)
-
-            result = h + scale * s
-            tl.store(hidden_ptr + hidden_base + offs, result, mask=mask)
-
-
-# Launch configuration
-grid = (num_reqs,)
-apply_steering_kernel[grid](
-    hidden_states,
-    steering_vectors,
-    attn_metadata.query_start_loc,
-    steering_metadata.request_steering_idx,
-    steering_metadata.request_steering_scale,
-    attn_metadata.num_reqs,
-    HIDDEN_DIM=hidden_dim,
-    BLOCK_D=128,
-)
+# On each Gemma3DecoderLayer:
+steering_table: torch.Tensor   # (max_configs + 2, hidden_size)
+steering_index: torch.Tensor   # (max_tokens,) — shared across all layers
 ```
+
+### Table Layout
+
+```
+Row 0:  [0, 0, 0, ..., 0]              ← prefill / no steering
+Row 1:  [g₁, g₂, ..., gₕ]             ← global vector only
+Row 2:  [g₁+a₁, g₂+a₂, ..., gₕ+aₕ]   ← global + per-request config A
+Row 3:  [g₁+b₁, g₂+b₂, ..., gₕ+bₕ]   ← global + per-request config B
+```
+
+### Index Mapping
+
+```python
+# Model runner builds this before each forward pass:
+# Token:  [decode₁, decode₂, prefill₁, prefill₂, decode₃]
+# Index:  [   2,       1,        0,        0,       3    ]
+```
+
+### Custom Op (splitting point)
+
+```python
+# In Gemma3DecoderLayer.forward():
+residual = torch.ops.vllm.apply_steering(
+    residual,              # (num_tokens, hidden_size)
+    self.steering_table,   # (max_configs + 2, hidden_size)
+    self.steering_index,   # (max_tokens,)
+)
+# = residual + steering_table[steering_index[:N]]
+```
+
+The custom op is registered as a torch.compile splitting point, so the Python implementation runs at runtime between compiled graph segments. In-place buffer updates are visible across CUDA graph replays.
+
+### How Requests Map to Table Rows
+
+The `SteeringManager` assigns table rows to distinct steering configs (identified by hash). Multiple requests sharing identical vectors share a row (reference counted). The `InputBatch` tracks each request's `steering_config_hash`, and the model runner builds the `steering_index` by looking up each request's hash → row mapping.
+
+See [STEERING.md](STEERING.md) for the full architecture.
 
 ## Key Files Reference
 

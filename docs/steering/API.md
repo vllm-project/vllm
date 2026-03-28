@@ -1,8 +1,10 @@
 # Steering API
 
-REST endpoints for managing activation steering vectors at runtime. All endpoints require `VLLM_SERVER_DEV_MODE=1`.
+## Global Steering (HTTP Endpoints)
 
-## Endpoints
+REST endpoints for managing server-wide activation steering vectors at runtime. All endpoints require `VLLM_SERVER_DEV_MODE=1`.
+
+Global steering affects all requests. For per-request steering, see the SamplingParams section below.
 
 ### POST /v1/steering/set
 
@@ -77,7 +79,55 @@ Return which layers currently have non-zero steering vectors.
 
 Returns an empty `active_layers` object when no steering is active.
 
+## Per-Request Steering (SamplingParams)
+
+Per-request steering does not require the HTTP API or dev mode. It requires `--enable-steering` on the server.
+
+### SamplingParams Field
+
+```python
+from vllm import SamplingParams
+
+params = SamplingParams(
+    max_tokens=100,
+    temperature=0.7,
+    steering_vectors={15: [0.1, 0.2, ...], 20: [0.3, 0.4, ...]},
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `steering_vectors` | `dict[int, list[float]] \| None` | Layer index to steering vector. Keys are non-negative ints, values are lists of finite floats with length `hidden_size`. |
+
+### OpenAI Client (extra_body)
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+
+response = client.chat.completions.create(
+    model="google/gemma-3-4b-it",
+    messages=[{"role": "user", "content": "Hello"}],
+    extra_body={
+        "steering_vectors": {15: [0.1, 0.2, ...]},
+    },
+)
+```
+
+### Additive Combination
+
+When both global and per-request steering are active, the effective vector per layer is:
+
+```
+effective = global_vector + per_request_vector
+```
+
+Per-request steering without global steering applies just the per-request vector. Requests without per-request steering get just the global vector (or nothing if no global steering is set).
+
 ## Data Flow
+
+### Global Steering
 
 ```
 Client POST /v1/steering/set
@@ -97,25 +147,54 @@ Phase 1 — Validate (collective_rpc → all workers)
 Phase 2 — Apply (collective_rpc → all workers)
     │  If replace=true: clear_steering_vectors() first
     │  set_steering_vectors(vectors, validate_only=False)
-    │  Workers copy vectors into model buffers via .copy_()
+    │  Workers copy vectors into steering_vector buffers
+    │  Workers notify SteeringManager.update_global_vectors()
     │
     ▼
 Model forward pass
-    │  Gemma3DecoderLayer.forward() calls torch.ops.vllm.apply_steering()
-    │  Custom op reads num_decode_tokens from ForwardContext
-    │  Steering vector added to first N rows of hidden_states (decode tokens only)
+    │  SteeringManager.populate_steering_tables() writes global to row 1
+    │  _update_steering_buffers() sets steering_index for each token
+    │  apply_steering(residual, table, index) adds table[index[:N]] to residual
     │
     ▼
 Steered output
 ```
 
-The two-phase flow prevents partial application in pipeline-parallel setups — if any worker would reject a vector (wrong size, non-finite values), no worker applies anything.
+### Per-Request Steering
 
-The `asyncio.Lock` serializes all mutations so a concurrent `/set` and `/clear` cannot interleave between the validate and apply phases.
+```
+SamplingParams(steering_vectors={15: [...]})
+    │
+    ▼
+Request.steering_config_hash = SHA-256 hash of vectors dict
+    │
+    ▼
+Scheduler: check len(scheduled_steering_configs) < max_steering_configs
+    │  If at capacity with new hash → skipped_waiting queue
+    │
+    ▼
+NewRequestData.steering_config_hash → Model Runner
+    │
+    ▼
+SteeringManager.register_config(hash, vectors) → assigns table row
+    │
+    ▼
+InputBatch.request_steering_config_hash[req_idx] = hash
+    │
+    ▼
+_update_steering_buffers():
+    │  populate_steering_tables() → row N = global + per_request
+    │  steering_index[token_offset] = row N for this request's decode tokens
+    │
+    ▼
+apply_steering(residual, table, index) → per-token steering via gather
+```
+
+The two-phase flow in global steering prevents partial application in pipeline-parallel setups — if any worker would reject a vector (wrong size, non-finite values), no worker applies anything.
 
 ## Usage Examples
 
-### Python (requests)
+### Python (requests) — Global
 
 ```python
 import requests
@@ -141,26 +220,14 @@ resp = requests.post(f"{base}/v1/steering/clear")
 print(resp.json())  # {"status": "ok"}
 ```
 
-### Atomic replacement
-
-```python
-# Replace all existing steering with a new configuration
-resp = requests.post(f"{base}/v1/steering/set", json={
-    "vectors": {10: new_vec_10, 20: new_vec_20},
-    "replace": True,  # clears all layers first, then applies
-})
-```
-
-### Python (programmatic, no server)
-
-When using `vllm.LLM` directly without the HTTP server, use `collective_rpc`:
+### Python (programmatic, no server) — Global
 
 ```python
 from vllm import LLM
 
 llm = LLM(model="google/gemma-3-4b-it")
 
-# Set steering
+# Set global steering
 vec = [10.0] * 3584
 llm.collective_rpc("set_steering_vectors", args=({14: vec}, False))
 
@@ -171,6 +238,34 @@ outputs = llm.generate(["Hello"], sampling_params)
 llm.collective_rpc("clear_steering_vectors")
 ```
 
+### Python (programmatic) — Per-Request
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(
+    model="google/gemma-3-4b-it",
+    enable_steering=True,
+    max_steering_configs=4,
+)
+
+# Different steering per request
+steered_a = SamplingParams(
+    max_tokens=100,
+    steering_vectors={15: [1.0] * 3072},
+)
+steered_b = SamplingParams(
+    max_tokens=100,
+    steering_vectors={15: [-1.0] * 3072},
+)
+normal = SamplingParams(max_tokens=100)
+
+outputs = llm.generate(
+    ["Prompt A", "Prompt B", "Prompt C"],
+    [steered_a, steered_b, normal],
+)
+```
+
 ## Key Files
 
 | File | Purpose |
@@ -179,3 +274,6 @@ llm.collective_rpc("clear_steering_vectors")
 | `vllm/entrypoints/serve/steering/protocol.py` | `SetSteeringRequest` Pydantic model |
 | `vllm/entrypoints/serve/__init__.py` | Router registration |
 | `vllm/v1/worker/worker_base.py` | `set_steering_vectors`, `clear_steering_vectors`, `get_steering_status` |
+| `vllm/sampling_params.py` | `steering_vectors` field on `SamplingParams` |
+| `vllm/v1/request.py` | `steering_config_hash` property |
+| `vllm/engine/arg_utils.py` | `--enable-steering`, `--max-steering-configs` CLI args |
