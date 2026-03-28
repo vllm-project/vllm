@@ -175,6 +175,7 @@ class LoRAModel:
                     continue
                 module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
                 # Case for expert lora weights
+                print(f"XXXXXXXXXX MN0 {module_name}")
                 if ".experts" in module_name:
                     expert_idx = module_name.find(".experts")
                     expert_suffix = module_name[expert_idx + 1 :]

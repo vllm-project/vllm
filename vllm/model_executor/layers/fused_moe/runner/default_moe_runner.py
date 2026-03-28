@@ -80,7 +80,8 @@ class DefaultMoERunner(MoERunnerBase):
     @property
     def do_naive_dispatch_combine(self) -> bool:
         return (
-            self.moe_config.dp_size > 1 and not self.quant_method.supports_internal_mk
+            self.moe_config.dp_size > 1
+            and not self.routed_experts.quant_method.supports_internal_mk
         )
 
     def _maybe_dispatch(

@@ -142,6 +142,10 @@ class RoutedExperts(torch.nn.Module):
             )
 
     @property
+    def use_ep(self) -> bool:
+        return self.moe_config.moe_parallel_config.use_ep
+
+    @property
     def expert_map(self) -> torch.Tensor | None:
         return (
             self.expert_map_manager.expert_map
@@ -428,7 +432,7 @@ class RoutedExperts(torch.nn.Module):
         is_transposed = getattr(param, "is_transposed", False)
 
         # compressed-tensors checkpoints with packed weights are stored flipped
-        # TODO (mgoin): check self.layer._runner.quant_method.quant_config.quant_format
+        # TODO (mgoin): check self.quant_method.quant_config.quant_format
         # against known CompressionFormat enum values that have this quality
         if quant_method_name in (
             "CompressedTensorsWNA16MarlinMoEMethod",

@@ -230,7 +230,7 @@ class MoERunnerBase(MoERunner):
         return self.gate is not None
 
     @property
-    def quant_method(self) -> FusedMoEMethodBase:
+    def _quant_method(self) -> FusedMoEMethodBase:
         return self.routed_experts.quant_method
 
     @property
@@ -333,8 +333,8 @@ class MoERunnerBase(MoERunner):
         """
         return (
             self._shared_experts is not None
-            and self.quant_method.moe_kernel is not None
-            and self.quant_method.moe_kernel.output_is_reduced()
+            and self.routed_experts.quant_method.moe_kernel is not None
+            and self.routed_experts.quant_method.moe_kernel.output_is_reduced()
         )
 
     def _maybe_reduce_shared_expert_output(
@@ -412,7 +412,7 @@ class MoERunnerBase(MoERunner):
         )
         transformed_hidden_dim = hidden_states.shape[-1]
         if (
-            not self.quant_method.skip_forward_padding
+            not self.routed_experts.quant_method.skip_forward_padding
             and self.moe_config.hidden_dim != transformed_hidden_dim
         ):
             hidden_states = F.pad(
@@ -463,7 +463,7 @@ class MoERunnerBase(MoERunner):
             SharedExpertsOrder.NO_OVERLAP,
         )
 
-        if self.quant_method.is_monolithic:
+        if self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
             fused_out = self.routed_experts.forward(
                 x=hidden_states,

@@ -648,6 +648,7 @@ class LoRAModelManager:
                 replaced_module_name = module_name.removeprefix("model.")
                 if lora_model.check_lora_name(replaced_module_name):
                     module_name = replaced_module_name
+            print(f"XXXXXXXXXX MN1 {module_name}")
             if module_name.endswith(".experts"):
                 if self._is_non_gated_moe and len(replacement_loras) > 0:
                     replacement_loras = self._pad_lora_pairs_to_triplets(

@@ -36,11 +36,6 @@ class MoERunner(torch.nn.Module):
 
     @property
     @abstractmethod
-    def quant_method(self) -> FusedMoEMethodBase:
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
     def shared_experts(self) -> SharedExperts | None:
         raise NotImplementedError
 

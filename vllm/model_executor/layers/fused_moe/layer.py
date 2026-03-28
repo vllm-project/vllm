@@ -403,7 +403,7 @@ class FusedMoE(CustomOp):
             eplb_manager=eplb_manager,
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
-            indices_type_getter=lambda: self._runner.quant_method.topk_indices_dtype,
+            indices_type_getter=lambda: self._runner.routed_experts.quant_method.topk_indices_dtype,  # noqa: E501
             zero_expert_type=zero_expert_type,
             num_logical_experts=self.logical_num_experts,
         )
@@ -479,7 +479,7 @@ class FusedMoE(CustomOp):
 
         # Create RoutedExperts instance BEFORE create_weights()
         # This will hold all expert weight parameters
-        self.routed_experts = RoutedExperts(
+        routed_experts = RoutedExperts(
             self.layer_name,
             params_dtype,
             unpadded_hidden_size,
@@ -489,6 +489,7 @@ class FusedMoE(CustomOp):
             expert_map_manager=self.expert_map_manager,
             # Extra params that are needed by quant_methods, pass along for now
             rocm_aiter_fmoe_enabled=self.rocm_aiter_fmoe_enabled,
+            top_k=top_k,
             use_grouped_topk=use_grouped_topk,
             num_expert_group=num_expert_group,
             topk_group=topk_group,
@@ -500,14 +501,12 @@ class FusedMoE(CustomOp):
             activation=MoEActivation.from_str(activation),
         )
 
-        # HACK
-        # self.quant_method = self.routed_experts.quant_method
+        # TODO(bnell): this needs to be stored as a parameter for weight loading.
+        # ditch this eventually.
+        self.routed_experts = routed_experts
 
         # Move XXXXXXXXXXXXX
-        if (
-            eplb_manager is not None
-            and not self.routed_experts.quant_method.supports_eplb
-        ):
+        if eplb_manager is not None and not routed_experts.quant_method.supports_eplb:
             # TODO: Add support for additional quantization methods.
             # The implementation for other quantization methods does not
             # contain essential differences, but the current quant API
@@ -530,14 +529,14 @@ class FusedMoE(CustomOp):
             routed_output_transform=routed_output_transform,
             gate=gate,
             shared_experts=shared_experts,
-            routed_experts=self.routed_experts,
+            routed_experts=routed_experts,
             enable_dbo=vllm_config.parallel_config.enable_dbo,
             apply_scale_to_output=apply_scale_to_output,
             routed_scaling_factor=routed_scaling_factor,
         )
 
         # HACK XXXXXXXXXXXXXXXXXXXXXXXX
-        self.routed_experts.shared_experts = self._runner.shared_experts
+        routed_experts.shared_experts = self._runner.shared_experts
 
         # For smuggling this layer into the fused moe custom op
         register_layer_for_moe_forward_op(vllm_config, self)
@@ -577,20 +576,22 @@ class FusedMoE(CustomOp):
         # NOTE(rob): WIP refactor. For quant methods that own the MK
         # we create the MK during process_weights_after_loading.
         if (
-            self._runner.quant_method.supports_internal_mk
-            or self._runner.quant_method.is_monolithic
+            self._runner.routed_experts.quant_method.supports_internal_mk
+            or self._runner.routed_experts.quant_method.is_monolithic
         ):
             return None
 
-        self.routed_experts._ensure_moe_quant_config_init()
+        self._runner.routed_experts._ensure_moe_quant_config_init()
         # routing_tables only needed for round-robin expert placement with
         # DeepEP all2all backend.
         routing_tables = self._maybe_init_expert_routing_tables()
 
-        if isinstance(self._runner.quant_method, FusedMoEModularMethod):
-            base_quant_method = self._runner.quant_method.old_quant_method
+        if isinstance(self._runner.routed_experts.quant_method, FusedMoEModularMethod):
+            base_quant_method = (
+                self._runner.routed_experts.quant_method.old_quant_method
+            )
         else:
-            base_quant_method = self._runner.quant_method
+            base_quant_method = self._runner.routed_experts.quant_method
 
         prepare_finalize = base_quant_method.maybe_make_prepare_finalize(
             routing_tables=routing_tables
@@ -676,7 +677,7 @@ class FusedMoE(CustomOp):
 
     @property
     def is_monolithic(self) -> bool:
-        return self._runner.quant_method.is_monolithic
+        return self._runner.routed_experts.quant_method.is_monolithic
 
     @property
     def shared_experts(self) -> SharedExperts | None:
@@ -688,19 +689,21 @@ class FusedMoE(CustomOp):
 
     @property
     def expert_map(self) -> torch.Tensor | None:
-        return self.routed_experts.expert_map
+        return self._runner.routed_experts.expert_map
 
     def _maybe_init_expert_routing_tables(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        return self.routed_experts._maybe_init_expert_routing_tables()
+        return self._runner.routed_experts._maybe_init_expert_routing_tables()
 
     def update_expert_map(self):
-        self.routed_experts.update_expert_map()
+        self._runner.routed_experts.update_expert_map()
 
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
         """Map global expert ID to local expert ID."""
-        return self.routed_experts._map_global_expert_id_to_local_expert_id(expert_id)
+        return self._runner.routed_experts._map_global_expert_id_to_local_expert_id(
+            expert_id
+        )
 
     #
     # EPLB
@@ -773,57 +776,6 @@ class FusedMoE(CustomOp):
         )
 
     #
-    # Weight Loading (Delegated to RoutedExperts)
-    #
-
-    # @overload
-    # def weight_loader(
-    #     self,
-    #     param: torch.nn.Parameter,
-    #     loaded_weight: torch.Tensor,
-    #     weight_name: str,
-    #     shard_id: str,
-    #     expert_id: int,
-    #     return_success: Literal[False],
-    # ) -> None: ...
-
-    # @overload
-    # def weight_loader(
-    #     self,
-    #     param: torch.nn.Parameter,
-    #     loaded_weight: torch.Tensor,
-    #     weight_name: str,
-    #     shard_id: str,
-    #     expert_id: int,
-    #     return_success: Literal[True],
-    # ) -> bool: ...
-
-    # def weight_loader(
-    #     self,
-    #     param: torch.nn.Parameter,
-    #     loaded_weight: torch.Tensor,
-    #     weight_name: str,
-    #     shard_id: str,
-    #     expert_id: int,
-    #     return_success: bool = False,
-    # ) -> bool | None:
-    #     """Delegate to RoutedExperts."""
-    #     return self.routed_experts.weight_loader(
-    #         param=param,
-    #         loaded_weight=loaded_weight,
-    #         weight_name=weight_name,
-    #         shard_id=shard_id,
-    #         expert_id=expert_id,
-    #         return_success=return_success,
-    #     )
-
-    # def load_weights(
-    #     self, weights: Iterable[tuple[str, torch.Tensor]]
-    # ) -> Iterable[str]:
-    #     """Delegate to RoutedExperts."""
-    #     return self.routed_experts.load_weights(weights)
-
-    #
     # Execution
     #
 
@@ -843,8 +795,3 @@ class FusedMoE(CustomOp):
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
         return self.forward_native(hidden_states, router_logits)
-
-
-# Mark the FusedMoE weight_loader as supporting MoE-specific parameters
-# to avoid expensive runtime reflection in model loading code
-# FusedMoE.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
