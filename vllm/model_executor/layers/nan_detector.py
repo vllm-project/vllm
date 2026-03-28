@@ -156,6 +156,12 @@ class NaNDetector:
                 len(pad_bad),
             )
 
+        if len(real_bad) > 0:
+            raise RuntimeError(
+                f"NaN/Inf detected in {len(real_bad)} layer(s). "
+                "See ERROR logs above for details."
+            )
+
     def check_kv_blocks(self, block_ids: list[int]) -> None:
         """Check specific KV cache blocks for NaN/Inf.
 
