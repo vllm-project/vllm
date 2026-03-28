@@ -46,8 +46,8 @@ MESSAGES = [
             + multi_gpu_marks(num_gpus=4)
             + [
                 pytest.mark.skipif(
-                    current_platform.is_rocm(),
-                    reason="modelopt quantization is not supported on ROCm",
+                    not current_platform.is_cuda(),
+                    reason="modelopt quantization is supported only on CUDA",
                 )
             ],
         ),
