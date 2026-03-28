@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for SteeringManager.
 
-The SteeringManager maintains a steering table with the following row layout:
+The SteeringManager maintains per-hook-point steering tables with the
+following row layout:
     row 0  — always zeros (no-steering sentinel)
     row 1  — global-only steering vector
     rows 2+ — global + per-request combined vectors
@@ -14,10 +15,13 @@ lifecycle, the row-lookup semantics, and the table-population logic.
 import torch
 import torch.nn as nn
 
+from vllm.model_executor.layers.steering import DEFAULT_HOOK_POINT
 from vllm.v1.worker.steering_manager import SteeringManager
 
 HIDDEN_SIZE = 8
 MAX_CONFIGS = 4
+_HP = DEFAULT_HOOK_POINT.value  # "post_mlp_pre_ln"
+_TABLE_ATTR = "steering_table_post_mlp_pre_ln"
 
 
 # ---------------------------------------------------------------------------
@@ -26,12 +30,12 @@ MAX_CONFIGS = 4
 
 
 class FakeSteerableLayer(nn.Module):
-    """Minimal module that exposes a ``steering_table`` buffer."""
+    """Minimal module that exposes a per-hook ``steering_table_*`` buffer."""
 
     def __init__(self, num_rows: int, hidden_size: int):
         super().__init__()
         self.register_buffer(
-            "steering_table",
+            _TABLE_ATTR,
             torch.zeros(num_rows, hidden_size),
         )
 
@@ -66,14 +70,14 @@ class TestRegisterRelease:
     def test_register_returns_row_gte_2(self):
         """Registered configs must occupy rows >= 2 (0=zeros, 1=global)."""
         mgr = _make_manager()
-        vectors = {0: [1.0] * HIDDEN_SIZE}
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         row = mgr.register_config(config_hash=42, vectors=vectors)
         assert row >= 2
 
     def test_duplicate_hash_returns_same_row(self):
         """Re-registering the same hash bumps the refcount, same row."""
         mgr = _make_manager()
-        vectors = {0: [1.0] * HIDDEN_SIZE}
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         row1 = mgr.register_config(config_hash=42, vectors=vectors)
         row2 = mgr.register_config(config_hash=42, vectors=vectors)
         assert row1 == row2
@@ -81,8 +85,8 @@ class TestRegisterRelease:
     def test_different_hashes_get_different_rows(self):
         """Distinct config hashes must not alias to the same row."""
         mgr = _make_manager()
-        vectors_a = {0: [1.0] * HIDDEN_SIZE}
-        vectors_b = {0: [2.0] * HIDDEN_SIZE}
+        vectors_a = {_HP: {0: [1.0] * HIDDEN_SIZE}}
+        vectors_b = {_HP: {0: [2.0] * HIDDEN_SIZE}}
         row_a = mgr.register_config(config_hash=100, vectors=vectors_a)
         row_b = mgr.register_config(config_hash=200, vectors=vectors_b)
         assert row_a != row_b
@@ -90,7 +94,7 @@ class TestRegisterRelease:
     def test_release_decrements_refcount_still_active(self):
         """Releasing once with refcount > 1 keeps the config active."""
         mgr = _make_manager()
-        vectors = {0: [1.0] * HIDDEN_SIZE}
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         mgr.register_config(config_hash=42, vectors=vectors)
         mgr.register_config(config_hash=42, vectors=vectors)  # refcount = 2
         mgr.release_config(config_hash=42)  # refcount -> 1
@@ -101,7 +105,7 @@ class TestRegisterRelease:
     def test_release_frees_row_at_refcount_zero(self):
         """Fully releasing a config makes its row reclaimable."""
         mgr = _make_manager()
-        vectors = {0: [1.0] * HIDDEN_SIZE}
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         mgr.register_config(config_hash=42, vectors=vectors)
         assert mgr.num_active_configs == 1
         mgr.release_config(config_hash=42)
@@ -110,23 +114,27 @@ class TestRegisterRelease:
     def test_freed_row_is_reusable(self):
         """After full release, the row can be assigned to a new config."""
         mgr = _make_manager(max_configs=1)
-        vectors = {0: [1.0] * HIDDEN_SIZE}
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         row_old = mgr.register_config(config_hash=42, vectors=vectors)
         mgr.release_config(config_hash=42)
 
         # A completely new config should be able to use the freed slot.
-        vectors_new = {0: [9.0] * HIDDEN_SIZE}
+        vectors_new = {_HP: {0: [9.0] * HIDDEN_SIZE}}
         row_new = mgr.register_config(config_hash=99, vectors=vectors_new)
         assert row_new == row_old  # same slot recycled
 
     def test_capacity_exhaustion_raises(self):
         """Exceeding max_steering_configs raises RuntimeError."""
         mgr = _make_manager(max_configs=2)
-        mgr.register_config(config_hash=1, vectors={0: [1.0] * HIDDEN_SIZE})
-        mgr.register_config(config_hash=2, vectors={0: [2.0] * HIDDEN_SIZE})
+        mgr.register_config(
+            config_hash=1, vectors={_HP: {0: [1.0] * HIDDEN_SIZE}}
+        )
+        mgr.register_config(
+            config_hash=2, vectors={_HP: {0: [2.0] * HIDDEN_SIZE}}
+        )
         try:
             mgr.register_config(
-                config_hash=3, vectors={0: [3.0] * HIDDEN_SIZE}
+                config_hash=3, vectors={_HP: {0: [3.0] * HIDDEN_SIZE}}
             )
             assert False, "Expected RuntimeError for capacity exhaustion"
         except RuntimeError:
@@ -154,7 +162,7 @@ class TestGetRow:
     def test_registered_hash_returns_assigned_row(self):
         """A registered config returns the row assigned at registration."""
         mgr = _make_manager()
-        vectors = {0: [1.0] * HIDDEN_SIZE}
+        vectors = {_HP: {0: [1.0] * HIDDEN_SIZE}}
         row = mgr.register_config(config_hash=42, vectors=vectors)
         assert mgr.get_row_for_config(config_hash=42) == row
 
@@ -176,11 +184,12 @@ class TestPopulateTables:
         """Row 0 must be all zeros even if the buffer was dirtied."""
         mgr = _make_manager()
         layers = _make_layers(mgr, layer_indices=[0])
+        table = getattr(layers[0], _TABLE_ATTR)
         # Dirty row 0 on purpose.
-        layers[0].steering_table[0].fill_(99.0)
+        table[0].fill_(99.0)
         mgr.populate_steering_tables(layers)
         assert torch.allclose(
-            layers[0].steering_table[0],
+            table[0],
             torch.zeros(HIDDEN_SIZE),
         )
 
@@ -188,71 +197,71 @@ class TestPopulateTables:
         """Row 1 should contain the global steering vector for each layer."""
         mgr = _make_manager()
         global_vec = torch.ones(HIDDEN_SIZE) * 3.0
-        mgr.update_global_vectors(layer_idx=0, vector=global_vec)
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=global_vec
+        )
         layers = _make_layers(mgr, layer_indices=[0])
         mgr.populate_steering_tables(layers)
-        assert torch.allclose(
-            layers[0].steering_table[1],
-            global_vec,
-        )
+        table = getattr(layers[0], _TABLE_ATTR)
+        assert torch.allclose(table[1], global_vec)
 
     def test_row_one_zero_without_global(self):
         """Without a global vector set, row 1 must remain zeros."""
         mgr = _make_manager()
         layers = _make_layers(mgr, layer_indices=[0])
         mgr.populate_steering_tables(layers)
-        assert torch.allclose(
-            layers[0].steering_table[1],
-            torch.zeros(HIDDEN_SIZE),
-        )
+        table = getattr(layers[0], _TABLE_ATTR)
+        assert torch.allclose(table[1], torch.zeros(HIDDEN_SIZE))
 
     def test_per_request_row_is_additive(self):
         """Per-request rows should contain global + per_request vectors."""
         mgr = _make_manager()
         global_vec = torch.ones(HIDDEN_SIZE) * 2.0
         per_req_vec = torch.ones(HIDDEN_SIZE) * 5.0
-        mgr.update_global_vectors(layer_idx=0, vector=global_vec)
-        vectors = {0: per_req_vec.tolist()}
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=global_vec
+        )
+        vectors = {_HP: {0: per_req_vec.tolist()}}
         row = mgr.register_config(config_hash=42, vectors=vectors)
 
         layers = _make_layers(mgr, layer_indices=[0])
         mgr.populate_steering_tables(layers)
 
+        table = getattr(layers[0], _TABLE_ATTR)
         expected = global_vec + per_req_vec
-        assert torch.allclose(
-            layers[0].steering_table[row],
-            expected,
-        ), (
+        assert torch.allclose(table[row], expected), (
             f"Row {row} should be global+per_request.\n"
             f"Expected: {expected}\n"
-            f"Got: {layers[0].steering_table[row]}"
+            f"Got: {table[row]}"
         )
 
     def test_per_request_only_no_global(self):
         """Per-request config without global should just have per_request."""
         mgr = _make_manager()
         per_req_vec = torch.ones(HIDDEN_SIZE) * 7.0
-        vectors = {0: per_req_vec.tolist()}
+        vectors = {_HP: {0: per_req_vec.tolist()}}
         row = mgr.register_config(config_hash=42, vectors=vectors)
 
         layers = _make_layers(mgr, layer_indices=[0])
         mgr.populate_steering_tables(layers)
 
-        assert torch.allclose(
-            layers[0].steering_table[row],
-            per_req_vec,
-        )
+        table = getattr(layers[0], _TABLE_ATTR)
+        assert torch.allclose(table[row], per_req_vec)
 
     def test_layer_without_per_request_gets_global_only(self):
         """A layer not covered by per-request vectors gets global in row."""
         mgr = _make_manager()
         global_vec_0 = torch.ones(HIDDEN_SIZE) * 2.0
         global_vec_1 = torch.ones(HIDDEN_SIZE) * 3.0
-        mgr.update_global_vectors(layer_idx=0, vector=global_vec_0)
-        mgr.update_global_vectors(layer_idx=1, vector=global_vec_1)
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=global_vec_0
+        )
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=1, vector=global_vec_1
+        )
 
         # Per-request config only targets layer 0, not layer 1.
-        vectors = {0: [5.0] * HIDDEN_SIZE}
+        vectors = {_HP: {0: [5.0] * HIDDEN_SIZE}}
         row = mgr.register_config(config_hash=42, vectors=vectors)
 
         layers = _make_layers(mgr, layer_indices=[0, 1])
@@ -260,28 +269,24 @@ class TestPopulateTables:
 
         # Layer 0: global + per_request
         expected_layer0 = global_vec_0 + torch.tensor([5.0] * HIDDEN_SIZE)
-        assert torch.allclose(
-            layers[0].steering_table[row],
-            expected_layer0,
-        )
+        table_0 = getattr(layers[0], _TABLE_ATTR)
+        assert torch.allclose(table_0[row], expected_layer0)
 
         # Layer 1: only global (per-request didn't target it)
-        assert torch.allclose(
-            layers[1].steering_table[row],
-            global_vec_1,
-        )
+        table_1 = getattr(layers[1], _TABLE_ATTR)
+        assert torch.allclose(table_1[row], global_vec_1)
 
     def test_clear_global_vectors_zeros_row_one(self):
         """After clear_global_vectors, row 1 must return to zeros."""
         mgr = _make_manager()
         global_vec = torch.ones(HIDDEN_SIZE) * 4.0
-        mgr.update_global_vectors(layer_idx=0, vector=global_vec)
+        mgr.update_global_vectors(
+            hook_point=_HP, layer_idx=0, vector=global_vec
+        )
         mgr.clear_global_vectors()
 
         layers = _make_layers(mgr, layer_indices=[0])
         mgr.populate_steering_tables(layers)
 
-        assert torch.allclose(
-            layers[0].steering_table[1],
-            torch.zeros(HIDDEN_SIZE),
-        )
+        table = getattr(layers[0], _TABLE_ATTR)
+        assert torch.allclose(table[1], torch.zeros(HIDDEN_SIZE))

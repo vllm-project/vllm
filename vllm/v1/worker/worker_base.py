@@ -12,6 +12,10 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.exceptions import SteeringVectorError
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.steering import (
+    HOOK_POINT_VECTOR_ATTR,
+    SteeringHookPoint,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -124,6 +128,9 @@ class WorkerBase:
         Works with any model runner that exposes ``get_model()``,
         including the V2 runner.  Result is cached after first
         successful discovery.
+
+        A layer is considered steerable if it has ``layer_idx`` and at
+        least one ``steering_vector_*`` buffer for any hook point.
         """
         cache = getattr(self, "_steerable_layers_cache", None)
         if cache is not None:
@@ -134,7 +141,13 @@ class WorkerBase:
             return {}
         layers: dict = {}
         for mod in mr.get_model().modules():
-            if hasattr(mod, "steering_vector") and hasattr(mod, "layer_idx"):
+            if not hasattr(mod, "layer_idx"):
+                continue
+            has_any_vector = any(
+                hasattr(mod, attr)
+                for attr in HOOK_POINT_VECTOR_ATTR.values()
+            )
+            if has_any_vector:
                 layers[mod.layer_idx] = mod
 
         if layers:
@@ -144,21 +157,24 @@ class WorkerBase:
 
     def set_steering_vectors(
         self,
-        vectors_data: dict[int, list[float]],
+        vectors_data: dict[str, dict[int, list[float]]],
         validate_only: bool = False,
     ) -> list[int]:
         """Set activation steering vectors from plain Python data.
 
-        Only the layers present in *vectors_data* are modified; other
-        layers keep their current steering state.  Use
+        Args:
+            vectors_data: ``{hook_point_str: {layer_idx: [floats]}}``
+                mapping hook point names to per-layer vectors.
+            validate_only: When ``True``, validate without applying.
+
+        Only the layers/hook-points present in *vectors_data* are
+        modified; other layers keep their current steering state.  Use
         :meth:`clear_steering_vectors` to zero everything first when a
         full replacement is intended.
 
-        All requested vectors are validated (layer existence and
-        hidden-size match) **before** any buffer is touched.  When
-        *validate_only* is ``True`` the method returns after validation
-        without copying any data — the router uses this to verify all
-        pipeline-parallel stages before committing the update.
+        All requested vectors are validated (hook-point existence, layer
+        existence, and hidden-size match) **before** any buffer is
+        touched.
 
         Returns:
             Sorted list of layer indices that were actually updated (or
@@ -169,49 +185,93 @@ class WorkerBase:
         if not steerable:
             return []
 
-        # Determine which requested layers this worker owns.
-        valid_indices = set(vectors_data.keys()) & set(steerable.keys())
+        valid_indices: set[int] = set()
+
+        # Validate all hook_point / layer / vector combinations.
+        for hook_point_str, layer_vecs in vectors_data.items():
+            try:
+                hp_enum = SteeringHookPoint(hook_point_str)
+            except ValueError:
+                raise SteeringVectorError(
+                    f"Invalid hook point: {hook_point_str!r}"
+                )
+            vec_attr = HOOK_POINT_VECTOR_ATTR[hp_enum]
+
+            for idx, vec_values in layer_vecs.items():
+                if idx not in steerable:
+                    continue
+                mod = steerable[idx]
+                if not hasattr(mod, vec_attr):
+                    raise SteeringVectorError(
+                        f"Hook point {hook_point_str!r} not active "
+                        f"on layer {idx}"
+                    )
+                buf = getattr(mod, vec_attr)
+                expected_size = buf.shape[1]
+                if len(vec_values) != expected_size:
+                    raise SteeringVectorError(
+                        f"Layer {idx} ({hook_point_str}): expected "
+                        f"vector of size {expected_size}, "
+                        f"got {len(vec_values)}"
+                    )
+                if not all(math.isfinite(v) for v in vec_values):
+                    raise SteeringVectorError(
+                        f"Layer {idx} ({hook_point_str}): steering "
+                        f"vector contains non-finite values "
+                        f"(NaN or Infinity)"
+                    )
+                valid_indices.add(idx)
+
         if not valid_indices:
             return []
-
-        # Validate vector sizes and values before any mutation.
-        for idx in sorted(valid_indices):
-            vec = vectors_data[idx]
-            expected = steerable[idx].steering_vector.shape[1]
-            if len(vec) != expected:
-                raise SteeringVectorError(
-                    f"Layer {idx}: expected vector of size {expected}, got {len(vec)}"
-                )
-            if not all(math.isfinite(v) for v in vec):
-                raise SteeringVectorError(
-                    f"Layer {idx}: steering vector contains non-finite "
-                    f"values (NaN or Infinity)"
-                )
 
         if validate_only:
             return sorted(valid_indices)
 
         # All checks passed — apply.
-        for idx in valid_indices:
-            vec = torch.tensor(vectors_data[idx], dtype=torch.float32).unsqueeze(0)
-            buf = steerable[idx].steering_vector
-            buf.copy_(vec.to(device=buf.device, dtype=buf.dtype))
+        for hook_point_str, layer_vecs in vectors_data.items():
+            vec_attr = HOOK_POINT_VECTOR_ATTR[
+                SteeringHookPoint(hook_point_str)
+            ]
+            for idx, vec_values in layer_vecs.items():
+                if idx not in steerable:
+                    continue
+                mod = steerable[idx]
+                if not hasattr(mod, vec_attr):
+                    continue
+                buf = getattr(mod, vec_attr)
+                t = torch.tensor(
+                    [vec_values], dtype=buf.dtype, device=buf.device
+                )
+                buf.copy_(t)
 
         # Notify SteeringManager of global vector changes
         if hasattr(self, "model_runner") and self.model_runner is not None:
             mgr = getattr(self.model_runner, "_steering_manager", None)
             if mgr is not None:
-                for idx in valid_indices:
-                    mgr.update_global_vectors(
-                        idx, steerable[idx].steering_vector
-                    )
+                for hook_point_str, layer_vecs in vectors_data.items():
+                    vec_attr = HOOK_POINT_VECTOR_ATTR[
+                        SteeringHookPoint(hook_point_str)
+                    ]
+                    for idx in layer_vecs:
+                        if idx not in valid_indices or idx not in steerable:
+                            continue
+                        mod = steerable[idx]
+                        if hasattr(mod, vec_attr):
+                            mgr.update_global_vectors(
+                                hook_point_str,
+                                idx,
+                                getattr(mod, vec_attr),
+                            )
 
         return sorted(valid_indices)
 
     def clear_steering_vectors(self) -> None:
-        """Zero all steering-vector buffers."""
+        """Zero all steering-vector buffers across all hook points."""
         for mod in self._steerable_layers().values():
-            mod.steering_vector.zero_()
+            for vec_attr in HOOK_POINT_VECTOR_ATTR.values():
+                if hasattr(mod, vec_attr):
+                    getattr(mod, vec_attr).zero_()
 
         # Notify SteeringManager
         if hasattr(self, "model_runner") and self.model_runner is not None:
@@ -220,12 +280,23 @@ class WorkerBase:
                 mgr.clear_global_vectors()
 
     def get_steering_status(self) -> dict:
-        """Return ``{layer_idx: {"norm": float}}`` for active layers."""
+        """Return per-hook-point status for active layers.
+
+        Returns ``{layer_idx: {hook_point: {"norm": float}}}`` for
+        layers/hook-points that have a non-zero steering vector.
+        """
         result: dict = {}
         for idx, mod in self._steerable_layers().items():
-            norm = mod.steering_vector.norm().item()
-            if norm > 0.0:
-                result[idx] = {"norm": round(norm, 6)}
+            layer_info: dict[str, dict[str, float]] = {}
+            for hp, vec_attr in HOOK_POINT_VECTOR_ATTR.items():
+                if not hasattr(mod, vec_attr):
+                    continue
+                vec = getattr(mod, vec_attr)
+                norm = vec.norm().item()
+                if norm > 0.0:
+                    layer_info[hp.value] = {"norm": round(norm, 6)}
+            if layer_info:
+                result[idx] = layer_info
         return result
 
     def get_model_inspection(self) -> str:

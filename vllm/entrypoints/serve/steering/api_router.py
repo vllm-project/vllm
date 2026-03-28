@@ -12,6 +12,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.serve.steering.protocol import SetSteeringRequest
 from vllm.exceptions import SteeringVectorError
 from vllm.logger import init_logger
+from vllm.model_executor.layers.steering import DEFAULT_HOOK_POINT
 
 logger = init_logger(__name__)
 
@@ -66,6 +67,13 @@ async def set_steering(
         else:
             scaled[layer_idx] = vec
 
+    # Wrap legacy layer-indexed vectors under the default hook point
+    # so the worker receives the new hook-point-aware format:
+    # {hook_point_str: {layer_idx: [floats]}}
+    hook_vectors: dict[str, dict[int, list[float]]] = {
+        DEFAULT_HOOK_POINT.value: scaled,
+    }
+
     try:
         async with _steering_lock:
             # Phase 1 — validate on every worker without mutating
@@ -73,7 +81,7 @@ async def set_steering(
             # partially applying an update when a later stage would
             # reject it.
             results = await engine.collective_rpc(
-                "set_steering_vectors", args=(scaled, True)
+                "set_steering_vectors", args=(hook_vectors, True)
             )
             # Each worker returns the layer indices it *would* update.
             # Union across workers (TP replicas report the same layers,
@@ -117,7 +125,9 @@ async def set_steering(
                 await engine.collective_rpc("clear_steering_vectors")
 
             # Phase 2 — all workers validated; now apply.
-            await engine.collective_rpc("set_steering_vectors", args=(scaled, False))
+            await engine.collective_rpc(
+                "set_steering_vectors", args=(hook_vectors, False)
+            )
 
         return JSONResponse(
             content={

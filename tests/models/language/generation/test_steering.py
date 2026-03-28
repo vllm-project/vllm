@@ -5,8 +5,16 @@
 import pytest
 
 from vllm import SamplingParams
+from vllm.model_executor.layers.steering import (
+    DEFAULT_HOOK_POINT,
+    HOOK_POINT_VECTOR_ATTR,
+)
 
 MODEL = "google/gemma-3-4b-it"
+
+# Shorthand
+_HP = DEFAULT_HOOK_POINT.value
+_VEC_ATTR = HOOK_POINT_VECTOR_ATTR[DEFAULT_HOOK_POINT]
 
 
 @pytest.mark.parametrize("model", [MODEL])
@@ -43,8 +51,10 @@ def test_steering_changes_output(vllm_runner, monkeypatch, model: str) -> None:
                 layers = {}
                 model = worker.model_runner.get_model()
                 for mod in model.modules():
-                    if hasattr(mod, "steering_vector") and hasattr(mod, "layer_idx"):
-                        layers[mod.layer_idx] = mod.steering_vector.shape[1]
+                    if hasattr(mod, _VEC_ATTR) and hasattr(mod, "layer_idx"):
+                        layers[mod.layer_idx] = getattr(
+                            mod, _VEC_ATTR
+                        ).shape[1]
                 return layers
 
             layer_info = llm.llm.collective_rpc(_discover)[0]
@@ -57,7 +67,7 @@ def test_steering_changes_output(vllm_runner, monkeypatch, model: str) -> None:
             vec = [500.0] * hidden_size
             llm.llm.collective_rpc(
                 "set_steering_vectors",
-                args=({target_layer: vec}, False),
+                args=({_HP: {target_layer: vec}}, False),
             )
 
             steered = llm.llm.generate([prompt], sampling)
@@ -110,8 +120,10 @@ def test_per_request_steering_via_sampling_params(
                 layers = {}
                 model_inst = worker.model_runner.get_model()
                 for mod in model_inst.modules():
-                    if hasattr(mod, "steering_vector") and hasattr(mod, "layer_idx"):
-                        layers[mod.layer_idx] = mod.steering_vector.shape[1]
+                    if hasattr(mod, _VEC_ATTR) and hasattr(mod, "layer_idx"):
+                        layers[mod.layer_idx] = getattr(
+                            mod, _VEC_ATTR
+                        ).shape[1]
                 return layers
 
             layer_info = llm.llm.collective_rpc(_discover)[0]
@@ -173,10 +185,12 @@ def test_per_request_steering_concurrent_with_cuda_graphs(
                 layers = {}
                 model_inst = worker.model_runner.get_model()
                 for mod in model_inst.modules():
-                    if hasattr(mod, "steering_vector") and hasattr(
+                    if hasattr(mod, _VEC_ATTR) and hasattr(
                         mod, "layer_idx"
                     ):
-                        layers[mod.layer_idx] = mod.steering_vector.shape[1]
+                        layers[mod.layer_idx] = getattr(
+                            mod, _VEC_ATTR
+                        ).shape[1]
                 return layers
 
             layer_info = llm.llm.collective_rpc(_discover)[0]
