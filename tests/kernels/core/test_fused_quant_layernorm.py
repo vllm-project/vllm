@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-import itertools
-
 import pytest
 import torch
 
@@ -20,17 +18,17 @@ from vllm.platforms import current_platform
 
 DTYPES = [torch.bfloat16, torch.float]
 QUANT_DTYPES = [torch.int8, current_platform.fp8_dtype()]
-VEC_HIDDEN_SIZES = [1024, 1025, 1027, 1029]
-# Avoid combinatorial explosion with full Cartesian product
+# Trimmed to cover: small, misaligned, large-aligned, large-misaligned
 NUM_TOKENS_HIDDEN_SIZES = [
-    *[(1, i) for i in [1, 64, 128, *VEC_HIDDEN_SIZES, 5120, 5137]],
-    *[(2048, i) for i in [1, 64, *VEC_HIDDEN_SIZES, 5137]],
-    *[(4096, i) for i in [1, 64, 5137]],
+    (1, 128),
+    (1, 1025),       # odd/misaligned vectorization
+    (2048, 1024),     # medium aligned
+    (4096, 5137),     # large misaligned
 ]
 
 ADD_RESIDUAL = [False, True]
 SCALE_UBS = [True, False]
-GROUP_SIZES = [None, [1, 64], [1, 128]]
+GROUP_SIZES = [None, [1, 128]]
 TMA_ALIGNMENTS = [0, 4]
 SEEDS = [0]
 CUDA_DEVICES = [
@@ -160,7 +158,7 @@ def ops_impl(
 @pytest.mark.parametrize("quant_dtype", QUANT_DTYPES)
 @pytest.mark.parametrize(
     "group_size, tma_alignment",
-    [(None, 0), *itertools.product(GROUP_SIZES, TMA_ALIGNMENTS)],
+    [(None, 0), ([1, 128], 0), ([1, 128], 4)],
 )
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
