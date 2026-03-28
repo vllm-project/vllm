@@ -293,6 +293,11 @@ class SamplingParams(
     """Per-request activation steering vectors. Keys are layer indices,
     values are steering vectors of length hidden_size."""
 
+    steering_hook_vectors: dict[str, dict[int, list[float]]] | None = None
+    """Per-request activation steering vectors keyed by hook point name,
+    then layer index. Valid hook points: pre_attn, post_attn,
+    post_mlp_pre_ln, post_mlp_post_ln."""
+
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
     If such repetition is detected, generation will be ended early. LLMs can
@@ -333,6 +338,9 @@ class SamplingParams(
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
         steering_vectors: dict[int, list[float]] | None = None,
+        steering_hook_vectors: (
+            dict[str, dict[int, list[float]]] | None
+        ) = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -375,6 +383,7 @@ class SamplingParams(
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
             steering_vectors=steering_vectors,
+            steering_hook_vectors=steering_hook_vectors,
         )
 
     def __post_init__(self) -> None:
@@ -528,36 +537,67 @@ class SamplingParams(
         self._validate_steering_vectors()
 
     def _validate_steering_vectors(self) -> None:
-        """Validate steering_vectors if provided."""
-        if self.steering_vectors is None:
-            return
-        if not isinstance(self.steering_vectors, dict):
+        """Validate steering_vectors and steering_hook_vectors if provided."""
+        if self.steering_vectors is not None:
+            self._validate_layer_vector_dict(
+                self.steering_vectors, "steering_vectors"
+            )
+        if self.steering_hook_vectors is not None:
+            self._validate_steering_hook_vectors()
+
+    @staticmethod
+    def _validate_layer_vector_dict(
+        d: dict[int, list[float]], field_name: str
+    ) -> None:
+        """Validate a dict mapping layer indices to float vectors."""
+        if not isinstance(d, dict):
             raise ValueError(
-                "steering_vectors must be a dict mapping layer indices "
+                f"{field_name} must be a dict mapping layer indices "
                 "to lists of floats."
             )
-        for key, value in self.steering_vectors.items():
+        for key, value in d.items():
             if not isinstance(key, int) or key < 0:
                 raise ValueError(
-                    f"steering_vectors keys must be non-negative integers, "
+                    f"{field_name} keys must be non-negative integers, "
                     f"got {key!r}."
                 )
             if not isinstance(value, list):
                 raise ValueError(
-                    f"steering_vectors values must be lists of floats, "
+                    f"{field_name} values must be lists of floats, "
                     f"got {type(value).__name__} for layer {key}."
                 )
             for i, v in enumerate(value):
                 if not isinstance(v, (int, float)):
                     raise ValueError(
-                        f"steering_vectors[{key}][{i}] must be a finite "
+                        f"{field_name}[{key}][{i}] must be a finite "
                         f"float, got {type(v).__name__}."
                     )
                 if not math.isfinite(v):
                     raise ValueError(
-                        f"steering_vectors[{key}][{i}] must be finite, "
+                        f"{field_name}[{key}][{i}] must be finite, "
                         f"got {v}."
                     )
+
+    def _validate_steering_hook_vectors(self) -> None:
+        """Validate steering_hook_vectors if provided."""
+        from vllm.model_executor.layers.steering import VALID_HOOK_POINT_NAMES
+
+        if not isinstance(self.steering_hook_vectors, dict):
+            raise ValueError(
+                "steering_hook_vectors must be a dict mapping hook point "
+                "names to dicts of layer vectors."
+            )
+        for hook_name, layer_vecs in self.steering_hook_vectors.items():
+            if hook_name not in VALID_HOOK_POINT_NAMES:
+                raise ValueError(
+                    f"steering_hook_vectors key {hook_name!r} is not a "
+                    f"valid hook point. Valid values: "
+                    f"{sorted(VALID_HOOK_POINT_NAMES)}."
+                )
+            self._validate_layer_vector_dict(
+                layer_vecs,
+                f"steering_hook_vectors[{hook_name!r}]",
+            )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
