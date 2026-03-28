@@ -72,7 +72,7 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return False, "Model configuration is required."
 
         model_type = getattr(model_config.hf_text_config, "model_type", None)
-        if not should_auto_disable_deep_gemm(model_type):
+        if should_auto_disable_deep_gemm(model_type):
             return False, f"Should not use deepgemm for model {model_type}"
 
         if not should_use_deepgemm_for_fp8_linear(
