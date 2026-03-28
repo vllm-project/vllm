@@ -398,6 +398,10 @@ class TritonAttentionImpl(AttentionImpl):
 
         bs = kv_half // (self.num_kv_heads * self.head_size * dtype_sz + scale_sz)
         data_per_kv = bs * self.num_kv_heads * self.head_size * dtype_sz
+        assert kv_half == data_per_kv + bs * scale_sz, (
+            f"Packed KV layout mismatch: {kv_half} != "
+            f"{data_per_kv} + {bs * scale_sz}"
+        )
         full_block = 2 * kv_half
         raw = kv_cache.untyped_storage()
 

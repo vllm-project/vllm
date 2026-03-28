@@ -34,7 +34,7 @@ def apply_softcap(S, x):
 
 
 @triton.jit
-def _dequant_kv_tile(
+def _prepare_kv_tile(
     data,
     Q,
     tensor_scale,
@@ -46,29 +46,39 @@ def _dequant_kv_tile(
     BLOCK_SIZE: tl.constexpr,
     KV_QUANT_MODE: tl.constexpr,
 ):
-    """Dequantize a loaded KV tile.
+    """Prepare a loaded KV tile for attention computation.
 
-    Returns ``(dequantized, token_scales)``.  *token_scales* is only
-    meaningful when ``KV_QUANT_MODE >= 2`` (per-token); callers gate
-    its use on the same constexpr so the compiler eliminates dead code.
+    Casts the raw KV data to Q's dtype and loads per-token scales
+    when applicable:
 
-    All return paths produce ``(Q.dtype, float32)`` so that Triton's
-    type checker is satisfied even for dead branches.
+    - ``KV_QUANT_MODE == 0``: cast only (no-op for bf16/fp16).
+    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize inline
+      using the tensor-wide scale.
+    - ``KV_QUANT_MODE >= 2`` (per-token int8/fp8): cast to Q's dtype
+      and return per-token scales separately — the caller applies
+      them after the dot product for better numerical efficiency.
+
+    Returns ``(data, token_scales)``.  *token_scales* is only
+    meaningful when ``KV_QUANT_MODE >= 2``; callers gate its use on
+    the same constexpr so the compiler eliminates dead code.
     """
-    # Dummy scales (float32) — never read when KV_QUANT_MODE < 2.
-    dummy_scales = tile_mask.to(tl.float32)
+    # KV_QUANT_MODE values: 0=none, 1=fp8 per-tensor,
+    #                       2=int8 per-token, 3=fp8 per-token
+
+    # Placeholder scales (float32) — never read when KV_QUANT_MODE < 2.
+    unused_scales = tl.zeros_like(tile_mask, dtype=tl.float32)
 
     if KV_QUANT_MODE == 1:  # FP8 per-tensor
         if Q.dtype.is_fp8():
-            return data.to(Q.dtype), dummy_scales
-        return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype), dummy_scales
+            return data.to(Q.dtype), unused_scales
+        return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype), unused_scales
     if KV_QUANT_MODE >= 2:  # per-token (int8 or fp8)
         scale_idx = physical_block_idx * stride_s_blk + (seq_offset % BLOCK_SIZE)
         token_scales = tl.load(scale_cache_ptr + scale_idx, mask=tile_mask, other=1.0)
         return data.to(Q.dtype), token_scales
     # .to(Q.dtype) is a no-op when data is already Q's type (bf16/fp16),
     # but required so Triton sees consistent return types across branches.
-    return data.to(Q.dtype), dummy_scales
+    return data.to(Q.dtype), unused_scales
 
 
 @triton.jit
@@ -305,7 +315,7 @@ def kernel_unified_attention_2d(
             mask=dim_mask[:, None] & tile_mask[None, :],
             other=0.0,
         )
-        K, k_token_scales = _dequant_kv_tile(
+        K, k_token_scales = _prepare_kv_tile(
             K_load,
             Q,
             k_scale,
@@ -324,7 +334,7 @@ def kernel_unified_attention_2d(
             mask=dim_mask[None, :] & tile_mask[:, None],
             other=0.0,
         )
-        V, v_token_scales = _dequant_kv_tile(
+        V, v_token_scales = _prepare_kv_tile(
             V_load,
             Q,
             v_scale,
@@ -685,7 +695,7 @@ def kernel_unified_attention_3d(
             mask=dim_mask[:, None] & tile_mask[None, :],
             other=0.0,
         )
-        K, k_token_scales = _dequant_kv_tile(
+        K, k_token_scales = _prepare_kv_tile(
             K_load,
             Q,
             k_scale,
@@ -704,7 +714,7 @@ def kernel_unified_attention_3d(
             mask=dim_mask[None, :] & tile_mask[:, None],
             other=0.0,
         )
-        V, v_token_scales = _dequant_kv_tile(
+        V, v_token_scales = _prepare_kv_tile(
             V_load,
             Q,
             v_scale,

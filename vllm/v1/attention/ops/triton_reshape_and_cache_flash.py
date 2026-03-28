@@ -179,11 +179,11 @@ def _reshape_cache_per_token(
         other=0.0,
     ).to(tl.float32)
 
-    k_scale = tl.maximum(tl.max(tl.abs(tl.where(k_mask, k_all, 0.0))) / QUANT_MAX, 1e-6)
+    k_scale = tl.maximum(tl.max(tl.abs(k_all)) / QUANT_MAX, 1e-6)
 
     tl.store(k_scale_cache_ptr + blk * stride_ks_blk + slot_in_blk, k_scale)
 
-    k_q = tl.clamp(k_all / k_scale, QUANT_MIN, QUANT_MAX)
+    k_q = tl.clamp(k_all * (1.0 / k_scale), QUANT_MIN, QUANT_MAX)
     tl.store(
         key_cache_ptr
         + blk * stride_kc_blk
@@ -206,11 +206,11 @@ def _reshape_cache_per_token(
         other=0.0,
     ).to(tl.float32)
 
-    v_scale = tl.maximum(tl.max(tl.abs(tl.where(v_mask, v_all, 0.0))) / QUANT_MAX, 1e-6)
+    v_scale = tl.maximum(tl.max(tl.abs(v_all)) / QUANT_MAX, 1e-6)
 
     tl.store(v_scale_cache_ptr + blk * stride_vs_blk + slot_in_blk, v_scale)
 
-    v_q = tl.clamp(v_all / v_scale, QUANT_MIN, QUANT_MAX)
+    v_q = tl.clamp(v_all * (1.0 / v_scale), QUANT_MIN, QUANT_MAX)
     tl.store(
         value_cache_ptr
         + blk * stride_vc_blk
@@ -223,9 +223,7 @@ def _reshape_cache_per_token(
 
 
 # Mapping from cache torch dtype to (QUANT_MAX, QUANT_MIN) for the
-# per-token quantization kernel.  Extend this dict when adding new
-# per-token quantization formats (e.g. fp8_per_token would add the
-# appropriate fp8 torch dtype with its representable range).
+# per-token quantization kernel.
 _PER_TOKEN_QUANT_PARAMS: dict[torch.dtype, tuple[float, float]] = {
     torch.int8: (127.0, -128.0),
     torch.float8_e4m3fn: (448.0, -448.0),
@@ -265,16 +263,15 @@ def triton_reshape_and_cache_flash_per_token_quant(
     head_size_v = value.shape[2]
     head_size_padded = triton.next_power_of_2(max(head_size, head_size_v))
 
-    # Flat vector sizes for single-pass load of all heads.
-    flat_k = triton.next_power_of_2(num_kv_heads * head_size_padded)
-    flat_v = triton.next_power_of_2(num_kv_heads * head_size_padded)
+    # Flat vector size for single-pass load of all heads (same for K and V).
+    flat_size = triton.next_power_of_2(num_kv_heads * head_size_padded)
 
     block_size = key_cache.shape[1]
 
     if current_platform.is_rocm() or current_platform.is_xpu():
         num_warps = 4
     else:
-        num_warps = min(16, max(1, flat_k // 32))
+        num_warps = min(16, max(1, flat_size // 32))
 
     _reshape_cache_per_token[(num_tokens,)](
         key_ptr=key,
@@ -301,8 +298,8 @@ def triton_reshape_and_cache_flash_per_token_quant(
         head_size_v=head_size_v,
         head_size_padded=head_size_padded,
         NUM_KV_HEADS=num_kv_heads,
-        FLAT_K_SIZE=flat_k,
-        FLAT_V_SIZE=flat_v,
+        FLAT_K_SIZE=flat_size,
+        FLAT_V_SIZE=flat_size,
         QUANT_MAX=quant_max,
         QUANT_MIN=quant_min,
         num_warps=num_warps,
