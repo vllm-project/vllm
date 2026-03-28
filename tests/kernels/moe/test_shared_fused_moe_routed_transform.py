@@ -137,7 +137,7 @@ def test_routed_input_transform_inside_vs_outside(
     Method A (inside): SharedFusedMoE with routed_input_transform
     Method B (outside): Manually transform, then SharedFusedMoE without transform
     """
-    if current_platform.is_rocm() and use_rocm_aiter:
+    if current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1" if use_rocm_aiter else "0")
         from vllm._aiter_ops import rocm_aiter_ops
