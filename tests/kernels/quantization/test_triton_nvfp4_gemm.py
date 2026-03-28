@@ -24,9 +24,7 @@ if not current_platform.has_device_capability(100):
     )
 
 # Add the benchmarks/kernels directory so we can import the Triton kernel
-sys.path.insert(
-    0, str(Path(__file__).resolve().parents[3] / "benchmarks" / "kernels")
-)
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "benchmarks" / "kernels"))
 from nvfp4_utils import FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX, break_fp4_bytes
 from triton_nvfp4_gemm import triton_scaled_fp4_mm
 
@@ -55,8 +53,7 @@ def dequantize_linear_scales(
     block_size = 16
 
     # Unpack FP4 nibbles to float values
-    values = break_fp4_bytes(fp4, torch.float32).reshape(m, k // block_size,
-                                                         block_size)
+    values = break_fp4_bytes(fp4, torch.float32).reshape(m, k // block_size, block_size)
     # Apply block scales: dequant = fp4_val * (block_scale / global_scale)
     scale_f32 = scale.to(torch.float32) / global_scale
     out = (values * scale_f32.unsqueeze(-1)).reshape(m, k)
@@ -97,10 +94,10 @@ def test_triton_nvfp4_gemm_correctness(
 
     # Compute global scales
     a_global_scale = (
-        FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(a_bf16).max().float()
+        FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / (torch.abs(a_bf16).max().float() + 1e-12)
     )
     b_global_scale = (
-        FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(b_bf16).max().float()
+        FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / (torch.abs(b_bf16).max().float() + 1e-12)
     )
     alpha = 1.0 / (a_global_scale * b_global_scale)
 
@@ -117,8 +114,13 @@ def test_triton_nvfp4_gemm_correctness(
 
     # Reference
     expected = get_ref_results(
-        a_fp4, b_fp4, a_scale, b_scale,
-        a_global_scale, b_global_scale, dtype,
+        a_fp4,
+        b_fp4,
+        a_scale,
+        b_scale,
+        a_global_scale,
+        b_global_scale,
+        dtype,
     )
 
     assert out.shape == expected.shape
@@ -144,16 +146,12 @@ def test_triton_nvfp4_gemm_output_shape(dtype: torch.dtype) -> None:
     a_bf16 = torch.randn((m, k), dtype=dtype, device=device)
     b_bf16 = torch.randn((n, k), dtype=dtype, device=device)
 
-    a_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(a_bf16).max().float()
-    b_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(b_bf16).max().float()
+    a_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / (torch.abs(a_bf16).max().float() + 1e-12)
+    b_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / (torch.abs(b_bf16).max().float() + 1e-12)
     alpha = 1.0 / (a_gs * b_gs)
 
-    a_fp4, a_scale = ops.scaled_fp4_quant(
-        a_bf16, a_gs, is_sf_swizzled_layout=False
-    )
-    b_fp4, b_scale = ops.scaled_fp4_quant(
-        b_bf16, b_gs, is_sf_swizzled_layout=False
-    )
+    a_fp4, a_scale = ops.scaled_fp4_quant(a_bf16, a_gs, is_sf_swizzled_layout=False)
+    b_fp4, b_scale = ops.scaled_fp4_quant(b_bf16, b_gs, is_sf_swizzled_layout=False)
 
     out = triton_scaled_fp4_mm(a_fp4, b_fp4, a_scale, b_scale, alpha, dtype)
 
@@ -179,8 +177,8 @@ def test_triton_vs_cutlass_nvfp4(m: int, n: int, k: int) -> None:
     a_bf16 = torch.randn((m, k), dtype=dtype, device=device)
     b_bf16 = torch.randn((n, k), dtype=dtype, device=device)
 
-    a_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(a_bf16).max().float()
-    b_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / torch.abs(b_bf16).max().float()
+    a_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / (torch.abs(a_bf16).max().float() + 1e-12)
+    b_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / (torch.abs(b_bf16).max().float() + 1e-12)
     alpha = 1.0 / (a_gs * b_gs)
 
     # CUTLASS: swizzled scales
