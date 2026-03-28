@@ -140,3 +140,96 @@ def test_per_request_steering_via_sampling_params(
             assert restored_tokens == baseline_tokens, (
                 "Per-request steering should not contaminate other requests"
             )
+
+
+@pytest.mark.parametrize("model", [MODEL])
+def test_per_request_steering_concurrent_with_cuda_graphs(
+    vllm_runner, monkeypatch, model: str
+) -> None:
+    """Test that different per-request steering configs in the same batch
+    produce different outputs, and that CUDA graph replays correctly pick
+    up updated steering buffers between steps.
+
+    This sends multiple requests simultaneously so they land in the same
+    batch during decode, exercising the request-indexed gather with
+    CUDA graphs active.
+    """
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+        prompt = "What does the fox say? " * 32
+        base_sampling = SamplingParams(max_tokens=10, temperature=0.0)
+
+        with vllm_runner(
+            model,
+            load_format="dummy",
+            max_model_len=512,
+            enable_prefix_caching=False,
+            enable_steering=True,
+            max_steering_configs=4,
+        ) as llm:
+            # 1. Discover steerable layers
+            def _discover(worker):
+                layers = {}
+                model_inst = worker.model_runner.get_model()
+                for mod in model_inst.modules():
+                    if hasattr(mod, "steering_vector") and hasattr(
+                        mod, "layer_idx"
+                    ):
+                        layers[mod.layer_idx] = mod.steering_vector.shape[1]
+                return layers
+
+            layer_info = llm.llm.collective_rpc(_discover)[0]
+            target_layer = max(layer_info.keys()) // 2
+            hidden_size = layer_info[target_layer]
+
+            # 2. Create three requests: no steering, positive, negative
+            no_steer = SamplingParams(max_tokens=10, temperature=0.0)
+            steer_pos = SamplingParams(
+                max_tokens=10,
+                temperature=0.0,
+                steering_vectors={target_layer: [500.0] * hidden_size},
+            )
+            steer_neg = SamplingParams(
+                max_tokens=10,
+                temperature=0.0,
+                steering_vectors={target_layer: [-500.0] * hidden_size},
+            )
+
+            # 3. Send all three simultaneously so they batch together
+            outputs = llm.llm.generate(
+                [prompt, prompt, prompt],
+                [no_steer, steer_pos, steer_neg],
+            )
+
+            tokens_none = list(outputs[0].outputs[0].token_ids)
+            tokens_pos = list(outputs[1].outputs[0].token_ids)
+            tokens_neg = list(outputs[2].outputs[0].token_ids)
+
+            # Positive and negative steering should produce different output
+            assert tokens_pos != tokens_neg, (
+                "Opposite steering vectors should produce different outputs"
+            )
+
+            # At least one steered output should differ from unsteered
+            assert tokens_pos != tokens_none or tokens_neg != tokens_none, (
+                "At least one steered request should differ from unsteered"
+            )
+
+            # 4. Run again without steering to verify CUDA graph replays
+            #    pick up updated (cleared) buffer contents
+            outputs2 = llm.llm.generate(
+                [prompt, prompt],
+                [no_steer, no_steer],
+            )
+
+            tokens_none2 = list(outputs2[0].outputs[0].token_ids)
+            tokens_none3 = list(outputs2[1].outputs[0].token_ids)
+
+            # Unsteered should be consistent across runs
+            assert tokens_none2 == tokens_none, (
+                "Unsteered output should be deterministic across runs"
+            )
+            assert tokens_none3 == tokens_none, (
+                "Both unsteered requests should match baseline"
+            )

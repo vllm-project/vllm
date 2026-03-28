@@ -255,7 +255,8 @@ class Request:
         if not self.steering_vectors:
             return 0
         data = str(sorted(self.steering_vectors.items())).encode()
-        return int(hashlib.sha256(data).hexdigest()[:16], 16)
+        # Mask to fit in np.int64 (used by InputBatch tracking arrays)
+        return int(hashlib.sha256(data).hexdigest()[:16], 16) & 0x7FFFFFFFFFFFFFFF
 
     def get_skip_reading_prefix_cache(self) -> bool:
         if (
