@@ -326,10 +326,6 @@ class RMSNorm(CustomOp):
             nan_layer_idx = self._nan_detect_layer_idx
             nan_max_tokens = detector.max_num_tokens
             if nan_flags is not None:
-                logger.warning_once(
-                    "VLLM_NAN_DETECT=1: bypassing Oink/batch-invariant "
-                    "paths to use instrumented vLLM RMSNorm kernels."
-                )
                 add_residual = residual is not None
                 if add_residual:
                     return fused_add_rms_norm(
