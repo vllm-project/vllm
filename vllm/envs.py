@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     NO_COLOR: bool = False
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
+    VLLM_NAN_DETECT: bool = False
     VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
@@ -693,6 +694,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, vllm will trace function calls
     # Useful for debugging
     "VLLM_TRACE_FUNCTION": lambda: int(os.getenv("VLLM_TRACE_FUNCTION", "0")),
+    # If set to 1, enables zero-overhead NaN/Inf detection in RMSNorm kernels.
+    # Detects per-token NaN/Inf at every layer boundary via the existing
+    # variance reduction. Reports layer names and token positions.
+    "VLLM_NAN_DETECT": lambda: bool(int(os.getenv("VLLM_NAN_DETECT", "0"))),
     # If set, vllm will use flashinfer sampler
     "VLLM_USE_FLASHINFER_SAMPLER": lambda: bool(
         int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"])

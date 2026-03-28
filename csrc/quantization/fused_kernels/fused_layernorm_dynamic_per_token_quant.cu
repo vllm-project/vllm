@@ -15,13 +15,15 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
     scalar_t const* __restrict__ input,   // [..., hidden_size]
     scalar_t const* __restrict__ weight,  // [hidden_size]
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
-    int32_t const input_stride, scalar_t* __restrict__ residual = nullptr) {
+    int32_t const input_stride, scalar_t* __restrict__ residual = nullptr,
+    int8_t* __restrict__ nan_flag_ptr = nullptr) {
   float rms = 0.0f;
   float token_scale = 0.0f;
 
   // Compute rms
   vllm::vectorized::compute_rms<scalar_t, has_residual>(
-      &rms, input, hidden_size, input_stride, var_epsilon, residual);
+      &rms, input, hidden_size, input_stride, var_epsilon, residual,
+      nan_flag_ptr);
 
   // Compute scale
   vllm::vectorized::compute_dynamic_per_token_scales<scalar_t, scalar_out_t,
@@ -53,7 +55,8 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
     scalar_t const* __restrict__ input,   // [..., hidden_size]
     scalar_t const* __restrict__ weight,  // [hidden_size]
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
-    int32_t const input_stride, scalar_t* __restrict__ residual = nullptr) {
+    int32_t const input_stride, scalar_t* __restrict__ residual = nullptr,
+    int8_t* __restrict__ nan_flag_ptr = nullptr) {
   // For vectorization, token_input and token_output pointers need to be
   // aligned at 8-byte and 4-byte addresses respectively.
   bool const can_vectorize = hidden_size % 4 == 0 and input_stride % 4 == 0;
@@ -62,7 +65,7 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
     return rms_norm_dynamic_per_token_quant_vec<scalar_t, scalar_out_t,
                                                 has_residual>(
         out, scales, input, weight, scale_ub, var_epsilon, hidden_size,
-        input_stride, residual);
+        input_stride, residual, nan_flag_ptr);
   }
 
   float rms = 0.0f;
@@ -70,7 +73,8 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
 
   // Compute RMS
   vllm::compute_rms<scalar_t, has_residual>(
-      &rms, input, hidden_size, input_stride, var_epsilon, residual);
+      &rms, input, hidden_size, input_stride, var_epsilon, residual,
+      nan_flag_ptr);
   // Compute Scale
   vllm::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
       &token_scale, scales, input, weight, rms, scale_ub, hidden_size,
@@ -102,12 +106,14 @@ __global__ void rms_norm_per_block_quant_kernel(
     scalar_t const* __restrict__ weight,  // [hidden_size]
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
     int32_t const input_stride, scalar_t* __restrict__ residual = nullptr,
-    int64_t outer_scale_stride = 1) {
+    int64_t outer_scale_stride = 1,
+    int8_t* __restrict__ nan_flag_ptr = nullptr) {
   float rms;
   // Compute RMS
   // Always able to vectorize due to constraints on hidden_size
   vllm::vectorized::compute_rms<scalar_t, has_residual>(
-      &rms, input, hidden_size, input_stride, var_epsilon, residual);
+      &rms, input, hidden_size, input_stride, var_epsilon, residual,
+      nan_flag_ptr);
 
   // Compute Scale
   // Always able to vectorize due to constraints on hidden_size and group_size
@@ -140,7 +146,8 @@ void rms_norm_dynamic_per_token_quant_dispatch(
     torch::Tensor& scales,        // [num_tokens]
     double const var_epsilon,     // Variance epsilon used in norm calculation
     std::optional<at::Tensor> const& scale_ub,
-    std::optional<at::Tensor>& residual) {
+    std::optional<at::Tensor>& residual,
+    int8_t* nan_flag_ptr) {
   int32_t hidden_size = input.size(-1);
   int32_t input_stride = input.view({-1, hidden_size}).stride(0);
   auto num_tokens = input.numel() / hidden_size;
@@ -160,7 +167,8 @@ void rms_norm_dynamic_per_token_quant_dispatch(
                   input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
                   scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
                   var_epsilon, hidden_size, input_stride,
-                  has_residual ? residual->data_ptr<scalar_in_t>() : nullptr);
+                  has_residual ? residual->data_ptr<scalar_in_t>() : nullptr,
+                  nan_flag_ptr);
         });
   });
 }
@@ -171,7 +179,9 @@ void rms_norm_dynamic_per_token_quant(
     torch::Tensor const& weight,  // [hidden_size]
     torch::Tensor& scales,        // [num_tokens]
     double const var_epsilon,     // Variance epsilon used in norm calculation
-    std::optional<at::Tensor> scale_ub, std::optional<at::Tensor> residual) {
+    std::optional<at::Tensor> scale_ub, std::optional<at::Tensor> residual,
+    std::optional<torch::Tensor> nan_flags, int64_t layer_idx,
+    int64_t max_num_tokens) {
   static c10::ScalarType kFp8Type = is_fp8_ocp()
                                         ? c10::ScalarType::Float8_e4m3fn
                                         : c10::ScalarType::Float8_e4m3fnuz;
@@ -190,10 +200,17 @@ void rms_norm_dynamic_per_token_quant(
     TORCH_CHECK(residual->is_contiguous());
   }
 
+  int8_t* nan_flag_ptr = nullptr;
+  if (nan_flags.has_value()) {
+    nan_flag_ptr =
+        nan_flags->data_ptr<int8_t>() + layer_idx * max_num_tokens;
+  }
+
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_dynamic_per_token_quant_dispatch", [&] {
         rms_norm_dynamic_per_token_quant_dispatch<scalar_t>(
-            out, input, weight, scales, var_epsilon, scale_ub, residual);
+            out, input, weight, scales, var_epsilon, scale_ub, residual,
+            nan_flag_ptr);
       });
 }
 
@@ -207,7 +224,8 @@ void rms_norm_per_block_quant_dispatch(
     int32_t group_size,
     double const var_epsilon,  // Variance epsilon used in norm calculation
     std::optional<at::Tensor> const& scale_ub,
-    std::optional<at::Tensor>& residual, bool is_scale_transposed) {
+    std::optional<at::Tensor>& residual, bool is_scale_transposed,
+    int8_t* nan_flag_ptr) {
   int32_t hidden_size = input.size(-1);
   int32_t input_stride = input.view({-1, hidden_size}).stride(0);
 
@@ -246,7 +264,7 @@ void rms_norm_per_block_quant_dispatch(
                             var_epsilon, hidden_size, input_stride,
                             has_residual ? residual->data_ptr<scalar_in_t>()
                                          : nullptr,
-                            scales.stride(1));
+                            scales.stride(1), nan_flag_ptr);
                   });
             });
           });
@@ -259,7 +277,9 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor& scales, double const var_epsilon,
                               std::optional<torch::Tensor> scale_ub,
                               std::optional<torch::Tensor> residual,
-                              int64_t group_size, bool is_scale_transposed) {
+                              int64_t group_size, bool is_scale_transposed,
+                              std::optional<torch::Tensor> nan_flags,
+                              int64_t layer_idx, int64_t max_num_tokens) {
   static c10::ScalarType kFp8Type = is_fp8_ocp()
                                         ? c10::ScalarType::Float8_e4m3fn
                                         : c10::ScalarType::Float8_e4m3fnuz;
@@ -295,7 +315,13 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
               "scales buffer too small: need ", num_tokens * num_groups,
               " elements, got ", scales.numel());
 
+  int8_t* nan_flag_ptr = nullptr;
+  if (nan_flags.has_value()) {
+    nan_flag_ptr =
+        nan_flags->data_ptr<int8_t>() + layer_idx * max_num_tokens;
+  }
+
   rms_norm_per_block_quant_dispatch(out, input, weight, scales, group_size,
                                     var_epsilon, scale_ub, residual,
-                                    is_scale_transposed);
+                                    is_scale_transposed, nan_flag_ptr);
 }

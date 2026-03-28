@@ -18,7 +18,8 @@ template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
                             int32_t const hidden_size,
                             int32_t const input_stride, float const epsilon,
-                            scalar_t const* __restrict__ residual = nullptr) {
+                            scalar_t const* __restrict__ residual = nullptr,
+                            int8_t* __restrict__ nan_flag_ptr = nullptr) {
   int64_t const input_token_offset =
       blockIdx.x * static_cast<int64_t>(input_stride);
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
@@ -41,6 +42,9 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   __shared__ float s_rms;
   if (threadIdx.x == 0) {
     s_rms = rsqrtf(ss / hidden_size + epsilon);
+    if (nan_flag_ptr && (isnan(ss) || isinf(ss))) {
+      nan_flag_ptr[blockIdx.x] = 1;
+    }
   }
   __syncthreads();
 
@@ -235,7 +239,8 @@ template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
                             int32_t const hidden_size,
                             int32_t const input_stride, float const epsilon,
-                            scalar_t const* __restrict__ residual = nullptr) {
+                            scalar_t const* __restrict__ residual = nullptr,
+                            int8_t* __restrict__ nan_flag_ptr = nullptr) {
   int64_t const input_token_offset =
       blockIdx.x * static_cast<int64_t>(input_stride);
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
@@ -286,6 +291,9 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   __shared__ float s_rms;
   if (threadIdx.x == 0) {
     s_rms = rsqrtf(ss / hidden_size + epsilon);
+    if (nan_flag_ptr && (isnan(ss) || isinf(ss))) {
+      nan_flag_ptr[blockIdx.x] = 1;
+    }
   }
   __syncthreads();
 

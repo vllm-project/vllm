@@ -152,14 +152,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
-      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> "
-      "()");
+      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon, "
+      "Tensor? nan_flags=None, int layer_idx=0, int max_num_tokens=0) -> ()");
   ops.impl("rms_norm", torch::kCUDA, &rms_norm);
 
   // In-place fused Add and RMS Normalization.
   ops.def(
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
-      "float epsilon) -> ()");
+      "float epsilon, Tensor? nan_flags=None, int layer_idx=0, "
+      "int max_num_tokens=0) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
   // Function for fused QK Norm and RoPE
@@ -200,8 +201,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
       "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
-      "Tensor scale, float epsilon) -> "
-      "()");
+      "Tensor scale, float epsilon, Tensor? nan_flags=None, "
+      "int layer_idx=0, int max_num_tokens=0) -> ()");
   ops.impl("rms_norm_static_fp8_quant", torch::kCUDA,
            &rms_norm_static_fp8_quant);
 
@@ -209,7 +210,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
       "Tensor! residual, Tensor weight, "
-      "Tensor scale, float epsilon) -> ()");
+      "Tensor scale, float epsilon, Tensor? nan_flags=None, "
+      "int layer_idx=0, int max_num_tokens=0) -> ()");
   ops.impl("fused_add_rms_norm_static_fp8_quant", torch::kCUDA,
            &fused_add_rms_norm_static_fp8_quant);
 
@@ -217,7 +219,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
       "Tensor weight, Tensor! scale, float epsilon, "
-      "Tensor? scale_ub, Tensor!? residual) -> ()");
+      "Tensor? scale_ub, Tensor!? residual, Tensor? nan_flags=None, "
+      "int layer_idx=0, int max_num_tokens=0) -> ()");
   ops.impl("rms_norm_dynamic_per_token_quant", torch::kCUDA,
            &rms_norm_dynamic_per_token_quant);
 
@@ -226,7 +229,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "rms_norm_per_block_quant(Tensor! result, Tensor input, "
       "Tensor weight, Tensor! scale, float epsilon, "
       "Tensor? scale_ub, Tensor!? residual, int group_size, "
-      "bool is_scale_transposed) -> ()");
+      "bool is_scale_transposed, Tensor? nan_flags=None, "
+      "int layer_idx=0, int max_num_tokens=0) -> ()");
   ops.impl("rms_norm_per_block_quant", torch::kCUDA, &rms_norm_per_block_quant);
 
   // Rotary embedding

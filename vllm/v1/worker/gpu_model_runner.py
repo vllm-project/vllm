@@ -3791,6 +3791,13 @@ class GPUModelRunner(
         # When spec decode is enabled, defer connector finalization
         # (wait_for_save + clear metadata) until after draft model runs.
         defer_kv_connector_finalize = self.speculative_config is not None
+
+        # Clear NaN/Inf detection flags before the forward pass.
+        if envs.VLLM_NAN_DETECT:
+            from vllm.model_executor.layers.nan_detector import NaNDetector
+
+            NaNDetector.get().clear()
+
         with (
             set_forward_context(
                 attn_metadata,
@@ -3816,6 +3823,12 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+
+        # Check NaN/Inf detection flags after the forward pass.
+        if envs.VLLM_NAN_DETECT:
+            from vllm.model_executor.layers.nan_detector import NaNDetector
+
+            NaNDetector.get().check(num_scheduled_tokens)
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -4620,6 +4633,16 @@ class GPUModelRunner(
             )
             if self.eplb_state.is_async:
                 self.eplb_state.start_async_loop()
+
+        # Initialize NaN/Inf detector if enabled.  Must happen after model
+        # loading (so all RMSNorm layers have registered) but before CUDA graph
+        # capture (so the flag tensor address is stable).
+        if envs.VLLM_NAN_DETECT:
+            from vllm.model_executor.layers.nan_detector import NaNDetector
+
+            detector = NaNDetector.get()
+            detector.update_layer_names(self.model)
+            detector.finalize(self.device, self.max_num_tokens)
 
         if (
             self.vllm_config.compilation_config.mode

@@ -20,7 +20,8 @@ __global__ void rms_norm_kernel(
     const int64_t input_shape_d2,         // input.size(-2)
     const int64_t input_shape_d3,         // input.size(-3)
     const scalar_t* __restrict__ weight,  // [hidden_size]
-    const float epsilon, const int num_tokens, const int hidden_size) {
+    const float epsilon, const int num_tokens, const int hidden_size,
+    int8_t* __restrict__ nan_flag_ptr) {
   __shared__ float s_variance;
   float variance = 0.0f;
   const scalar_t* input_row;
@@ -63,6 +64,9 @@ __global__ void rms_norm_kernel(
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
+    if (nan_flag_ptr && (isnan(variance) || isinf(variance))) {
+      nan_flag_ptr[blockIdx.x] = 1;
+    }
   }
   __syncthreads();
 
@@ -94,7 +98,8 @@ fused_add_rms_norm_kernel(
     const int64_t input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size]
-    const float epsilon, const int num_tokens, const int hidden_size) {
+    const float epsilon, const int num_tokens, const int hidden_size,
+    int8_t* __restrict__ nan_flag_ptr) {
   // Sanity checks on our vector struct and type-punned pointer arithmetic
   static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
   static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
@@ -128,6 +133,9 @@ fused_add_rms_norm_kernel(
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
+    if (nan_flag_ptr && (isnan(variance) || isinf(variance))) {
+      nan_flag_ptr[blockIdx.x] = 1;
+    }
   }
   __syncthreads();
 
@@ -151,7 +159,8 @@ fused_add_rms_norm_kernel(
     const int64_t input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size]
-    const float epsilon, const int num_tokens, const int hidden_size) {
+    const float epsilon, const int num_tokens, const int hidden_size,
+    int8_t* __restrict__ nan_flag_ptr) {
   __shared__ float s_variance;
   float variance = 0.0f;
 
@@ -169,6 +178,9 @@ fused_add_rms_norm_kernel(
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
+    if (nan_flag_ptr && (isnan(variance) || isinf(variance))) {
+      nan_flag_ptr[blockIdx.x] = 1;
+    }
   }
   __syncthreads();
 
@@ -184,7 +196,10 @@ fused_add_rms_norm_kernel(
 void rms_norm(torch::Tensor& out,     // [..., hidden_size]
               torch::Tensor& input,   // [..., hidden_size]
               torch::Tensor& weight,  // [hidden_size]
-              double epsilon) {
+              double epsilon,
+              std::optional<torch::Tensor> nan_flags,
+              int64_t layer_idx,
+              int64_t max_num_tokens) {
   TORCH_CHECK(out.is_contiguous());
   if (input.stride(-1) != 1) {
     input = input.contiguous();
@@ -201,6 +216,11 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   int64_t input_stride_d4 = (num_dims >= 4) ? input.stride(-4) : 0;
   int64_t input_shape_d2 = (num_dims >= 3) ? input.size(-2) : 0;
   int64_t input_shape_d3 = (num_dims >= 4) ? input.size(-3) : 0;
+
+  int8_t* nan_flag_ptr = nullptr;
+  if (nan_flags.has_value()) {
+    nan_flag_ptr = nan_flags->data_ptr<int8_t>() + layer_idx * max_num_tokens;
+  }
 
   // For large num_tokens, use smaller blocks to increase SM concurrency.
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
@@ -220,7 +240,7 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
                 out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
                 input_stride_d2, input_stride_d3, input_stride_d4,
                 input_shape_d2, input_shape_d3, weight.data_ptr<scalar_t>(),
-                epsilon, num_tokens, hidden_size);
+                epsilon, num_tokens, hidden_size, nan_flag_ptr);
       });
     });
   });
@@ -233,13 +253,16 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
             <<<grid, block, 0, stream>>>(                                   \
                 input.data_ptr<scalar_t>(), input_stride,                   \
                 residual.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(), \
-                epsilon, num_tokens, hidden_size);                          \
+                epsilon, num_tokens, hidden_size, nan_flag_ptr);            \
       });
 
 void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
                         torch::Tensor& residual,  // [..., hidden_size]
                         torch::Tensor& weight,    // [hidden_size]
-                        double epsilon) {
+                        double epsilon,
+                        std::optional<torch::Tensor> nan_flags,
+                        int64_t layer_idx,
+                        int64_t max_num_tokens) {
   TORCH_CHECK(weight.scalar_type() == input.scalar_type());
   TORCH_CHECK(input.scalar_type() == residual.scalar_type());
   TORCH_CHECK(residual.is_contiguous());
@@ -247,6 +270,11 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
   int hidden_size = input.size(-1);
   int64_t input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;
+
+  int8_t* nan_flag_ptr = nullptr;
+  if (nan_flags.has_value()) {
+    nan_flag_ptr = nan_flags->data_ptr<int8_t>() + layer_idx * max_num_tokens;
+  }
 
   dim3 grid(num_tokens);
   /* This kernel is memory-latency bound in many scenarios.

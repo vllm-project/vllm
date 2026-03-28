@@ -87,10 +87,14 @@ void convert_vertical_slash_indexes_mergehead(
 #endif
 
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
-              double epsilon);
+              double epsilon,
+              std::optional<torch::Tensor> nan_flags = std::nullopt,
+              int64_t layer_idx = 0, int64_t max_num_tokens = 0);
 
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
-                        torch::Tensor& weight, double epsilon);
+                        torch::Tensor& weight, double epsilon,
+                        std::optional<torch::Tensor> nan_flags = std::nullopt,
+                        int64_t layer_idx = 0, int64_t max_num_tokens = 0);
 
 void fused_qk_norm_rope(torch::Tensor& qkv, int64_t num_heads_q,
                         int64_t num_heads_k, int64_t num_heads_v,
@@ -120,13 +124,17 @@ void large_context_topk(const torch::Tensor& score, torch::Tensor& indices,
 
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,
-                               double epsilon);
+                               double epsilon,
+                               std::optional<torch::Tensor> nan_flags = std::nullopt,
+                               int64_t layer_idx = 0, int64_t max_num_tokens = 0);
 
 void fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
                                          torch::Tensor& input,
                                          torch::Tensor& residual,
                                          torch::Tensor& weight,
-                                         torch::Tensor& scale, double epsilon);
+                                         torch::Tensor& scale, double epsilon,
+                                         std::optional<torch::Tensor> nan_flags = std::nullopt,
+                                         int64_t layer_idx = 0, int64_t max_num_tokens = 0);
 
 void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
                                       torch::Tensor const& input,
@@ -134,14 +142,18 @@ void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
                                       torch::Tensor& scales,
                                       double const epsilon,
                                       std::optional<torch::Tensor> scale_ub,
-                                      std::optional<torch::Tensor> residual);
+                                      std::optional<torch::Tensor> residual,
+                                      std::optional<torch::Tensor> nan_flags = std::nullopt,
+                                      int64_t layer_idx = 0, int64_t max_num_tokens = 0);
 
 void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor const& weight,
                               torch::Tensor& scales, double const epsilon,
                               std::optional<torch::Tensor> scale_ub,
                               std::optional<torch::Tensor> residual,
-                              int64_t group_size, bool is_scale_transposed);
+                              int64_t group_size, bool is_scale_transposed,
+                              std::optional<torch::Tensor> nan_flags = std::nullopt,
+                              int64_t layer_idx = 0, int64_t max_num_tokens = 0);
 
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
