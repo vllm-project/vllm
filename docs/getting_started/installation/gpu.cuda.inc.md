@@ -227,6 +227,90 @@ ${CUDA_HOME}/bin/nvcc --version # verify that nvcc is in your CUDA_HOME
 ```
 
 #### Unsupported OS build
+##### Building for NVIDIA Blackwell consumer GPUs (RTX 50-series) on Windows/WSL2
+
+NVIDIA Blackwell consumer GPUs (RTX 5060, 5070, 5080, 5090) use compute capability 12.0 (SM120). Pre-built vLLM wheels do not yet include SM120 kernels for these consumer GPUs, so you must build from source with CUDA 12.8+.
+
+!!! important
+    **CUDA Toolkit 12.8 or later** is required for SM120 support. Earlier versions do not include the `nvcc` compiler backend for this architecture.
+
+!!! note
+    vLLM does not build natively on Windows. Use **WSL2 with Ubuntu 22.04 or 24.04**. Install CUDA Toolkit inside WSL2 (not the Windows version). The NVIDIA GPU driver on the Windows host is shared with WSL2 automatically.
+
+**Prerequisites:**
+
+| Component | Minimum Version |
+|-----------|-----------------|
+| CUDA Toolkit (inside WSL2) | ≥ 12.8 |
+| Python | 3.10 – 3.12 |
+| GCC / G++ | ≥ 13 |
+| CMake | ≥ 3.26 |
+| PyTorch | ≥ 2.10 with cu128 support |
+
+**Step 1: Set up the build environment (inside WSL2)**
+
+```bash
+# Create conda environment
+conda create -n vllm_build python=3.11 -y
+conda activate vllm_build
+
+# Install PyTorch with CUDA 12.8 support
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+
+# Install build tools
+pip install cmake ninja setuptools-scm
+
+# Ensure system compiler is available
+sudo apt install -y build-essential
+```
+
+**Step 2: Clone and build vLLM**
+
+```bash
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+
+# Target Blackwell architecture specifically
+export TORCH_CUDA_ARCH_LIST="12.0"
+export MAX_JOBS=2  # Each nvcc instance uses 2-4 GB RAM; adjust based on available memory
+export CC=/usr/bin/gcc
+export CXX=/usr/bin/g++
+
+# Build and install (typically 30-60 minutes on a laptop)
+pip install --no-build-isolation -e .
+```
+
+**Step 3: Verify the installation**
+
+```bash
+python -c "
+import vllm
+print('vLLM version:', vllm.__version__)
+import vllm._C
+print('CUDA kernels: OK')
+import torch
+print('GPU:', torch.cuda.get_device_name(0))
+print('Compute capability:', torch.cuda.get_device_capability(0))
+"
+```
+
+!!! warning "ABI mismatch errors"
+    If you see `undefined symbol: _ZN3c10...` errors when importing `vllm._C`, the C extensions were compiled against a different PyTorch version than the one currently installed. This can happen if `pip install -e .` resolves a different `torch` version than the one you installed. Fix by cleaning and rebuilding:
+
+    ```bash
+    rm -rf build/ vllm/*.so vllm/_C*.so
+    pip install --no-build-isolation -e .
+    ```
+
+!!! tip "Known Blackwell + WSL2 considerations"
+
+    | Issue | Workaround |
+    |-------|-----------|
+    | OOM with `gpu_memory_utilization=0.9` on 8 GB cards | Use `0.7` – `0.8` instead |
+    | Flash Attention 2 uses PTX fallback | Expected behavior; native SM120 FA2 kernels are not yet available |
+    | `pin_memory=False` warning on WSL2 | Cosmetic warning; minor performance impact only |
+    | CUDA graph capture issues on WSL2 | Use `enforce_eager=True` when running on WSL2 |
+
 
 vLLM can fully run only on Linux but for development purposes, you can still build it on other systems (for example, macOS), allowing for imports and a more convenient development environment. The binaries will not be compiled and won't work on non-Linux systems.
 
