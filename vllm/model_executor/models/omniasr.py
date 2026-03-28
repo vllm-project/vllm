@@ -9,6 +9,11 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from typing import Iterable
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseProcessingInfo,
+    EncDecMultiModalProcessor
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 class OmniASRModel(nn.Module):
@@ -66,6 +71,9 @@ class Wav2Vec2FeatureExtractor(nn.Module):
     def __init__(self):
         super().__init__()
         self.layers = nn.ModuleList()
+        #TODO:Remove hard-coded numbers with acutal config
+        self.sampling_rate = 16000
+        self.subsampling_factor = 320
         in_channels = [1, 512, 512, 512, 512, 512, 512]
         kernel_sizes = [10, 3, 3, 3, 3, 2, 2]
         strides = [5, 2, 2, 2, 2, 2, 2]
@@ -202,4 +210,77 @@ class Wav2Vec2TransformerEncoder(nn.Module):
         x = self.layer_norm(x)
         return x
 
+# TODO: Add multimodal registry once OmniASR config/processor are defined
+# @MULTIMODAL_REGISTRY.register_processor(...)
 
+class OmniAsrForConditionalGeneration(nn.Module):
+    """OmniASR: Wav2Vec2 encoder + projection + LLaMA decoder.
+    
+    TODO:
+    - Add HuggingFace config class
+    - Implement SupportsTranscription, SupportsMultiModal interfaces
+    - Add multimodal processor and dummy inputs
+    - Integrate LLaMA decoder via vLLM's LlamaForCausalLM
+    """
+    
+    def __init__(self, *, vllm_config=None, prefix: str = ""):
+        super().__init__()
+        # TODO: read dimensions from vllm_config.model_config.hf_config
+
+class OmniASRProcessingInfo(BaseProcessingInfo):
+    def get_default_tok_params(self):
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
+    def get_supported_mm_limits(self) -> Mapping[str, int|None]:
+        return {"audio":1}
+    def get_data_parser(self) -> MultiModalDataParser:
+        feature_extractor = self.get_feature_extractor()
+        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
+    def get_feature_extractor(self):
+        return Wav2Vec2FeatureExtractor()
+    def get_num_audio_tokens(self, num_samples):
+        fe = self.get_feature_extractor()
+        return num_samples // fe.subsampling_factor
+
+class OmniASRMultiModalProcessor(EncDecMultiModalProcessor):
+    def create_encoder_prompt(
+            self, 
+            prompt: str | list[int],
+            mm_items: MultiModalDataItems,
+        ) -> str | list[int]:
+        return [0]
+    def _call_hf_processor(self, prompt, mm_data:Mapping[str, object], mm_kwargs:Mapping[str, object], tok_kwargs:Mapping[str, object]):
+        # TODO: Implement custom audio processing for fairseq2-based OmniASR
+        # Cannot use HF processor — need to:
+        # 1. Accept raw audio waveform from mm_data
+        # 2. Return input_features tensor for Wav2Vec2Frontend
+        # 3. Return length tensor for sequence tracking
+        #
+        # Expected return format:
+        # {
+        #     "input_features": processed audio tensor,
+        #     "length": tensor of audio lengths,
+        #     "input_ids": tokenized prompt,
+        # }
+        import torch
+        audios = mm_data.get("audios", [])
+        if isinstance(audios, list) and len(audios) > 0:
+            features = [torch.tensor(a, dtype=torch.float32) for a in audios]
+            lengths = torch.tensor([f.shape[-1] for f in features])
+        else:
+            features = torch.zeros(1, 1, 16000)  # placeholder
+            lengths = torch.tensor([16000])
+
+        return {    
+            "input_features": features,
+            "length": lengths,
+            "input_ids": [0],
+        }
+    def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
+        return dict(
+            input_features=MultiModalFieldConfig.batched("audio"),
+            length=MultiModalFieldConfig.batched("audio"),
+        )
+
+    def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
+        # TODO: implement proper prompt replacement
+        return []
