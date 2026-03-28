@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
-from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
@@ -49,6 +48,31 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 FLASHINFER_MLA_SPARSE_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
+
+
+def _import_flashinfer():
+    """Lazily import flashinfer runtime symbols.
+
+    This must not run during parent-process config initialization, because
+    importing flashinfer may initialize CUDA. It is only safe to call this
+    from runtime paths after worker startup.
+    """
+    global trtllm_batch_decode_with_kv_cache_mla
+
+    if trtllm_batch_decode_with_kv_cache_mla is not None:
+        return
+
+    from flashinfer.decode import (  # noqa
+        trtllm_batch_decode_with_kv_cache_mla as _trtllm_batch_decode_with_kv_cache_mla,
+    )
+
+    trtllm_batch_decode_with_kv_cache_mla = _trtllm_batch_decode_with_kv_cache_mla
+
+
+if TYPE_CHECKING:
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+else:
+    trtllm_batch_decode_with_kv_cache_mla = None
 
 
 class FlashInferMLASparseBackend(AttentionBackend):
@@ -241,7 +265,7 @@ _fi_sparse_workspace: torch.Tensor | None = None
 
 def _get_workspace_buffer(device: torch.device) -> torch.Tensor:
     global _fi_sparse_workspace
-    if _fi_sparse_workspace is None:
+    if _fi_sparse_workspace is None or _fi_sparse_workspace.device != device:
         _fi_sparse_workspace = torch.zeros(
             FLASHINFER_MLA_SPARSE_WORKSPACE_BUFFER_SIZE,
             dtype=torch.uint8,
@@ -274,6 +298,7 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         indexer: "Indexer | None" = None,
         **mla_args,
     ) -> None:
+        _import_flashinfer()
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
