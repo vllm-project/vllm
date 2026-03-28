@@ -18,6 +18,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.entrypoints.pooling.embed.protocol import (
+    CohereEmbedContent,
     CohereEmbedInput,
     CohereEmbedRequest,
     EmbeddingChatRequest,
@@ -28,6 +29,7 @@ from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.renderers import merge_kwargs
+from vllm.renderers.hf import resolve_chat_template
 from vllm.utils.collection_utils import chunk_list
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -284,13 +286,27 @@ class EmbedIOProcessor(PoolingIOProcessor):
     ) -> list[ChatCompletionMessageParam]:
         """Build chat messages from a mixed text+image input.
 
-        When *task_prefix* is given, it is prepended to each text part.
+        When *task_prefix* is given, it is used as the system prompt.
         """
+        messages: list[ChatCompletionMessageParam] = []
+        if task_prefix is not None:
+            messages.append(
+                CustomChatCompletionMessageParam(
+                    role="system",
+                    content=[
+                        ChatCompletionContentPartTextParam(
+                            type="text", text=task_prefix
+                        )
+                    ],
+                )
+            )
+
         parts: list[ChatCompletionContentPartParam] = []
         for item in inp.content:
             if item.type == "text" and item.text is not None:
-                text = task_prefix + item.text if task_prefix else item.text
-                parts.append(ChatCompletionContentPartTextParam(type="text", text=text))
+                parts.append(
+                    ChatCompletionContentPartTextParam(type="text", text=item.text)
+                )
             elif item.type == "image_url" and item.image_url is not None:
                 parts.append(
                     ChatCompletionContentPartImageParam(
@@ -298,7 +314,8 @@ class EmbedIOProcessor(PoolingIOProcessor):
                         image_url=ImageURL(url=item.image_url["url"]),
                     )
                 )
-        return [CustomChatCompletionMessageParam(role="user", content=parts)]
+        messages.append(CustomChatCompletionMessageParam(role="user", content=parts))
+        return messages
 
     @staticmethod
     def _check_cohere_max_tokens(
@@ -346,9 +363,11 @@ class EmbedIOProcessor(PoolingIOProcessor):
     def _pre_process_cohere_online(self, ctx: PoolingServeContext) -> None:
         """Convert a ``CohereEmbedRequest`` into engine prompts.
 
-        For texts, a single batched completion request path is used.
-        For images and mixed inputs, conversations are batch-rendered
-        through the chat template in one ``render_chat`` call.
+        If a model has a chat template the task instruction are rendered
+        as a system prompt. Otherwise they are just prepended to the input text.
+
+        Images and mixed inputs are always batch-rendered through the chat
+        template in one ``render_chat`` call.
         """
         request = ctx.request
         assert isinstance(request, CohereEmbedRequest)
@@ -363,42 +382,91 @@ class EmbedIOProcessor(PoolingIOProcessor):
         self._validate_input_type(input_type)
 
         if request.images is not None:
-            all_messages: list[list[ChatCompletionMessageParam]] = [
-                [
-                    CustomChatCompletionMessageParam(
-                        role="user",
-                        content=[{"type": "image_url", "image_url": {"url": uri}}],
-                    )
-                ]
+            input: list[CohereEmbedInput] = [
+                CohereEmbedInput(
+                    content=[
+                        CohereEmbedContent(type="image_url", image_url={"url": uri})
+                    ]
+                )
                 for uri in request.images
             ]
-            ctx.engine_inputs = self._batch_render_chat(
-                request, all_messages, truncate_prompt_tokens, truncation_side
-            )
-
         elif request.inputs is not None:
-            task_prefix = self._get_task_instruction_prefix(input_type)
-            all_messages = [
-                self._mixed_input_to_messages(inp, task_prefix=task_prefix)
-                for inp in request.inputs
-            ]
-            ctx.engine_inputs = self._batch_render_chat(
-                request, all_messages, truncate_prompt_tokens, truncation_side
-            )
-
+            input = request.inputs
         else:
-            prefixed = self._apply_task_instruction(request.texts or [], input_type)
-            proxy = EmbeddingCompletionRequest(
-                model=request.model,
-                input=prefixed,
-                dimensions=request.output_dimension,
-                encoding_format="float",
-                truncate_prompt_tokens=truncate_prompt_tokens,
-                truncation_side=truncation_side,
+            texts = request.texts or []
+            task_prefix = self._get_task_instruction_prefix(input_type)
+
+            if task_prefix is None:
+                ctx.engine_inputs = self._preprocess_cohere_text_completion(
+                    request,
+                    texts,
+                    truncate_prompt_tokens,
+                    truncation_side,
+                )
+                return
+
+            all_messages = [
+                self._mixed_input_to_messages(
+                    CohereEmbedInput(
+                        content=[CohereEmbedContent(type="text", text=text)]
+                    ),
+                    task_prefix=task_prefix,
+                )
+                for text in texts
+            ]
+            if self._has_chat_template():
+                ctx.engine_inputs = self._batch_render_chat(
+                    request,
+                    all_messages,
+                    truncate_prompt_tokens,
+                    truncation_side,
+                )
+            else:
+                ctx.engine_inputs = self._preprocess_cohere_text_completion(
+                    request,
+                    self._apply_task_instruction(texts, input_type),
+                    truncate_prompt_tokens,
+                    truncation_side,
+                )
+            return
+
+        task_prefix = self._get_task_instruction_prefix(input_type)
+        all_messages = [
+            self._mixed_input_to_messages(inp, task_prefix=task_prefix) for inp in input
+        ]
+        ctx.engine_inputs = self._batch_render_chat(
+            request, all_messages, truncate_prompt_tokens, truncation_side
+        )
+
+    def _has_chat_template(self) -> bool:
+        return (
+            resolve_chat_template(
+                self.renderer.tokenizer,
+                chat_template=self.chat_template,
+                tools=None,
+                model_config=self.model_config,
             )
-            ctx.engine_inputs = self._preprocess_completion_online(
-                proxy, prompt_input=proxy.input, prompt_embeds=None
-            )
+            is not None
+        )
+
+    def _preprocess_cohere_text_completion(
+        self,
+        request: CohereEmbedRequest,
+        texts: list[str],
+        truncate_prompt_tokens: int | None,
+        truncation_side: Literal["left", "right"] | None,
+    ) -> list[EngineInput]:
+        proxy = EmbeddingCompletionRequest(
+            model=request.model,
+            input=texts,
+            dimensions=request.output_dimension,
+            encoding_format="float",
+            truncate_prompt_tokens=truncate_prompt_tokens,
+            truncation_side=truncation_side,
+        )
+        return self._preprocess_completion_online(
+            proxy, prompt_input=proxy.input, prompt_embeds=None
+        )
 
     def _batch_render_chat(
         self,
