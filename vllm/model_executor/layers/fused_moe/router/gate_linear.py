@@ -133,9 +133,10 @@ class GateLinear(ReplicatedLinear):
             return output, None
 
         # Tier 2: fp32 specialized kernel (H=3072, E=256, M<=32)
-        # Accepts bf16 or fp32 activation; conversion to fp32 done in kernel.
-        if self.allow_fp32_router_gemm and x.shape[0] <= self.FP32_MAX_TOKENS:
-            output = ops.fp32_router_gemm(x, self.weight)
+        # Dispatch is wrapped in a custom op so that torch.compile/CUDA-graph
+        # capture does not freeze the runtime num_tokens branch.
+        if self.allow_fp32_router_gemm:
+            output = torch.ops.vllm.fp32_router_gemm_dispatch(x, self.weight)
             return output, None
 
         # Tier 3: gpt-oss specialized kernel
@@ -155,6 +156,37 @@ class GateLinear(ReplicatedLinear):
         if self.out_dtype is not None and output.dtype != self.out_dtype:
             output = output.to(self.out_dtype)
         return output, output_bias
+
+
+_FP32_ROUTER_GEMM_MAX_TOKENS = GateLinear.FP32_MAX_TOKENS
+
+
+def fp32_router_gemm_dispatch_impl(
+    x: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    """
+    Dynamically run fp32 specialized gemm if num_tokens <= FP32_MAX_TOKENS,
+    otherwise fall back to F.linear.
+    This must be wrapped in a custom op because our torch.compile integration
+    does not support runtime dispatching on num_tokens.
+    """
+    if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
+        return ops.fp32_router_gemm(x, weight)
+    else:
+        return torch.nn.functional.linear(x.float(), weight)
+
+
+def fp32_router_gemm_dispatch_fake(
+    x: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    return x.new_empty((x.shape[0], weight.shape[0]), dtype=torch.float32)
+
+
+direct_register_custom_op(
+    op_name="fp32_router_gemm_dispatch",
+    op_func=fp32_router_gemm_dispatch_impl,
+    fake_impl=fp32_router_gemm_dispatch_fake,
+)
 
 
 def gpt_oss_router_gemm_impl(

@@ -36,10 +36,8 @@ def test_fp32_activation(num_tokens: int):
     _requires_sm90()
     torch.manual_seed(42)
     device = torch.device("cuda")
-    mat_a = torch.randn(num_tokens, HIDDEN_DIM, dtype=torch.float32,
-                        device=device)
-    mat_b = torch.randn(NUM_EXPERTS, HIDDEN_DIM, dtype=torch.float32,
-                        device=device)
+    mat_a = torch.randn(num_tokens, HIDDEN_DIM, dtype=torch.float32, device=device)
+    mat_b = torch.randn(NUM_EXPERTS, HIDDEN_DIM, dtype=torch.float32, device=device)
 
     out = fp32_router_gemm(mat_a, mat_b)
     ref = _ref(mat_a, mat_b)
@@ -55,10 +53,10 @@ def test_bf16_activation(num_tokens: int):
     _requires_sm90()
     torch.manual_seed(42)
     device = torch.device("cuda")
-    mat_a_bf16 = torch.randn(num_tokens, HIDDEN_DIM, dtype=torch.bfloat16,
-                             device=device)
-    mat_b = torch.randn(NUM_EXPERTS, HIDDEN_DIM, dtype=torch.float32,
-                        device=device)
+    mat_a_bf16 = torch.randn(
+        num_tokens, HIDDEN_DIM, dtype=torch.bfloat16, device=device
+    )
+    mat_b = torch.randn(NUM_EXPERTS, HIDDEN_DIM, dtype=torch.float32, device=device)
 
     out = fp32_router_gemm(mat_a_bf16, mat_b)
     ref = _ref(mat_a_bf16, mat_b).to(device)
@@ -73,10 +71,8 @@ def test_output_shape_and_dtype():
     _requires_sm90()
     device = torch.device("cuda")
     mat_a = torch.randn(4, HIDDEN_DIM, dtype=torch.float32, device=device)
-    mat_b = torch.randn(NUM_EXPERTS, HIDDEN_DIM, dtype=torch.float32,
-                        device=device)
+    mat_b = torch.randn(NUM_EXPERTS, HIDDEN_DIM, dtype=torch.float32, device=device)
     out = fp32_router_gemm(mat_a, mat_b)
     assert out.shape == (4, NUM_EXPERTS)
     assert out.dtype == torch.float32
     assert out.device.type == "cuda"
-
