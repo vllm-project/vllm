@@ -113,6 +113,7 @@ class AttentionBackend(ABC):
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
+        **kwargs: object,  # e.g. cache_dtype_str for packed layouts
     ) -> tuple[int, ...]:
         """
         Get the physical (memory layout) ordering of the kv cache dimensions.
