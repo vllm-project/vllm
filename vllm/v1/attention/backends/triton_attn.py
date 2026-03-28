@@ -35,7 +35,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_per_token_quant,
 )
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, kv_cache_uses_per_token_scales
 
 logger = init_logger(__name__)
 
@@ -304,6 +304,13 @@ class TritonAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
+        if kv_cache_uses_per_token_scales(cache_dtype_str):
+            # Flat layout: data + packed float32 scales per kv-half.
+            # The attention backend unpacks this internally.
+            data_per_kv = block_size * num_kv_heads * head_size  # 1-byte dtype
+            scale_per_kv = block_size * 4  # float32
+            kv_half = data_per_kv + scale_per_kv
+            return (num_blocks, 2, kv_half)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod

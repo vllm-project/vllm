@@ -137,7 +137,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
-    KVQuantMode,
     MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
@@ -6581,56 +6580,32 @@ class GPUModelRunner(
                     )
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
-                    # For per-token quant, scales are packed into the
-                    # same allocation after each K/V data region.  Store
-                    # as a flat uint8 tensor so that KV cache transfers
-                    # move data + scales together with no gaps.
-                    if kv_cache_spec.kv_quant_mode in (
-                        KVQuantMode.INT8_PER_TOKEN,
-                        KVQuantMode.FP8_PER_TOKEN,
-                    ):
-                        bs = kernel_block_size
-                        dtype_sz = get_dtype_size(kv_cache_spec.dtype)
-                        data_per_kv = (
-                            bs
-                            * kv_cache_spec.num_kv_heads
-                            * kv_cache_spec.head_size
-                            * dtype_sz
-                        )
-                        scale_per_kv = bs * get_dtype_size(torch.float32)
-                        kv_half = data_per_kv + scale_per_kv
-                        kv_caches[layer_name] = raw_tensor.view(
-                            kernel_num_blocks, 2, kv_half
-                        )
-                    else:
-                        kv_cache_shape = attn_backend.get_kv_cache_shape(
-                            kernel_num_blocks,
-                            kernel_block_size,
-                            kv_cache_spec.num_kv_heads,
-                            kv_cache_spec.head_size,
-                            cache_dtype_str=self.cache_config.cache_dtype,
-                        )
-                        dtype = kv_cache_spec.dtype
-                        try:
-                            kv_cache_stride_order = (
-                                attn_backend.get_kv_cache_stride_order()
-                            )
-                            assert len(kv_cache_stride_order) == len(kv_cache_shape)
-                        except (AttributeError, NotImplementedError):
-                            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-                        kv_cache_shape = tuple(
-                            kv_cache_shape[i] for i in kv_cache_stride_order
-                        )
-                        inv_order = [
-                            kv_cache_stride_order.index(i)
-                            for i in range(len(kv_cache_stride_order))
-                        ]
-                        kv_caches[layer_name] = (
-                            kv_cache_raw_tensors[layer_name]
-                            .view(dtype)
-                            .view(kv_cache_shape)
-                            .permute(*inv_order)
-                        )
+                    kv_cache_shape = attn_backend.get_kv_cache_shape(
+                        kernel_num_blocks,
+                        kernel_block_size,
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.head_size,
+                        cache_dtype_str=self.cache_config.cache_dtype,
+                    )
+                    dtype = kv_cache_spec.dtype
+                    try:
+                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+                        assert len(kv_cache_stride_order) == len(kv_cache_shape)
+                    except (AttributeError, NotImplementedError):
+                        kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+                    kv_cache_shape = tuple(
+                        kv_cache_shape[i] for i in kv_cache_stride_order
+                    )
+                    inv_order = [
+                        kv_cache_stride_order.index(i)
+                        for i in range(len(kv_cache_stride_order))
+                    ]
+                    kv_caches[layer_name] = (
+                        kv_cache_raw_tensors[layer_name]
+                        .view(dtype)
+                        .view(kv_cache_shape)
+                        .permute(*inv_order)
+                    )
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
