@@ -15,7 +15,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 class FakeDecoderLayer(nn.Module):
     """Minimal decoder layer with a steering buffer."""
 
-    def __init__(self, layer_idx: int, hidden_size: int):
+    def __init__(self, layer_idx: int, hidden_size: int, max_steering_configs: int = 0):
         super().__init__()
         self.layer_idx = layer_idx
         self.register_buffer(
@@ -23,17 +23,37 @@ class FakeDecoderLayer(nn.Module):
             torch.zeros(1, hidden_size),
             persistent=False,
         )
+        self.register_buffer(
+            "steering_table",
+            torch.zeros(max_steering_configs + 2, hidden_size),
+            persistent=False,
+        )
+        self.register_buffer(
+            "steering_index",
+            torch.zeros(16, dtype=torch.long),  # small for testing
+            persistent=False,
+        )
 
 
 class FakeModel(nn.Module):
     """Model with a few steerable decoder layers."""
 
-    def __init__(self, num_layers: int = 4, hidden_size: int = 8):
+    def __init__(
+        self, num_layers: int = 4, hidden_size: int = 8, max_steering_configs: int = 0
+    ):
         super().__init__()
         self.layers = nn.ModuleList(
-            [FakeDecoderLayer(i, hidden_size) for i in range(num_layers)]
+            [
+                FakeDecoderLayer(i, hidden_size, max_steering_configs)
+                for i in range(num_layers)
+            ]
         )
         self.hidden_size = hidden_size
+        # Share steering_index across layers (matches real model behaviour)
+        if self.layers:
+            shared_index = self.layers[0].steering_index
+            for layer in self.layers[1:]:
+                layer.steering_index = shared_index
 
 
 class FakeModelRunner:
