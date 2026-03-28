@@ -68,10 +68,14 @@ class KimiK2ToolParser(ToolParser):
         )
 
         self.stream_tool_call_portion_regex = re.compile(
-            r"(?P<tool_call_id>.+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>.*)"
+            r"\s*(?P<tool_call_id>\S.*:\d+)\s*"
+            r"<\|tool_call_argument_begin\|>\s*(?P<function_arguments>.*)",
+            re.DOTALL,
         )
 
-        self.stream_tool_call_name_regex = re.compile(r"(?P<tool_call_id>.+:\d+)\s*")
+        self.stream_tool_call_name_regex = re.compile(
+            r"\s*(?P<tool_call_id>\S.*:\d+)\s*", re.DOTALL
+        )
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -449,7 +453,7 @@ class KimiK2ToolParser(ToolParser):
                 if current_tool_call_matches:
                     tool_id, tool_args = current_tool_call_matches.groups()
                     tool_name = tool_id.split(":")[0].split(".")[-1]
-                    current_tool_call["id"] = tool_id.strip()
+                    current_tool_call["id"] = tool_id
                     current_tool_call["name"] = tool_name
                     current_tool_call["arguments"] = tool_args
                 else:
@@ -459,7 +463,7 @@ class KimiK2ToolParser(ToolParser):
                     if current_tool_call_name_matches:
                         (tool_id_str,) = current_tool_call_name_matches.groups()
                         tool_name = tool_id_str.split(":")[0].split(".")[-1]
-                        current_tool_call["id"] = tool_id_str.strip()
+                        current_tool_call["id"] = tool_id_str
                         current_tool_call["name"] = tool_name
                         current_tool_call["arguments"] = ""
                     else:

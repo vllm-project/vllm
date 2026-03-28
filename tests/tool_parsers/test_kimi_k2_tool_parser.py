@@ -872,6 +872,108 @@ def test_streaming_tool_call_markers_not_leaked(kimi_k2_tool_parser):
     assert "I'll check the weather." in full_content or len(all_content) > 0
 
 
+def test_stream_tool_call_portion_regex_handles_leading_newline(
+    kimi_k2_tool_parser,
+):
+    """
+    Regression test for: https://github.com/vllm-project/vllm/issues/38441
+
+    The model sometimes emits a \\n between <|tool_call_begin|> and the
+    function name during streaming.  Because Python's `re.compile` does not
+    treat `.` as matching newlines by default, the old regex
+
+        r"(?P<tool_call_id>.+:\\d+)\\s*<\\|tool_call_argument_begin\\|>..."
+
+    failed to match when `tool_call_portion` started with a stray newline, so
+    the tool call was silently dropped.  The fix adds a leading ``\\s*`` and
+    compiles with ``re.DOTALL``.
+    """
+    # Simulate the "stray \\n" scenario described in the issue:
+    #   <|tool_call_begin|>\\nfunctions.edit:15<|tool_call_argument_begin|>{...}
+    # After splitting on <|tool_call_begin|>, portion = "\\nfunctions.edit:15..."
+    newline_portion = (
+        '\nfunctions.edit:15<|tool_call_argument_begin|>{"path": "foo.py"}'
+    )
+    name_only_newline = "\nfunctions.edit:15"
+
+    # portion regex must match even with leading newline
+    m_portion = kimi_k2_tool_parser.stream_tool_call_portion_regex.match(
+        newline_portion
+    )
+    assert m_portion is not None, (
+        "stream_tool_call_portion_regex failed to match when tool_call_id "
+        "is preceded by a newline (re.DOTALL / leading \\s* missing)"
+    )
+    assert m_portion.group("tool_call_id") == "functions.edit:15"
+    assert m_portion.group("function_arguments") == '{"path": "foo.py"}'
+
+    # name regex must also match when only the ID is present with a leading newline
+    m_name = kimi_k2_tool_parser.stream_tool_call_name_regex.match(name_only_newline)
+    assert m_name is not None, (
+        "stream_tool_call_name_regex failed to match when tool_call_id "
+        "is preceded by a newline (re.DOTALL / leading \\s* missing)"
+    )
+    assert m_name.group("tool_call_id") == "functions.edit:15"
+
+    # Sanity-check: normal (no newline) input still matches
+    normal_portion = 'functions.edit:15<|tool_call_argument_begin|>{"path": "foo.py"}'
+    assert (
+        kimi_k2_tool_parser.stream_tool_call_portion_regex.match(normal_portion)
+        is not None
+    ), "Regression: normal portion no longer matches after fix"
+
+    normal_name = "functions.edit:15"
+    assert (
+        kimi_k2_tool_parser.stream_tool_call_name_regex.match(normal_name) is not None
+    ), "Regression: normal name no longer matches after fix"
+
+
+def test_streaming_tool_call_with_newline_after_begin_token(kimi_k2_tool_parser):
+    """
+    End-to-end streaming regression for issue #38441.
+
+    When the model emits \\n between <|tool_call_begin|> and the function name,
+    the streaming parser must still emit the tool-name delta rather than
+    silently returning None.
+    """
+    kimi_k2_tool_parser.reset_streaming_state()
+
+    section_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_begin|>")
+    tool_begin_id = kimi_k2_tool_parser.vocab.get("<|tool_call_begin|>")
+    tool_end_id = kimi_k2_tool_parser.vocab.get("<|tool_call_end|>")
+    section_end_id = kimi_k2_tool_parser.vocab.get("<|tool_calls_section_end|>")
+
+    # Model output where \\n appears between <|tool_call_begin|> and the name
+    tool_chunk = (
+        "<|tool_call_begin|>\n"
+        'functions.get_weather:0 <|tool_call_argument_begin|> {"city": "Beijing"}'
+        " <|tool_call_end|>"
+    )
+
+    deltas = [
+        ("Checking weather. ", [1, 2, 3]),
+        ("<|tool_calls_section_begin|>", [section_begin_id]),
+        (tool_chunk, [tool_begin_id, 10, 11, 12, tool_end_id]),
+        ("<|tool_calls_section_end|>", [section_end_id]),
+    ]
+
+    results = run_streaming_sequence(kimi_k2_tool_parser, deltas)
+
+    # Collect all emitted tool-call deltas
+    tool_call_deltas = [r for r in results if r is not None and r.tool_calls]
+
+    # At minimum the tool name must have been emitted
+    assert len(tool_call_deltas) >= 1, (
+        "No tool-call delta emitted when \\n precedes function name after "
+        "<|tool_call_begin|>. The streaming parser silently dropped the tool call."
+    )
+
+    # The first tool-call delta should carry the function name
+    first_tc = tool_call_deltas[0].tool_calls[0]
+    if first_tc.function and first_tc.function.get("name"):
+        assert first_tc.function["name"] == "get_weather"
+
+
 def test_streaming_multiple_tool_calls_not_leaked(kimi_k2_tool_parser):
     """
     Test that MULTIPLE tool calls in streaming mode do not leak into content.
