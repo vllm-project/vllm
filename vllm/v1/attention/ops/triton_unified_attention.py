@@ -66,7 +66,7 @@ def _prepare_kv_tile(
     #                       2=int8 per-token, 3=fp8 per-token
 
     # Placeholder scales (float32) — never read when KV_QUANT_MODE < 2.
-    unused_scales = tl.zeros_like(tile_mask, dtype=tl.float32)
+    unused_scales = tile_mask.to(tl.float32)
 
     if KV_QUANT_MODE == 1:  # FP8 per-tensor
         if Q.dtype.is_fp8():
