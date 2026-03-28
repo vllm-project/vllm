@@ -216,10 +216,25 @@ def apply_nvfp4_linear(
     output_dtype = x.dtype
     output_shape = [*x.shape[:-1], output_size]
 
+    # NaN/Inf checks: input to FP4 quantization
+    nan_check = envs.VLLM_NAN_DETECT and hasattr(layer, "_nan_detect_indices")
+    if nan_check:
+        from vllm.model_executor.layers.nan_detector import NaNDetector
+
+        detector = NaNDetector.get()
+        ndi = layer._nan_detect_indices
+        detector.check_tensor(x, ndi["fp4_input"])
+
     # Quantize BF16 or FP16 to (FP4 and interleaved block scale)
     x_fp4, x_blockscale = scaled_fp4_quant(
         x, input_global_scale_inv, is_sf_swizzled_layout=True, backend=backend.value
     )
+
+    # NaN/Inf checks: FP4 quantized activation scales
+    if nan_check:
+        detector.check_tensor(
+            x_blockscale.view(x.shape[0], -1), ndi["fp4_act_scales"]
+        )
 
     # Validate dtypes
     assert x_fp4.dtype == torch.uint8
@@ -262,6 +277,10 @@ def apply_nvfp4_linear(
 
     # Slice output to remove N-dimension padding
     out = slice_nvfp4_output(out, output_size)
+
+    # NaN/Inf checks: GEMM output
+    if nan_check:
+        detector.check_tensor(out, ndi["fp4_gemm_output"])
 
     if bias is not None:
         out = out + bias
