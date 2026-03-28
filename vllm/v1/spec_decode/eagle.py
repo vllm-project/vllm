@@ -831,12 +831,31 @@ class SpecDecodeBaseProposer:
         is not sampled and comes from `request.get_token_id()` instead. This is denoted
         the "backup" token id. It also counts rejected tokens via `sampled_token_ids`.
         """
-        # Precompute get_token_id for when there is no valid next token
+        # Precompute get_token_id for when there is no valid next token.
+        # NOTE: We intentionally use (num_tokens_no_spec - 1) — the index of
+        # the last *committed* output token — rather than seq_lens_cpu (which
+        # is optimistic_seq_lens_cpu and may be inflated by un-corrected draft
+        # token placeholders when async scheduling is enabled).
+        #
+        # seq_lens_cpu = num_computed_tokens + num_scheduled_tokens, which
+        # points one past the end of the committed output_token_ids when async
+        # scheduling has appended -1 placeholders.  get_token_id() at that
+        # inflated index returns -1, feeding garbage to the drafter and
+        # degrading the draft acceptance rate.
+        #
+        # (num_tokens_no_spec - 1) is the index of the last real token before
+        # the current step, which is the correct input for the drafter when a
+        # request is discarded (all spec tokens rejected).
+        # See: vllm-project/vllm#38098
         num_reqs = gpu_input_batch.num_reqs
-        seq_lens_list = seq_lens_cpu[:num_reqs].tolist()
+        actual_last_token_idx = (
+            gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1
+        ).tolist()
         self.backup_next_token_ids.np[:num_reqs] = np.array(
             [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
+                requests[gpu_input_batch.req_ids[i]].get_token_id(
+                    int(actual_last_token_idx[i])
+                )
                 for i in range(num_reqs)
             ],
             dtype=np.int32,

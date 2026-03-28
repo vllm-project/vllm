@@ -302,11 +302,22 @@ class ExtractHiddenStatesProposer:
         num_reqs = gpu_input_batch.num_reqs
         device = sampled_token_ids.device
 
-        # Compute backup tokens for discarded / invalid requests
-        seq_lens_list = seq_lens[:num_reqs].tolist()
+        # Compute backup tokens for discarded / invalid requests.
+        # NOTE: Use (num_tokens_no_spec - 1) — the index of the last
+        # *committed* output token — rather than seq_lens (which is
+        # optimistic_seq_lens_cpu and may be inflated by un-corrected draft
+        # token placeholders when async scheduling is enabled). Using the
+        # inflated index causes get_token_id() to return -1 (placeholder),
+        # feeding garbage to the drafter and degrading draft acceptance rate.
+        # See: vllm-project/vllm#38098
+        actual_last_token_idx = (
+            gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1
+        ).tolist()
         backup_tokens_gpu = torch.tensor(
             [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
+                requests[gpu_input_batch.req_ids[i]].get_token_id(
+                    int(actual_last_token_idx[i])
+                )
                 for i in range(num_reqs)
             ],
             dtype=torch.int32,
