@@ -119,6 +119,7 @@ class FlashInferMLABackend(MLACommonBackend):
     def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
         return "HND"
 
+
 _fi_workspace: torch.Tensor | None = None
 
 
