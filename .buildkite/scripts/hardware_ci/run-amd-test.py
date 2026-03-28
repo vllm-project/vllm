@@ -56,8 +56,8 @@ Because ``docker wait`` returns the process exit code *after* these hooks
 have run, neither ``docker run --rm`` + ``$?`` nor ``docker wait`` alone
 will see the real pytest exit code.
 
-This script uses **JUnit XML** as the authoritative source of truth. Pytest
-writes the XML file during ``pytest_sessionfinish`` -- before Python's atexit
+This script uses **JUnit XML** as the source of truth. Pytest writes
+the XML file during ``pytest_sessionfinish`` -- before Python's atexit
 handlers execute. The XML is written to a bind-mounted volume, so it
 survives on the host after the container exits. After ``docker wait``
 returns, we parse the XML: if it reports failures but the exit code is 0,
@@ -66,16 +66,16 @@ we override the exit code to 1.
 
 Usage
 -----
-Preferred (quoting preserved)::
+Preferred (quoting preserved):
 
     export VLLM_TEST_COMMANDS='pytest -v -s tests/ -m "not slow"'
     python3 run-amd-test.py
 
-Legacy (backward-compatible, inner double-quotes may be stripped)::
+Legacy (backward-compatible, inner double-quotes may be stripped):
 
     python3 run-amd-test.py "pytest -v -s tests/"
 
-The bash shim ``run-amd-test.sh`` does ``exec python3 run-amd-test.py "$@"``
+The bash shim (run-amd-test.sh) does "exec python3 run-amd-test.py $@"
 so existing Buildkite pipeline YAML needs no changes.
 """
 
@@ -95,6 +95,7 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from contextlib import contextmanager, suppress
+from datetime import datetime, timezone
 from pathlib import Path
 
 import regex as re
@@ -105,6 +106,194 @@ import regex as re
 # All tunables are grouped here so operators can adjust them without reading
 # the rest of the file. Environment variable overrides are noted inline.
 # ==========================================================================
+
+# --------------------------------------------------------------------------
+# Master feature switches
+#
+# Each major subsystem can be disabled with a single env var. Use these
+# as kill switches when something breaks in production. All default to
+# "1" (enabled). Set to "0" to disable.
+#
+# VLLM_ROCM_CI_GPU_PREFLIGHT    GPU zombie cleanup, health validation, VRAM checks.
+# VLLM_ROCM_CI_INFRA_CHECKS     DNS, registry, memory, disk I/O, pod uptime checks.
+# VLLM_ROCM_CI_CACHE_ENABLED    All persistent cache mounts and eviction.
+# VLLM_ROCM_CI_CACHE_EVICTION   L1 and L2 cache eviction (mounts still work).
+# VLLM_ROCM_CI_DOCKER_EVICTION  Docker image LFU/LRU eviction.
+# VLLM_ROCM_CI_DIAGNOSTICS      OOM/signal/PID-limit detection and annotations.
+# VLLM_ROCM_CI_JUNIT_OVERRIDE   JUnit XML exit-code override (the core fix).
+#                                Disabling this means atexit hooks can hide failures.
+# --------------------------------------------------------------------------
+
+ENABLE_GPU_PREFLIGHT = os.environ.get("VLLM_ROCM_CI_GPU_PREFLIGHT", "1") == "1"
+ENABLE_INFRA_CHECKS = os.environ.get("VLLM_ROCM_CI_INFRA_CHECKS", "1") == "1"
+ENABLE_CACHE = os.environ.get("VLLM_ROCM_CI_CACHE_ENABLED", "1") == "1"
+ENABLE_CACHE_EVICTION = os.environ.get("VLLM_ROCM_CI_CACHE_EVICTION", "1") == "1"
+ENABLE_DOCKER_EVICTION = os.environ.get("VLLM_ROCM_CI_DOCKER_EVICTION", "1") == "1"
+ENABLE_DIAGNOSTICS = os.environ.get("VLLM_ROCM_CI_DIAGNOSTICS", "1") == "1"
+ENABLE_JUNIT_OVERRIDE = os.environ.get("VLLM_ROCM_CI_JUNIT_OVERRIDE", "1") == "1"
+
+# VLLM_ROCM_CI_LEGACY_DOCKER_TAG
+#
+# Controls how the Docker image tag is resolved for the test container.
+#
+#   "1" (default, current):
+#     Image tag is rocm/vllm-ci:{BUILDKITE_COMMIT} -- the single fat
+#     multi-arch image built for all GPU architectures. This is the
+#     pattern used by the current amd.yaml pipeline.
+#
+#   "0" (per-arch, PR #36949):
+#     Image tag is read from DOCKER_IMAGE_NAME, which the pipeline
+#     template sets per step (e.g., rocm/vllm-ci:{commit}-gfx942).
+#     DOCKER_IMAGE_NAME must be set or the script exits with an error.
+#     This is the pattern introduced by the ci-bake three-tier build.
+#
+# When migrating to per-arch images, flip this to "0" in the pipeline
+# YAML and ensure every test step sets DOCKER_IMAGE_NAME.
+ENABLE_LEGACY_DOCKER_TAG = os.environ.get("VLLM_ROCM_CI_LEGACY_DOCKER_TAG", "1") == "1"
+
+# --------------------------------------------------------------------------
+# Hard reset switches
+#
+# These are one-shot destructive operations. Set the env var to "1" on a
+# single build to wipe the corresponding state, then remove the env var.
+# The test still runs after the reset -- this is a pre-test cleanup, not
+# an abort.
+#
+# VLLM_ROCM_CI_RESET_CACHE_COUNTS   Wipe .access_counts (frequency log).
+#                                    Use when counts are corrupted or you
+#                                    want a fresh frequency baseline.
+#
+# VLLM_ROCM_CI_RESET_CACHE_L1       Wipe ALL L1 (local) cache data.
+#                                    Next test starts cold. Use when cache
+#                                    is corrupted or causing test failures.
+#
+# VLLM_ROCM_CI_RESET_CACHE_L2       Wipe ALL L2 (NFS/PVC) cache data.
+#                                    Affects all pods on all nodes. Use
+#                                    with caution -- every pod starts cold
+#                                    until caches are rebuilt.
+#
+# VLLM_ROCM_CI_RESET_DOCKER         Run docker system prune --all --force.
+#                                    Wipes every image, container, volume.
+#                                    Next build does a full cold pull.
+#
+# VLLM_ROCM_CI_RESET_OVERLAY        Remove overlay workdirs and merged
+#                                    mounts. Fixes stale overlay state
+#                                    after unclean shutdown.
+# --------------------------------------------------------------------------
+
+RESET_CACHE_COUNTS = os.environ.get("VLLM_ROCM_CI_RESET_CACHE_COUNTS", "0") == "1"
+RESET_CACHE_L1 = os.environ.get("VLLM_ROCM_CI_RESET_CACHE_L1", "0") == "1"
+RESET_CACHE_L2 = os.environ.get("VLLM_ROCM_CI_RESET_CACHE_L2", "0") == "1"
+RESET_DOCKER = os.environ.get("VLLM_ROCM_CI_RESET_DOCKER", "0") == "1"
+RESET_OVERLAY = os.environ.get("VLLM_ROCM_CI_RESET_OVERLAY", "0") == "1"
+
+# --------------------------------------------------------------------------
+# GPU architecture registry
+#
+# Every ROCm GPU architecture that CI is allowed to run on must be listed
+# here. This is a safety gate: if a pipeline step targets an architecture
+# that is not in this registry, the script exits immediately with a clear
+# error pointing to this line.
+#
+# Why this exists:
+#   - Prevents silent misconfiguration. A typo in DOCKER_IMAGE_NAME
+#     (e.g., "gfx94" instead of "gfx942") would pull a nonexistent image
+#     and fail late with a confusing Docker error. The registry catches it
+#     upfront.
+#   - Prevents running on unsupported hardware. If a new GPU architecture
+#     is added to the fleet without updating the CI runner, tests may
+#     produce wrong results (wrong compiled kernels, wrong NCCL config).
+#     The registry forces a conscious decision to support a new arch.
+#   - Documents exactly which architectures are tested. Anyone reading
+#     this file knows the full set.
+#
+# To add a new architecture:
+#   1. Add it to SUPPORTED_ROCM_ARCHS below.
+#   2. Add a per-arch build step in amd.yaml (see PR #36949 pattern).
+#   3. Update the pipeline template to set DOCKER_IMAGE_NAME for the
+#      new arch's test steps.
+#   4. Verify the architecture string matches what PYTORCH_ROCM_ARCH and
+#      rocm-smi report (e.g., "gfx942", not "mi300x").
+# --------------------------------------------------------------------------
+SUPPORTED_ROCM_ARCHS = frozenset(
+    {
+        "gfx90a",  # MI210, MI250, MI250X
+        "gfx942",  # MI300X, MI300A
+        "gfx950",  # MI350X
+    }
+)
+
+
+def _validate_image_arch(image_name):
+    # type: (str) -> None
+    """Validate that a per-arch image tag targets a supported architecture.
+
+    When VLLM_ROCM_CI_LEGACY_DOCKER_TAG=0, the image tag is expected to
+    end with a "-{arch}" suffix (e.g., "rocm/vllm-ci:abc123-gfx942").
+    This function extracts the arch suffix and checks it against the
+    SUPPORTED_ROCM_ARCHS registry.
+
+    Called only in per-arch mode. In legacy mode (fat multi-arch image),
+    there is no arch suffix to validate.
+
+    Args:
+        image_name: Full Docker image name from DOCKER_IMAGE_NAME.
+
+    Raises:
+        SystemExit: If the arch is not in SUPPORTED_ROCM_ARCHS.
+    """
+    # Extract the tag portion after the colon.
+    if ":" not in image_name:
+        # No tag at all -- let docker pull fail with its own error.
+        return
+
+    tag = image_name.rsplit(":", 1)[1]
+
+    # Extract the arch suffix after the last hyphen.
+    # Tag format: {commit}-{arch}  e.g., "abc123def-gfx942"
+    if "-" not in tag:
+        warn(
+            f"Image tag '{tag}' has no '-{{arch}}' suffix. "
+            f"In per-arch mode, tags are expected to be "
+            f"'{{commit}}-{{arch}}' (e.g., abc123-gfx942). "
+            f"Skipping arch validation."
+        )
+        return
+
+    arch = tag.rsplit("-", 1)[1]
+
+    if arch not in SUPPORTED_ROCM_ARCHS:
+        error(
+            f"GPU architecture '{arch}' (from image tag '{image_name}') "
+            f"is not in the supported architecture registry.\n"
+            f"\n"
+            f"  Registered architectures: "
+            f"{', '.join(sorted(SUPPORTED_ROCM_ARCHS))}\n"
+            f"\n"
+            f"  This check exists at SUPPORTED_ROCM_ARCHS in:\n"
+            f"    {__file__}:{_SUPPORTED_ROCM_ARCHS_LINE}\n"
+            f"\n"
+            f"  If '{arch}' is a valid new architecture, add it to\n"
+            f"  SUPPORTED_ROCM_ARCHS. If this is a typo, fix\n"
+            f"  DOCKER_IMAGE_NAME in the pipeline YAML."
+        )
+        sys.exit(1)
+
+    info(f"Architecture '{arch}' is registered and supported")
+
+
+# Line number of SUPPORTED_ROCM_ARCHS for error messages. This trick
+# avoids hardcoding a line number that goes stale on every edit.
+# We search for the frozenset assignment in our own source.
+_SUPPORTED_ROCM_ARCHS_LINE = "?"  # type: str
+try:
+    with open(__file__) as _f:
+        for _i, _line in enumerate(_f, 1):
+            if _line.strip().startswith("SUPPORTED_ROCM_ARCHS"):
+                _SUPPORTED_ROCM_ARCHS_LINE = str(_i)
+                break
+except OSError:
+    pass
 
 # GPU state file written by the AMD GPU driver's userspace tooling.
 # The driver writes "clean" after a successful reset. We write "reset"
@@ -134,12 +323,12 @@ GPU_POLL_INTERVAL_S = 3
 # VLLM_DISK_TARGET_PCT, VLLM_DISK_TARGET_GB.
 
 # Percentage thresholds. 0 = disabled (GB-only or no eviction).
-DISK_USAGE_THRESHOLD_PCT = int(os.environ.get("VLLM_DISK_THRESHOLD_PCT", "70"))
-DISK_USAGE_TARGET_PCT = int(os.environ.get("VLLM_DISK_TARGET_PCT", "50"))
+DISK_USAGE_THRESHOLD_PCT = int(os.environ.get("VLLM_DISK_THRESHOLD_PCT", "0"))
+DISK_USAGE_TARGET_PCT = int(os.environ.get("VLLM_DISK_TARGET_PCT", "0"))
 
 # Absolute thresholds in GB. 0 = disabled (percentage-only or no eviction).
-DISK_USAGE_THRESHOLD_GB = int(os.environ.get("VLLM_DISK_THRESHOLD_GB", "0"))
-DISK_USAGE_TARGET_GB = int(os.environ.get("VLLM_DISK_TARGET_GB", "0"))
+DISK_USAGE_THRESHOLD_GB = int(os.environ.get("VLLM_DISK_THRESHOLD_GB", "512"))
+DISK_USAGE_TARGET_GB = int(os.environ.get("VLLM_DISK_TARGET_GB", "256"))
 
 # Eviction policy. Controls the order in which images are removed when
 # disk usage exceeds the threshold.
@@ -162,84 +351,214 @@ DISK_EVICTION_POLICY = os.environ.get("VLLM_DISK_EVICTION_POLICY", "lfu").lower(
 RESULTS_MOUNT = "/tmp/vllm-ci-results"
 
 # ---------------------------------------------------------------------------
-# Persistent cache configuration
+# Two-tier cache configuration (L1 ephemeral + L2 persistent)
 #
-# Each cache type maps a host-side directory to a container-side mount point
-# and an environment variable that tells the code inside the container where
-# to find it. Caches persist across CI jobs on the same node, so subsequent
-# runs hit warm cache instead of re-downloading.
+# In K8s, storage comes in two flavors with opposite tradeoffs:
+#
+#   Ephemeral (emptyDir, local NVMe)   Fast I/O, but wiped on pod death.
+#   Persistent (hostPath, PVC/NFS)     Survives pod restarts, but slower I/O.
+#
+# Using only ephemeral means every pod starts cold (downloads 12GB+ of
+# model weights). Using only persistent means slow reads on every cache
+# hit if the backend is NFS.
+#
+# The solution is a two-tier cache using OverlayFS:
+#
+#   L1: CACHE_ROOT (ephemeral, fast) -- the "upper" overlay layer.
+#     All writes land here. Reads that hit L1 are served from fast
+#     local storage. This is the read-write layer.
+#
+#   L2: CACHE_BACKING_ROOT (persistent, slow) -- the "lower" overlay layer.
+#     Read-only from the overlay's perspective. When a file is not in L1,
+#     the kernel transparently reads it from L2 (NFS). No application
+#     changes needed -- tools like huggingface_hub see a single merged
+#     directory and don't know about the tiers.
+#
+#   Merged view: mounted at CACHE_OVERLAY_ROOT, bind-mounted into the
+#     container. The test sees one directory with the union of L1 and L2.
+#
+# OverlayFS gives us:
+#   - L1 cache hits: served from NVMe (fast)
+#   - L2 cache hits: served from NFS (slow but no internet download)
+#   - Cache misses: downloaded from internet, written to L1
+#   - After test: rsync L1 delta back to L2 so next pod has it
+#
+# When OverlayFS is not available (no kernel support, no privileges),
+# we fall back to seed-based sync: copy the most recently used files
+# from L2 to L1 at startup, and rsync new files back at cleanup.
+#
+# Access frequency tracking:
+#   We maintain a lightweight access log at CACHE_ROOT/.access_counts
+#   that records how many times each cache path has been requested
+#   across jobs. This is used to prioritize seeding: high-frequency
+#   files are seeded first when OverlayFS is not available. The log
+#   is persisted to backing on cleanup.
+#
+# If CACHE_BACKING_ROOT is not set, the system degrades to single-tier:
+# CACHE_ROOT is both L1 and L2. This is the right default for hostPath
+# mounts (persistent + fast local disk).
+#
+# Tier behavior matrix:
+#
+#   CACHE_ROOT        CACHE_BACKING_ROOT  Behavior
+#   ----------------------------------------------------------------
+#   ~/vllm-ci-cache   (not set)           Single-tier. hostPath style.
+#   /scratch/cache    /mnt/nfs/cache      Two-tier overlay (if supported)
+#                                         or seed-based fallback.
+#   /tmp/cache        (not set)           Single-tier ephemeral. Cold
+#                                         start every pod. Works but slow.
 #
 # Adding a new cache:
 #   1. Add an entry to CACHES below.
 #   2. The host directory is created automatically under CACHE_ROOT.
 #   3. The volume mount and env var are injected into docker run.
+#   4. If backing is configured, overlay or seed happens automatically.
 #
-# Override VLLM_CI_CACHE_ROOT to change the host-side base directory
-# (default: ~/vllm-ci-cache). Useful when the node has a fast ephemeral
-# disk (NVMe) separate from the root partition.
+# Override env vars:
+#   VLLM_CI_CACHE_ROOT         Hot tier path (default: ~/vllm-ci-cache)
+#   VLLM_CI_CACHE_BACKING_ROOT Warm tier path (default: unset = single-tier)
 # ---------------------------------------------------------------------------
 
-# Base directory for all caches on the host.
+# Hot tier: fast local storage. Container mounts point here.
 CACHE_ROOT = Path(
-    os.environ.get("VLLM_CI_CACHE_ROOT", str(Path.home() / "vllm-ci-cache"))
+    os.environ.get(
+        "VLLM_CI_CACHE_ROOT",
+        str(Path.home() / "vllm-ci-cache"),
+    )
 )
 
+# L2 (warm tier): persistent shared storage. Set to a PVC or NFS mount.
+# None = single-tier mode (no backing store, CACHE_ROOT is everything).
+_backing_env = os.environ.get("VLLM_CI_CACHE_BACKING_ROOT", "")
+CACHE_BACKING_ROOT = Path(_backing_env) if _backing_env else None
+
+# Overlay merged view: when OverlayFS is used, this is the mount point
+# that the container sees. It merges L1 (upper) and L2 (lower).
+# OverlayFS also needs a workdir (same filesystem as upper).
+CACHE_OVERLAY_ROOT = CACHE_ROOT.parent / "vllm-ci-cache-merged"
+CACHE_OVERLAY_WORK = CACHE_ROOT.parent / "vllm-ci-cache-work"
+
+# Access frequency log file. Tracks how many times each relative path
+# has been accessed across jobs. Used to prioritize seeding when
+# OverlayFS is not available.
+ACCESS_LOG_FILE = CACHE_ROOT / ".access_counts"
+
 # Cache registry: each entry defines one persistent cache.
+#
 #   host_subdir:    directory name under CACHE_ROOT on the host
 #   container_path: absolute path inside the container
 #   env_var:        environment variable set inside the container
 #   description:    human-readable description for logging
+#   max_gb:         L1 (ephemeral/local) size budget in GB. This controls:
+#                     - LRU eviction: when L1 exceeds max_gb, oldest-accessed
+#                       files are evicted from L1 until under the limit.
+#                     - Seed budget: at pod startup, at most max_gb is copied
+#                       from L2 (NFS) into L1.
+#                   0 = unlimited (bounded only by available disk space).
+#
+#   l2_max_gb:      L2 (NFS/PVC) size budget in GB. 0 = unlimited.
+#                   Even though persistent storage is large, stale data
+#                   accumulates (old model versions, abandoned experiments).
+#                   When exceeded, L2 is trimmed by time-based eviction.
+#
+#   l2_max_days:    L2 time-based eviction threshold in days. Files in L2
+#                   not accessed (atime) for longer than this are evicted,
+#                   regardless of L2 size. 0 = disabled (size-only eviction).
+#                   Default: 14 days.
+#
+# Override any cache's max_gb at runtime via env var:
+#   VLLM_CACHE_MAX_<ENV_VAR>=<gb>
+#   Example: VLLM_CACHE_MAX_PIP_CACHE_DIR=5
+#
 # Legacy HF cache path: the original bash script used ~/huggingface (not
 # under CACHE_ROOT). We preserve this path so existing warm caches on CI
 # nodes are not invalidated. New caches go under CACHE_ROOT.
 _HF_CACHE_HOST = Path(os.environ.get("VLLM_HF_CACHE", str(Path.home() / "huggingface")))
 
+# Default L2 time-based eviction: files not accessed in this many days
+# are evicted from NFS/PVC. Override per-cache or globally via env var.
+L2_DEFAULT_MAX_DAYS = int(os.environ.get("VLLM_CACHE_L2_MAX_DAYS", "21"))
+
 CACHES = [
     {
-        # host_dir is overridden to _HF_CACHE_HOST below (legacy path).
         "host_subdir": "__hf_legacy__",
         "host_dir_override": str(_HF_CACHE_HOST),
         "container_path": "/root/.cache/huggingface",
         "env_var": "HF_HOME",
+        "max_gb": 1408,  # L1 budget
+        "l2_max_gb": 7168,  # L2 budget (NFS)
+        "l2_max_days": 14,  # evict from L2 if untouched 14d
         "description": "HuggingFace models and datasets",
     },
     {
         "host_subdir": "modelscope",
         "container_path": "/root/.cache/modelscope",
         "env_var": "MODELSCOPE_CACHE",
+        "max_gb": 220,
+        "l2_max_gb": 1792,
+        "l2_max_days": 14,
         "description": "ModelScope models",
     },
     {
         "host_subdir": "vllm-test-cache",
         "container_path": "/root/.cache/vllm-test-cache",
         "env_var": "VLLM_TEST_CACHE",
-        "description": "Test data (dummy models, datasets, tiktoken, GeoTIFFs)",
+        "max_gb": 208,
+        "l2_max_gb": 512,
+        "l2_max_days": 14,  # test data goes stale faster
+        "description": "Test data (dummy models, datasets)",
     },
     {
         "host_subdir": "vllm",
         "container_path": "/root/.cache/vllm",
         "env_var": "VLLM_CACHE_ROOT",
-        "description": "vLLM runtime cache (compiled kernels, etc.)",
+        "max_gb": 32,
+        "l2_max_gb": 512,
+        "l2_max_days": 7,  # compiled kernels for old code
+        "description": "vLLM runtime cache (compiled kernels)",
     },
     {
         "host_subdir": "vllm/media_cache",
         "container_path": "/root/.cache/vllm/media_cache",
         "env_var": "VLLM_MEDIA_CACHE",
-        "description": "Media URL cache (images, audio, video from URLs)",
+        "max_gb": 16,
+        "l2_max_gb": 64,
+        "l2_max_days": 14,
+        "description": "Media URL cache (images, audio, video)",
     },
     {
+        # pip respects PIP_CACHE_DIR. Used by the 46 "pip install"
+        # commands in test-amd.yaml.
         "host_subdir": "pip",
         "container_path": "/root/.cache/pip",
         "env_var": "PIP_CACHE_DIR",
-        "description": "pip download cache (avoids re-downloading wheels)",
+        "max_gb": 32,
+        "l2_max_gb": 64,
+        "l2_max_days": 7,  # old wheel versions pile up fast
+        "description": "pip download cache",
     },
     {
-        "host_subdir": "ccache",
-        "container_path": "/root/.cache/ccache",
-        "env_var": "CCACHE_DIR",
-        "description": "ccache compiler cache (for per-arch kernel builds)",
+        # uv respects UV_CACHE_DIR. Used by the 25 "uv pip install"
+        # commands in test-amd.yaml.
+        "host_subdir": "uv",
+        "container_path": "/root/.cache/uv",
+        "env_var": "UV_CACHE_DIR",
+        "max_gb": 64,
+        "l2_max_gb": 256,
+        "l2_max_days": 7,
+        "description": "uv package manager cache",
     },
-]  # type: list[dict[str, str]]
+    {
+        # sccache is the compiler cache used in the ROCm Dockerfile.
+        "host_subdir": "sccache",
+        "container_path": "/root/.cache/sccache",
+        "env_var": "SCCACHE_DIR",
+        "max_gb": 80,
+        "l2_max_gb": 256,
+        "l2_max_days": 21,
+        "description": "sccache compiler cache (ROCm builds)",
+    },
+]  # type: list[dict]
 
 # Pytest exit code 5 = "no tests were collected". We treat this as success
 # because shard-based parallelism can legitimately produce empty shards.
@@ -252,12 +571,16 @@ MIN_SYSTEM_PID = 1000
 STALE_CONTAINER_AGE_H = 4
 
 # If ``docker info`` does not respond within this many seconds, abort.
-# Increased from 10s to 30s to tolerate slow Docker daemons under load.
-DOCKER_HEALTH_TIMEOUT_S = 30
+DOCKER_HEALTH_TIMEOUT_S = 120
+
+# Timeout for rocm-smi commands. The AMD driver can hang indefinitely
+# if the GPU is in a bad state (post-reset, memory pressure). Without
+# a timeout, the entire CI script hangs silently with no log output.
+ROCM_SMI_TIMEOUT_S = 60
 
 # Number of times to retry ``docker pull`` on failure (network flakes).
 DOCKER_PULL_RETRIES = 3
-DOCKER_PULL_RETRY_DELAY_S = 10
+DOCKER_PULL_RETRY_DELAY_S = 30
 
 # Maximum number of PIDs allowed inside the test container.
 # Prevents fork-bomb scenarios from killing the K8s node.
@@ -373,7 +696,7 @@ def sh(cmd, *, check=False, capture=False, timeout=None):
     kwargs = {"text": True}  # type: dict
     if capture:
         kwargs["capture_output"] = True
-    if timeout:
+    if timeout is not None:
         kwargs["timeout"] = timeout
     if isinstance(cmd, str):
         kwargs["shell"] = True
@@ -400,14 +723,111 @@ def timed(label):
         label: Human-readable name for the operation being timed.
     """
     start = time.monotonic()
-    yield
-    elapsed = time.monotonic() - start
-    info(f"{label} completed in {elapsed:.1f}s")
+    exc_occurred = False
+    try:
+        yield
+    except BaseException:
+        exc_occurred = True
+        raise
+    finally:
+        elapsed = time.monotonic() - start
+        status = "FAILED after" if exc_occurred else "completed in"
+        info(f"{label} {status} {elapsed:.1f}s")
 
 
 # ==========================================================================
 # Configuration dump
 # ==========================================================================
+
+
+def execute_hard_resets():
+    # type: () -> None
+    """Execute any hard-reset operations requested via env vars.
+
+    Hard resets are destructive, one-shot operations that wipe state.
+    They run at the very beginning of the script (Phase 1), before
+    any other setup, so that subsequent phases see a clean slate.
+
+    Each reset is logged prominently so it is obvious in the build
+    log that a destructive operation occurred.
+    """
+    any_reset = any(
+        [
+            RESET_CACHE_COUNTS,
+            RESET_CACHE_L1,
+            RESET_CACHE_L2,
+            RESET_DOCKER,
+            RESET_OVERLAY,
+        ]
+    )
+    if not any_reset:
+        return
+
+    section("HARD RESET requested")
+
+    if RESET_CACHE_COUNTS:
+        warn("Resetting cache access counts (VLLM_ROCM_CI_RESET_CACHE_COUNTS=1)")
+        for log_path in [ACCESS_LOG_FILE]:
+            if log_path.is_file():
+                info(f"  Deleting {log_path}")
+                os.unlink(str(log_path))
+        if CACHE_BACKING_ROOT is not None:
+            backing_log = CACHE_BACKING_ROOT / ".access_counts"
+            if backing_log.is_file():
+                info(f"  Deleting {backing_log}")
+                os.unlink(str(backing_log))
+        info("  Access counts reset to zero")
+
+    if RESET_CACHE_L1:
+        warn("Wiping ALL L1 cache data (VLLM_ROCM_CI_RESET_CACHE_L1=1)")
+        if CACHE_ROOT.exists():
+            info(f"  rm -rf {CACHE_ROOT}")
+            shutil.rmtree(str(CACHE_ROOT), ignore_errors=True)
+            CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        info("  L1 cache wiped -- next test starts cold")
+
+    if RESET_CACHE_L2:
+        warn("Wiping ALL L2 cache data (VLLM_ROCM_CI_RESET_CACHE_L2=1)")
+        if CACHE_BACKING_ROOT is not None and CACHE_BACKING_ROOT.exists():
+            if os.access(str(CACHE_BACKING_ROOT), os.W_OK):
+                info(f"  rm -rf {CACHE_BACKING_ROOT}")
+                shutil.rmtree(str(CACHE_BACKING_ROOT), ignore_errors=True)
+                CACHE_BACKING_ROOT.mkdir(parents=True, exist_ok=True)
+                info("  L2 cache wiped -- all pods start cold")
+            else:
+                error(f"  Cannot wipe L2: {CACHE_BACKING_ROOT} is read-only")
+        else:
+            info("  L2 not configured -- nothing to wipe")
+
+    if RESET_OVERLAY:
+        warn("Resetting overlay state (VLLM_ROCM_CI_RESET_OVERLAY=1)")
+        for d in [CACHE_OVERLAY_ROOT, CACHE_OVERLAY_WORK]:
+            if d.exists():
+                # Unmount any active overlays first.
+                still_mounted = False
+                for sub in d.iterdir():
+                    if sub.is_mount():
+                        sh(f"umount '{sub}' 2>/dev/null || true")
+                        if sub.is_mount():
+                            # Lazy unmount as fallback for busy mounts.
+                            sh(f"umount -l '{sub}' 2>/dev/null || true")
+                            if sub.is_mount():
+                                warn(
+                                    f"  {sub} is still mounted after "
+                                    f"lazy unmount -- skipping rmtree "
+                                    f"to avoid deleting backing data"
+                                )
+                                still_mounted = True
+                if still_mounted:
+                    continue
+                info(f"  rm -rf {d}")
+                shutil.rmtree(str(d), ignore_errors=True)
+        info("  Overlay state reset")
+
+    if RESET_DOCKER:
+        warn("Wiping ALL Docker data (VLLM_ROCM_CI_RESET_DOCKER=1)")
+        sh("docker system prune --all --force --volumes", capture=True)
+        info("  Docker fully pruned -- next pull is cold")
 
 
 def log_effective_config():
@@ -420,6 +840,61 @@ def log_effective_config():
     the build log without needing to SSH into the node.
     """
     section("Effective configuration")
+
+    # Feature switches first -- most important for debugging.
+    def _on_off(val):
+        # type: (bool) -> str
+        return "ON" if val else "OFF"
+
+    info("  Feature switches:")
+    info(f"    GPU_PREFLIGHT:           {_on_off(ENABLE_GPU_PREFLIGHT)}")
+    info(f"    INFRA_CHECKS:            {_on_off(ENABLE_INFRA_CHECKS)}")
+    info(f"    CACHE:                   {_on_off(ENABLE_CACHE)}")
+    info(f"    CACHE_EVICTION:          {_on_off(ENABLE_CACHE_EVICTION)}")
+    info(f"    DOCKER_EVICTION:         {_on_off(ENABLE_DOCKER_EVICTION)}")
+    info(f"    DIAGNOSTICS:             {_on_off(ENABLE_DIAGNOSTICS)}")
+    info(f"    JUNIT_OVERRIDE:          {_on_off(ENABLE_JUNIT_OVERRIDE)}")
+    tag_mode = (
+        "legacy (commit-only)"
+        if ENABLE_LEGACY_DOCKER_TAG
+        else "per-arch (DOCKER_IMAGE_NAME)"
+    )
+    info(f"    DOCKER_TAG_MODE:         {tag_mode}")
+
+    any_off = not all(
+        [
+            ENABLE_GPU_PREFLIGHT,
+            ENABLE_INFRA_CHECKS,
+            ENABLE_CACHE,
+            ENABLE_CACHE_EVICTION,
+            ENABLE_DOCKER_EVICTION,
+            ENABLE_DIAGNOSTICS,
+            ENABLE_JUNIT_OVERRIDE,
+        ]
+    )
+    if any_off:
+        warn(
+            "One or more features are DISABLED via env vars. "
+            "This may hide failures or skip cleanup."
+        )
+
+    # Hard resets.
+    resets_active = [
+        name
+        for name, val in [
+            ("CACHE_COUNTS", RESET_CACHE_COUNTS),
+            ("CACHE_L1", RESET_CACHE_L1),
+            ("CACHE_L2", RESET_CACHE_L2),
+            ("DOCKER", RESET_DOCKER),
+            ("OVERLAY", RESET_OVERLAY),
+        ]
+        if val
+    ]
+    if resets_active:
+        warn(f"  Hard resets ACTIVE: {', '.join(resets_active)}")
+    else:
+        info("  Hard resets: none")
+
     info(f"  GPU_STATE_FILE:            {GPU_STATE_FILE}")
     info(f"  GPU_CLEAN_TIMEOUT_S:       {GPU_CLEAN_TIMEOUT_S}")
     info(f"  DISK_USAGE_THRESHOLD_PCT:  {DISK_USAGE_THRESHOLD_PCT}%")
@@ -444,6 +919,8 @@ def log_effective_config():
     info(f"  STALE_CONTAINER_AGE_H:     {STALE_CONTAINER_AGE_H}h")
     info(f"  MIN_SYSTEM_PID:            {MIN_SYSTEM_PID}")
     info(f"  CACHE_ROOT:                {CACHE_ROOT}")
+    backing = CACHE_BACKING_ROOT or "(not set -- single-tier)"
+    info(f"  CACHE_BACKING_ROOT:        {backing}")
     info(
         f"  Caches registered:         {len(CACHES)} "
         f"({', '.join(c['env_var'] for c in CACHES)})"
@@ -452,13 +929,30 @@ def log_effective_config():
     # Log env var overrides so operators can see what was customized.
     overrides = []  # type: list[str]
     for var in [
+        "VLLM_ROCM_CI_GPU_PREFLIGHT",
+        "VLLM_ROCM_CI_INFRA_CHECKS",
+        "VLLM_ROCM_CI_CACHE_ENABLED",
+        "VLLM_ROCM_CI_CACHE_EVICTION",
+        "VLLM_ROCM_CI_DOCKER_EVICTION",
+        "VLLM_ROCM_CI_DIAGNOSTICS",
+        "VLLM_ROCM_CI_JUNIT_OVERRIDE",
+        "VLLM_ROCM_CI_RESET_CACHE_COUNTS",
+        "VLLM_ROCM_CI_RESET_CACHE_L1",
+        "VLLM_ROCM_CI_RESET_CACHE_L2",
+        "VLLM_ROCM_CI_RESET_DOCKER",
+        "VLLM_ROCM_CI_RESET_OVERLAY",
         "VLLM_TEST_TIMEOUT",
         "VLLM_DISK_THRESHOLD_PCT",
         "VLLM_DISK_THRESHOLD_GB",
         "VLLM_DISK_TARGET_PCT",
         "VLLM_DISK_TARGET_GB",
         "VLLM_DISK_EVICTION_POLICY",
+        "VLLM_CI_CACHE_ROOT",
+        "VLLM_CI_CACHE_BACKING_ROOT",
+        "VLLM_CACHE_L2_MAX_DAYS",
         "VLLM_CI_REGISTRY",
+        "VLLM_ROCM_CI_LEGACY_DOCKER_TAG",
+        "DOCKER_IMAGE_NAME",
     ]:
         val = os.environ.get(var)
         if val is not None:
@@ -615,14 +1109,13 @@ def diagnose_container_exit(container_name, log_file=None):
     Returns:
         Dict with keys:
           "oom_killed" (bool), "exit_code" (int), "error" (str),
-          "pids_exhausted" (bool), "timed_out" (bool).
+          "pids_exhausted" (bool).
     """
     diag = {
         "oom_killed": False,
         "exit_code": -1,
         "error": "",
         "pids_exhausted": False,
-        "timed_out": False,
     }  # type: dict[str, object]
 
     # -- Docker inspect --
@@ -791,10 +1284,28 @@ def snapshot_gpu_vram(label=""):
         Empty dict if rocm-smi is unavailable.
     """
     prefix = f"[{label}] " if label else ""
-    r = sh("rocm-smi --showmemuse --json 2>/dev/null", capture=True)
+    try:
+        r = sh(
+            "rocm-smi --showmemuse --json 2>/dev/null",
+            capture=True,
+            timeout=ROCM_SMI_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        warn(f"{prefix}rocm-smi --showmemuse timed out after {ROCM_SMI_TIMEOUT_S}s")
+        return {}
     if r.returncode != 0:
         # Fallback: non-JSON output for older rocm-smi versions.
-        r = sh("rocm-smi --showmeminfo vram 2>/dev/null", capture=True)
+        try:
+            r = sh(
+                "rocm-smi --showmeminfo vram 2>/dev/null",
+                capture=True,
+                timeout=ROCM_SMI_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            warn(
+                f"{prefix}rocm-smi --showmeminfo timed out after {ROCM_SMI_TIMEOUT_S}s"
+            )
+            return {}
         if r.returncode == 0:
             info(f"{prefix}VRAM snapshot:\n{r.stdout.strip()}")
         return {}
@@ -834,10 +1345,8 @@ def snapshot_gpu_vram(label=""):
 
     if result:
         for idx, mem in sorted(result.items()):
-            used_mb = mem["used"] / (1024 * 1024) if mem["used"] > 1024 else mem["used"]
-            total_mb = (
-                mem["total"] / (1024 * 1024) if mem["total"] > 1024 else mem["total"]
-            )
+            used_mb = mem["used"] / (1024 * 1024)
+            total_mb = mem["total"] / (1024 * 1024)
             info(f"{prefix}GPU {idx}: VRAM {used_mb:.0f}MB / {total_mb:.0f}MB")
 
     return result
@@ -1131,7 +1640,13 @@ def rocm_smi_gpu_pids():
         List of integer PIDs with PID > MIN_SYSTEM_PID.
         Empty list if rocm-smi is unavailable or reports no processes.
     """
-    r = sh("rocm-smi --showpids 2>/dev/null", capture=True)
+    try:
+        r = sh(
+            "rocm-smi --showpids 2>/dev/null", capture=True, timeout=ROCM_SMI_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired:
+        warn(f"rocm-smi --showpids timed out after {ROCM_SMI_TIMEOUT_S}s")
+        return []
     if r.returncode != 0 or not r.stdout.strip():
         return []
 
@@ -1161,19 +1676,50 @@ def rocm_smi_check_vram():
         True if all GPUs report zero VRAM usage (or if rocm-smi fails,
         in which case we return True optimistically to avoid blocking CI).
     """
-    r = sh("rocm-smi --showmeminfo vram 2>/dev/null", capture=True)
+    try:
+        r = sh(
+            "rocm-smi --showmeminfo vram 2>/dev/null",
+            capture=True,
+            timeout=ROCM_SMI_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        warn(f"rocm-smi --showmeminfo timed out after {ROCM_SMI_TIMEOUT_S}s")
+        annotate_build(
+            "### :warning: VRAM check skipped (rocm-smi timeout)\n\n"
+            "GPU VRAM state could not be verified. Tests may run on "
+            "a GPU with leaked VRAM from a previous job.",
+            style="warning",
+            context="vram-check-skip",
+        )
+        return True  # optimistic: don't block CI on tooling failure
     if r.returncode != 0:
         warn("rocm-smi --showmeminfo failed -- cannot verify VRAM")
+        annotate_build(
+            "### :warning: VRAM check skipped (rocm-smi failed)\n\n"
+            "GPU VRAM state could not be verified. Tests may run on "
+            "a GPU with leaked VRAM from a previous job.",
+            style="warning",
+            context="vram-check-skip",
+        )
         return True  # optimistic: don't block CI on tooling failure
 
     for line in r.stdout.splitlines():
         lower = line.lower()
-        if "used" in lower:
-            for token in line.split():
-                cleaned = token.rstrip("BMKGbmkg")
-                if cleaned.isdigit() and int(cleaned) > 0:
+        if "used" in lower and ":" in line:
+            # Extract the numeric value after the last colon.
+            # rocm-smi formats: "VRAM Total Used Memory (B): 0" or
+            # "GPU[1] : Used : 0". Splitting on ":" and taking the
+            # last part avoids false-positives from GPU index numbers.
+            value_part = line.rsplit(":", 1)[1].strip()
+            # Strip unit suffixes: B, KB, MB, MiB, GB, GiB, etc.
+            cleaned = re.sub(r"[BKMGT]i?[Bb]?$", "", value_part.rstrip()).strip()
+            try:
+                val = float(cleaned)
+                if val > 0:
                     warn(f"GPU VRAM still in use: {line.strip()}")
                     return False
+            except (ValueError, OverflowError):
+                pass
     return True
 
 
@@ -1190,7 +1736,11 @@ def rocm_smi_hard_reset():
         True if the reset succeeded, False otherwise.
     """
     info("Attempting hardware GPU reset via rocm-smi...")
-    r = sh("rocm-smi --gpureset 2>&1", capture=True)
+    try:
+        r = sh("rocm-smi --gpureset 2>&1", capture=True, timeout=ROCM_SMI_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        warn(f"rocm-smi --gpureset timed out after {ROCM_SMI_TIMEOUT_S}s")
+        return False
     if r.returncode == 0:
         info("rocm-smi --gpureset succeeded")
         return True
@@ -1219,7 +1769,13 @@ def rocm_smi_validate_health():
     section("Validating GPU health")
 
     # 1. Enumeration
-    r = sh("rocm-smi --showid 2>/dev/null", capture=True)
+    try:
+        r = sh(
+            "rocm-smi --showid 2>/dev/null", capture=True, timeout=ROCM_SMI_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired:
+        error(f"rocm-smi --showid timed out after {ROCM_SMI_TIMEOUT_S}s")
+        sys.exit(1)
     if r.returncode != 0:
         error("rocm-smi --showid failed -- GPUs may not be accessible")
         error("Check that the K8s device plugin allocated GPUs to this pod")
@@ -1227,10 +1783,21 @@ def rocm_smi_validate_health():
     info(r.stdout.strip())
 
     # 2. Temperature
-    r = sh("rocm-smi --showtemp 2>/dev/null", capture=True)
-    if r.returncode == 0:
+    try:
+        r = sh(
+            "rocm-smi --showtemp 2>/dev/null", capture=True, timeout=ROCM_SMI_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired:
+        warn(f"rocm-smi --showtemp timed out after {ROCM_SMI_TIMEOUT_S}s")
+        r = None
+    if r is not None and r.returncode == 0:
         info(r.stdout.strip())
         for line in r.stdout.splitlines():
+            lower = line.lower()
+            # Only parse temperature from lines that mention temperature,
+            # to avoid false positives from GPU indices, fan speeds, etc.
+            if "temp" not in lower and "temperature" not in lower:
+                continue
             for token in line.split():
                 try:
                     temp = float(token)
@@ -1240,8 +1807,16 @@ def rocm_smi_validate_health():
                     continue
 
     # 3. ECC errors
-    r = sh("rocm-smi --showrasinfo 2>/dev/null", capture=True)
-    if r.returncode == 0 and r.stdout.strip():
+    try:
+        r = sh(
+            "rocm-smi --showrasinfo 2>/dev/null",
+            capture=True,
+            timeout=ROCM_SMI_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        warn(f"rocm-smi --showrasinfo timed out after {ROCM_SMI_TIMEOUT_S}s")
+        r = None
+    if r is not None and r.returncode == 0 and r.stdout.strip():
         for line in r.stdout.splitlines():
             lower = line.lower()
             if "uncorrectable" in lower:
@@ -1454,23 +2029,56 @@ def setup_caches():
         The CACHES list (unchanged), for use by ``build_cache_docker_args``.
     """
     section("Persistent cache setup")
-    info(f"Cache root: {CACHE_ROOT}")
+
+    # Log tier configuration and storage types.
+    hot_type = _detect_storage_type(
+        CACHE_ROOT if CACHE_ROOT.exists() else CACHE_ROOT.parent
+    )
+    info(f"Hot tier (CACHE_ROOT):     {CACHE_ROOT} [{hot_type}]")
+    if CACHE_BACKING_ROOT is not None:
+        backing_type = _detect_storage_type(
+            CACHE_BACKING_ROOT
+            if CACHE_BACKING_ROOT.exists()
+            else CACHE_BACKING_ROOT.parent
+        )
+        info(f"Warm tier (backing):       {CACHE_BACKING_ROOT} [{backing_type}]")
+        info("Mode: two-tier (fast local + persistent backing)")
+    else:
+        info("Warm tier (backing):       not configured")
+        info("Mode: single-tier (CACHE_ROOT is both hot and warm)")
+
     if not CACHE_ROOT.exists():
         info(f"  Creating cache root: {CACHE_ROOT}")
         CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
-    for cache in CACHES:
-        # Use override path if specified (e.g., legacy HF cache at ~/huggingface),
-        # otherwise use CACHE_ROOT / host_subdir.
-        override = cache.get("host_dir_override")
-        host_dir = Path(override) if override else CACHE_ROOT / cache["host_subdir"]
-        host_dir.mkdir(parents=True, exist_ok=True)
+    # Try OverlayFS first (L1+L2 merged transparently by kernel).
+    # If overlay works, seeding is unnecessary -- L2 reads are automatic.
+    # If overlay fails, fall back to frequency-aware seeding.
+    _overlay_active = mount_overlay_caches()
+    if not _overlay_active:
+        sync_caches_from_backing()
 
-        # Report cache size and file count for visibility.
+    # Show the top-K access frequency table only on nightly builds
+    # to avoid noise on every PR step.
+    if os.environ.get("NIGHTLY") == "1":
+        log_top_k_access_counts()
+
+    for cache in CACHES:
+        host_dir = _get_cache_host_dir(cache)
+        host_dir.mkdir(parents=True, exist_ok=True)
+        max_gb = _get_cache_max_gb(cache)
+
+        # Report cache size, file count, and limit.
         try:
-            r = sh(f"du -sh '{host_dir}' 2>/dev/null | cut -f1", capture=True)
+            r = sh(
+                f"du -sh '{host_dir}' 2>/dev/null | cut -f1",
+                capture=True,
+            )
             size = r.stdout.strip() if r.returncode == 0 else "?"
-            r2 = sh(f"find '{host_dir}' -type f 2>/dev/null | wc -l", capture=True)
+            r2 = sh(
+                f"find '{host_dir}' -type f 2>/dev/null | wc -l",
+                capture=True,
+            )
             count = r2.stdout.strip() if r2.returncode == 0 else "?"
         except (OSError, subprocess.SubprocessError):
             size, count = "?", "?"
@@ -1480,8 +2088,10 @@ def setup_caches():
             status = "warm" if is_warm else "cold"
         except ValueError:
             status = "unknown"
+
+        limit = f"{max_gb}GB" if max_gb > 0 else "unlimited"
         env = cache["env_var"]
-        info(f"  {env:25s} {str(host_dir):45s} {size:>8s} ({count} files) [{status}]")
+        info(f"  {env:25s} {size:>8s} ({count} files) [{status}] limit={limit}")
 
     return CACHES
 
@@ -1499,11 +2109,24 @@ def build_cache_docker_args():
 
     Returns:
         List of docker CLI arguments (strings).
+        Empty list if ENABLE_CACHE is False.
     """
+    if not ENABLE_CACHE:
+        return []
     args = []  # type: list[str]
     for cache in CACHES:
-        override = cache.get("host_dir_override")
-        host_dir = Path(override) if override else CACHE_ROOT / cache["host_subdir"]
+        # If overlay is active for this cache, mount the merged view
+        # (which transparently includes both L1 and L2).
+        # Otherwise, mount the raw L1 directory.
+        overlay_merged = CACHE_OVERLAY_ROOT / cache["host_subdir"]
+        if (
+            not cache.get("host_dir_override")
+            and overlay_merged.exists()
+            and overlay_merged.is_mount()
+        ):
+            host_dir = overlay_merged
+        else:
+            host_dir = _get_cache_host_dir(cache)
         args += ["-v", f"{host_dir}:{cache['container_path']}"]
         args += ["-e", f"{cache['env_var']}={cache['container_path']}"]
     return args
@@ -1511,7 +2134,7 @@ def build_cache_docker_args():
 
 def log_cache_stats_diff(label):
     # type: (str) -> None
-    """Log cache sizes for post-mortem comparison (e.g., pre-test vs post-test).
+    """Log cache sizes for post-mortem comparison.
 
     Called before and after test execution. By diffing the two snapshots,
     you can see which caches grew (new downloads) and by how much.
@@ -1521,16 +2144,897 @@ def log_cache_stats_diff(label):
     """
     info(f"Cache stats [{label}]:")
     for cache in CACHES:
-        override = cache.get("host_dir_override")
-        host_dir = Path(override) if override else CACHE_ROOT / cache["host_subdir"]
+        host_dir = _get_cache_host_dir(cache)
         if not host_dir.exists():
             continue
         try:
-            r = sh(f"du -sh '{host_dir}' 2>/dev/null | cut -f1", capture=True)
+            r = sh(
+                f"du -sh '{host_dir}' 2>/dev/null | cut -f1",
+                capture=True,
+            )
             size = r.stdout.strip() if r.returncode == 0 else "?"
         except (OSError, subprocess.SubprocessError):
             size = "?"
-        info(f"  {cache['env_var']:25s} {size}")
+        max_gb = _get_cache_max_gb(cache)
+        limit = f"/{max_gb}GB" if max_gb > 0 else ""
+        info(f"  {cache['env_var']:25s} {size}{limit}")
+
+
+def _get_cache_host_dir(cache):
+    # type: (dict) -> Path
+    """Resolve the hot-tier host directory for a cache entry."""
+    override = cache.get("host_dir_override")
+    return Path(override) if override else CACHE_ROOT / cache["host_subdir"]
+
+
+def _get_cache_backing_dir(cache):
+    # type: (dict) -> Path | None
+    """Resolve the warm-tier (backing) directory for a cache entry.
+
+    Returns None if two-tier caching is not configured, or if this
+    cache uses a host_dir_override (e.g., the legacy HF path -- the
+    override IS the persistent path, so there's no separate backing).
+    """
+    if CACHE_BACKING_ROOT is None:
+        return None
+    if cache.get("host_dir_override"):
+        # Legacy override caches manage their own persistence.
+        return None
+    return CACHE_BACKING_ROOT / cache["host_subdir"]
+
+
+def _overlay_supported():
+    # type: () -> bool
+    """Return True if OverlayFS mounts are possible.
+
+    Requirements:
+      1. The overlay kernel module is available.
+      2. We have permission to mount (CAP_SYS_ADMIN or running as root).
+      3. L1 and L2 are on filesystems that support overlay (not all do).
+
+    If any check fails, we fall back to seed-based sync.
+    """
+    # Check kernel module.
+    r = sh("modprobe overlay 2>/dev/null || true", capture=True)
+    r = sh(
+        "cat /proc/filesystems 2>/dev/null | grep -q overlay",
+        capture=True,
+    )
+    if r.returncode != 0:
+        return False
+    # Check mount permission with a dry-run style test.
+    # We try to mount a trivial overlay; if it fails, we can't use it.
+    test_dir = CACHE_ROOT.parent / ".overlay_test"
+    lower = test_dir / "lower"
+    upper = test_dir / "upper"
+    work = test_dir / "work"
+    merged = test_dir / "merged"
+    try:
+        for d in (lower, upper, work, merged):
+            d.mkdir(parents=True, exist_ok=True)
+        r = sh(
+            f"mount -t overlay overlay "
+            f"-o lowerdir='{lower}',upperdir='{upper}',"
+            f"workdir='{work}' '{merged}' 2>/dev/null",
+            capture=True,
+            timeout=30,
+        )
+        if r.returncode == 0:
+            sh(f"umount '{merged}' 2>/dev/null || true", timeout=10)
+            shutil.rmtree(str(test_dir), ignore_errors=True)
+            return True
+    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+        pass
+    shutil.rmtree(str(test_dir), ignore_errors=True)
+    return False
+
+
+def mount_overlay_caches():
+    # type: () -> bool
+    """Mount OverlayFS for each cache, merging L1 (local) and L2 (NFS).
+
+    Creates a merged view at CACHE_OVERLAY_ROOT/<subdir> for each cache
+    where both L1 and L2 directories exist. The container mounts point
+    to the merged view instead of the raw L1 directory.
+
+    When a file is read:
+      - If it exists in L1 (upper): read from fast local storage.
+      - If it exists in L2 (lower): read from NFS (transparent fallback).
+    When a file is written:
+      - Always goes to L1 (upper). L2 is read-only from overlay's view.
+
+    Returns True if overlay was mounted for at least one cache.
+    Returns False if overlay is not supported or no caches have backing.
+    """
+    if CACHE_BACKING_ROOT is None:
+        return False
+
+    if not _overlay_supported():
+        info("OverlayFS not available -- using seed-based fallback")
+        return False
+
+    section("Mounting OverlayFS cache layers (L1 + L2)")
+    CACHE_OVERLAY_ROOT.mkdir(parents=True, exist_ok=True)
+    CACHE_OVERLAY_WORK.mkdir(parents=True, exist_ok=True)
+
+    mounted = 0
+    for cache in CACHES:
+        backing = _get_cache_backing_dir(cache)
+        if backing is None or not backing.exists():
+            continue
+
+        local = _get_cache_host_dir(cache)
+        local.mkdir(parents=True, exist_ok=True)
+        merged = CACHE_OVERLAY_ROOT / cache["host_subdir"]
+        work = CACHE_OVERLAY_WORK / cache["host_subdir"]
+        merged.mkdir(parents=True, exist_ok=True)
+        work.mkdir(parents=True, exist_ok=True)
+
+        env = cache["env_var"]
+        try:
+            r = sh(
+                f"mount -t overlay overlay "
+                f"-o lowerdir='{backing}',"
+                f"upperdir='{local}',"
+                f"workdir='{work}' "
+                f"'{merged}' 2>&1",
+                capture=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            warn(f"  {env}: overlay mount timed out after 30s (NFS may be unreachable)")
+            continue
+        if r.returncode == 0:
+            info(f"  {env}: overlay mounted (L1={local}, L2={backing})")
+            mounted += 1
+        else:
+            warn(f"  {env}: overlay mount failed: {r.stdout.strip()}")
+
+    if mounted > 0:
+        info(f"Mounted {mounted} overlay cache(s)")
+    return mounted > 0
+
+
+def unmount_overlay_caches():
+    # type: () -> None
+    """Unmount all OverlayFS mounts. Called during cleanup."""
+    if not CACHE_OVERLAY_ROOT.exists():
+        return
+    for cache in CACHES:
+        merged = CACHE_OVERLAY_ROOT / cache["host_subdir"]
+        if merged.exists() and merged.is_mount():
+            env = cache["env_var"]
+            sh(f"umount '{merged}' 2>/dev/null || true")
+            info(f"  {env}: overlay unmounted")
+
+
+# ---- Access frequency tracking ----
+#
+# Tracks how many times each cache subpath has been accessed across
+# jobs. Stored as a simple "count path" text file. Used to prioritize
+# seeding when OverlayFS is not available: high-frequency files are
+# copied first, so the most-requested models end up in L1.
+#
+# The log is updated from container access (via the container log or
+# by scanning atime after the test) and persisted to backing.
+
+
+def _load_access_counts():
+    # type: () -> dict[str, int]
+    """Load the access frequency log from disk.
+
+    Returns a dict mapping relative file paths to access counts.
+    If the log doesn't exist or can't be parsed, returns empty dict.
+    """
+    counts = {}  # type: dict[str, int]
+    # Try backing store first (survives pod death), then local.
+    for log_path in [
+        CACHE_BACKING_ROOT / ".access_counts" if CACHE_BACKING_ROOT else None,
+        ACCESS_LOG_FILE,
+    ]:
+        if log_path is None or not log_path.is_file():
+            continue
+        try:
+            for line in log_path.read_text().splitlines():
+                parts = line.strip().split(None, 1)
+                if len(parts) == 2 and parts[0].isdigit():
+                    counts[parts[1]] = int(parts[0])
+            if counts:
+                return counts
+        except OSError:
+            continue
+    return counts
+
+
+def _save_access_counts(counts):
+    # type: (dict[str, int]) -> None
+    """Save the access frequency log to disk (both L1 and L2)."""
+    if not counts:
+        return
+    # Sort by count descending for human readability.
+    lines = [
+        f"{count} {path}" for path, count in sorted(counts.items(), key=lambda x: -x[1])
+    ]
+    content = "\n".join(lines) + "\n"
+
+    def _atomic_write(target):
+        # type: (Path) -> None
+        """Write via temp file + rename for crash-safe concurrent access."""
+        try:
+            fd, tmp = tempfile.mkstemp(
+                dir=str(target.parent),
+                suffix=".tmp",
+            )
+            try:
+                os.write(fd, content.encode())
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, str(target))
+        except OSError:
+            with suppress(OSError):
+                os.unlink(tmp)
+
+    # Write to local.
+    with suppress(OSError):
+        _atomic_write(ACCESS_LOG_FILE)
+    # Write to backing if available.
+    if CACHE_BACKING_ROOT is not None:
+        with suppress(OSError):
+            backing_log = CACHE_BACKING_ROOT / ".access_counts"
+            _atomic_write(backing_log)
+
+
+def log_top_k_access_counts(k=15):
+    # type: (int) -> None
+    """Log the top-K most frequently accessed cache paths.
+
+    Printed as a table in the Buildkite log so operators can see which
+    models and files are hot across jobs. Useful for:
+      - Deciding which models to pre-bake into the Docker image.
+      - Tuning per-cache max_gb limits.
+      - Spotting unexpected access patterns (e.g., a test downloading
+        a 30GB model that should be in the base image).
+
+    Args:
+        k: Number of entries to show (default 15).
+    """
+    counts = _load_access_counts()
+    if not counts:
+        info("No access frequency data yet (first run)")
+        return
+
+    section(f"Cache access frequency (top {k})")
+    info(f"  {'Hits':>6s}  {'Cache tier':15s}  Path")
+    info(f"  {'----':>6s}  {'----------':15s}  ----")
+
+    # Group by cache tier (first path component).
+    top = sorted(counts.items(), key=lambda x: -x[1])[:k]
+    for path, count in top:
+        # First component is the cache subdir (e.g., "huggingface").
+        parts = path.split("/", 1)
+        tier = parts[0] if parts else "?"
+        relpath = parts[1] if len(parts) > 1 else path
+        # Truncate long paths for readability.
+        if len(relpath) > 60:
+            relpath = "..." + relpath[-57:]
+        info(f"  {count:>6d}  {tier:15s}  {relpath}")
+
+    total_entries = len(counts)
+    total_hits = sum(counts.values())
+    info("  ------")
+    info(f"  {total_entries} tracked paths, {total_hits} total hits across all jobs")
+
+
+def update_access_counts_from_atime(cache, counts=None):
+    # type: (dict, dict[str, int] | None) -> dict[str, int]
+    """Update access counts by scanning which files were accessed (atime).
+
+    After a test run, files with recent atime were read during the test.
+    We increment their access counts. This gives us a frequency signal
+    for future seeding decisions.
+
+    Args:
+        cache:  A single CACHES entry.
+        counts: Running counts dict to update. If None, loads from disk.
+                Pass the return value from a previous call to accumulate
+                counts across multiple caches without data loss.
+
+    Returns:
+        Updated counts dict (merged with existing counts).
+    """
+    if counts is None:
+        counts = _load_access_counts()
+    host_dir = _get_cache_host_dir(cache)
+    if not host_dir.exists():
+        return counts
+
+    # Find files modified in the last 3 hours (covers the test run).
+    # Uses mtime (not atime) because many filesystems mount with
+    # noatime/relatime, making atime unreliable.
+    r = sh(
+        f"find '{host_dir}' -type f -mmin -180 -printf '%P\\n' 2>/dev/null",
+        capture=True,
+    )
+    if r.returncode != 0 or not r.stdout.strip():
+        return counts
+
+    subdir = cache["host_subdir"]
+    for relpath in r.stdout.strip().splitlines():
+        key = f"{subdir}/{relpath}"
+        counts[key] = counts.get(key, 0) + 1
+
+    return counts
+
+
+def sync_caches_from_backing():
+    # type: () -> None
+    """Seed L1 (hot) from L2 (backing) using frequency-aware selection.
+
+    Called at pod startup (Phase 5) ONLY when OverlayFS is not available.
+    When OverlayFS is mounted, seeding is unnecessary because the kernel
+    handles L1/L2 read-through transparently.
+
+    The backing store (NFS/PVC) may be much larger than L1 (e.g., 14TB
+    vs 2TB), so we do NOT copy everything. Instead we select files that
+    fit within each cache's max_gb limit, prioritizing by:
+
+      1. Access frequency (from .access_counts log) -- most-accessed first.
+      2. Modification time (newest first) -- tiebreaker for equal frequency.
+
+    This means frequently-used models (like the ones most tests need)
+    are seeded first, even if they're not the newest.
+
+    Algorithm per cache:
+      1. List files in backing with size and mtime.
+      2. Sort by (access_count desc, mtime desc).
+      3. Copy files one-by-one until we hit the cache's max_gb limit
+         or run out of files.
+      3. Use rsync with --files-from for efficient transfer.
+
+    If max_gb is 0 (unlimited), we cap the seed at the ephemeral
+    volume's available space minus a 10% safety margin.
+
+    Skipped if CACHE_BACKING_ROOT is not set (single-tier mode).
+    """
+    if CACHE_BACKING_ROOT is None:
+        return
+
+    section("Cache seed: frequency-aware L2 -> L1 copy")
+    info(f"Backing root: {CACHE_BACKING_ROOT}")
+
+    # Load access frequency data from previous jobs.
+    access_counts = _load_access_counts()
+    if access_counts:
+        info(
+            f"Loaded access counts: {len(access_counts)} entries "
+            f"(top: {list(access_counts.items())[:3]})"
+        )
+    else:
+        info("No access history yet -- seeding by mtime only")
+
+    if not CACHE_BACKING_ROOT.exists():
+        warn(
+            f"Backing root {CACHE_BACKING_ROOT} does not exist "
+            f"-- skipping seed (cold start)"
+        )
+        return
+
+    for cache in CACHES:
+        backing = _get_cache_backing_dir(cache)
+        if backing is None:
+            continue
+        local = _get_cache_host_dir(cache)
+        local.mkdir(parents=True, exist_ok=True)
+        env = cache["env_var"]
+
+        if not backing.exists():
+            info(f"  {env}: no backing dir yet -- skip")
+            continue
+
+        max_gb = _get_cache_max_gb(cache)
+        max_bytes = max_gb * 1024 * 1024 * 1024 if max_gb > 0 else None
+
+        # If no limit, estimate from available disk space (90%).
+        if max_bytes is None:
+            r = sh(
+                f"df -B1 '{local}' 2>/dev/null | tail -1 | awk '{{print $4}}'",
+                capture=True,
+            )
+            try:
+                avail = int(r.stdout.strip())
+                max_bytes = int(avail * 0.9)
+            except (ValueError, AttributeError):
+                info(f"  {env}: cannot determine available space -- skip seed")
+                continue
+
+        # List all files in backing with mtime and size.
+        r = sh(
+            f"find '{backing}' -type f -printf '%T@ %s %P\\n' 2>/dev/null",
+            capture=True,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            info(f"  {env}: backing is empty -- skip")
+            continue
+
+        # Parse file list and sort by access frequency (desc),
+        # then mtime (desc) as tiebreaker. Frequently-used models
+        # are seeded first regardless of age.
+        subdir = cache["host_subdir"]
+        file_entries = []  # (freq, mtime, size, relpath)
+        for line in r.stdout.strip().splitlines():
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            mtime = float(parts[0])
+            fsize = int(parts[1])
+            relpath = parts[2]
+            key = f"{subdir}/{relpath}"
+            freq = access_counts.get(key, 0)
+            file_entries.append((freq, mtime, fsize, relpath))
+
+        # Sort: highest frequency first, then newest first.
+        file_entries.sort(key=lambda e: (-e[0], -e[1]))
+
+        # Select files that fit within the budget.
+        budget = max_bytes
+        selected = []  # type: list[str]
+        total_size = 0
+        seeded_freq = 0
+        for freq, mtime, fsize, relpath in file_entries:
+            if budget - fsize < 0:
+                continue  # skip this file, try smaller ones
+            selected.append(relpath)
+            budget -= fsize
+            total_size += fsize
+            if freq > 0:
+                seeded_freq += 1
+
+        if not selected:
+            info(f"  {env}: no files fit within budget -- skip")
+            continue
+
+        # Write file list to a temp file for rsync --files-from.
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False
+        ) as flist:
+            flist.write("\n".join(selected))
+            flist_path = flist.name
+
+        start = time.monotonic()
+        total_mb = total_size / (1024 * 1024)
+        info(
+            f"  {env}: seeding {len(selected)} files "
+            f"({total_mb:.0f}MB), "
+            f"{seeded_freq} by frequency, "
+            f"{len(selected) - seeded_freq} by mtime"
+        )
+        r = sh(
+            f"rsync --archive --timeout=120 "
+            f"--files-from='{flist_path}' "
+            f"'{backing}/' '{local}/' 2>&1",
+            capture=True,
+        )
+        elapsed = time.monotonic() - start
+        os.unlink(flist_path)
+
+        if r.returncode == 0:
+            info(f"  {env}: seeded in {elapsed:.1f}s")
+        else:
+            warn(
+                f"  {env}: rsync seed failed "
+                f"(rc={r.returncode}, {elapsed:.1f}s) -- "
+                f"proceeding with partial cache"
+            )
+
+
+def sync_caches_to_backing():
+    # type: () -> None
+    """Persist new files from the hot tier back to the backing store.
+
+    Called during cleanup. Only copies files that are newer locally
+    than in backing (--update flag). This means we only transfer the
+    delta -- files the test downloaded that were not in backing before.
+
+    This is safe for concurrent pods writing to the same backing store:
+      - --update never overwrites a newer backing file with an older one.
+      - rsync uses atomic renames, so partial writes don't corrupt files.
+
+    Skipped if CACHE_BACKING_ROOT is not set (single-tier mode).
+    """
+    if CACHE_BACKING_ROOT is None:
+        return
+
+    info("Persisting new cache files to backing store...")
+    CACHE_BACKING_ROOT.mkdir(parents=True, exist_ok=True)
+
+    for cache in CACHES:
+        backing = _get_cache_backing_dir(cache)
+        if backing is None:
+            continue
+        local = _get_cache_host_dir(cache)
+        if not local.exists():
+            continue
+
+        backing.mkdir(parents=True, exist_ok=True)
+        start = time.monotonic()
+        # --update: skip files that are newer on the receiver (backing).
+        # --ignore-existing could also work but --update is safer for
+        # concurrent writers since it compares timestamps.
+        r = sh(
+            f"rsync --archive --update --timeout=120 '{local}/' '{backing}/' 2>&1",
+            capture=True,
+        )
+        elapsed = time.monotonic() - start
+        env = cache["env_var"]
+        if r.returncode == 0:
+            info(f"  {env}: persisted in {elapsed:.1f}s")
+        else:
+            warn(
+                f"  {env}: rsync to backing failed (rc={r.returncode}, {elapsed:.1f}s)"
+            )
+
+
+def _detect_storage_type(path):
+    # type: (Path) -> str
+    """Detect what kind of storage a path sits on.
+
+    Returns one of: "tmpfs", "nfs", "local", "unknown".
+    Used for logging so operators can verify the cache tiers are
+    on the expected storage backends.
+    """
+    r = sh(
+        f"df -T '{path}' 2>/dev/null | tail -1 | awk '{{print $2}}'",
+        capture=True,
+    )
+    if r.returncode != 0 or not r.stdout.strip():
+        return "unknown"
+    fstype = r.stdout.strip().lower()
+    if fstype in ("tmpfs", "ramfs"):
+        return "tmpfs (ephemeral RAM)"
+    if "nfs" in fstype:
+        return f"nfs ({fstype})"
+    if fstype in ("ext4", "xfs", "btrfs"):
+        return f"local ({fstype})"
+    if "fuse" in fstype:
+        return f"fuse ({fstype})"
+    return fstype
+
+
+def _get_cache_max_gb(cache):
+    # type: (dict) -> int
+    """Resolve the effective max_gb for a cache, with env var override.
+
+    The env var VLLM_CACHE_MAX_<ENV_VAR> overrides the default max_gb.
+    For example, VLLM_CACHE_MAX_PIP_CACHE_DIR=5 sets the pip cache
+    limit to 5 GB. 0 means unlimited.
+    """
+    env_key = f"VLLM_CACHE_MAX_{cache['env_var']}"
+    env_val = os.environ.get(env_key)
+    if env_val is not None:
+        try:
+            return int(env_val)
+        except ValueError:
+            warn(
+                f"Invalid value for {env_key}='{env_val}' "
+                f"(expected integer GB) -- using default"
+            )
+    return int(cache.get("max_gb", 0))
+
+
+def _get_dir_size_bytes(path):
+    # type: (Path) -> int
+    """Return total size of all files under path, in bytes."""
+    r = sh(
+        f"du -sb '{path}' 2>/dev/null | cut -f1",
+        capture=True,
+    )
+    if r.returncode == 0 and r.stdout.strip().isdigit():
+        return int(r.stdout.strip())
+    return 0
+
+
+def evict_cache_lru(cache):
+    # type: (dict) -> None
+    """Evict oldest-accessed files from a single cache until under max_gb.
+
+    Uses file access time (atime) as the LRU signal. Files that haven't
+    been read in the longest time are evicted first. This works because:
+
+    - HuggingFace: models not used recently are least valuable.
+    - pip: old wheels for previous dependency versions.
+    - ccache: compiled objects for old code revisions.
+    - Test data: datasets from tests that no longer run.
+
+    Eviction is file-level, not directory-level. Empty directories are
+    cleaned up after eviction.
+
+    Args:
+        cache: A single entry from the CACHES registry.
+    """
+    host_dir = _get_cache_host_dir(cache)
+    max_gb = _get_cache_max_gb(cache)
+    env = cache["env_var"]
+
+    if max_gb <= 0:
+        return  # unlimited
+
+    if not host_dir.exists():
+        return
+
+    current_bytes = _get_dir_size_bytes(host_dir)
+    max_bytes = max_gb * 1024 * 1024 * 1024
+
+    if current_bytes <= max_bytes:
+        return
+
+    current_gb = current_bytes / (1024 * 1024 * 1024)
+    info(
+        f"  {env}: {current_gb:.1f}GB > {max_gb}GB limit "
+        f"-- evicting oldest-accessed files"
+    )
+
+    # List all files sorted by modification time (oldest first).
+    # Uses mtime (%T@) instead of atime (%A@) because many filesystems
+    # mount with noatime/relatime, making atime unreliable.
+    r = sh(
+        f"find '{host_dir}' -type f -printf '%T@ %s %p\\n' 2>/dev/null | sort -n",
+        capture=True,
+    )
+    if r.returncode != 0 or not r.stdout.strip():
+        warn(f"  {env}: could not list files for eviction")
+        return
+
+    evicted_count = 0
+    evicted_bytes = 0
+    for line in r.stdout.strip().splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            file_size = int(parts[1])
+        except ValueError:
+            continue
+        file_path = parts[2]
+
+        # Safety: resolve symlinks and .. to prevent path traversal.
+        try:
+            resolved = str(Path(file_path).resolve())
+        except OSError:
+            continue
+        if not resolved.startswith(str(host_dir.resolve())):
+            continue
+
+        try:
+            os.unlink(file_path)
+            evicted_count += 1
+            evicted_bytes += file_size
+            current_bytes -= file_size
+        except OSError:
+            continue
+
+        if current_bytes <= max_bytes:
+            break
+
+    # Clean up empty directories left behind.
+    sh(f"find '{host_dir}' -type d -empty -delete 2>/dev/null || true")
+
+    evicted_mb = evicted_bytes / (1024 * 1024)
+    remaining_gb = current_bytes / (1024 * 1024 * 1024)
+    info(
+        f"  {env}: evicted {evicted_count} files "
+        f"({evicted_mb:.0f}MB), now {remaining_gb:.1f}GB"
+    )
+
+
+def evict_all_caches():
+    # type: () -> None
+    """Run LRU eviction on all caches that exceed their max_gb limit.
+
+    Called during Docker housekeeping (Phase 5) so caches are trimmed
+    before the test runs, not after. This prevents a situation where
+    a test downloads a large model, fills the cache past the limit,
+    and the next job on the same node starts with a full disk.
+    """
+    section("Cache eviction (per-cache LRU)")
+    any_evicted = False
+    for cache in CACHES:
+        max_gb = _get_cache_max_gb(cache)
+        if max_gb <= 0:
+            continue
+        host_dir = _get_cache_host_dir(cache)
+        if not host_dir.exists():
+            continue
+        current_bytes = _get_dir_size_bytes(host_dir)
+        max_bytes = max_gb * 1024 * 1024 * 1024
+        if current_bytes > max_bytes:
+            any_evicted = True
+            evict_cache_lru(cache)
+        else:
+            current_gb = current_bytes / (1024 * 1024 * 1024)
+            info(f"  {cache['env_var']:25s} {current_gb:.1f}GB / {max_gb}GB -- OK")
+    if not any_evicted:
+        info("All L1 caches within limits")
+
+
+def evict_l2_cache(cache):
+    # type: (dict) -> None
+    """Evict stale and oversized data from L2 (backing/NFS) for one cache.
+
+    Two eviction criteria (both enforced):
+
+    1. Time-based (l2_max_days): any file not accessed in more than
+       l2_max_days is deleted, regardless of L2 size. This prevents
+       abandoned models, old wheel versions, and stale compiled kernels
+       from accumulating indefinitely on shared NFS.
+
+    2. Size-based (l2_max_gb): if L2 still exceeds l2_max_gb after
+       time-based eviction, we evict the oldest-accessed files until
+       under the limit (same LRU-by-atime as L1).
+
+    Only runs when CACHE_BACKING_ROOT is configured (two-tier mode).
+
+    Args:
+        cache: A single entry from the CACHES registry.
+    """
+    backing = _get_cache_backing_dir(cache)
+    if backing is None or not backing.exists():
+        return
+
+    env = cache["env_var"]
+    max_days = int(cache.get("l2_max_days", L2_DEFAULT_MAX_DAYS))
+    l2_max_gb = int(cache.get("l2_max_gb", 0))
+
+    if max_days <= 0 and l2_max_gb <= 0:
+        return  # both disabled
+
+    # Check write access before attempting any deletions.
+    if not os.access(str(backing), os.W_OK):
+        warn(
+            f"  {env} L2: backing at {backing} is read-only "
+            f"-- cannot evict. Mount the PVC as ReadWriteMany "
+            f"(RWX) or run L2 eviction from a pod with write "
+            f"access."
+        )
+        return
+
+    # -- Time-based eviction --
+    if max_days > 0:
+        # Find files not modified in more than max_days.
+        # Uses mtime (not atime) because many filesystems mount with
+        # noatime/relatime, making atime unreliable.
+        r = sh(
+            f"find '{backing}' -type f -mtime +{max_days} "
+            f"-printf '%s %P\\n' 2>/dev/null",
+            capture=True,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            stale_files = r.stdout.strip().splitlines()
+            stale_bytes = 0
+            stale_count = 0
+            for line in stale_files:
+                parts = line.split(None, 1)
+                if len(parts) < 2:
+                    continue
+                try:
+                    fsize = int(parts[0])
+                except ValueError:
+                    continue
+                fpath = backing / parts[1]
+                try:
+                    resolved = str(fpath.resolve())
+                except OSError:
+                    continue
+                if not resolved.startswith(str(backing.resolve())):
+                    continue  # safety
+                with suppress(OSError):
+                    os.unlink(str(fpath))
+                    stale_count += 1
+                    stale_bytes += fsize
+
+            if stale_count > 0:
+                stale_mb = stale_bytes / (1024 * 1024)
+                info(
+                    f"  {env} L2: evicted {stale_count} files "
+                    f"({stale_mb:.0f}MB) older than {max_days}d"
+                )
+
+    # -- Size-based eviction --
+    if l2_max_gb > 0:
+        current_bytes = _get_dir_size_bytes(backing)
+        max_bytes = l2_max_gb * 1024 * 1024 * 1024
+        if current_bytes > max_bytes:
+            current_gb = current_bytes / (1024 * 1024 * 1024)
+            info(
+                f"  {env} L2: {current_gb:.1f}GB > "
+                f"{l2_max_gb}GB limit -- evicting oldest"
+            )
+            # LRU by mtime, oldest first (atime is unreliable on
+            # noatime/relatime filesystems).
+            r = sh(
+                f"find '{backing}' -type f "
+                f"-printf '%T@ %s %p\\n' "
+                f"2>/dev/null | sort -n",
+                capture=True,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                evicted_count = 0
+                evicted_bytes = 0
+                for line in r.stdout.strip().splitlines():
+                    parts = line.split(None, 2)
+                    if len(parts) < 3:
+                        continue
+                    try:
+                        fsize = int(parts[1])
+                    except ValueError:
+                        continue
+                    fpath = parts[2]
+                    try:
+                        resolved = str(Path(fpath).resolve())
+                    except OSError:
+                        continue
+                    if not resolved.startswith(str(backing.resolve())):
+                        continue
+                    with suppress(OSError):
+                        os.unlink(fpath)
+                        evicted_count += 1
+                        evicted_bytes += fsize
+                        current_bytes -= fsize
+                    if current_bytes <= max_bytes:
+                        break
+                if evicted_count > 0:
+                    mb = evicted_bytes / (1024 * 1024)
+                    gb = current_bytes / (1024 * 1024 * 1024)
+                    info(
+                        f"  {env} L2: evicted "
+                        f"{evicted_count} files "
+                        f"({mb:.0f}MB), now {gb:.1f}GB"
+                    )
+
+    # Clean up empty directories.
+    sh(f"find '{backing}' -type d -empty -delete 2>/dev/null || true")
+
+
+def evict_all_l2_caches():
+    # type: () -> None
+    """Run time-based and size-based eviction on all L2 (backing) caches.
+
+    Only runs when CACHE_BACKING_ROOT is configured. Runs during
+    Phase 5 (housekeeping) alongside L1 eviction and Docker cleanup.
+
+    Only runs on nightly builds (NIGHTLY=1) to avoid adding latency
+    to every PR job. L2 accumulation is slow (days/weeks), so daily
+    cleanup is sufficient.
+    """
+    if CACHE_BACKING_ROOT is None:
+        return
+
+    if os.environ.get("NIGHTLY") != "1":
+        info("L2 eviction skipped (NIGHTLY!=1)")
+        return
+
+    section("L2 cache eviction (time + size)")
+    any_evicted = False
+    for cache in CACHES:
+        backing = _get_cache_backing_dir(cache)
+        if backing is None or not backing.exists():
+            continue
+        max_days = int(cache.get("l2_max_days", L2_DEFAULT_MAX_DAYS))
+        l2_max_gb = int(cache.get("l2_max_gb", 0))
+        if max_days <= 0 and l2_max_gb <= 0:
+            continue
+        current_bytes = _get_dir_size_bytes(backing)
+        current_gb = current_bytes / (1024 * 1024 * 1024)
+        limit_str = f"{l2_max_gb}GB" if l2_max_gb > 0 else "unlimited"
+        info(
+            f"  {cache['env_var']:25s} L2: {current_gb:.1f}GB "
+            f"(limit={limit_str}, max_age={max_days}d)"
+        )
+        evict_l2_cache(cache)
+        any_evicted = True
+
+    if not any_evicted:
+        info("No L2 caches to evict")
 
 
 # ==========================================================================
@@ -1588,10 +3092,18 @@ def check_infra_health():
     to discover the node was degraded from the start.
 
     Checks performed:
-      1. DNS resolution -- can we resolve hostnames? Catches broken DNS
-         in K8s (kube-dns/coredns down, pod DNS policy misconfigured).
+      1. DNS resolution -- can we resolve the Docker registry and
+         huggingface.co? Catches broken DNS in K8s (kube-dns/coredns
+         down, pod DNS policy misconfigured). Only tests hosts that
+         this job will actually contact (configured via VLLM_CI_REGISTRY).
+         Without this, a DNS failure surfaces minutes later as a Docker
+         ``dial tcp: lookup ...: no such host`` after Docker exhausts
+         its internal retry loop.
       2. Docker registry reachability -- can we reach the image registry?
          Catches network partition, proxy issues, registry outages.
+     2b. Network throughput -- is the network fast enough? Measures
+         download speed against the registry. Warns below 1 MB/s
+         (slow pulls), errors below 100 KB/s (likely timeout).
       3. Available memory -- is the node under memory pressure? If free
          memory is very low, tests will OOM or the kubelet may evict us.
       4. Disk I/O latency -- is the disk responsive? Slow NFS mounts,
@@ -1608,26 +3120,41 @@ def check_infra_health():
     section("Infrastructure health checks")
 
     # -- 1. DNS resolution --
-    # Test with a well-known hostname. If DNS is broken, docker pull will
-    # hang for minutes before failing with an opaque error.
-    dns_hosts = ["ghcr.io", "docker.io", "huggingface.co"]
+    # Resolve the hosts that THIS job will actually contact: the Docker
+    # registry (configurable) and huggingface.co (model downloads).
+    # Only test relevant hosts -- hardcoding public endpoints like
+    # ghcr.io is wrong when CI uses a private registry or mirror.
+    # Without this pre-check, a DNS failure surfaces minutes later as
+    # "dial tcp: lookup ...: no such host" after Docker exhausts its
+    # internal retry loop. Catching it here fails in <5s with context.
+    registry = os.environ.get("VLLM_CI_REGISTRY", "docker.io")
+    dns_hosts = []  # type: list[str]
+    # Extract hostname from registry (strip port if present).
+    registry_host = registry.split(":")[0].split("/")[0]
+    dns_hosts.append(registry_host)
+    # HuggingFace is always needed for model downloads.
+    dns_hosts.append("huggingface.co")
+    # Deduplicate while preserving order.
+    seen = set()  # type: set[str]
+    dns_hosts = [h for h in dns_hosts if not (h in seen or seen.add(h))]
+
+    dns_ok = True
     for host in dns_hosts:
         r = sh(f"getent hosts {host} 2>/dev/null", capture=True, timeout=5)
         if r.returncode != 0 or not r.stdout.strip():
+            dns_ok = False
             warn(
                 f"{_DIAG_PREFIX} DNS resolution failed for '{host}'. "
                 f"Docker pull and model downloads may fail. "
                 f"Check pod DNS policy and kube-dns/coredns health."
             )
-            break
-    else:
-        info("DNS resolution: OK")
+    if dns_ok:
+        info(f"DNS resolution: OK ({', '.join(dns_hosts)})")
 
     # -- 2. Docker registry reachability --
     # Try to reach the registry API. We don't need to authenticate --
     # a TCP connection or HTTP response is enough to confirm the network
     # path is open.
-    registry = os.environ.get("VLLM_CI_REGISTRY", "docker.io")
     r = sh(
         f"curl -sf --connect-timeout 10 --max-time 15 "
         f"-o /dev/null -w '%{{http_code}}' https://{registry}/v2/ 2>/dev/null",
@@ -1641,6 +3168,44 @@ def check_infra_health():
         )
     else:
         info(f"Docker registry ({registry}): reachable")
+
+    # -- 2b. Network throughput --
+    # A slow but functional network is a common source of pull timeouts
+    # and model download failures. Download a small payload and measure
+    # throughput. We use curl's built-in speed reporting to avoid parsing.
+    # The test URL is the registry's /v2/ endpoint (already proven reachable
+    # above, tiny payload, no auth needed). If that is not available, fall
+    # back to a small HuggingFace API call.
+    speed_url = f"https://{registry}/v2/"
+    r = sh(
+        f"curl -sf --connect-timeout 5 --max-time 10 "
+        f"-o /dev/null -w '%{{speed_download}}' "
+        f"'{speed_url}' 2>/dev/null",
+        capture=True,
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        try:
+            # curl reports speed_download in bytes/sec.
+            speed_bps = float(r.stdout.strip())
+            speed_mbps = speed_bps / (1024 * 1024)
+            if speed_bps < 1024 * 100:  # < 100 KB/s
+                warn(
+                    f"{_DIAG_PREFIX} Network throughput: {speed_mbps:.2f} MB/s "
+                    f"(very slow, <100KB/s). "
+                    f"Docker pull and model downloads will be severely affected. "
+                    f"Check network bandwidth, proxy throttling, and NIC health."
+                )
+            elif speed_bps < 1024 * 1024:  # < 1 MB/s
+                warn(
+                    f"Network throughput: {speed_mbps:.2f} MB/s "
+                    f"(slow, may cause pull timeouts)"
+                )
+            else:
+                info(f"Network throughput: {speed_mbps:.1f} MB/s (OK)")
+        except (ValueError, OverflowError):
+            pass
+    else:
+        info("Network throughput: could not measure (registry probe failed)")
 
     # -- 3. Available memory --
     r = sh("cat /proc/meminfo 2>/dev/null", capture=True)
@@ -1764,21 +3329,16 @@ def _get_disk_info(path):
     # type: (str) -> tuple[int | None, int | None, int | None]
     """Return (usage_pct, used_gb, total_gb) for the partition containing ``path``.
 
-    Uses ``df`` to read partition stats. Returns None for any value that
-    cannot be parsed.
+    Uses shutil.disk_usage (stdlib) for reliable, parse-free disk stats.
+    Falls back to df if shutil fails (e.g., permission denied).
     """
-    # df output: Filesystem 1K-blocks Used Available Use% Mounted-on
-    r = sh(f"df '{path}' | tail -1", capture=True)
-    if r.returncode != 0 or not r.stdout.strip():
-        return None, None, None
-
-    parts = r.stdout.strip().split()
     try:
-        total_kb = int(parts[1])
-        used_kb = int(parts[2])
-        pct_str = parts[4].rstrip("%")
-        return int(pct_str), used_kb // (1024 * 1024), total_kb // (1024 * 1024)
-    except (ValueError, IndexError):
+        usage = shutil.disk_usage(path)
+        total_gb = usage.total // (1024 * 1024 * 1024)
+        used_gb = usage.used // (1024 * 1024 * 1024)
+        pct = int(100 * usage.used / usage.total) if usage.total > 0 else 0
+        return pct, used_gb, total_gb
+    except (OSError, ValueError):
         return None, None, None
 
 
@@ -1879,7 +3439,6 @@ def cleanup_stale_containers():
             # Drop nanosecond fractional part and trailing Z.
             clean = raw_ts.split(".")[0].rstrip("Z")
             # Python 3.7+ fromisoformat handles "YYYY-MM-DDTHH:MM:SS".
-            from datetime import datetime, timezone
 
             dt = datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
             created_epoch = dt.timestamp()
@@ -1997,10 +3556,17 @@ def cleanup_docker_disk():
             raw_images.append((parts[0], parts[1], parts[2], parts[3]))
 
     # Protect the current job's image from eviction.
+    # Protect both the per-arch image (DOCKER_IMAGE_NAME, e.g.,
+    # rocm/vllm-ci:abc123-gfx942) and the legacy fat image
+    # (rocm/vllm-ci:abc123) so eviction does not delete the image
+    # we are about to run or are currently running.
     current_commit = os.environ.get("BUILDKITE_COMMIT", "")
     protected_names = set()  # type: set[str]
     if current_commit:
         protected_names.add(f"rocm/vllm-ci:{current_commit}")
+    docker_image_env = os.environ.get("DOCKER_IMAGE_NAME", "").strip()
+    if docker_image_env:
+        protected_names.add(docker_image_env)
 
     # Filter out protected and base images.
     candidates = []  # type: list[tuple[str, str, str, str]]
@@ -2010,6 +3576,11 @@ def cleanup_docker_disk():
             continue
         if name.startswith("rocm/") and ":latest" in name:
             info(f"  Protected (base image): {name}")
+            continue
+        # Protect the ci_base image (shared Tier-1 layer from PR #36949).
+        # This image is rebuilt weekly and shared by all per-arch builds.
+        if "ci_base" in name:
+            info(f"  Protected (ci_base): {name}")
             continue
         candidates.append((img_id, name, created, size))
 
@@ -2163,13 +3734,20 @@ def run_container(
     # Validate each token: must start with --device or be a /dev/ path.
     if render_devices:
         tokens = render_devices.split()
+        safe_tokens = []  # type: list[str]
         for token in tokens:
-            if not (token.startswith("--device") or token.startswith("/dev/")):
+            if (
+                token == "--device"
+                or token.startswith("--device=")
+                or token.startswith("/dev/")
+            ):
+                safe_tokens.append(token)
+            else:
                 warn(
-                    f"Unexpected render_devices token: '{token}' "
+                    f"Dropping unexpected render_devices token: '{token}' "
                     f"(expected --device or /dev/ path)"
                 )
-        docker_cmd.extend(tokens)
+        docker_cmd.extend(safe_tokens)
 
     # RDMA passthrough for ibverbs-based tests (e.g., test_moriio_connector).
     if rdma:
@@ -2217,8 +3795,13 @@ def run_container(
         # Tell pytest to write JUnit XML to the bind-mounted results dir.
         # This is the KEY to the exit-code fix: the XML is written BEFORE
         # Python's atexit handlers run, and it persists on the host.
+        # Append to any existing PYTEST_ADDOPTS to avoid silently dropping
+        # upstream settings (e.g., --timeout from the pipeline).
         "-e",
-        f"PYTEST_ADDOPTS=--junitxml={RESULTS_MOUNT}/results.xml",
+        "PYTEST_ADDOPTS={} --junitxml={}/results.xml".format(
+            os.environ.get("PYTEST_ADDOPTS", "").strip(),
+            RESULTS_MOUNT,
+        ).strip(),
     ]
 
     # Persistent cache mounts -- all caches defined in the CACHES registry.
@@ -2247,14 +3830,28 @@ def run_container(
     )
     info(f"Docker run command: {' '.join(cmd_summary)} /bin/bash -c '<commands>'")
 
-    r = sh(docker_cmd, check=True, capture=True)
+    try:
+        r = sh(docker_cmd, check=True, capture=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or exc.stdout or "").strip()
+        error(
+            f"{_DIAG_PREFIX} DOCKER RUN FAILED\n"
+            f"  What happened: 'docker run --detach' exited "
+            f"with code {exc.returncode}\n"
+            f"  Error:  {stderr[:500]}\n"
+            f"  Common causes:\n"
+            f"    - Image not found (check docker pull step above)\n"
+            f"    - Device not available (/dev/kfd, /dev/dri/*)\n"
+            f"    - Disk full (check Docker root partition)\n"
+            f"    - Docker daemon error (check 'docker info')"
+        )
+        return 1
     container_id = r.stdout.strip()
     info(f"Container started: {container_id[:12]} (full ID: {container_id})")
 
     # -- Step 2: Stream logs to stdout (Buildkite) AND a file (artifact) --
     log_file = results_dir / "container.log"
     info(f"Container log will be saved to: {log_file}")
-    log_fd = open(log_file, "w")  # noqa: SIM115
     log_proc = subprocess.Popen(
         ["docker", "logs", "-f", name],
         stdout=subprocess.PIPE,
@@ -2294,7 +3891,7 @@ def run_container(
             f"Container exceeded timeout after {wait_elapsed:.1f}s "
             f"(limit: {CONTAINER_TIMEOUT_S}s) -- killing"
         )
-        sh(f"docker kill {name} 2>/dev/null || true")
+        sh(["docker", "kill", name], capture=True)
         exit_code = 124  # matches GNU timeout convention
 
     # -- Step 4: Flush log streaming --
@@ -2305,7 +3902,12 @@ def run_container(
         warn("Log stream flush timed out after 30s -- killing tee process")
         tee_proc.kill()
         tee_proc.wait()
-    log_fd.close()
+    # Reap the docker-logs process to avoid a zombie.
+    with suppress(subprocess.TimeoutExpired):
+        log_proc.wait(timeout=5)
+    if log_proc.poll() is None:
+        log_proc.kill()
+        log_proc.wait()
 
     info(f"Container exit code (docker wait): {exit_code}")
 
@@ -2314,7 +3916,15 @@ def run_container(
     log_cache_stats_diff("post-test")
 
     # -- Step 6: Diagnose exit (OOM, signals, PID limit) BEFORE docker rm --
-    diag = diagnose_container_exit(name, log_file=log_file)
+    if ENABLE_DIAGNOSTICS:
+        diag = diagnose_container_exit(name, log_file=log_file)
+    else:
+        diag = {
+            "oom_killed": False,
+            "exit_code": exit_code,
+            "error": "",
+            "pids_exhausted": False,
+        }
 
     if diag["oom_killed"]:
         annotate_build(
@@ -2370,7 +3980,9 @@ def run_container(
     # os._exit(0) overwrite pytest's exit code, but the XML is already
     # on disk (bind-mounted to the host) at that point.
     xml_path = results_dir / "results.xml"
-    if exit_code == 0:
+    if not ENABLE_JUNIT_OVERRIDE:
+        info("JUnit XML override DISABLED (VLLM_ROCM_CI_JUNIT_OVERRIDE=0)")
+    elif exit_code == 0:
         failures = parse_junit_failures(xml_path)
         if failures is not None and failures > 0:
             error(
@@ -2497,7 +4109,12 @@ def _is_marker_boundary(word):
         return True
     if word.startswith("--"):
         return True
-    if len(word) == 2 and word[0] == "-" and word[1].isalpha():
+    if (
+        word[0] == "-"
+        and not word.startswith("--")
+        and len(word) >= 2
+        and word[1:].isalpha()
+    ):
         return True
     if "/" in word:
         return True
@@ -2684,11 +4301,12 @@ def apply_rocm_overrides(command):
             flags = " ".join(f"--ignore={f}" for f in files)
             command = f"{command} {flags}"
 
-    # Insert --ignore flags after a directory token.
+    # Insert --ignore flags after a directory token (first occurrence only,
+    # to avoid double-injection if the pattern appears multiple times).
     for pattern, files in _INLINE_IGNORES.items():
         if pattern in command:
             flags = " ".join(f"--ignore={f}" for f in files)
-            command = command.replace(pattern, f"{pattern}{flags} ")
+            command = command.replace(pattern, f"{pattern}{flags} ", 1)
 
     return command
 
@@ -2821,8 +4439,8 @@ def _cleanup_multi_node():
     sh("docker network rm docker-net 2>/dev/null || true")
 
 
-def _inject_junit_into_multi_node_cmd(cmd, node_idx, results_host_dir):
-    # type: (str, int, Path) -> str
+def _inject_junit_into_multi_node_cmd(cmd, node_idx, pair_idx, results_host_dir):
+    # type: (str, int, int, Path) -> str
     """Wrap a multi-node test command to produce JUnit XML.
 
     The original multi-node bash script (run-multi-node-test.sh) runs
@@ -2830,13 +4448,16 @@ def _inject_junit_into_multi_node_cmd(cmd, node_idx, results_host_dir):
     problem as ``docker run``. We inject PYTEST_ADDOPTS to produce JUnit
     XML inside the container, then copy it out after the test completes.
 
-    Each node gets a unique XML filename to avoid collisions:
-      node0 -> results_node0.xml
-      node1 -> results_node1.xml
+    Each (node, pair) combination gets a unique XML filename to avoid
+    collisions when multiple command pairs are executed:
+      node0, pair0 -> results_node0_pair0.xml
+      node1, pair0 -> results_node1_pair0.xml
+      node0, pair1 -> results_node0_pair1.xml
 
     Args:
         cmd:              Original pytest command string for this node.
         node_idx:         Node index (0 = head, 1+ = workers).
+        pair_idx:         Command pair index (0-based).
         results_host_dir: Host directory for results (bind-mounted or copied).
 
     Returns:
@@ -2844,10 +4465,12 @@ def _inject_junit_into_multi_node_cmd(cmd, node_idx, results_host_dir):
     """
     # The XML path is inside the container. We'll copy it out after the
     # test using ``docker cp``.
-    xml_path = f"/tmp/results_node{node_idx}.xml"
+    xml_path = f"/tmp/results_node{node_idx}_pair{pair_idx}.xml"
     # Inject PYTEST_ADDOPTS before the command. If the command already
     # sets PYTEST_ADDOPTS, this prepends (pytest merges them).
-    return f"export PYTEST_ADDOPTS='--junitxml={xml_path}' && {cmd}"
+    return (
+        f'export PYTEST_ADDOPTS="${{PYTEST_ADDOPTS:-}} --junitxml={xml_path}" && {cmd}'
+    )
 
 
 def run_multi_node(commands, image, results_dir):
@@ -2898,10 +4521,12 @@ def run_multi_node(commands, image, results_dir):
     node1_cmds = [c.strip().strip('"') for c in m.group(3).split(",")]
 
     if len(node0_cmds) != len(node1_cmds):
-        warn(
+        error(
             f"node0 has {len(node0_cmds)} commands, "
-            f"node1 has {len(node1_cmds)} -- pairing by index"
+            f"node1 has {len(node1_cmds)} -- counts must match. "
+            f"Extra commands would be silently dropped."
         )
+        return 1
 
     # In K8s: set MASTER_ADDR to this pod's IP for NCCL discovery.
     pod_ip = _get_pod_ip()
@@ -2932,11 +4557,14 @@ def run_multi_node(commands, image, results_dir):
         info(f"  [{i}] {cmd}")
 
     # Inject JUnit XML output into each per-node command.
+    # Each (node, pair) gets a unique XML filename so that multi-pair jobs
+    # don't overwrite earlier pairs' results (which would silently lose failures).
     modified_node0 = []  # type: list[str]
     modified_node1 = []  # type: list[str]
+    num_pairs = len(node0_cmds)
     for i, (cmd0, cmd1) in enumerate(zip(node0_cmds, node1_cmds)):
-        mod0 = _inject_junit_into_multi_node_cmd(cmd0, 0, results_dir)
-        mod1 = _inject_junit_into_multi_node_cmd(cmd1, 1, results_dir)
+        mod0 = _inject_junit_into_multi_node_cmd(cmd0, 0, i, results_dir)
+        mod1 = _inject_junit_into_multi_node_cmd(cmd1, 1, i, results_dir)
         modified_node0.append(mod0)
         modified_node1.append(mod1)
         info(f"  Pair [{i}] node0 (with JUnit): {mod0[:120]}...")
@@ -2970,7 +4598,7 @@ def run_multi_node(commands, image, results_dir):
         exit_code = 124
         annotate_build(
             f"### :alarm_clock: Multi-node Test Timeout ({CONTAINER_TIMEOUT_S}s)\n\n"
-            "Set `VLLM_TEST_TIMEOUT` env var to override (default: 7200s).",
+            "Set `VLLM_TEST_TIMEOUT` env var to override (default: 10200s).",
             style="error",
             context="timeout",
         )
@@ -2981,30 +4609,41 @@ def run_multi_node(commands, image, results_dir):
     # Copy JUnit XMLs from node containers to the host results directory.
     # The containers may still exist if run-multi-node-test.sh's trap hasn't
     # fired yet, or if it used --rm and they're already gone.
+    # Each (node, pair) combination has a unique XML file to ensure that
+    # multi-pair jobs don't lose earlier pairs' failure data.
     info("Collecting JUnit XML from node containers...")
     total_failures = 0
-    for node_idx in range(num_nodes):
-        container_xml = f"/tmp/results_node{node_idx}.xml"
-        host_xml = results_dir / f"results_node{node_idx}.xml"
-        info(f"  docker cp node{node_idx}:{container_xml} -> {host_xml}")
-        r = sh(
-            f"docker cp node{node_idx}:{container_xml} {host_xml} 2>/dev/null",
-            capture=True,
-        )
-        if r.returncode == 0 and host_xml.is_file():
-            xml_size = host_xml.stat().st_size
-            failures = parse_junit_failures(host_xml)
-            if failures is not None:
-                info(
-                    f"  Node {node_idx}: JUnit XML ({xml_size}B) {failures} failure(s)"
-                )
-                total_failures += failures
+    for pair_idx in range(num_pairs):
+        for node_idx in range(num_nodes):
+            container_xml = f"/tmp/results_node{node_idx}_pair{pair_idx}.xml"
+            host_xml = results_dir / f"results_node{node_idx}_pair{pair_idx}.xml"
+            info(f"  docker cp node{node_idx}:{container_xml} -> {host_xml}")
+            r = sh(
+                f"docker cp node{node_idx}:{container_xml} {host_xml} 2>/dev/null",
+                capture=True,
+            )
+            if r.returncode == 0 and host_xml.is_file():
+                xml_size = host_xml.stat().st_size
+                failures = parse_junit_failures(host_xml)
+                if failures is not None:
+                    info(
+                        f"  Node {node_idx} pair {pair_idx}: "
+                        f"JUnit XML ({xml_size}B) {failures} failure(s)"
+                    )
+                    total_failures += failures
+                else:
+                    warn(
+                        f"  Node {node_idx} pair {pair_idx}: "
+                        f"JUnit XML ({xml_size}B) could not be parsed"
+                    )
             else:
-                warn(f"  Node {node_idx}: JUnit XML ({xml_size}B) could not be parsed")
-        else:
-            # CompletedProcess always has .stderr when capture=True.
-            stderr_msg = (r.stderr or "").strip() or "container may have been removed"
-            warn(f"  Could not copy JUnit XML from node{node_idx}: {stderr_msg}")
+                stderr_msg = (
+                    r.stderr or ""
+                ).strip() or "container may have been removed"
+                warn(
+                    f"  Could not copy JUnit XML from node{node_idx} "
+                    f"pair {pair_idx}: {stderr_msg}"
+                )
 
     # JUnit XML validation: override exit code if any node reported failures.
     if exit_code == 0 and total_failures > 0:
@@ -3016,16 +4655,17 @@ def run_multi_node(commands, image, results_dir):
 
     # Buildkite annotation for multi-node failures.
     if exit_code != 0:
-        # Try to build annotation from whichever node XML exists.
-        for node_idx in range(int(os.environ.get("NUM_NODES", "2"))):
-            host_xml = results_dir / f"results_node{node_idx}.xml"
-            annotation = build_failure_annotation(host_xml)
-            if annotation:
-                annotate_build(
-                    f"**Node {node_idx}:**\n\n{annotation}",
-                    style="error",
-                    context=f"test-failures-node{node_idx}",
-                )
+        # Try to build annotation from whichever node/pair XML exists.
+        for pair_idx in range(num_pairs):
+            for node_idx in range(num_nodes):
+                host_xml = results_dir / f"results_node{node_idx}_pair{pair_idx}.xml"
+                annotation = build_failure_annotation(host_xml)
+                if annotation:
+                    annotate_build(
+                        f"**Node {node_idx} pair {pair_idx}:**\n\n{annotation}",
+                        style="error",
+                        context=f"test-failures-node{node_idx}-pair{pair_idx}",
+                    )
 
     # OOM detection for each node container (before cleanup removes them).
     for node_idx in range(int(os.environ.get("NUM_NODES", "2"))):
@@ -3091,6 +4731,7 @@ class _Cleanup:
         self.commit = os.environ.get("BUILDKITE_COMMIT", "")  # type: str
         self.is_multi_node = False  # type: bool
         self._done = False  # type: bool
+        self._signal_triggered = False  # type: bool
 
     def run(self):
         # type: () -> None
@@ -3101,10 +4742,37 @@ class _Cleanup:
 
         section("Cleanup: tearing down test environment")
 
+        # When triggered by a signal (SIGTERM/SIGINT), Buildkite will send
+        # SIGKILL shortly after (~10s). Skip slow operations (rsync to NFS,
+        # access count updates) that can't complete in time and would just
+        # get killed mid-write, potentially corrupting the backing store.
+        if self._signal_triggered:
+            info("Signal-triggered cleanup: skipping cache sync (time-limited)")
+        else:
+            # 0a. Update access frequency counts from this job's file atimes.
+            info("  [0/8] Updating cache access counts...")
+            counts = _load_access_counts()
+            for cache in CACHES:
+                counts = update_access_counts_from_atime(cache, counts)
+            _save_access_counts(counts)
+            if os.environ.get("NIGHTLY") == "1":
+                log_top_k_access_counts()
+
+        # 0b. Unmount overlay caches (must happen before rsync to backing,
+        # because the upper layer files are only visible after unmount
+        # when overlay is active).
+        unmount_overlay_caches()
+
+        if not self._signal_triggered:
+            # 0c. Persist caches to backing store before tearing anything
+            # down. Do this first so cache data survives even if later
+            # cleanup steps fail or the pod is killed mid-cleanup.
+            sync_caches_to_backing()
+
         # 1. Remove test container(s).
         if self.container:
             info(f"  [1/8] Removing test container: {self.container}")
-            sh(f"docker rm -f {self.container} 2>/dev/null || true")
+            sh(["docker", "rm", "-f", self.container], capture=True)
         else:
             info("  [1/8] No container to remove (not started)")
         if self.is_multi_node:
@@ -3165,12 +4833,15 @@ class _Cleanup:
         else:
             info("  [5/8] No commit hash -- skipping stale container cleanup")
 
-        # 6. Remove Docker image.
+        # 6. Docker image: keep for same-commit retries.
+        # Removing the image after every run defeats the Docker layer
+        # cache and forces a full pull on retries of the same commit.
+        # The LRU/LFU eviction in cleanup_docker_disk() handles disk
+        # pressure -- no need to eagerly remove here.
         if self.image:
-            info(f"  [6/8] Removing Docker image: {self.image}")
-            sh(f"docker image rm -f {self.image} 2>/dev/null || true")
+            info(f"  [6/8] Keeping Docker image: {self.image} (for retry cache)")
         else:
-            info("  [6/8] No image to remove")
+            info("  [6/8] No image tracked")
 
         # 7. Remove results directory (artifacts already uploaded).
         if self.results_dir and self.results_dir.exists():
@@ -3194,7 +4865,9 @@ def _on_signal(signum, _frame):
     """Signal handler for SIGTERM and SIGINT.
 
     Runs cleanup and exits with 128+signum (POSIX convention).
+    Skips slow operations (cache sync) since Buildkite SIGKILL follows soon.
     """
+    _cleanup._signal_triggered = True
     _cleanup.run()
     sys.exit(128 + signum)
 
@@ -3227,36 +4900,62 @@ def main():
     atexit.register(_cleanup.run)
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGQUIT, _on_signal)
 
     # -- Phase 1: Environment + config --
     section("Environment")
     log_k8s_context()
     log_effective_config()
 
+    # -- Phase 1b: Hard resets (destructive, one-shot) --
+    execute_hard_resets()
+
     # -- Phase 2: Infrastructure health --
-    with timed("Infrastructure health checks"):
+    if ENABLE_INFRA_CHECKS:
+        with timed("Infrastructure health checks"):
+            check_docker_health()
+            check_infra_health()
+    else:
+        info("Infrastructure checks DISABLED (VLLM_ROCM_CI_INFRA_CHECKS=0)")
+        # Docker health is always checked -- can't run without Docker.
         check_docker_health()
-        check_infra_health()
 
     # -- Phase 3: GPU pre-flight --
-    with timed("GPU pre-flight"):
-        kill_gpu_zombies()
-        wait_for_clean_gpus()
+    if ENABLE_GPU_PREFLIGHT:
+        with timed("GPU pre-flight"):
+            kill_gpu_zombies()
+            wait_for_clean_gpus()
 
-    section("ROCm info")
-    sh("rocminfo")
+        section("ROCm info")
+        try:
+            sh("rocminfo", timeout=ROCM_SMI_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            warn(f"rocminfo timed out after {ROCM_SMI_TIMEOUT_S}s")
 
-    # -- Phase 4: GPU health --
-    rocm_smi_validate_health()
+        # -- Phase 4: GPU health --
+        rocm_smi_validate_health()
+    else:
+        info("GPU pre-flight DISABLED (VLLM_ROCM_CI_GPU_PREFLIGHT=0)")
 
-    # -- Phase 5: Docker housekeeping --
-    with timed("Docker housekeeping"):
+    # -- Phase 5: Docker + cache housekeeping --
+    with timed("Docker and cache housekeeping"):
         cleanup_stale_containers()
-        cleanup_docker_disk()
+        if ENABLE_DOCKER_EVICTION:
+            cleanup_docker_disk()
+        else:
+            info("Docker eviction DISABLED (VLLM_ROCM_CI_DOCKER_EVICTION=0)")
+        if ENABLE_CACHE_EVICTION:
+            evict_all_caches()  # L1 (local)
+            evict_all_l2_caches()  # L2 (NFS, nightly only)
+        else:
+            info("Cache eviction DISABLED (VLLM_ROCM_CI_CACHE_EVICTION=0)")
 
     # -- Phase 6: GPU reset --
-    with timed("GPU reset"):
-        reset_gpus()
+    if ENABLE_GPU_PREFLIGHT:
+        with timed("GPU reset"):
+            reset_gpus()
+    else:
+        info("GPU reset DISABLED (VLLM_ROCM_CI_GPU_PREFLIGHT=0)")
 
     # -- Phase 7: Image pull --
     section("Pulling container")
@@ -3265,7 +4964,26 @@ def main():
         error("BUILDKITE_COMMIT is not set")
         sys.exit(1)
 
-    image = f"rocm/vllm-ci:{commit}"
+    if ENABLE_LEGACY_DOCKER_TAG:
+        # Legacy: single fat multi-arch image tagged by commit only.
+        image = f"rocm/vllm-ci:{commit}"
+        info("Image tag mode: legacy (VLLM_ROCM_CI_LEGACY_DOCKER_TAG=1)")
+    else:
+        # Per-arch: pipeline template sets DOCKER_IMAGE_NAME per step
+        # (e.g., rocm/vllm-ci:abc123-gfx942). Required.
+        image = os.environ.get("DOCKER_IMAGE_NAME", "").strip()
+        if not image:
+            error(
+                "DOCKER_IMAGE_NAME is not set but legacy docker tag is disabled "
+                "(VLLM_ROCM_CI_LEGACY_DOCKER_TAG=0).\n"
+                "  The pipeline must set DOCKER_IMAGE_NAME to the per-arch "
+                "image tag (e.g., rocm/vllm-ci:$COMMIT-gfx942).\n"
+                "  To use the legacy single-image pattern, set "
+                "VLLM_ROCM_CI_LEGACY_DOCKER_TAG=1."
+            )
+            sys.exit(1)
+        info(f"Image tag mode: per-arch (DOCKER_IMAGE_NAME={image})")
+        _validate_image_arch(image)
     container = f"rocm_{commit}_{os.urandom(5).hex()}"
     info(f"Image: {image}")
     info(f"Container name: {container}")
@@ -3309,8 +5027,11 @@ def main():
     else:
         warn("BUILDKITE_AGENT_META_DATA_RENDER_DEVICES is empty")
 
-    # Set up all persistent caches (HF, ModelScope, test data, pip, ccache, etc.).
-    setup_caches()
+    # Set up all persistent caches (HF, ModelScope, test data, pip, etc.).
+    if ENABLE_CACHE:
+        setup_caches()
+    else:
+        info("Persistent caches DISABLED (VLLM_ROCM_CI_CACHE_ENABLED=0)")
 
     # -- Phase 9: Execute --
     results_dir = Path(tempfile.mkdtemp(prefix=f"vllm-ci-{container[:20]}-"))
