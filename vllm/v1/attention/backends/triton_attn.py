@@ -28,6 +28,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     KVQuantMode,
     MultipleOf,
+    get_kv_quant_mode,
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
