@@ -180,6 +180,16 @@ class FixFunctionalizationPass(VllmInductorPass):
                     2: "key",
                 }
                 self.defunctionalize(graph, node, mutated_args=mutated_args)
+            elif (
+                hasattr(torch.ops.vllm, "fused_qk_norm_rope_cache_quant")
+                and at_target
+                == torch.ops.vllm.fused_qk_norm_rope_cache_quant.default
+            ):
+                mutated_args = {
+                    1: "query",
+                    2: "key",
+                }
+                self.defunctionalize(graph, node, mutated_args=mutated_args)
             # only used for test_functionalization::TestFunctionWithMutatedArgsAndReturn
             elif (
                 hasattr(torch.ops.vllm, "function_with_mutated_args_and_return")
