@@ -287,6 +287,14 @@ class BenchmarkDataset(ABC):
                 identifiers.
 
         """
+        if num_requests > 0 and not requests:
+            raise ValueError(
+                f"No valid requests could be sampled from "
+                f"{self.__class__.__name__}. The dataset may be empty or "
+                "all rows may have been filtered out by the current "
+                "benchmark constraints."
+            )
+
         if no_oversample:
             logger.info("Skipping oversampling. Total samples: %d.", len(requests))
             return
@@ -316,6 +324,33 @@ class BenchmarkDataset(ABC):
 # -----------------------------------------------------------------------------
 
 
+def get_invalid_sequence_reasons(
+    prompt_len: int,
+    output_len: int,
+    min_len: int = 4,
+    max_prompt_len: int = 1024,
+    max_total_len: int = 2048,
+    skip_min_output_len_check: bool = False,
+) -> list[str]:
+    """
+    Classify why a sequence is invalid based on prompt and output lengths.
+
+    Default pruning criteria are copied from the original `sample_hf_requests`
+    and `sample_sharegpt_requests` functions in benchmark_serving.py, as well as
+    from `sample_requests` in benchmark_throughput.py.
+    """
+    reasons = []
+    if prompt_len < min_len:
+        reasons.append("prompt_too_short")
+    if (not skip_min_output_len_check) and (output_len < min_len):
+        reasons.append("output_too_short")
+    if prompt_len > max_prompt_len:
+        reasons.append("prompt_too_long")
+    if (prompt_len + output_len) > max_total_len:
+        reasons.append("combined_too_long")
+    return reasons
+
+
 def is_valid_sequence(
     prompt_len: int,
     output_len: int,
@@ -326,20 +361,14 @@ def is_valid_sequence(
 ) -> bool:
     """
     Validate a sequence based on prompt and output lengths.
-
-    Default pruning criteria are copied from the original `sample_hf_requests`
-    and `sample_sharegpt_requests` functions in benchmark_serving.py, as well as
-    from `sample_requests` in benchmark_throughput.py.
     """
-    # Check for invalid conditions
-    prompt_too_short = prompt_len < min_len
-    output_too_short = (not skip_min_output_len_check) and (output_len < min_len)
-    prompt_too_long = prompt_len > max_prompt_len
-    combined_too_long = (prompt_len + output_len) > max_total_len
-
-    # Return True if none of the invalid conditions are met
-    return not (
-        prompt_too_short or output_too_short or prompt_too_long or combined_too_long
+    return not get_invalid_sequence_reasons(
+        prompt_len=prompt_len,
+        output_len=output_len,
+        min_len=min_len,
+        max_prompt_len=max_prompt_len,
+        max_total_len=max_total_len,
+        skip_min_output_len_check=skip_min_output_len_check,
     )
 
 
@@ -1336,6 +1365,12 @@ class ShareGPTDataset(BenchmarkDataset):
         **kwargs,
     ) -> list:
         samples: list = []
+        invalid_counts = {
+            "prompt_too_short": 0,
+            "output_too_short": 0,
+            "prompt_too_long": 0,
+            "combined_too_long": 0,
+        }
         ind = 0
         for entry in self.data:
             if len(samples) >= num_requests:
@@ -1355,11 +1390,14 @@ class ShareGPTDataset(BenchmarkDataset):
             completion_ids = tokenizer(completion).input_ids
             prompt_len = len(prompt_ids)
             new_output_len = len(completion_ids) if output_len is None else output_len
-            if not is_valid_sequence(
-                prompt_len,
-                new_output_len,
+            invalid_reasons = get_invalid_sequence_reasons(
+                prompt_len=prompt_len,
+                output_len=new_output_len,
                 skip_min_output_len_check=output_len is not None,
-            ):
+            )
+            if invalid_reasons:
+                for invalid_reason in invalid_reasons:
+                    invalid_counts[invalid_reason] += 1
                 continue
             if image_path := entry.get("image"):
                 mm_content = process_image(image_path)
@@ -1380,6 +1418,29 @@ class ShareGPTDataset(BenchmarkDataset):
                 )
             )
             ind += 1
+
+        if num_requests > 0 and not samples:
+            invalid_total = sum(invalid_counts.values())
+            if output_len is not None and invalid_total == invalid_counts["combined_too_long"]:
+                raise ValueError(
+                    f"No valid requests could be sampled from "
+                    f"{self.__class__.__name__}: all {invalid_total} candidate "
+                    f"requests were filtered out because output_len={output_len} "
+                    "violates the benchmark constraint "
+                    "prompt_len + output_len <= 2048."
+                )
+
+            invalid_summary = ", ".join(
+                f"{reason}={count}"
+                for reason, count in invalid_counts.items()
+                if count > 0
+            )
+            raise ValueError(
+                f"No valid requests could be sampled from "
+                f"{self.__class__.__name__}. Filtered candidate requests due to: "
+                f"{invalid_summary}."
+            )
+
         self.maybe_oversample_requests(
             samples, num_requests, request_id_prefix, no_oversample
         )
