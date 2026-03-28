@@ -196,24 +196,106 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
 
     if USE_G:
         # diagonal blocks: gate + strictly lower-triangular mask + boundary mask + beta
-        b_A00 = tl.where(m_d & (m_tc0[:, None] & m_tc0[None, :]), b_A00 * exp(b_g0[:, None] - b_g0[None, :]), 0.) * b_b0[:, None]
-        b_A11 = tl.where(m_d & (m_tc1[:, None] & m_tc1[None, :]), b_A11 * exp(b_g1[:, None] - b_g1[None, :]), 0.) * b_b1[:, None]
-        b_A22 = tl.where(m_d & (m_tc2[:, None] & m_tc2[None, :]), b_A22 * exp(b_g2[:, None] - b_g2[None, :]), 0.) * b_b2[:, None]
-        b_A33 = tl.where(m_d & (m_tc3[:, None] & m_tc3[None, :]), b_A33 * exp(b_g3[:, None] - b_g3[None, :]), 0.) * b_b3[:, None]
+        b_A00 = (
+            tl.where(
+                m_d & (m_tc0[:, None] & m_tc0[None, :]),
+                b_A00 * exp(b_g0[:, None] - b_g0[None, :]),
+                0.0,
+            )
+            * b_b0[:, None]
+        )
+        b_A11 = (
+            tl.where(
+                m_d & (m_tc1[:, None] & m_tc1[None, :]),
+                b_A11 * exp(b_g1[:, None] - b_g1[None, :]),
+                0.0,
+            )
+            * b_b1[:, None]
+        )
+        b_A22 = (
+            tl.where(
+                m_d & (m_tc2[:, None] & m_tc2[None, :]),
+                b_A22 * exp(b_g2[:, None] - b_g2[None, :]),
+                0.0,
+            )
+            * b_b2[:, None]
+        )
+        b_A33 = (
+            tl.where(
+                m_d & (m_tc3[:, None] & m_tc3[None, :]),
+                b_A33 * exp(b_g3[:, None] - b_g3[None, :]),
+                0.0,
+            )
+            * b_b3[:, None]
+        )
 
         # off-diagonal blocks: gate + boundary mask + beta
-        b_A10 = tl.where(m_tc1[:, None] & m_tc0[None, :], b_A10 * exp(b_g1[:, None] - b_g0[None, :]), 0.) * b_b1[:, None]
-        b_A20 = tl.where(m_tc2[:, None] & m_tc0[None, :], b_A20 * exp(b_g2[:, None] - b_g0[None, :]), 0.) * b_b2[:, None]
-        b_A21 = tl.where(m_tc2[:, None] & m_tc1[None, :], b_A21 * exp(b_g2[:, None] - b_g1[None, :]), 0.) * b_b2[:, None]
-        b_A30 = tl.where(m_tc3[:, None] & m_tc0[None, :], b_A30 * exp(b_g3[:, None] - b_g0[None, :]), 0.) * b_b3[:, None]
-        b_A31 = tl.where(m_tc3[:, None] & m_tc1[None, :], b_A31 * exp(b_g3[:, None] - b_g1[None, :]), 0.) * b_b3[:, None]
-        b_A32 = tl.where(m_tc3[:, None] & m_tc2[None, :], b_A32 * exp(b_g3[:, None] - b_g2[None, :]), 0.) * b_b3[:, None]
+        b_A10 = (
+            tl.where(
+                m_tc1[:, None] & m_tc0[None, :],
+                b_A10 * exp(b_g1[:, None] - b_g0[None, :]),
+                0.0,
+            )
+            * b_b1[:, None]
+        )
+        b_A20 = (
+            tl.where(
+                m_tc2[:, None] & m_tc0[None, :],
+                b_A20 * exp(b_g2[:, None] - b_g0[None, :]),
+                0.0,
+            )
+            * b_b2[:, None]
+        )
+        b_A21 = (
+            tl.where(
+                m_tc2[:, None] & m_tc1[None, :],
+                b_A21 * exp(b_g2[:, None] - b_g1[None, :]),
+                0.0,
+            )
+            * b_b2[:, None]
+        )
+        b_A30 = (
+            tl.where(
+                m_tc3[:, None] & m_tc0[None, :],
+                b_A30 * exp(b_g3[:, None] - b_g0[None, :]),
+                0.0,
+            )
+            * b_b3[:, None]
+        )
+        b_A31 = (
+            tl.where(
+                m_tc3[:, None] & m_tc1[None, :],
+                b_A31 * exp(b_g3[:, None] - b_g1[None, :]),
+                0.0,
+            )
+            * b_b3[:, None]
+        )
+        b_A32 = (
+            tl.where(
+                m_tc3[:, None] & m_tc2[None, :],
+                b_A32 * exp(b_g3[:, None] - b_g2[None, :]),
+                0.0,
+            )
+            * b_b3[:, None]
+        )
     else:
         # diagonal blocks: strictly lower-triangular mask + boundary mask + beta
-        b_A00 = tl.where(m_d & (m_tc0[:, None] & m_tc0[None, :]), b_A00, 0.) * b_b0[:, None]
-        b_A11 = tl.where(m_d & (m_tc1[:, None] & m_tc1[None, :]), b_A11, 0.) * b_b1[:, None]
-        b_A22 = tl.where(m_d & (m_tc2[:, None] & m_tc2[None, :]), b_A22, 0.) * b_b2[:, None]
-        b_A33 = tl.where(m_d & (m_tc3[:, None] & m_tc3[None, :]), b_A33, 0.) * b_b3[:, None]
+        b_A00 = (
+            tl.where(m_d & (m_tc0[:, None] & m_tc0[None, :]), b_A00, 0.0)
+            * b_b0[:, None]
+        )
+        b_A11 = (
+            tl.where(m_d & (m_tc1[:, None] & m_tc1[None, :]), b_A11, 0.0)
+            * b_b1[:, None]
+        )
+        b_A22 = (
+            tl.where(m_d & (m_tc2[:, None] & m_tc2[None, :]), b_A22, 0.0)
+            * b_b2[:, None]
+        )
+        b_A33 = (
+            tl.where(m_d & (m_tc3[:, None] & m_tc3[None, :]), b_A33, 0.0)
+            * b_b3[:, None]
+        )
 
         # off-diagonal blocks: just beta (kkt values are 0 for out-of-bounds from boundary_check)
         b_A10 = b_A10 * b_b1[:, None]
