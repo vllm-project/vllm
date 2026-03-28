@@ -155,7 +155,6 @@ class NaNDetector:
         if self._nan_flags is not None:
             self._nan_flags.zero_()
 
-    @torch.compiler.disable
     def check_tensor(
         self, tensor: torch.Tensor, checkpoint_idx: int
     ) -> None:
@@ -163,7 +162,6 @@ class NaNDetector:
 
         Uses ``torch.isfinite`` -- all ops stay on GPU, no D2H sync.
         CUDA-graph compatible (fixed output address).
-        Decorated with ``@torch.compiler.disable`` to avoid graph breaks.
 
         Args:
             tensor: 2-D ``[num_tokens, hidden_size]`` tensor to check.
@@ -171,11 +169,27 @@ class NaNDetector:
         """
         if self._nan_flags is None:
             return
-        num_tokens = tensor.shape[0]
-        has_bad = (~torch.isfinite(tensor.view(num_tokens, -1))).any(dim=1)
-        self._nan_flags[checkpoint_idx, :num_tokens].bitwise_or_(
-            has_bad.to(torch.int8)
+        _check_tensor_impl(
+            tensor, self._nan_flags, checkpoint_idx
         )
+
+
+@torch.compiler.disable
+def _check_tensor_impl(
+    tensor: torch.Tensor,
+    nan_flags: torch.Tensor,
+    checkpoint_idx: int,
+) -> None:
+    num_tokens = tensor.shape[0]
+    t = tensor.view(num_tokens, -1)
+    # torch.isfinite doesn't support FP8 — cast to float first.
+    if t.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz,
+                   torch.float8_e5m2, torch.float8_e5m2fnuz):
+        t = t.to(torch.float16)
+    has_bad = (~torch.isfinite(t)).any(dim=1)
+    nan_flags[checkpoint_idx, :num_tokens].bitwise_or_(
+        has_bad.to(torch.int8)
+    )
 
     # ------------------------------------------------------------------
     # Post-forward checking
