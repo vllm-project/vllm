@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import os
-import psutil
 import socket
 import tempfile
 import time
@@ -341,24 +340,21 @@ class Executor(ABC):
 
     def _acquire_gpu_access(self):
         """Acquire atomic signals for all GPUs managed by this executor."""
-        my_pid = os.getpid()
-        try:
-            # Obtain the current process's startup time and add a uniqueness check.
-            my_create_time = psutil.Process(my_pid).create_time()
-        except psutil.Error:
-            my_create_time = -1.0
-
-        my_lock_info = f"{my_pid}:{my_create_time}"
         device_ids = self.device_config.device_ids
         if not device_ids:
             logger.warning(
                 "Could not determine device IDs for GPU access lock. "
-                "This may cause issues in multi-instance or multi-GPU scenarios. "
                 "Falling back to locking GPU 0."
             )
             device_ids = [0]
 
         sorted_ids = sorted(list(set(device_ids)))
+        my_pid = os.getpid()
+        try:
+            my_create_time = psutil.Process(my_pid).create_time()
+        except psutil.Error:
+            my_create_time = -1.0
+        my_lock_info = f"{my_pid}:{my_create_time}"
         acquired_paths: list[Path] = []
 
         for d_id in sorted_ids:
@@ -368,36 +364,30 @@ class Executor(ABC):
                     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
                     fd = os.open(str(sig_path), flags)
                     with os.fdopen(fd, "w") as f:
-                        f.write(str(my_lock_info))
+                        f.write(my_lock_info)
                     acquired_paths.append(sig_path)
                     break
                 except FileExistsError:
                     try:
-                        content = sig_path.read_text().strip()
-                        if not content:
-                            raise ValueError("Lock file is empty.")
-                        owner_pid_str, owner_create_time_str = content.split(":", 1)
-                        owner_pid = int(owner_pid_str)
-                        owner_create_time = float(owner_create_time_str)
-                        if owner_pid == my_pid and owner_create_time == my_create_time:
+                        owner_info = sig_path.read_text().strip()
+                        if owner_info == my_lock_info:
                             acquired_paths.append(sig_path)
                             break
-                        # Verify whether the lock holder is still alive
-                        # and whether the startup time is consistent.
-                        p = psutil.Process(owner_pid)
-                        if p.create_time() != owner_create_time:
-                            raise ProcessLookupError
+                        owner_pid = -1
+                        if owner_info:
+                            try:
+                                owner_pid = int(owner_info.split(":", 1)[0])
+                            except (ValueError, IndexError):
+                                raise ProcessLookupError from None
 
-                    except (
-                        psutil.NoSuchProcess,
-                        ProcessLookupError,
-                        ValueError,
-                        OSError,
-                    ):
-                        with contextlib.suppress(OSError):
+                        if owner_pid != -1:
+                            os.kill(owner_pid, 0)
+                        else:
+                            raise ProcessLookupError from None
+                    except (ProcessLookupError, ValueError, OSError, psutil.Error):
+                        with contextlib.suppress(Exception):
                             sig_path.unlink(missing_ok=True)
                         continue
-
                     logger.info(
                         "GPU %d is busy (Owner: %d), retrying...", d_id, owner_pid
                     )
@@ -405,14 +395,19 @@ class Executor(ABC):
         return acquired_paths
 
     def _release_gpu_access(self, acquired_paths: list[Path]):
-        """Release all held GPU signals."""
+        """Release all held GPU signals with PID and create_time validation."""
         my_pid = os.getpid()
+        try:
+            my_create_time = psutil.Process(my_pid).create_time()
+        except psutil.Error:
+            my_create_time = -1.0
+        my_lock_info = f"{my_pid}:{my_create_time}"
+
         for sig_path in acquired_paths:
             try:
                 if sig_path.exists():
-                    with open(sig_path) as f:
-                        content = f.read().strip()
-                    if content and int(content) == my_pid:
+                    content = sig_path.read_text().strip()
+                    if content == my_lock_info:
                         sig_path.unlink(missing_ok=True)
             except (OSError, ValueError):
                 pass

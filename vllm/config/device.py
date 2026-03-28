@@ -76,4 +76,15 @@ class DeviceConfig:
             self.device = torch.device(self.device_type)
 
         if not self.device_ids:
-            self.device_ids = [0] if self.device_type == "cuda" else []
+            if current_platform.is_cuda_alike():
+                logical_id = (
+                    self.device.index
+                    if self.device.index is not None
+                    else torch.accelerator.current_device_index()
+                )
+                physical_id = current_platform.device_id_to_physical_device_id(
+                    logical_id
+                )
+                self.device_ids = [physical_id]
+            else:
+                self.device_ids = []
