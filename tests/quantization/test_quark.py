@@ -22,6 +22,9 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkW8A8Fp8,
     QuarkW8A8Int8,
 )
+from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+    QuarkW8A8Int8MoEMethod,
+)
 from vllm.platforms import current_platform
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
@@ -123,6 +126,35 @@ def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
         llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
+
+
+
+@pytest.mark.parametrize("tp", [1])
+def test_quark_int8_w8a8_moe(vllm_runner, tp):
+    """Test W8A8 INT8 MoE quantization with a tiny Qwen3 MoE model."""
+    model_path = "nameistoken/tiny-qwen3-moe-w8a8-int8-quark"
+    with vllm_runner(
+        model_path,
+        enforce_eager=True,
+        tensor_parallel_size=tp,
+        gpu_memory_utilization=0.1,
+    ) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+            # MoE experts should use QuarkW8A8Int8MoEMethod
+            moe = layer.mlp.experts
+            assert isinstance(
+                moe.quant_method, QuarkW8A8Int8MoEMethod
+            ), f"Expected QuarkW8A8Int8MoEMethod, got {type(moe.quant_method)}"
+            # Non-MoE linear layers should use QuarkW8A8Int8
+            qkv_proj = layer.self_attn.qkv_proj
+            assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello", max_tokens=4)
         assert output
 
 
