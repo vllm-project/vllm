@@ -10,7 +10,6 @@ from tests.v1.engine.utils import (
     NUM_PROMPT_LOGPROBS_UNDER_TEST,
     NUM_SAMPLE_LOGPROBS_UNDER_TEST,
     PROMPT_LEN,
-    TOKENIZER_NAME,
     DummyOutputProcessorTestVectors,
     generate_dummy_prompt_logprobs_tensors,
     generate_dummy_sample_logprobs,
@@ -23,15 +22,17 @@ EngineCoreSampleLogprobsType = list[tuple[torch.Tensor, torch.Tensor]]
 EngineCorePromptLogprobsType = tuple[torch.Tensor, torch.Tensor]
 
 
-def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
+def _build_test_vectors_no_logprobs(
+    tokenizer_name: str,
+) -> DummyOutputProcessorTestVectors:
     """Generate output processor dummy test vectors, without logprobs
 
     Returns:
       DummyOutputProcessorTestVectors instance with no logprobs
     """
 
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
-    vllm_config = EngineArgs(model=TOKENIZER_NAME).create_engine_config()
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    vllm_config = EngineArgs(model=tokenizer_name).create_engine_config()
     # Tokenize prompts under test & create dummy generated tokens
     prompt_tokens = [tokenizer(text).input_ids[:PROMPT_LEN] for text in FULL_STRINGS]
     generation_tokens = [
@@ -61,14 +62,23 @@ def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
 
 
 @pytest.fixture
-def dummy_test_vectors() -> DummyOutputProcessorTestVectors:
+def dummy_test_vectors_tokenizer_name() -> str:
+    """Tokenizer used by output processor fixture tests."""
+
+    return "Qwen/Qwen3-1.7B"
+
+
+@pytest.fixture
+def dummy_test_vectors(
+    dummy_test_vectors_tokenizer_name: str,
+) -> DummyOutputProcessorTestVectors:
     """Generate output processor dummy test vectors, with logprobs
 
     Returns:
       DummyOutputProcessorTestVectors instance with logprobs
     """
     # Build dummy test vectors without logprobs
-    dtv = _build_test_vectors_no_logprobs()
+    dtv = _build_test_vectors_no_logprobs(dummy_test_vectors_tokenizer_name)
     # Inject logprobs into dummy test vectors
     # data structure
     dtv.generation_logprobs = [

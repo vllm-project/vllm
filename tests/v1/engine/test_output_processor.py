@@ -11,7 +11,9 @@ from tests.v1.engine.utils import (
     NUM_SAMPLE_LOGPROBS_UNDER_TEST,
     STOP_STRINGS,
     DummyOutputProcessorTestVectors,
+    get_non_eos_special_token,
     MockEngineCore,
+    generate_dummy_tracked_logprobs,
 )
 from vllm import PoolingParams
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
@@ -623,9 +625,6 @@ def test_stop_token(
       (i.e. first control token causes stop but is not represented
       in output text.)
 
-    Note: some test details are tuned for meta-llama/Llama-3.2-1B,
-    another model should work only if the test is modified.
-
     Args:
         include_stop_str_in_output: stop token str appears in output text
         num_sample_logprobs: number of sample logprobs (`None` for no logprobs)
@@ -633,22 +632,17 @@ def test_stop_token(
         ignore_eos: if True, EOS stops are disabled
         dummy_test_vectors: dummy engine core outputs and other data structures
     """
-    model_id = dummy_test_vectors.tokenizer.name_or_path
-    if model_id != "meta-llama/Llama-3.2-1B":
-        raise AssertionError(
-            f"Test requires meta-llama/Llama-3.2-1B but {model_id} is in use."
-        )
+    tokenizer = dummy_test_vectors.tokenizer
     do_logprobs = num_sample_logprobs is not None
     # EOS under test; if False, stop_token_ids under test
     is_eos_test = stop_token_type == "eos_token_id"
     # EOS under test but ignore_eos enabled
     is_eos_ignore_test = is_eos_test and ignore_eos
-    eos_token_id = (
-        dummy_test_vectors.tokenizer.eos_token_id if is_eos_test else None
-    )  # '<|end_of_text|>'
-    stop_token_ids = [128009] if not is_eos_test else None  # '<|eot_id|>'
+    eos_token_id = tokenizer.eos_token_id if is_eos_test else None
+    stop_token_id, stop_token_text = get_non_eos_special_token(tokenizer)
+    stop_token_ids = [stop_token_id] if not is_eos_test else None
 
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    output_processor = OutputProcessor(tokenizer, log_stats=False)
     # Dummy engine core outputs, with control tokens suffixed to test stops
     suffix_token = [eos_token_id] if is_eos_test else stop_token_ids
     assert suffix_token is not None and isinstance(suffix_token[0], int)
@@ -730,7 +724,11 @@ def test_stop_token(
             gen_logprobs.extend(request_output.outputs[0].logprobs)
 
     # Validate generated text
-    control_token = "<|end_of_text|>" if is_eos_test else "<|eot_id|>"
+    control_token = (
+        tokenizer.decode([eos_token_id], skip_special_tokens=False)
+        if is_eos_test
+        else stop_token_text
+    )
     if is_eos_ignore_test:
         # Length-based stop; expect full string
         ref_str = generation_string + 2 * control_token
@@ -1336,3 +1334,281 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+# ==============================================================================
+# Tests for tracked_logprobs (track_token_ids feature)
+# ==============================================================================
+
+
+@pytest.mark.parametrize(
+    "request_output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
+)
+def test_tracked_logprobs_basic(
+    request_output_kind: RequestOutputKind,
+    dummy_test_vectors,
+):
+    """Test that tracked_logprobs are correctly processed and included in output.
+
+    Verifies:
+    1. Tracked logprobs are accumulated across generation steps
+    2. Output includes tracked_logprobs dict with token_id -> [logprobs] mapping
+    3. Works with both DELTA and FINAL_ONLY output modes
+    """
+    # Define tokens to track
+    track_token_ids = [100, 200, 300]
+    # Generate dummy tracked logprobs for each request
+    tracked_logprobs_raw = [
+        generate_dummy_tracked_logprobs(len(generation_tokens), track_token_ids)
+        for generation_tokens in dummy_test_vectors.generation_tokens
+    ]
+
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens,
+        tracked_logprobs_raw=tracked_logprobs_raw,
+    )
+
+    # Make N requests with track_token_ids
+    request_id_list = [
+        f"request-{idx}" for idx in range(len(dummy_test_vectors.prompt_strings))
+    ]
+    requests = [
+        EngineCoreRequest(
+            request_id=request_id_list[idx],
+            external_req_id=request_id_list[idx],
+            prompt_token_ids=prompt_tokens,
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=SamplingParams(
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+                output_kind=request_output_kind,
+                stop=[],
+                include_stop_str_in_output=False,
+                track_token_ids=track_token_ids,
+            ),
+            pooling_params=None,
+        )
+        for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
+    ]
+
+    # Add requests to the output processor
+    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
+        output_processor.add_request(request, prompt)
+
+    gen_tracked_logprobs = {}
+    while True:
+        # Mock output from the EngineCore
+        outputs = engine_core.get_outputs()
+        if len(outputs) == 0:
+            break
+
+        # Step the output processor
+        processed_outputs = output_processor.process_outputs(outputs)
+        request_outputs = processed_outputs.request_outputs
+        assert len(processed_outputs.reqs_to_abort) == 0
+
+        # Collect tracked logprobs
+        for request_output in request_outputs:
+            request_id = request_output.request_id
+            tracked = request_output.outputs[0].tracked_logprobs
+            if tracked is not None:
+                if request_id not in gen_tracked_logprobs:
+                    gen_tracked_logprobs[request_id] = tracked
+                else:
+                    # Extend existing tracked logprobs
+                    for token_id, logprobs_list in tracked.items():
+                        if token_id in gen_tracked_logprobs[request_id]:
+                            gen_tracked_logprobs[request_id][token_id].extend(
+                                logprobs_list
+                            )
+                        else:
+                            gen_tracked_logprobs[request_id][token_id] = logprobs_list
+
+    # Validate tracked logprobs
+    for idx, request_id in enumerate(request_id_list):
+        tracked = gen_tracked_logprobs.get(request_id)
+        assert tracked is not None, f"Request {request_id} missing tracked_logprobs"
+
+        # Check all track_token_ids are present
+        assert set(tracked.keys()) == set(track_token_ids), (
+            f"Expected keys {track_token_ids}, got {list(tracked.keys())}"
+        )
+
+        # Check number of logprobs per token matches generation length
+        expected_num_tokens = len(dummy_test_vectors.generation_tokens[idx])
+        for token_id in track_token_ids:
+            num_logprobs = len(tracked[token_id])
+            assert num_logprobs == expected_num_tokens, (
+                f"Token {token_id} has {num_logprobs} logprobs, "
+                f"expected {expected_num_tokens}"
+            )
+
+    assert output_processor.get_num_unfinished_requests() == 0
+
+
+def test_tracked_logprobs_none_when_not_requested(dummy_test_vectors):
+    """Test that tracked_logprobs is None when track_token_ids is not specified."""
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens,
+        tracked_logprobs_raw=None,  # No tracked logprobs
+    )
+
+    # Make request WITHOUT track_token_ids
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="request-0",
+        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            skip_special_tokens=False,
+            spaces_between_special_tokens=False,
+            output_kind=RequestOutputKind.DELTA,
+            # track_token_ids not set - defaults to None
+        ),
+        pooling_params=None,
+    )
+
+    output_processor.add_request(request, dummy_test_vectors.prompt_strings[0])
+
+    while True:
+        outputs = engine_core.get_outputs()
+        if len(outputs) == 0:
+            break
+
+        processed_outputs = output_processor.process_outputs(outputs)
+
+        for request_output in processed_outputs.request_outputs:
+            # tracked_logprobs should be None
+            assert request_output.outputs[0].tracked_logprobs is None
+
+
+def test_tracked_logprobs_with_sample_logprobs(dummy_test_vectors):
+    """Test that tracked_logprobs works alongside regular sample logprobs."""
+    track_token_ids = [50, 100, 150]
+    num_generation_tokens = len(dummy_test_vectors.generation_tokens[0])
+
+    # Generate both regular and tracked logprobs
+    tracked_logprobs_raw = [
+        generate_dummy_tracked_logprobs(num_generation_tokens, track_token_ids)
+        for _ in range(len(dummy_test_vectors.generation_tokens))
+    ]
+
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens,
+        generated_logprobs_raw=dummy_test_vectors.generation_logprobs,
+        tracked_logprobs_raw=tracked_logprobs_raw,
+    )
+
+    # Make request with both logprobs and track_token_ids
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="request-0",
+        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            skip_special_tokens=False,
+            spaces_between_special_tokens=False,
+            output_kind=RequestOutputKind.DELTA,
+            logprobs=NUM_SAMPLE_LOGPROBS_UNDER_TEST,  # Regular logprobs
+            track_token_ids=track_token_ids,  # Also track specific tokens
+        ),
+        pooling_params=None,
+    )
+
+    output_processor.add_request(request, dummy_test_vectors.prompt_strings[0])
+
+    gen_logprobs = []
+    gen_tracked_logprobs: dict[int, list[float]] = {}
+
+    while True:
+        outputs = engine_core.get_outputs()
+        if len(outputs) == 0:
+            break
+
+        processed_outputs = output_processor.process_outputs(outputs)
+
+        for request_output in processed_outputs.request_outputs:
+            # Both should be present
+            logprobs = request_output.outputs[0].logprobs
+            tracked = request_output.outputs[0].tracked_logprobs
+
+            if logprobs:
+                gen_logprobs.extend(logprobs)
+
+            if tracked:
+                for token_id, logprobs_list in tracked.items():
+                    if token_id in gen_tracked_logprobs:
+                        gen_tracked_logprobs[token_id].extend(logprobs_list)
+                    else:
+                        gen_tracked_logprobs[token_id] = logprobs_list
+
+    # Validate both are present
+    assert len(gen_logprobs) == num_generation_tokens
+    assert set(gen_tracked_logprobs.keys()) == set(track_token_ids)
+
+
+def test_tracked_logprobs_single_token(dummy_test_vectors):
+    """Test tracking a single token ID."""
+    track_token_ids = [42]  # Single token
+    num_generation_tokens = len(dummy_test_vectors.generation_tokens[0])
+
+    tracked_logprobs_raw = [
+        generate_dummy_tracked_logprobs(num_generation_tokens, track_token_ids)
+        for _ in range(len(dummy_test_vectors.generation_tokens))
+    ]
+
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens,
+        tracked_logprobs_raw=tracked_logprobs_raw,
+    )
+
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="request-0",
+        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            skip_special_tokens=False,
+            output_kind=RequestOutputKind.FINAL_ONLY,
+            track_token_ids=track_token_ids,
+        ),
+        pooling_params=None,
+    )
+
+    output_processor.add_request(request, dummy_test_vectors.prompt_strings[0])
+
+    final_tracked = None
+    while True:
+        outputs = engine_core.get_outputs()
+        if len(outputs) == 0:
+            break
+
+        processed_outputs = output_processor.process_outputs(outputs)
+
+        for request_output in processed_outputs.request_outputs:
+            if request_output.finished:
+                final_tracked = request_output.outputs[0].tracked_logprobs
+
+    assert final_tracked is not None
+    assert 42 in final_tracked
+    assert len(final_tracked[42]) == num_generation_tokens
