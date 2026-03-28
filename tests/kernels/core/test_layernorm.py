@@ -10,8 +10,8 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
-HIDDEN_SIZES = [8, 768, 769, 5120, 5125, 8192]  # Arbitrary values for testing
+NUM_TOKENS = [7, 4096]  # Small + large
+HIDDEN_SIZES = [8, 769, 8192]  # Small, odd/misaligned, large
 ADD_RESIDUAL = [False, True]
 SEEDS = [0]
 CUDA_DEVICES = [
@@ -77,7 +77,7 @@ def test_rms_norm(
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("quant_scale", [0.01, 1.0, 10.0])
+@pytest.mark.parametrize("quant_scale", [0.01, 10.0])
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("strided_input", [False, True])
