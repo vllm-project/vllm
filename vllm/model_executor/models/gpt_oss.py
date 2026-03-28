@@ -668,7 +668,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 continue
 
             if (
-                all(key in name for key in ["input_scale", "mlp.experts"])
+                all(key in name for key in ["input_scale", "mlp.experts"])  # XXXXX
                 and expert_id is not None
             ):
                 assert loaded_weight.numel() == 1

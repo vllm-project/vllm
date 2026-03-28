@@ -782,7 +782,7 @@ class HunYuanModel(nn.Module, EagleModelMixin):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                if "mlp.experts" in name:
+                if "mlp.experts" in name:  # XXXXXXXXXXXXX
                     continue
                 # cross layer only have q_proj, skip qkv pack
                 if weight_name == ".q_proj":

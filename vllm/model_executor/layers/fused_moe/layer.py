@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Iterable
-from typing import Literal, overload
 
 import torch
 
@@ -136,7 +135,7 @@ def maybe_roundup_hidden_size(
 
 def register_layer_for_moe_forward_op(
     vllm_config: VllmConfig,
-    layer: torch.nn.Module,
+    layer: torch.nn.Module,  # FusedMoE for now
 ):
     # For smuggling this layer into the fused moe custom op
     prefix = layer.layer_name
@@ -502,7 +501,7 @@ class FusedMoE(CustomOp):
         )
 
         # HACK
-        self.quant_method = self.routed_experts.quant_method
+        # self.quant_method = self.routed_experts.quant_method
 
         # Move XXXXXXXXXXXXX
         if eplb_manager is not None and not self.quant_method.supports_eplb:
@@ -761,7 +760,7 @@ class FusedMoE(CustomOp):
         num_redundant_experts: int = 0,
     ) -> list[tuple[str, str, int, str]]:
         """Delegate to EPLB manager."""
-        return EplbManager.make_expert_params_mapping(
+        return RoutedExperts.make_expert_params_mapping(
             model,
             ckpt_gate_proj_name,
             ckpt_down_proj_name,
@@ -774,52 +773,52 @@ class FusedMoE(CustomOp):
     # Weight Loading (Delegated to RoutedExperts)
     #
 
-    @overload
-    def weight_loader(
-        self,
-        param: torch.nn.Parameter,
-        loaded_weight: torch.Tensor,
-        weight_name: str,
-        shard_id: str,
-        expert_id: int,
-        return_success: Literal[False],
-    ) -> None: ...
+    # @overload
+    # def weight_loader(
+    #     self,
+    #     param: torch.nn.Parameter,
+    #     loaded_weight: torch.Tensor,
+    #     weight_name: str,
+    #     shard_id: str,
+    #     expert_id: int,
+    #     return_success: Literal[False],
+    # ) -> None: ...
 
-    @overload
-    def weight_loader(
-        self,
-        param: torch.nn.Parameter,
-        loaded_weight: torch.Tensor,
-        weight_name: str,
-        shard_id: str,
-        expert_id: int,
-        return_success: Literal[True],
-    ) -> bool: ...
+    # @overload
+    # def weight_loader(
+    #     self,
+    #     param: torch.nn.Parameter,
+    #     loaded_weight: torch.Tensor,
+    #     weight_name: str,
+    #     shard_id: str,
+    #     expert_id: int,
+    #     return_success: Literal[True],
+    # ) -> bool: ...
 
-    def weight_loader(
-        self,
-        param: torch.nn.Parameter,
-        loaded_weight: torch.Tensor,
-        weight_name: str,
-        shard_id: str,
-        expert_id: int,
-        return_success: bool = False,
-    ) -> bool | None:
-        """Delegate to RoutedExperts."""
-        return self.routed_experts.weight_loader(
-            param=param,
-            loaded_weight=loaded_weight,
-            weight_name=weight_name,
-            shard_id=shard_id,
-            expert_id=expert_id,
-            return_success=return_success,
-        )
+    # def weight_loader(
+    #     self,
+    #     param: torch.nn.Parameter,
+    #     loaded_weight: torch.Tensor,
+    #     weight_name: str,
+    #     shard_id: str,
+    #     expert_id: int,
+    #     return_success: bool = False,
+    # ) -> bool | None:
+    #     """Delegate to RoutedExperts."""
+    #     return self.routed_experts.weight_loader(
+    #         param=param,
+    #         loaded_weight=loaded_weight,
+    #         weight_name=weight_name,
+    #         shard_id=shard_id,
+    #         expert_id=expert_id,
+    #         return_success=return_success,
+    #     )
 
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[str]:
-        """Delegate to RoutedExperts."""
-        return self.routed_experts.load_weights(weights)
+    # def load_weights(
+    #     self, weights: Iterable[tuple[str, torch.Tensor]]
+    # ) -> Iterable[str]:
+    #     """Delegate to RoutedExperts."""
+    #     return self.routed_experts.load_weights(weights)
 
     #
     # Execution
@@ -845,4 +844,4 @@ class FusedMoE(CustomOp):
 
 # Mark the FusedMoE weight_loader as supporting MoE-specific parameters
 # to avoid expensive runtime reflection in model loading code
-FusedMoE.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
+# FusedMoE.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]

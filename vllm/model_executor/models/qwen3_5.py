@@ -485,7 +485,7 @@ class Qwen3_5Model(Qwen3NextModel):
                 if weight_name not in name:
                     continue
 
-                if "mlp.experts" in name:
+                if "mlp.experts" in name:  # XXXXXXXXXXXXXXXXXXXXXXXX
                     continue
 
                 name = name.replace(weight_name, param_name)

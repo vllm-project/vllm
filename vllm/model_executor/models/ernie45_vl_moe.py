@@ -690,7 +690,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
                 break
             else:
                 # Distinguish between vision experts and text experts
-                if "mlp.experts" in name:
+                if "mlp.experts" in name:  # XXXXXXXXXXXXXXXXXX
                     moe_offset = int(name.split(".")[-3])
                     vision_expert_start_idx = self.config.moe_num_experts[0]
                     is_text_expert = moe_offset <= vision_expert_start_idx - 1

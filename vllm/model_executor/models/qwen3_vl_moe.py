@@ -208,7 +208,7 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                 # name will be updated to mlp.experts[0].gate_up_proj, which
                 # will then be updated below in expert_params_mapping
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if "mlp.experts" in name:
+                if "mlp.experts" in name:  # XXXXXXXXXXXXXXXXXXX
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra parameters for GPTQ/modelopt models.

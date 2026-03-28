@@ -235,12 +235,7 @@ class ExpertMapManager:
         if self._expert_map is None:
             return global_id
 
-        local_id = self._expert_map[global_id].item()
-        if local_id == -1:
-            raise ValueError(
-                f"Expert {global_id} is not assigned to rank {self.ep_rank}"
-            )
-        return local_id
+        return self._expert_map[global_id].item()
 
     def is_local_expert(self, global_id: int) -> bool:
         """Check if expert is assigned to this rank."""
