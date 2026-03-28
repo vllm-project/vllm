@@ -138,6 +138,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "gpt_oss_router_gemm(Tensor! output, Tensor input, Tensor weights, "
       "Tensor bias) -> ()");
   m.impl("gpt_oss_router_gemm", torch::kCUDA, &gpt_oss_router_gemm);
+
+  // FP32 x FP32 -> FP32 router GEMM for H=3072, E=256, M<=32 (SM90+)
+  m.def("fp32_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
+  // impl registration is in fp32_router_gemm_entry.cu
 #endif
 }
 

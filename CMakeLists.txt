@@ -1130,6 +1130,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                    " in CUDA target architectures")
   endif()
 
+  # FP32 router GEMM kernel (H=3072, E=256, M<=32) - requires SM90+
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(FP32_ROUTER_GEMM_ARCHS "9.0a;10.0f;11.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(FP32_ROUTER_GEMM_ARCHS "9.0a;10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND FP32_ROUTER_GEMM_ARCHS)
+    set(FP32_ROUTER_GEMM_SRC
+      "csrc/moe/fp32_router_gemm_entry.cu"
+      "csrc/moe/fp32_router_gemm.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${FP32_ROUTER_GEMM_SRC}"
+      CUDA_ARCHS "${FP32_ROUTER_GEMM_ARCHS}")
+    list(APPEND VLLM_MOE_EXT_SRC "${FP32_ROUTER_GEMM_SRC}")
+    message(STATUS "Building FP32 router GEMM kernel for archs: ${FP32_ROUTER_GEMM_ARCHS}")
+  else()
+    message(STATUS "Not building FP32 router GEMM kernel as no compatible archs found"
+                   " (requires SM90+ and CUDA >= 12.0)")
+  endif()
+
   # DeepSeek V3 router GEMM kernel - requires SM90+
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(DSV3_ROUTER_GEMM_ARCHS "9.0a;10.0f;11.0f" "${CUDA_ARCHS}")

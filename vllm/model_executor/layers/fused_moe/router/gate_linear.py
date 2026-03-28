@@ -32,6 +32,11 @@ class GateLinear(ReplicatedLinear):
     GPT_OSS_SUPPORTED_NUM_EXPERTS = [32, 128]
     GPT_OSS_SUPPORTED_HIDDEN_SIZES = [2880]
 
+    # Dimensions supported by the fp32 specialized kernel
+    FP32_SUPPORTED_NUM_EXPERTS = [256]
+    FP32_SUPPORTED_HIDDEN_SIZES = [3072]
+    FP32_MAX_TOKENS = 32
+
     def __init__(
         self,
         input_size: int,
@@ -81,6 +86,15 @@ class GateLinear(ReplicatedLinear):
             and input_size in self.GPT_OSS_SUPPORTED_HIDDEN_SIZES
         )
 
+        # fp32 specialized kernel eligibility (SM90+, exact dims, fp32 weight)
+        self.allow_fp32_router_gemm = (
+            self.weight.dtype == torch.float32
+            and current_platform.is_cuda()
+            and is_hopper_or_blackwell
+            and output_size in self.FP32_SUPPORTED_NUM_EXPERTS
+            and input_size in self.FP32_SUPPORTED_HIDDEN_SIZES
+        )
+
         # cuBLAS bf16→fp32 eligibility
         self.allow_cublas_router_gemm = (
             self.allow_specialized_router_gemm
@@ -117,17 +131,22 @@ class GateLinear(ReplicatedLinear):
             )
             return output, None
 
-        # Tier 2: gpt-oss specialized kernel
+        # Tier 2: fp32 specialized kernel (H=3072, E=256, M<=32)
+        if self.allow_fp32_router_gemm and x.shape[0] <= self.FP32_MAX_TOKENS:
+            output = ops.fp32_router_gemm(x, self.weight)
+            return output, None
+
+        # Tier 3: gpt-oss specialized kernel
         if self.allow_gpt_oss_router_gemm:
             output = torch.ops.vllm.gpt_oss_router_gemm(x, self.weight, self.bias)
             return output, None
 
-        # Tier 3: cuBLAS bf16→fp32
+        # Tier 4: cuBLAS bf16→fp32
         if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
             output = ops.router_gemm_bf16_fp32(x, self.weight)
             return output, None
 
-        # Tier 4: F.linear (ReplicatedLinear)
+        # Tier 5: F.linear (ReplicatedLinear)
         if self.out_dtype is not None and x.dtype != self.weight.dtype:
             x = x.to(self.weight.dtype)
         output, output_bias = super().forward(x)

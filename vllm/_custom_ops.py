@@ -2362,6 +2362,31 @@ def dsv3_router_gemm(
     return output
 
 
+def fp32_router_gemm(
+    hidden_states: torch.Tensor,
+    router_weight: torch.Tensor,
+) -> torch.Tensor:
+    output = torch.empty(
+        hidden_states.shape[0],
+        router_weight.shape[0],
+        device=hidden_states.device,
+        dtype=torch.float32,
+    )
+    torch.ops._moe_C.fp32_router_gemm(output, hidden_states, router_weight)
+    return output
+
+
+if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "fp32_router_gemm"):
+
+    @register_fake("_moe_C::fp32_router_gemm")
+    def fp32_router_gemm_fake(
+        output: torch.Tensor,
+        mat_a: torch.Tensor,
+        mat_b: torch.Tensor,
+    ) -> None:
+        return
+
+
 def gpt_oss_router_gemm(
     hidden_states: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
 ) -> torch.Tensor:
