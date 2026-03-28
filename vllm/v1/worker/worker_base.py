@@ -197,12 +197,27 @@ class WorkerBase:
             buf = steerable[idx].steering_vector
             buf.copy_(vec.to(device=buf.device, dtype=buf.dtype))
 
+        # Notify SteeringManager of global vector changes
+        if hasattr(self, "model_runner") and self.model_runner is not None:
+            mgr = getattr(self.model_runner, "_steering_manager", None)
+            if mgr is not None:
+                for idx in valid_indices:
+                    mgr.update_global_vectors(
+                        idx, steerable[idx].steering_vector
+                    )
+
         return sorted(valid_indices)
 
     def clear_steering_vectors(self) -> None:
         """Zero all steering-vector buffers."""
         for mod in self._steerable_layers().values():
             mod.steering_vector.zero_()
+
+        # Notify SteeringManager
+        if hasattr(self, "model_runner") and self.model_runner is not None:
+            mgr = getattr(self.model_runner, "_steering_manager", None)
+            if mgr is not None:
+                mgr.clear_global_vectors()
 
     def get_steering_status(self) -> dict:
         """Return ``{layer_idx: {"norm": float}}`` for active layers."""
