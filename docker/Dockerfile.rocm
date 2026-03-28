@@ -329,6 +329,11 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
+# Verify that PyTorch is the ROCm build, not CUDA
+RUN python3 -c "import torch; assert torch.version.hip is not None, \
+    f'Expected ROCm PyTorch but got CUDA (torch.version.cuda={torch.version.cuda}, torch.version.hip={torch.version.hip})'; \
+    print(f'Verified: PyTorch {torch.__version__} with ROCm (HIP {torch.version.hip})')"
+
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
     uv pip install --system /rixl_install/*.whl
@@ -380,6 +385,9 @@ ENV MIOPEN_DEBUG_CONV_GEMM=0
 # We hide it inside `src/` so that this source code
 # will not be imported by other tests
 RUN mkdir src && mv vllm src/vllm
+
+# This is a workaround to ensure pytest exits with the correct status code in CI tests.
+RUN echo "import os\n\ndef pytest_sessionfinish(session, exitstatus):\n    os._exit(int(exitstatus))" > /vllm-workspace/conftest.py
 
 # -----------------------
 # Final vLLM image
