@@ -6598,11 +6598,11 @@ class GPUModelRunner(
                             kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-                    # The allocation respects the backend-defined stride
-                    # order to ensure the semantic remains consistent for
-                    # each backend. We first obtain the generic kv cache
-                    # shape and then permute it according to the stride
-                    # order which could result in a non-contiguous tensor.
+                    # The allocation respects the backend-defined stride order
+                    # to ensure the semantic remains consistent for each
+                    # backend. We first obtain the generic kv cache shape and
+                    # then permute it according to the stride order which could
+                    # result in a non-contiguous tensor.
                     kv_cache_shape = tuple(
                         kv_cache_shape[i] for i in kv_cache_stride_order
                     )
