@@ -316,13 +316,9 @@ class TritonAttentionBackend(AttentionBackend):
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
-        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         # `stride_order` indicates the permutation that gets
         # us from `get_kv_cache_shape` to the actual memory layout we want.
-        if kv_cache_uses_per_token_scales(cache_dtype_str):
-            # Flat 3D layout: (num_blocks, 2, kv_half_bytes)
-            return (0, 1, 2)
         if include_num_layers_dimension:
             # (num_blocks, num_layers, 2, block_size, num_kv_heads, head_size)
             return (1, 0, 2, 3, 4, 5)
