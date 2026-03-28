@@ -39,6 +39,11 @@ class KVQuantMode(IntEnum):
     INT8_PER_TOKEN = 2  # per-token dynamic scales for int8
     FP8_PER_TOKEN = 3  # per-token dynamic scales for fp8
 
+    @property
+    def is_per_token(self) -> bool:
+        """True for any per-token quantization mode."""
+        return self >= 2
+
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
@@ -57,10 +62,7 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
 
 def kv_cache_uses_per_token_scales(kv_cache_dtype: str) -> bool:
     """Return True if *kv_cache_dtype* needs per-token scales."""
-    return get_kv_quant_mode(kv_cache_dtype) in (
-        KVQuantMode.INT8_PER_TOKEN,
-        KVQuantMode.FP8_PER_TOKEN,
-    )
+    return get_kv_quant_mode(kv_cache_dtype).is_per_token
 
 
 @dataclass(frozen=True)
@@ -142,10 +144,7 @@ class AttentionSpec(KVCacheSpec):
         token for K and one for V are appended after each data region.
         Returns 0 for other quantization modes.
         """
-        if self.kv_quant_mode in (
-            KVQuantMode.INT8_PER_TOKEN,
-            KVQuantMode.FP8_PER_TOKEN,
-        ):
+        if self.kv_quant_mode.is_per_token:
             return 2 * self.block_size * get_dtype_size(torch.float32)
         return 0
 

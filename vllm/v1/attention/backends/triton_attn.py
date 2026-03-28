@@ -502,10 +502,7 @@ class TritonAttentionImpl(AttentionImpl):
         self.supports_quant_query_input = current_platform.is_cuda()
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
-        self._is_per_token_quant = self._kv_quant_mode in (
-            KVQuantMode.INT8_PER_TOKEN,
-            KVQuantMode.FP8_PER_TOKEN,
-        )
+        self._is_per_token_quant = self._kv_quant_mode.is_per_token
 
     def forward(
         self,
