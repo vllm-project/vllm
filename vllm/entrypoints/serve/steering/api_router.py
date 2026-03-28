@@ -12,7 +12,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.serve.steering.protocol import SetSteeringRequest
 from vllm.exceptions import SteeringVectorError
 from vllm.logger import init_logger
-from vllm.model_executor.layers.steering import DEFAULT_HOOK_POINT
 from vllm.model_executor.layers.steering import VALID_HOOK_POINT_NAMES
 
 logger = init_logger(__name__)
@@ -112,24 +111,6 @@ async def set_steering(
             status_code=HTTPStatus.BAD_REQUEST.value,
         )
 
-    # Pre-multiply scales into vectors so the worker only needs to copy.
-    scaled: dict[int, list[float]] = {}
-    for layer_idx, vec in request.vectors.items():
-        scale = 1.0
-        if request.scales and layer_idx in request.scales:
-            scale = request.scales[layer_idx]
-        if scale != 1.0:
-            scaled[layer_idx] = [v * scale for v in vec]
-        else:
-            scaled[layer_idx] = vec
-
-    # Wrap legacy layer-indexed vectors under the default hook point
-    # so the worker receives the new hook-point-aware format:
-    # {hook_point_str: {layer_idx: [floats]}}
-    hook_vectors: dict[str, dict[int, list[float]]] = {
-        DEFAULT_HOOK_POINT.value: scaled,
-    }
-
     try:
         async with _steering_lock:
             # Phase 1 -- validate on every worker without mutating
@@ -137,7 +118,8 @@ async def set_steering(
             # partially applying an update when a later stage would
             # reject it.
             results = await engine.collective_rpc(
-                "set_steering_vectors", args=(hook_vectors, True)
+                "set_steering_vectors",
+                args=(all_hook_vectors, True),
             )
             # Each worker returns the layer indices it *would* update.
             # Union across workers (TP replicas report the same layers,
@@ -183,9 +165,10 @@ async def set_steering(
             if request.replace:
                 await engine.collective_rpc("clear_steering_vectors")
 
-            # Phase 2 — all workers validated; now apply.
+            # Phase 2 -- all workers validated; now apply.
             await engine.collective_rpc(
-                "set_steering_vectors", args=(hook_vectors, False)
+                "set_steering_vectors",
+                args=(all_hook_vectors, False),
             )
 
         return JSONResponse(

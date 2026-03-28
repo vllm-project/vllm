@@ -88,8 +88,8 @@ class TestSetSteering:
             },
         )
         assert resp.status_code == 200
-        # Check the vectors sent to the worker were scaled
-        # Format is now {hook_point: {layer_idx: [floats]}}
+        # Check the vectors sent to the worker were scaled.
+        # Format is now {hook_point: {layer_idx: [floats]}}.
         validate_call = engine.collective_rpc.call_args_list[0]
         hook_vectors = validate_call.kwargs.get(
             "args", validate_call[1].get("args", (None,))

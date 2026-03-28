@@ -2,9 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the steering request protocol."""
 
-import pytest
-from pydantic import ValidationError
-
 from vllm.entrypoints.serve.steering.protocol import SetSteeringRequest
 
 
@@ -40,9 +37,10 @@ class TestSetSteeringRequest:
         req = SetSteeringRequest(vectors={})
         assert req.vectors == {}
 
-    def test_vectors_required(self):
-        with pytest.raises(ValidationError):
-            SetSteeringRequest()
+    def test_vectors_defaults_to_empty(self):
+        """vectors defaults to empty dict (hook_vectors can supply vectors)."""
+        req = SetSteeringRequest()
+        assert req.vectors == {}
 
     def test_string_keys_coerced_to_int(self):
         """JSON dict keys are strings; Pydantic should coerce to int."""
