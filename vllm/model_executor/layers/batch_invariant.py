@@ -937,7 +937,7 @@ def enable_batch_invariant_mode():
 
     if (
         current_platform.is_device_capability_family(100)
-        or current_platform.is_device_capability(80)
+        or current_platform.is_device_capability_family(80)
         or current_platform.is_device_capability(89)
     ):
         # For PyTorch 2.9, B200 uses GEMV for bs=1
