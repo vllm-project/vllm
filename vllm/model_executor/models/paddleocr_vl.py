@@ -25,6 +25,7 @@ import torch.nn as nn
 from einops import rearrange
 from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 from transformers.activations import GELUActivation
+from transformers.image_utils import ChannelDimension
 from transformers.modeling_outputs import (
     BaseModelOutputWithPooling,
 )
@@ -34,6 +35,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
@@ -52,7 +54,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -249,8 +250,12 @@ class PaddleOCRVLMultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
+            final_mm_kwargs = dict(mm_kwargs or {})
+            final_mm_kwargs.setdefault("images_kwargs", {})
+            # vLLM use PIL.Image, always set channel_last
+            final_mm_kwargs["input_data_format"] = ChannelDimension.LAST
             processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
+                self.info.get_hf_processor(**final_mm_kwargs),
                 dict(text=prompt, **mm_data),
                 dict(**mm_kwargs, **tok_kwargs),
             )
@@ -404,7 +409,6 @@ class SiglipVisionEmbeddings(nn.Module):
         self.cache_position_embedding = dict()
         self.cache_position_count = dict()
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
-        self.packing_position_embedding = nn.Embedding(32768, self.embed_dim)
 
         self.register_buffer(
             "position_ids",
@@ -496,24 +500,22 @@ class SiglipVisionEmbeddings(nn.Module):
             patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))
             embeddings = patch_embeds.flatten(-2).squeeze(-1)
 
-            if interpolate_pos_encoding and image_grid_thw is not None:
-                start = 0
-                tmp_embeddings = list()
-                for image_grid in image_grid_thw:
-                    t, h, w = image_grid
-                    end = start + t * h * w
-                    image_embeddings = embeddings[start:end, :]
-                    position_embedding = (
-                        self.interpolate_pos_encoding(image_embeddings, h, w, True)
-                        .squeeze(0)
-                        .repeat(t, 1)
-                    )
-                    image_embeddings = image_embeddings + position_embedding
-                    tmp_embeddings.append(image_embeddings)
-                    start = end
-                embeddings = torch.concat(tmp_embeddings, dim=0).unsqueeze(0)
-            else:
-                embeddings = embeddings + self.packing_position_embedding(position_ids)
+            start = 0
+            tmp_embeddings = list()
+            for image_grid in image_grid_thw:
+                t, h, w = image_grid
+                end = start + t * h * w
+                image_embeddings = embeddings[start:end, :]
+                position_embedding = (
+                    self.interpolate_pos_encoding(image_embeddings, h, w, True)
+                    .squeeze(0)
+                    .repeat(t, 1)
+                )
+                image_embeddings = image_embeddings + position_embedding
+                tmp_embeddings.append(image_embeddings)
+                start = end
+            embeddings = torch.concat(tmp_embeddings, dim=0).unsqueeze(0)
+
             return embeddings
         else:
             raise ValueError(
@@ -933,6 +935,8 @@ class SiglipVisionModel(nn.Module):
             if "head.attention" in name or "head.layernorm" in name:
                 continue
             if "head.mlp" in name or "head.probe" in name:
+                continue
+            if "packing_position_embedding" in name:
                 continue
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)

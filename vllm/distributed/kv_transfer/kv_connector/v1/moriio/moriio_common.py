@@ -39,11 +39,13 @@ logger = init_logger(__name__)
 Transfer = tuple[int, float]
 EngineId = str
 ReqId = str
+TransferId = str
 
 
 @dataclass
 class WriteTask:
-    request_id: str
+    request_id: ReqId
+    transfer_id: TransferId
     dst_engine_id: str
     local_block_ids: list[int]
     remote_block_ids_hint: list[int] | None
@@ -59,7 +61,8 @@ class WriteTask:
 class LayerTransferPlan:
     """Plan for transferring a single layer."""
 
-    request_id: str
+    request_id: ReqId
+    transfer_id: TransferId
     layer_name: str
     sess_idx: int
     transfer_local_offsets: list[int]
@@ -234,6 +237,7 @@ class MoRIIOConstants:
     POP_DONE_RECV = b"pop_done_recv"
     OVER = b"OVER"
     COMPLETION_PREFIX = "cmpl"
+    TRANSFER_PREFIX = "tx"
 
     PING_INTERVAL = 5
     MAX_PING_RETRIES = 100
@@ -247,6 +251,7 @@ class MoRIIOConstants:
 class ReqMeta:
     """Metadata for a single request."""
 
+    transfer_id: TransferId
     local_block_ids: list[int]
     remote_block_ids: list[int]
     remote_host: str
@@ -263,21 +268,15 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
+        self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
 
     def __repr__(self):
-        return_str = ""
-        for req_id, req_meta in self.reqs_to_recv.items():
-            return_str += (
-                f"{req_id = },{req_meta.local_block_ids = },"
-                f"{req_meta.remote_host = },{req_meta.remote_port = }"
-                f"{req_meta.remote_engine_id = },{req_meta.tp_size = }"
-            )
-        return_str = f"MoRIIOConnectorMetadata:reqs_to_recv:{return_str},"
-
-        for req_id, expiry in self.reqs_to_send.items():
-            return_str += f"{req_id = },{expiry = }"
-        return_str = f"MoRIIOConnectorMetadata:reqs_to_send:{return_str},"
-        return return_str
+        return (
+            f"MoRIIOConnectorMetadata: reqs_to_recv={self.reqs_to_recv}, "
+            f"reqs_to_save={self.reqs_to_save}, "
+            f"reqs_to_send={self.reqs_to_send}, "
+            f"transfer_id_to_request_id={self.transfer_id_to_request_id}"
+        )
 
     def add_new_req(
         self,
@@ -286,7 +285,9 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         write_mode=False,
     ):
+        transfer_id = kv_transfer_params["transfer_id"]
         _req = ReqMeta(
+            transfer_id=transfer_id,
             local_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params["remote_block_ids"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
