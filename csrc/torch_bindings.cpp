@@ -647,6 +647,28 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
 
 #ifndef USE_ROCM
+  // Weight decompression for CompressedModelLoader.
+  ops.def(
+      "decompress_tensor(Tensor compressed_gpu, int[] shape, "
+      "str dtype, int original_size, str algorithm='lz4') -> Tensor");
+  ops.impl("decompress_tensor", torch::kCUDA, &decompress_tensor);
+
+  ops.def(
+      "compress_tensor(Tensor raw_gpu, str algorithm, int level=0) -> Tensor");
+  ops.impl("compress_tensor", torch::kCUDA, &compress_tensor);
+
+  ops.def("is_gpu_decompress_available() -> bool");
+  ops.impl("is_gpu_decompress_available",
+            c10::DispatchKey::CompositeImplicitAutograd,
+            &is_gpu_decompress_available);
+
+  ops.def("is_gpu_compress_available() -> bool");
+  ops.impl("is_gpu_compress_available",
+            c10::DispatchKey::CompositeImplicitAutograd,
+            &is_gpu_compress_available);
+#endif
+
+#ifndef USE_ROCM
   // Compute per-token-group FP8 quantized tensor and scaling factor.
   // The dummy arguments are here so we can correctly fuse with RMSNorm.
   ops.def(

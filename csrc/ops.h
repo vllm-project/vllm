@@ -415,3 +415,22 @@ int64_t qr_max_size();
 void dsv3_fused_a_gemm(torch::Tensor& output, torch::Tensor const& mat_a,
                        torch::Tensor const& mat_b);
 #endif
+
+// Weight decompression for CompressedModelLoader.
+// Decompresses a chunked LZ4 or GDeflate uint8 GPU tensor into a typed tensor.
+// algorithm: "lz4" (default) or "gdeflate".
+// Uses nvCOMP for GPU-native decompression if available, else CPU zlib fallback.
+#ifndef USE_ROCM
+torch::Tensor decompress_tensor(const torch::Tensor& compressed_gpu,
+                                const std::vector<int64_t>& shape,
+                                const std::string& dtype,
+                                int64_t original_size,
+                                const std::string& algorithm = "lz4");
+
+torch::Tensor compress_tensor(const torch::Tensor& raw_gpu,
+                              const std::string& algorithm,
+                              int64_t level = 0);
+
+bool is_gpu_decompress_available();
+bool is_gpu_compress_available();
+#endif

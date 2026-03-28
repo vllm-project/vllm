@@ -940,6 +940,26 @@ if (VLLM_GPU_LANG STREQUAL "HIP")
 # if ROCM endif
 endif()
 
+# Weight decompression kernel (CUDA builds only — ROCm uses _rocm_C).
+if (NOT VLLM_GPU_LANG STREQUAL "HIP")
+  list(APPEND VLLM_EXT_SRC "csrc/weight_decompress.cu")
+
+  # Optional: nvCOMP for GPU-native LZ4 + GDeflate decompression/compression.
+  # Install from https://github.com/NVIDIA/nvcomp then set
+  # -DVLLM_NVCOMP_PATH=/path/to/nvcomp/install or ensure it is on
+  # CMAKE_PREFIX_PATH. Without it the CPU zlib fallback is used.
+  if(DEFINED VLLM_NVCOMP_PATH)
+    list(APPEND CMAKE_PREFIX_PATH "${VLLM_NVCOMP_PATH}")
+  endif()
+  find_package(nvcomp QUIET)
+  if(nvcomp_FOUND)
+    message(STATUS "nvCOMP found — GPU LZ4/GDeflate decompression enabled")
+    list(APPEND VLLM_GPU_FLAGS "-DHAVE_NVCOMP")
+  else()
+    message(STATUS "nvCOMP not found — using CPU zlib fallback for decompression")
+  endif()
+endif()
+
 message(STATUS "Enabling C extension.")
 define_extension_target(
   _C
@@ -958,6 +978,14 @@ define_extension_target(
 # driver API. This causes problems when linking with earlier versions of CUDA.
 # Setting this variable sidesteps the issue by calling the driver directly.
 target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+
+# Link zlib (fallback) and optionally nvCOMP (GPU path) for weight decompression.
+if (NOT VLLM_GPU_LANG STREQUAL "HIP")
+  target_link_libraries(_C PRIVATE z)
+  if(nvcomp_FOUND)
+    target_link_libraries(_C PRIVATE nvcomp)
+  endif()
+endif()
 
 #
 # _moe_C extension
