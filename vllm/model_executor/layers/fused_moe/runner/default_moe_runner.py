@@ -177,7 +177,7 @@ direct_register_custom_op(
 
 # --8<-- [start:default_moe_runner]
 @PluggableLayer.register("default_moe_runner")
-class DefaultMoERunner(MoERunner, PluggableLayer):
+class DefaultMoERunner(MoERunner):
     """
     Default implementation of the MoE runner for executing Mixture of Experts layers.
 
