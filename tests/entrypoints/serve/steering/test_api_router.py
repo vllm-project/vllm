@@ -12,6 +12,9 @@ from fastapi.testclient import TestClient
 import vllm.envs as envs
 from vllm.entrypoints.serve.steering.api_router import attach_router, router
 from vllm.exceptions import SteeringVectorError
+from vllm.model_executor.layers.steering import DEFAULT_HOOK_POINT
+
+_HP = DEFAULT_HOOK_POINT.value
 
 
 def _make_app(engine_mock) -> FastAPI:
@@ -86,11 +89,12 @@ class TestSetSteering:
         )
         assert resp.status_code == 200
         # Check the vectors sent to the worker were scaled
+        # Format is now {hook_point: {layer_idx: [floats]}}
         validate_call = engine.collective_rpc.call_args_list[0]
-        scaled_vectors = validate_call.kwargs.get(
+        hook_vectors = validate_call.kwargs.get(
             "args", validate_call[1].get("args", (None,))
         )[0]
-        assert scaled_vectors[0] == [3.0, 6.0]
+        assert hook_vectors[_HP][0] == [3.0, 6.0]
 
     def test_set_missing_layer_returns_400(self, client, engine):
         """Layer not found on any worker -> 400."""
@@ -205,10 +209,10 @@ class TestSetSteering:
         )
         assert resp.status_code == 200
         validate_call = engine.collective_rpc.call_args_list[0]
-        scaled_vectors = validate_call.kwargs.get(
+        hook_vectors = validate_call.kwargs.get(
             "args", validate_call[1].get("args", (None,))
         )[0]
-        assert scaled_vectors[0] == [5.0, 10.0]
+        assert hook_vectors[_HP][0] == [5.0, 10.0]
 
     def test_set_empty_vectors(self, client, engine):
         """Empty vectors dict -> no steerable layers -> 400."""

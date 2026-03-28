@@ -1178,17 +1178,46 @@ class GPUModelRunner(
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
 
-            # Register per-request steering config if present
+            # Register per-request steering config if present.
+            # Build a merged hook-point dict from legacy steering_vectors
+            # (maps to post_mlp_pre_ln) and new steering_hook_vectors.
             if (
                 getattr(self, "_steering_manager", None) is not None
                 and new_req_data.steering_config_hash != 0
                 and new_req_data.sampling_params is not None
-                and new_req_data.sampling_params.steering_vectors
             ):
-                self._steering_manager.register_config(
-                    new_req_data.steering_config_hash,
-                    new_req_data.sampling_params.steering_vectors,
+                from vllm.model_executor.layers.steering import (
+                    DEFAULT_HOOK_POINT,
                 )
+
+                sp = new_req_data.sampling_params
+                merged_hook_vectors: dict[
+                    str, dict[int, list[float]]
+                ] = {}
+
+                # Legacy steering_vectors → default hook point
+                legacy_vecs = getattr(sp, "steering_vectors", None)
+                if legacy_vecs:
+                    merged_hook_vectors[DEFAULT_HOOK_POINT.value] = dict(
+                        legacy_vecs
+                    )
+
+                # New per-hook-point vectors (from API layer)
+                hook_vecs = getattr(
+                    sp, "steering_hook_vectors", None
+                )
+                if hook_vecs:
+                    for hp, vecs in hook_vecs.items():
+                        if hp in merged_hook_vectors:
+                            merged_hook_vectors[hp].update(vecs)
+                        else:
+                            merged_hook_vectors[hp] = dict(vecs)
+
+                if merged_hook_vectors:
+                    self._steering_manager.register_config(
+                        new_req_data.steering_config_hash,
+                        merged_hook_vectors,
+                    )
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[req_id] = (
@@ -3032,17 +3061,26 @@ class GPUModelRunner(
         """Update per-layer steering tables and the shared steering index.
 
         Lazily initializes the SteeringManager on first call.  Each step:
-        1. Populate each layer's steering_table from the manager
+        1. Populate each layer's per-hook steering_table from the manager
         2. Build the steering_index mapping tokens to table rows
         """
+        from vllm.model_executor.layers.steering import (
+            HOOK_POINT_TABLE_ATTR,
+            HOOK_POINT_VECTOR_ATTR,
+        )
+
         # Lazy init
         if not hasattr(self, "_steering_manager"):
             steerable: dict = {}
             model = self.get_model()
             for mod in model.modules():
-                if hasattr(mod, "steering_table") and hasattr(
-                    mod, "layer_idx"
-                ):
+                if not hasattr(mod, "layer_idx"):
+                    continue
+                has_any_table = any(
+                    hasattr(mod, attr)
+                    for attr in HOOK_POINT_TABLE_ATTR.values()
+                )
+                if has_any_table:
                     steerable[mod.layer_idx] = mod
             self._steerable_layers = steerable
 
@@ -3060,14 +3098,16 @@ class GPUModelRunner(
                 self._steering_manager = SteeringManager(max_configs)
 
                 # Pick up any existing global vectors from the
-                # steering_vector buffers (set via the global API before
-                # this method was called).
-                for layer_idx, mod in steerable.items():
-                    if hasattr(mod, "steering_vector"):
-                        norm = mod.steering_vector.norm().item()
-                        if norm > 0.0:
+                # steering_vector_* buffers (set via the global API
+                # before this method was called).
+                for hp, vec_attr in HOOK_POINT_VECTOR_ATTR.items():
+                    for layer_idx, mod in steerable.items():
+                        if not hasattr(mod, vec_attr):
+                            continue
+                        vec = getattr(mod, vec_attr)
+                        if vec.any():
                             self._steering_manager.update_global_vectors(
-                                layer_idx, mod.steering_vector
+                                hp.value, layer_idx, vec
                             )
             else:
                 self._steering_manager = None
