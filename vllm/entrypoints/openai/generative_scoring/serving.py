@@ -26,9 +26,8 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import ProcessorInputs, token_inputs
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.tracing import (
@@ -94,8 +93,7 @@ class GenerativeScoringRequest(OpenAIBaseModel):
     priority: int = Field(
         default=0,
         description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0)."
+            "The priority of the request (lower means earlier handling; default: 0)."
         ),
     )
     request_id: str = Field(
@@ -218,9 +216,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
 
         # Validate items
         if len(request.items) == 0:
-            return self.create_error_response(
-                "items must contain at least one item."
-            )
+            return self.create_error_response("items must contain at least one item.")
 
         # Note: Mixed item types (string and token list) are validated by
         # Pydantic at request parsing time, so we don't need to check here.
@@ -231,12 +227,13 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
             logger.exception("Error preparing request components")
             return self.create_error_response(e)
 
-        request_id = f"generative-scoring-{self._base_request_id(raw_request, request.request_id)}"
+        base_id = self._base_request_id(raw_request, request.request_id)
+        request_id = f"generative-scoring-{base_id}"
         created_time = int(time.time())
 
         # Build prompts for each item
         try:
-            engine_prompts, prompt_token_counts = await self._build_prompts(
+            engine_inputs, prompt_token_counts = await self._build_prompts(
                 request, tokenizer, self.model_config.max_model_len
             )
         except (ValueError, TypeError) as e:
@@ -263,20 +260,20 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
             else await self._get_trace_headers(raw_request.headers)
         )
 
-        # Schedule requests for all prompts
+        # Schedule requests for all inputs
         generators: list[AsyncGenerator[RequestOutput, None]] = []
-        for i, engine_prompt in enumerate(engine_prompts):
+        for i, engine_input in enumerate(engine_inputs):
             request_id_item = f"{request_id}-{i}"
 
             self._log_inputs(
                 request_id_item,
-                engine_prompt,
+                engine_input,
                 params=sampling_params,
                 lora_request=lora_request,
             )
 
             generator = self.engine_client.generate(
-                engine_prompt,
+                engine_input,
                 sampling_params,
                 request_id_item,
                 lora_request=lora_request,
@@ -287,7 +284,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
 
         # Collect results
         result_generator = merge_async_iterators(*generators)
-        results: list[RequestOutput | None] = [None] * len(engine_prompts)
+        results: list[RequestOutput | None] = [None] * len(engine_inputs)
 
         try:
             async for i, res in result_generator:
@@ -311,15 +308,11 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
 
             # Check for errors
             if result.outputs and result.outputs[0].finish_reason == "error":
-                return self.create_error_response(
-                    f"Generation error for item {i}"
-                )
+                return self.create_error_response(f"Generation error for item {i}")
 
             # Get logprobs from the generated token
             if not result.outputs or len(result.outputs) == 0:
-                return self.create_error_response(
-                    f"No output generated for item {i}"
-                )
+                return self.create_error_response(f"No output generated for item {i}")
 
             output = result.outputs[0]
             if output.logprobs is None or len(output.logprobs) == 0:
@@ -389,8 +382,11 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
         request: GenerativeScoringRequest,
         tokenizer,
         max_model_len: int,
-    ) -> tuple[list[TokensPrompt], list[int]]:
+    ) -> tuple[list[ProcessorInputs], list[int]]:
         """Build prompts by concatenating query and items.
+
+        Uses the Renderer's tokenizer to tokenize text inputs, then
+        creates ProcessorInputs via token_inputs() for engine consumption.
 
         Args:
             request: The request containing query, items, and settings.
@@ -398,7 +394,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
             max_model_len: Maximum model context length for truncation.
 
         Returns:
-            Tuple of (list of TokensPrompt, list of prompt token counts).
+            Tuple of (list of ProcessorInputs, list of prompt token counts).
         """
         # Tokenize query if it's a string
         if isinstance(request.query, str):
@@ -409,7 +405,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
         else:
             query_token_ids = request.query
 
-        engine_prompts: list[TokensPrompt] = []
+        engine_inputs: list[ProcessorInputs] = []
         prompt_token_counts: list[int] = []
 
         for item in request.items:
@@ -434,12 +430,10 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
             if len(prompt_token_ids) > max_prompt_len:
                 prompt_token_ids = prompt_token_ids[:max_prompt_len]
 
-            engine_prompts.append(
-                TokensPrompt(prompt_token_ids=prompt_token_ids)
-            )
+            engine_inputs.append(token_inputs(prompt_token_ids))
             prompt_token_counts.append(len(prompt_token_ids))
 
-        return engine_prompts, prompt_token_counts
+        return engine_inputs, prompt_token_counts
 
     def _compute_probabilities(
         self,
@@ -470,8 +464,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
             sum_exp = sum(exp_values.values())
 
             return {
-                token_id: exp_val / sum_exp
-                for token_id, exp_val in exp_values.items()
+                token_id: exp_val / sum_exp for token_id, exp_val in exp_values.items()
             }
         else:
             # Return true model probabilities
@@ -505,26 +498,7 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
         if request_id:
             return request_id
         if raw_request:
-            return getattr(raw_request.state, "request_id", None) or \
-                   str(id(raw_request))
+            return getattr(raw_request.state, "request_id", None) or str(
+                id(raw_request)
+            )
         return random_uuid()
-
-    def _log_inputs(
-        self,
-        request_id: str,
-        prompt: TokensPrompt,
-        params: SamplingParams,
-        lora_request: LoRARequest | None,
-    ) -> None:
-        """Log request inputs."""
-        if self.request_logger is None:
-            return
-
-        self.request_logger.log_inputs(
-            request_id=request_id,
-            prompt=str(prompt.get("prompt_token_ids", [])[:10]) + "...",
-            prompt_token_ids=None,
-            prompt_embeds=None,
-            params=params,
-            lora_request=lora_request,
-        )

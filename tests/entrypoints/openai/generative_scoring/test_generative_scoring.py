@@ -177,10 +177,14 @@ class TestProbabilityComputation:
         ],
         ids=["softmax_basic", "softmax_extreme_values", "true_probs"],
     )
-    def test_compute_probabilities(self, label_logprobs, apply_softmax, should_sum_to_one):
+    def test_compute_probabilities(
+        self, label_logprobs, apply_softmax, should_sum_to_one
+    ):
         """Test probability computation for softmax and true probability modes."""
         serving = OpenAIServingGenerativeScoring.__new__(OpenAIServingGenerativeScoring)
-        probs = serving._compute_probabilities(label_logprobs, apply_softmax=apply_softmax)
+        probs = serving._compute_probabilities(
+            label_logprobs, apply_softmax=apply_softmax
+        )
 
         # Verify sum behavior
         total = sum(probs.values())
@@ -227,8 +231,14 @@ class TestValidation:
     @pytest.mark.parametrize(
         "request_kwargs,expected_error",
         [
-            ({"query": "q", "items": ["i"], "label_token_ids": [999999, 999998]}, "out of vocabulary"),
-            ({"query": "q", "items": [], "label_token_ids": [100, 200]}, "at least one item"),
+            (
+                {"query": "q", "items": ["i"], "label_token_ids": [999999, 999998]},
+                "out of vocabulary",
+            ),
+            (
+                {"query": "q", "items": [], "label_token_ids": [100, 200]},
+                "at least one item",
+            ),
         ],
         ids=["invalid_token_id", "empty_items"],
     )
@@ -251,7 +261,7 @@ class TestPromptBuilding:
         "item_first,expected",
         [
             (False, [[100, 101, 200, 201], [100, 101, 300, 301]]),  # query + item
-            (True, [[200, 201, 100, 101], [300, 301, 100, 101]]),   # item + query
+            (True, [[200, 201, 100, 101], [300, 301, 100, 101]]),  # item + query
         ],
         ids=["query_first", "item_first"],
     )
@@ -266,10 +276,10 @@ class TestPromptBuilding:
             label_token_ids=[500, 501],
             item_first=item_first,
         )
-        engine_prompts, _ = await serving._build_prompts(request, MagicMock())
+        engine_inputs, _ = await serving._build_prompts(request, MagicMock())
 
         for i, exp in enumerate(expected):
-            assert engine_prompts[i]["prompt_token_ids"] == exp
+            assert engine_inputs[i]["prompt_token_ids"] == exp
 
 
 class TestGeneration:

@@ -425,9 +425,7 @@ async def init_app_state(
             init_generative_scoring_state,
         )
 
-        await init_generative_scoring_state(
-            engine_client, state, args, request_logger
-        )
+        await init_generative_scoring_state(engine_client, state, args, request_logger)
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0

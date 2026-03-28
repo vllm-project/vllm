@@ -16,10 +16,13 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--dtype", "bfloat16",
-        "--max-model-len", "512",
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "512",
         "--enforce-eager",
-        "--max-num-seqs", "32",
+        "--max-num-seqs",
+        "32",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -60,7 +63,9 @@ class TestGenerativeScoringAPI:
         usage = data["usage"]
         assert usage["prompt_tokens"] > 0
         assert usage["completion_tokens"] > 0
-        assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+        assert (
+            usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+        )
 
     @pytest.mark.asyncio
     async def test_multiple_items(self, server: RemoteOpenAIServer):
@@ -110,11 +115,13 @@ class TestGenerativeScoringAPI:
     @pytest.mark.parametrize(
         "label_token_ids,expected_status",
         [
-            ([9999999999, 9999999998], 400),    # Out of vocab range
+            ([9999999999, 9999999998], 400),  # Out of vocab range
         ],
         ids=["invalid_token_ids"],
     )
-    async def test_validation_errors(self, server: RemoteOpenAIServer, label_token_ids, expected_status):
+    async def test_validation_errors(
+        self, server: RemoteOpenAIServer, label_token_ids, expected_status
+    ):
         """Test validation errors for various invalid inputs."""
         response = requests.post(
             server.url_for("generative_scoring"),

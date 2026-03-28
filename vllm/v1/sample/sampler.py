@@ -124,7 +124,7 @@ class Sampler(nn.Module):
                 raw_logprobs, num_logprobs, token_ids=sampled
             )
 
-        # If we have both num_logprobs and logprob_token_ids, prefer 
+        # If we have both num_logprobs and logprob_token_ids, prefer
         # logprob_token_ids as it's more specific
         if logprob_token_ids_tensors is not None and num_logprobs is not None:
             logprobs_tensors = logprob_token_ids_tensors
@@ -192,16 +192,16 @@ class Sampler(nn.Module):
         # Fill in token IDs for each request
         for req_idx, token_ids in logprob_token_ids.items():
             num_tokens = len(token_ids)
-            token_ids_tensor[req_idx, 1:num_tokens + 1] = torch.tensor(
+            token_ids_tensor[req_idx, 1 : num_tokens + 1] = torch.tensor(
                 token_ids, dtype=torch.int64, device=device
             )
-            valid_mask[req_idx, 1:num_tokens + 1] = True
+            valid_mask[req_idx, 1 : num_tokens + 1] = True
 
         # Compute logprobs using the fused Triton kernel (log_softmax + gather)
         logprobs = compute_token_logprobs(logits, token_ids_tensor)
 
         # Mask invalid (padded) positions with -inf
-        logprobs = logprobs.masked_fill(~valid_mask, float('-inf'))
+        logprobs = logprobs.masked_fill(~valid_mask, float("-inf"))
 
         # Compute ranks for the sampled token
         sampled_logits = logits.gather(-1, sampled.unsqueeze(-1))
