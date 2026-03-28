@@ -14,7 +14,6 @@ pin_memory = is_pin_memory_available()
 
 @dataclass
 class PoolingCursor:
-    index: list[int]
     first_token_indices_gpu: torch.Tensor
     last_token_indices_gpu: torch.Tensor
     prompt_lens_cpu: torch.Tensor
@@ -23,7 +22,6 @@ class PoolingCursor:
 
     def __getitem__(self, indices: slice):
         return PoolingCursor(
-            index=self.index[indices],
             first_token_indices_gpu=self.first_token_indices_gpu[indices],
             last_token_indices_gpu=self.last_token_indices_gpu[indices],
             prompt_lens_cpu=self.prompt_lens_cpu[indices],
@@ -101,21 +99,34 @@ class PoolingMetadata:
         num_scheduled_tokens_np: np.ndarray,
         seq_lens_cpu: torch.Tensor,
         device: torch.device,
+        query_start_loc_gpu: torch.Tensor | None = None,
     ):
         n_seq = len(num_scheduled_tokens_np)
         prompt_lens = self.prompt_lens
 
         assert len(prompt_lens) == n_seq
 
-        index = list(range(n_seq))
         num_scheduled_tokens_cpu = torch.from_numpy(num_scheduled_tokens_np)
-        cumsum = torch.zeros(
-            n_seq + 1, dtype=torch.int64, pin_memory=pin_memory, device="cpu"
-        )
-        torch.cumsum(num_scheduled_tokens_cpu, dim=0, out=cumsum[1:])
-        cumsum = cumsum.to(device, non_blocking=True)
+        if query_start_loc_gpu is None:
+            cumsum = torch.zeros(
+                n_seq + 1, dtype=torch.int64, pin_memory=pin_memory, device="cpu"
+            )
+            torch.cumsum(num_scheduled_tokens_cpu, dim=0, out=cumsum[1:])
+            cumsum = cumsum.to(device, non_blocking=True)
+        else:
+            if query_start_loc_gpu.shape[0] != n_seq + 1:
+                raise ValueError(
+                    "query_start_loc_gpu length does not match "
+                    f"the number of sequences: {query_start_loc_gpu.shape[0]} "
+                    f"!= {n_seq + 1}."
+                )
+            if query_start_loc_gpu.device != device:
+                raise ValueError(
+                    "query_start_loc_gpu must be on the same device as the "
+                    f"hidden states: {query_start_loc_gpu.device} != {device}."
+                )
+            cumsum = query_start_loc_gpu
         self.pooling_cursor = PoolingCursor(
-            index=index,
             first_token_indices_gpu=cumsum[:n_seq],
             last_token_indices_gpu=cumsum[1:] - 1,
             prompt_lens_cpu=prompt_lens,
