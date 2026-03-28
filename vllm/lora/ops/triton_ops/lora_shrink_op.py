@@ -9,7 +9,6 @@ https://arxiv.org/abs/2310.18547
 
 import torch
 
-from vllm import envs
 from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import (
     _get_lora_a_ptr,
@@ -226,8 +225,10 @@ def _lora_shrink(
         num_active_loras.item(),
     )
 
-    # PDL only works when dual-stream is being used.
-    use_gdc = supports_pdl(inputs.device) and envs.VLLM_LORA_ENABLE_DUAL_STREAM
+    # PDL re-enabled: the fused lora_shrink_expand op launches both kernels
+    # back-to-back from a single custom op, making PDL valid on SM90+.
+    # When dual-stream is enabled, PDL is also used for standalone calls.
+    use_gdc = supports_pdl(inputs.device)
     _lora_shrink_kernel[grid](
         inputs,
         lora_ptr_tensor,
