@@ -157,8 +157,8 @@ def _cached_get_mamba_attn_backend(
         selected_backend = MambaAttentionBackendEnum[backend_name]
     except KeyError as e:
         raise ValueError(
-            f"Invalid mamba attention backend type: '{backend_name}'. Valid "
-            f"backends are: {list(MambaAttentionBackendEnum.__members__.keys())}"
+            f"Invalid mamba attention backend type: '{mamba_type}'. Valid "
+            f"types are: {list(MAMBA_TYPE_TO_BACKEND_MAP.keys())}"
         ) from e
 
     mamba_attn_backend = selected_backend.get_class()

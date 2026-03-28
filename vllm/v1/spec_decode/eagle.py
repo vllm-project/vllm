@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
-from dataclasses import replace
 from importlib.util import find_spec
 from typing import Any, cast
 
@@ -13,6 +12,7 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
+    replace,
 )
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
@@ -1254,6 +1254,21 @@ class SpecDecodeBaseProposer:
             model = model.module
         return model.__class__.__name__
 
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        """Return a VllmConfig with kernel-level overrides for the proposer.
+        Subclasses may override to apply additional config changes.
+        """
+        spec_cfg = self.speculative_config
+        if spec_cfg.moe_backend is not None:
+            return replace(
+                self.vllm_config,
+                kernel_config=replace(
+                    self.vllm_config.kernel_config,
+                    moe_backend=spec_cfg.moe_backend,
+                ),
+            )
+        return self.vllm_config
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
@@ -1261,9 +1276,10 @@ class SpecDecodeBaseProposer:
         """
         from vllm.compilation.backends import set_model_tag
 
+        draft_vllm_config = self._create_draft_vllm_config()
         with set_model_tag("eagle_head"):
             model = get_model(
-                vllm_config=self.vllm_config,
+                vllm_config=draft_vllm_config,
                 model_config=self.speculative_config.draft_model_config,
                 load_config=self.speculative_config.draft_load_config,
             )
@@ -1436,6 +1452,8 @@ class SpecDecodeBaseProposer:
                 )
             elif (
                 hasattr(target_language_model, "lm_head")
+                and hasattr(target_language_model.lm_head, "weight")
+                and hasattr(self.model.lm_head, "weight")
                 and isinstance(target_language_model.lm_head.weight, torch.Tensor)
                 and isinstance(self.model.lm_head.weight, torch.Tensor)
                 # TODO: Offload to CPU for comparison to avoid extra GPU memory
