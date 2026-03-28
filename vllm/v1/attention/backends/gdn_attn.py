@@ -319,7 +319,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         else:
             has_initial_state = None
 
-        if non_spec_query_start_loc_cpu is not None:
+        # Chunk prefill only; skip pure decode to avoid wasted CPU/HtoD/cache work.
+        if num_prefills > 0:
             # NOTE:
             # Pre-compute chunk_indices on CPU (avoiding GPU->CPU sync from
             # .tolist()) and register the result in tensor_cache under the
