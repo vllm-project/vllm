@@ -41,6 +41,12 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.steering import (
+    DEFAULT_HOOK_POINT,
+    HOOK_POINT_TABLE_ATTR,
+    HOOK_POINT_VECTOR_ATTR,
+    SteeringHookPoint,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -241,25 +247,29 @@ class Gemma3DecoderLayer(nn.Module):
         prefix: str = "",
         max_steering_tokens: int = 1,
         max_steering_configs: int = 0,
+        active_hook_points: frozenset[SteeringHookPoint] = frozenset(
+            {DEFAULT_HOOK_POINT}
+        ),
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         self.layer_idx = extract_layer_index(prefix)
 
-        # Activation steering: vector buffer updated via .copy_() between
-        # forward passes, compatible with torch.compile and CUDA graphs.
-        self.register_buffer(
-            "steering_vector",
-            torch.zeros(1, config.hidden_size),
-            persistent=False,
-        )
-        # Per-layer steering table: row 0=zeros sentinel, row 1=global,
-        # rows 2+=global+per_request combined vectors.
-        self.register_buffer(
-            "steering_table",
-            torch.zeros(max_steering_configs + 2, config.hidden_size),
-            persistent=False,
-        )
+        # Activation steering buffers, one pair per active hook point.
+        # Using hasattr() checks in forward() provides trace-time constants
+        # for torch.compile, avoiding dynamic branching.
+        self._active_hook_points = active_hook_points
+        for hp in active_hook_points:
+            self.register_buffer(
+                HOOK_POINT_VECTOR_ATTR[hp],
+                torch.zeros(1, config.hidden_size),
+                persistent=False,
+            )
+            self.register_buffer(
+                HOOK_POINT_TABLE_ATTR[hp],
+                torch.zeros(max_steering_configs + 2, config.hidden_size),
+                persistent=False,
+            )
         # Shared steering index mapping token positions to table rows.
         # Placeholder — replaced by a shared tensor during model init.
         self.register_buffer(
@@ -311,6 +321,13 @@ class Gemma3DecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        # Hook: pre_attn — steer residual before attention
+        if hasattr(self, "steering_table_pre_attn"):
+            residual = torch.ops.vllm.apply_steering(
+                residual, self.steering_table_pre_attn, self.steering_index
+            )
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -318,19 +335,35 @@ class Gemma3DecoderLayer(nn.Module):
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
 
+        # Hook: post_attn — steer residual after attention
+        if hasattr(self, "steering_table_post_attn"):
+            residual = torch.ops.vllm.apply_steering(
+                residual, self.steering_table_post_attn, self.steering_index
+            )
+
         hidden_states, residual = self.pre_feedforward_layernorm(
             hidden_states, residual
         )
         hidden_states = self.mlp(hidden_states)
+
+        # Hook: post_mlp_pre_ln — steer residual after MLP, before post_ff_ln
+        if hasattr(self, "steering_table_post_mlp_pre_ln"):
+            residual = torch.ops.vllm.apply_steering(
+                residual,
+                self.steering_table_post_mlp_pre_ln,
+                self.steering_index,
+            )
+
         hidden_states = self.post_feedforward_layernorm(hidden_states)
-        # Decode-only activation steering applied directly to the residual
-        # stream (post-MLP, pre-layernorm) to match the training-time
-        # injection point.  The custom op is a splitting point for
-        # torch.compile so the real Python runs at runtime, reading
-        # the live mask buffer (not a baked constant).
-        residual = torch.ops.vllm.apply_steering(
-            residual, self.steering_table, self.steering_index
-        )
+
+        # Hook: post_mlp_post_ln — steer residual after post_ff_ln
+        if hasattr(self, "steering_table_post_mlp_post_ln"):
+            residual = torch.ops.vllm.apply_steering(
+                residual,
+                self.steering_table_post_mlp_post_ln,
+                self.steering_index,
+            )
+
         return hidden_states, residual
 
 
@@ -350,6 +383,11 @@ class Gemma3Model(nn.Module):
         max_steering_configs = (
             steering_config.max_steering_configs if steering_config else 0
         )
+        active_hook_points: frozenset[SteeringHookPoint] = (
+            steering_config.steering_hook_points
+            if steering_config
+            else frozenset({DEFAULT_HOOK_POINT})
+        )
 
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
@@ -366,6 +404,7 @@ class Gemma3Model(nn.Module):
                 prefix=prefix,
                 max_steering_tokens=max_tokens,
                 max_steering_configs=max_steering_configs,
+                active_hook_points=active_hook_points,
             ),
             prefix=f"{prefix}.layers",
         )
