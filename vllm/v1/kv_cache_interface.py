@@ -82,6 +82,16 @@ class KVCacheSpec:
         """
         raise NotImplementedError
 
+    @property
+    def scale_bytes_per_block(self) -> int:
+        """Extra bytes for per-token scales. Defaults to 0."""
+        return 0
+
+    @property
+    def total_bytes_per_block(self) -> int:
+        """Total allocation per block: data + scales."""
+        return self.page_size_bytes + self.scale_bytes_per_block
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
         The maximum possible memory usage of this KV cache in bytes.

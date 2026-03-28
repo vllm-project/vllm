@@ -1111,24 +1111,15 @@ def get_kv_cache_config_from_groups(
         # different hidden size. Allocate different amount of memory for each
         # layer based on its hidden size.
         spec = kv_cache_groups[0].kv_cache_spec
-        # Sum page_size_bytes + scale_bytes for per-token quant modes.
         alloc_per_block = sum(
-            s.page_size_bytes + getattr(s, "scale_bytes_per_block", 0)
-            for s in spec.kv_cache_specs.values()
+            s.total_bytes_per_block for s in spec.kv_cache_specs.values()
         )
         num_blocks = available_memory // alloc_per_block
         num_blocks = may_override_num_blocks(vllm_config, num_blocks)
         per_layer_specs = spec.kv_cache_specs
         kv_cache_tensors = [
             KVCacheTensor(
-                size=(
-                    per_layer_specs[layer_name].page_size_bytes
-                    + getattr(
-                        per_layer_specs[layer_name],
-                        "scale_bytes_per_block",
-                        0,
-                    )
-                )
+                size=per_layer_specs[layer_name].total_bytes_per_block
                 * num_blocks,
                 shared_by=[layer_name],
             )
@@ -1145,10 +1136,8 @@ def get_kv_cache_config_from_groups(
         # full.1, sw.2: share another Tensor with size=available_memory//2
         group_size = max(len(group.layer_names) for group in kv_cache_groups)
 
-        # Include scale_bytes_per_block for per-token quant modes.
         effective_page_size = max(
-            group.kv_cache_spec.page_size_bytes
-            + getattr(group.kv_cache_spec, "scale_bytes_per_block", 0)
+            group.kv_cache_spec.total_bytes_per_block
             for group in kv_cache_groups
         )
         assert group_size > 0, "group_size must be greater than 0"

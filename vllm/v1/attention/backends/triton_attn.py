@@ -389,7 +389,7 @@ class TritonAttentionImpl(AttentionImpl):
         from vllm.utils.torch_utils import get_dtype_size
 
         num_blocks, _, kv_half = kv_cache.shape
-        if self.kv_quant_mode == KVQuantMode.FP8_PER_TOKEN:
+        if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN:
             dtype = current_platform.fp8_dtype()
         else:
             dtype = torch.int8
@@ -501,6 +501,12 @@ class TritonAttentionImpl(AttentionImpl):
         self.use_alibi_sqrt = use_alibi_sqrt
         self.supports_quant_query_input = current_platform.is_cuda()
 
+        self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
+        self._is_per_token_quant = self._kv_quant_mode in (
+            KVQuantMode.INT8_PER_TOKEN,
+            KVQuantMode.FP8_PER_TOKEN,
+        )
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -565,10 +571,7 @@ class TritonAttentionImpl(AttentionImpl):
 
         # Per-token quantized KV cache: unpack data and scale views
         # from the flat packed tensor on first call, then reuse.
-        if self.kv_quant_mode in (
-            KVQuantMode.INT8_PER_TOKEN,
-            KVQuantMode.FP8_PER_TOKEN,
-        ):
+        if self._is_per_token_quant:
             if not self._packed_views_ready:
                 self._unpack_kv_cache(kv_cache)
             key_cache = self._key_data
@@ -580,7 +583,7 @@ class TritonAttentionImpl(AttentionImpl):
         # FP8 per-tensor / auto path (original flow).
         else:
             key_cache, value_cache = kv_cache.unbind(1)
-            if self.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR:
+            if self._kv_quant_mode == KVQuantMode.FP8_PER_TENSOR:
                 if key_cache.dtype != self.fp8_dtype:
                     key_cache = key_cache.view(self.fp8_dtype)
                     value_cache = value_cache.view(self.fp8_dtype)
@@ -637,7 +640,7 @@ class TritonAttentionImpl(AttentionImpl):
             sinks=self.sinks,
             output_scale=output_scale,
             mm_prefix_range=mm_prefix_range_tensor,
-            kv_quant_mode=self.kv_quant_mode,
+            kv_quant_mode=self._kv_quant_mode,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
         )
@@ -664,7 +667,7 @@ class TritonAttentionImpl(AttentionImpl):
             layer: The attention layer
         """
         # Quantized KV cache is not supported for encoder attention.
-        if self.kv_quant_mode != KVQuantMode.NONE:
+        if self._kv_quant_mode != KVQuantMode.NONE:
             raise NotImplementedError(
                 "quantized KV cache is not supported for encoder attention"
             )
@@ -703,11 +706,7 @@ class TritonAttentionImpl(AttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
         # Reshape the input keys and values and store them in the cache.
-        quant_mode = self.kv_quant_mode
-        if quant_mode in (
-            KVQuantMode.INT8_PER_TOKEN,
-            KVQuantMode.FP8_PER_TOKEN,
-        ):
+        if self._is_per_token_quant:
             if not self._packed_views_ready:
                 self._unpack_kv_cache(kv_cache)
             triton_reshape_and_cache_flash_per_token_quant(
@@ -722,7 +721,7 @@ class TritonAttentionImpl(AttentionImpl):
             return
         # For decoder and cross-attention, use KV cache as before.
         key_cache, value_cache = kv_cache.unbind(1)
-        if quant_mode == KVQuantMode.FP8_PER_TENSOR:
+        if self._kv_quant_mode == KVQuantMode.FP8_PER_TENSOR:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
         triton_reshape_and_cache_flash(
@@ -737,10 +736,7 @@ class TritonAttentionImpl(AttentionImpl):
         )
 
     def fused_rope_kvcache_supported(self):
-        if self.kv_quant_mode in (
-            KVQuantMode.INT8_PER_TOKEN,
-            KVQuantMode.FP8_PER_TOKEN,
-        ):
+        if self._is_per_token_quant:
             return False
         return rocm_aiter_ops.is_enabled()
 
@@ -759,7 +755,7 @@ class TritonAttentionImpl(AttentionImpl):
         key_cache, value_cache = kv_cache.unbind(1)
         flash_layout = True
 
-        is_fp8_kv_cache = self.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+        is_fp8_kv_cache = self._kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
         if is_fp8_kv_cache:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
