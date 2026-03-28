@@ -101,6 +101,18 @@ class Request:
         if sampling_params is not None and sampling_params.steering_vectors:
             self.steering_vectors = sampling_params.steering_vectors
 
+        # Per-request hook-point-aware steering vectors.
+        self.steering_hook_vectors: (
+            dict[str, dict[int, list[float]]] | None
+        ) = None
+        if (
+            sampling_params is not None
+            and sampling_params.steering_hook_vectors
+        ):
+            self.steering_hook_vectors = (
+                sampling_params.steering_hook_vectors
+            )
+
         if pooling_params is not None:
             # Pooling models.
             self.max_tokens = 1
@@ -252,11 +264,29 @@ class Request:
     @cached_property
     def steering_config_hash(self) -> int:
         """0 if no per-request steering, else deterministic hash of vectors."""
-        if not self.steering_vectors:
+        if not self.steering_vectors and not self.steering_hook_vectors:
             return 0
-        data = str(sorted(self.steering_vectors.items())).encode()
+        # Build a canonical representation that includes all hook vectors.
+        canonical: dict[str, list[tuple[int, list[float]]]] = {}
+        if self.steering_vectors:
+            canonical["post_mlp_pre_ln"] = sorted(
+                self.steering_vectors.items()
+            )
+        if self.steering_hook_vectors:
+            for hp, vecs in sorted(self.steering_hook_vectors.items()):
+                if hp in canonical:
+                    # steering_vectors already set this hook point -- merge
+                    existing = dict(canonical[hp])
+                    existing.update(vecs)
+                    canonical[hp] = sorted(existing.items())
+                else:
+                    canonical[hp] = sorted(vecs.items())
+        data = str(sorted(canonical.items())).encode()
         # Mask to fit in np.int64 (used by InputBatch tracking arrays)
-        return int(hashlib.sha256(data).hexdigest()[:16], 16) & 0x7FFFFFFFFFFFFFFF
+        return (
+            int(hashlib.sha256(data).hexdigest()[:16], 16)
+            & 0x7FFFFFFFFFFFFFFF
+        )
 
     def get_skip_reading_prefix_cache(self) -> bool:
         if (

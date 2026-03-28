@@ -13,6 +13,7 @@ from vllm.entrypoints.serve.steering.protocol import SetSteeringRequest
 from vllm.exceptions import SteeringVectorError
 from vllm.logger import init_logger
 from vllm.model_executor.layers.steering import DEFAULT_HOOK_POINT
+from vllm.model_executor.layers.steering import VALID_HOOK_POINT_NAMES
 
 logger = init_logger(__name__)
 
@@ -28,6 +29,23 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
+def _scale_layer_vectors(
+    layer_vecs: dict[int, list[float]],
+    scales: dict[int, float] | None,
+) -> dict[int, list[float]]:
+    """Pre-multiply per-layer scale factors into vectors."""
+    scaled: dict[int, list[float]] = {}
+    for layer_idx, vec in layer_vecs.items():
+        scale = 1.0
+        if scales and layer_idx in scales:
+            scale = scales[layer_idx]
+        if scale != 1.0:
+            scaled[layer_idx] = [v * scale for v in vec]
+        else:
+            scaled[layer_idx] = vec
+    return scaled
+
+
 @router.post("/v1/steering/set")
 async def set_steering(
     request: SetSteeringRequest,
@@ -35,22 +53,60 @@ async def set_steering(
 ) -> JSONResponse:
     """Set activation steering vectors on decoder layers.
 
-    Vectors are applied to the residual stream after the MLP in each
-    specified layer.  Only the listed layers are modified; other layers
-    keep their current state.  Call ``POST /v1/steering/clear`` first
-    to zero everything if a full replacement is intended.
+    Vectors can be provided via the ``vectors`` field (shorthand for
+    the default ``post_mlp_pre_ln`` hook point) and/or via the
+    ``hook_vectors`` field which maps hook point names to layer-vector
+    dicts.  Both fields are merged; ``hook_vectors`` entries for
+    ``post_mlp_pre_ln`` are merged with ``vectors`` (``hook_vectors``
+    wins on conflict).
 
     When ``replace`` is ``True``, all existing vectors are cleared
-    atomically before the new ones are applied — no generation can
-    observe empty steering in between.
+    atomically before the new ones are applied.
     """
     engine = engine_client(raw_request)
 
-    if not request.vectors:
+    # Validate hook_vectors keys up front.
+    if request.hook_vectors:
+        invalid_hooks = (
+            set(request.hook_vectors.keys()) - VALID_HOOK_POINT_NAMES
+        )
+        if invalid_hooks:
+            return JSONResponse(
+                content={
+                    "error": (
+                        f"Invalid hook point name(s): "
+                        f"{sorted(invalid_hooks)}. "
+                        f"Valid values: "
+                        f"{sorted(VALID_HOOK_POINT_NAMES)}"
+                    ),
+                },
+                status_code=HTTPStatus.BAD_REQUEST.value,
+            )
+
+    # Build hook-point-aware vector dict.
+    all_hook_vectors: dict[str, dict[int, list[float]]] = {}
+
+    # Legacy vectors field -> post_mlp_pre_ln
+    if request.vectors:
+        all_hook_vectors["post_mlp_pre_ln"] = _scale_layer_vectors(
+            request.vectors, request.scales
+        )
+
+    # Explicit hook_vectors
+    if request.hook_vectors:
+        for hook_name, layer_vecs in request.hook_vectors.items():
+            scaled_hv = _scale_layer_vectors(layer_vecs, request.scales)
+            if hook_name in all_hook_vectors:
+                all_hook_vectors[hook_name].update(scaled_hv)
+            else:
+                all_hook_vectors[hook_name] = scaled_hv
+
+    if not all_hook_vectors:
         return JSONResponse(
             content={
                 "error": (
-                    "No vectors provided. Include at least one layer index and vector."
+                    "No vectors provided. Include at least one layer "
+                    "index and vector via 'vectors' or 'hook_vectors'."
                 ),
             },
             status_code=HTTPStatus.BAD_REQUEST.value,
@@ -76,7 +132,7 @@ async def set_steering(
 
     try:
         async with _steering_lock:
-            # Phase 1 — validate on every worker without mutating
+            # Phase 1 -- validate on every worker without mutating
             # buffers.  This prevents pipeline-parallel workers from
             # partially applying an update when a later stage would
             # reject it.
@@ -90,10 +146,13 @@ async def set_steering(
             for per_worker in results:
                 validated_layers.update(per_worker)
 
+            # Collect all requested layers across all hook points.
+            requested_layers: set[int] = set()
+            for layer_vecs in all_hook_vectors.values():
+                requested_layers.update(layer_vecs.keys())
+
             # Reject requests that reference layers not owned by any
-            # worker — a typo like layer 999 must not be silently
-            # ignored while the valid layers succeed.
-            requested_layers = set(scaled.keys())
+            # worker.
             missing = requested_layers - validated_layers
             if missing:
                 return JSONResponse(
@@ -132,6 +191,7 @@ async def set_steering(
         return JSONResponse(
             content={
                 "status": "ok",
+                "hook_points": sorted(all_hook_vectors.keys()),
                 "layers_updated": sorted(validated_layers),
             },
         )
