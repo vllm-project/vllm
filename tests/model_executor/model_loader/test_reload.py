@@ -96,39 +96,46 @@ def test_get_numel_loaded():
     assert ret == "value"
 
 
-@pytest.mark.parametrize("tp_size", [1])
+@pytest.mark.parametrize(
+    "tp_size", [pytest.param(1), pytest.param(2, marks=[pytest.mark.slow_test])]
+)
 @pytest.mark.parametrize(
     "base_model,mul_model,add_model",
     [
-        (
+        pytest.param(
             "Qwen/Qwen3-0.6B",
             "inference-optimization/Qwen3-0.6B-debug-multiply",
             "inference-optimization/Qwen3-0.6B-debug-add",
+            marks=[pytest.mark.slow_test],
         ),
-        (
+        pytest.param(
             "inference-optimization/Qwen3-0.6B-FP8_BLOCK",
             "inference-optimization/Qwen3-0.6B-debug-multiply-FP8_BLOCK",
             "inference-optimization/Qwen3-0.6B-debug-add-FP8_BLOCK",
+            marks=[pytest.mark.slow_test],
         ),
-        (
+        pytest.param(
             "inference-optimization/Qwen3-0.6B-W4A16-G128",
             "inference-optimization/Qwen3-0.6B-debug-multiply-W4A16-G128",
             "inference-optimization/Qwen3-0.6B-debug-add-W4A16-G128",
+            marks=[pytest.mark.slow_test],
         ),
-        (
+        pytest.param(
             "inference-optimization/DeepSeek-V3-debug-empty",
             "inference-optimization/DeepSeek-V3-debug-multiply",
             "inference-optimization/DeepSeek-V3-debug-add",
+            marks=[pytest.mark.slow_test],
         ),
-        (
+        pytest.param(
             "inference-optimization/DeepSeek-V3-debug-empty-FP8_DYNAMIC",
             "inference-optimization/DeepSeek-V3-debug-multiply-FP8_DYNAMIC",
             "inference-optimization/DeepSeek-V3-debug-add-FP8_DYNAMIC",
         ),
-        (
+        pytest.param(
             "inference-optimization/DeepSeek-V3-debug-empty-NVFP4A16",
             "inference-optimization/DeepSeek-V3-debug-multiply-NVFP4A16",
             "inference-optimization/DeepSeek-V3-debug-add-NVFP4A16",
+            marks=[pytest.mark.slow_test, pytest.mark.xfail(reason="Bug, see #38439")],
         ),
     ],
 )
@@ -156,34 +163,42 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         assert add_perp < mul_perp
 
 
-@pytest.mark.parametrize("tp_size", [1])
+@pytest.mark.parametrize(
+    "tp_size", [pytest.param(1), pytest.param(2, marks=[pytest.mark.slow_test])]
+)
 @pytest.mark.parametrize(
     "base_model,mul_model,add_model,quantization",
     [
-        (
+        pytest.param(
             "Qwen/Qwen3-0.6B",
             "inference-optimization/Qwen3-0.6B-debug-multiply",
             "inference-optimization/Qwen3-0.6B-debug-add",
             "fp8",
+            marks=[pytest.mark.slow_test],
         ),
-        (
+        pytest.param(
             "inference-optimization/DeepSeek-V3-debug-empty",
             "inference-optimization/DeepSeek-V3-debug-multiply",
             "inference-optimization/DeepSeek-V3-debug-add",
             "fp8",
         ),
-        (
+        pytest.param(
             "Qwen/Qwen3-0.6B",
             "inference-optimization/Qwen3-0.6B-debug-multiply",
             "inference-optimization/Qwen3-0.6B-debug-add",
             "mxfp8",
+            marks=[pytest.mark.slow_test],
         ),
-        # (  TODO: support mxfp4 & mla
-        #     "inference-optimization/DeepSeek-V3-debug-empty",
-        #     "inference-optimization/DeepSeek-V3-debug-multiply",
-        #     "inference-optimization/DeepSeek-V3-debug-add",
-        #     "mxfp8",
-        # ),
+        pytest.param(
+            "inference-optimization/DeepSeek-V3-debug-empty",
+            "inference-optimization/DeepSeek-V3-debug-multiply",
+            "inference-optimization/DeepSeek-V3-debug-add",
+            "mxfp8",
+            marks=[
+                pytest.mark.slow_test,
+                pytest.mark.xfail(reason="mxfp4 & mla is not supported yet"),
+            ],
+        ),
     ],
 )
 def test_online_quantize_reload(
