@@ -135,7 +135,7 @@ def test_get_numel_loaded():
             "inference-optimization/DeepSeek-V3-debug-empty-NVFP4A16",
             "inference-optimization/DeepSeek-V3-debug-multiply-NVFP4A16",
             "inference-optimization/DeepSeek-V3-debug-add-NVFP4A16",
-            marks=[pytest.mark.slow_test, pytest.mark.xfail(reason="Bug, see #38439")],
+            marks=[pytest.mark.slow_test],
         ),
     ],
 )
