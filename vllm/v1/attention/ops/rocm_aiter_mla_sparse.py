@@ -462,7 +462,7 @@ def rocm_fp8_mqa_logits(
 
 def rocm_aiter_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
-    k_cache_prefix: str,
+    k_cache_prefix: "LayerNameType",
     kv_cache: torch.Tensor,
     q_fp8: torch.Tensor,
     k: torch.Tensor,
@@ -489,7 +489,7 @@ def rocm_aiter_sparse_attn_indexer_fake(
 
 def rocm_aiter_sparse_attn_indexer(
     hidden_states: torch.Tensor,
-    k_cache_prefix: str,
+    k_cache_prefix: "LayerNameType",
     kv_cache: torch.Tensor,
     q_fp8: torch.Tensor,
     k: torch.Tensor,
@@ -505,6 +505,8 @@ def rocm_aiter_sparse_attn_indexer(
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
+    from vllm.utils.torch_utils import _resolve_layer_name
+    k_cache_prefix = _resolve_layer_name(k_cache_prefix)
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         return rocm_aiter_sparse_attn_indexer_fake(

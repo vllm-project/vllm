@@ -62,8 +62,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen3_5 import (
-    Qwen3_5Config,
+from vllm.utils.torch_utils import _encode_layer_name
+from vllm.transformers_utils.configs.qwen3_5 import (    Qwen3_5Config,
     Qwen3_5TextConfig,
 )
 from vllm.transformers_utils.configs.qwen3_5_moe import (
@@ -225,7 +225,7 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
                 hidden_states,
                 sum(self.in_proj_qkvz.output_sizes) // self.tp_size,
                 sum(self.in_proj_ba.output_sizes) // self.tp_size,
-                self.prefix,
+                _encode_layer_name(self.prefix),
             )
             qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
             z_size = self.value_dim // self.tp_size
@@ -252,7 +252,7 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             b,
             a,
             core_attn_out,
-            self.prefix,
+            _encode_layer_name(self.prefix),
         )
 
         # ============================================================
