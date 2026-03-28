@@ -296,25 +296,16 @@ class Attention(nn.Module, AttentionLayerBase):
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
         if attn_backend is None:
-            if kv_cache_dtype == "turboquant":
-                # Use Triton attention backend for TurboQuant — it's pure
-                # Python/Triton, making it easy to iterate toward packed
-                # storage in Phase 2.
-                from vllm.v1.attention.backends.triton_attn import (
-                    TritonAttentionBackend,
-                )
-                self.attn_backend = TritonAttentionBackend
-            else:
-                self.attn_backend = get_attn_backend(
-                    head_size,
-                    dtype,
-                    backend_kv_cache_dtype,
-                    use_mla=False,
-                    has_sink=self.has_sink,
-                    use_mm_prefix=self.use_mm_prefix,
-                    use_per_head_quant_scales=use_per_head_quant_scales,
-                    attn_type=attn_type,
-                )
+            self.attn_backend = get_attn_backend(
+                head_size,
+                dtype,
+                backend_kv_cache_dtype,
+                use_mla=False,
+                has_sink=self.has_sink,
+                use_mm_prefix=self.use_mm_prefix,
+                use_per_head_quant_scales=use_per_head_quant_scales,
+                attn_type=attn_type,
+            )
         else:
             self.attn_backend = attn_backend
         backend_supports_alibi_sqrt = self.attn_backend.supports_alibi_sqrt()
@@ -395,12 +386,14 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # Fallback: if user only passed --kv-cache-dtype turboquant
         # without --quantization, create default TurboQuantConfig
-        if (kv_cache_dtype == "turboquant"
-                and not hasattr(self, "_turboquant_config")):
+        if kv_cache_dtype == "turboquant" and not hasattr(self, "_turboquant_config"):
             from vllm.model_executor.layers.quantization.turboquant import (
                 TurboQuantConfig,
             )
-            self._turboquant_config = TurboQuantConfig()
+
+            self._turboquant_config = TurboQuantConfig(
+                bit_width=4, outlier_fraction=0.15
+            )
 
         # Initialize TurboQuantState eagerly (not in forward) to avoid
         # torch.compile graph breaks from torch.Generator in rotation matrix
@@ -409,10 +402,14 @@ class Attention(nn.Module, AttentionLayerBase):
                 TurboQuantState,
             )
             from vllm.model_executor.models.utils import extract_layer_index
+
             layer_idx = extract_layer_index(prefix)
             # Initialize on CUDA if available, CPU otherwise
-            init_device = torch.device("cuda") if torch.cuda.is_available() \
+            init_device = (
+                torch.device("cuda")
+                if torch.cuda.is_available()
                 else torch.device("cpu")
+            )
             self._tq_k_state = TurboQuantState(
                 config=self._turboquant_config,
                 head_size=head_size,
@@ -425,6 +422,8 @@ class Attention(nn.Module, AttentionLayerBase):
                 layer_idx=layer_idx + 10000,
                 device=init_device,
             )
+            # Calibrate outlier channels on first batch
+            self._tq_needs_calibration = self._turboquant_config.outlier_fraction > 0
 
         # for attn backends supporting query quantization
         self.query_quant = None
@@ -546,14 +545,6 @@ class Attention(nn.Module, AttentionLayerBase):
                     query, key, value, self.layer_name
                 )
 
-    def _apply_turboquant(self, key, value):
-        """Apply TurboQuant quantize->dequantize on K/V tensors."""
-        from vllm.model_executor.layers.quantization.turboquant import (
-            turboquant_pre_dequant,
-        )
-        return turboquant_pre_dequant(
-            key, value, self._tq_k_state, self._tq_v_state)
-
     def calc_kv_scales(self, query, key, value):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
         self._k_scale.copy_(torch.abs(key).max() / self.k_range)
@@ -595,17 +586,23 @@ class Attention(nn.Module, AttentionLayerBase):
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
 
-        # TurboQuant: packed indices + norm per slot for real compression
-        # Per (token, head): ceil(head_size * bits / 8) bytes indices + 2 bytes norm
-        # At 4-bit: 64 + 2 = 66 bytes vs 256 bf16 = 3.9x compression
-        # At 3-bit: 48 + 2 = 50 bytes vs 256 bf16 = 5.1x compression
-        # At 2-bit: 32 + 2 = 34 bytes vs 256 bf16 = 7.5x compression
+        # TurboQuant: packed uint8 storage with outlier-aware layout.
+        # Slot = [outlier_bf16_bytes | packed_tq_indices | norm_fp16_bytes]
         if self.kv_cache_dtype == "turboquant":
             import math
-            bits = int(self._turboquant_config.bit_width)
-            packed_indices_bytes = math.ceil(self.head_size * bits / 8)
-            norm_bytes = 2  # float16 norm
-            slot_bytes = packed_indices_bytes + norm_bytes
+
+            cfg = self._turboquant_config
+            n_outliers = (
+                max(1, int(self.head_size * cfg.outlier_fraction))
+                if cfg.outlier_fraction > 0
+                else 0
+            )
+            normal_size = self.head_size - n_outliers
+            bits = int(cfg.bit_width)
+            outlier_bytes = n_outliers * 2  # bf16
+            packed_bytes = math.ceil(normal_size * bits / 8)
+            norm_bytes = 2  # fp16
+            slot_bytes = outlier_bytes + packed_bytes + norm_bytes
             return FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
