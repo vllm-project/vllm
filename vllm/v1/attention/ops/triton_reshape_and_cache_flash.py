@@ -114,14 +114,17 @@ def reshape_and_cache_kernel_flash(
 # ---------------------------------------------------------------------------
 # Per-token dynamic quantization kernel
 # Grid: (num_tokens,)
-# Each instance handles one token (all KV heads):
-#   1. Computes scale = absmax(all heads) / QUANT_MAX  (one scale per token)
-#   2. Quantizes and writes all heads to kv_cache
-#   3. Writes the single scale to k_scale_cache / v_scale_cache
+# Each program handles one token across all KV heads in a single pass:
+#   1. Loads K (and V) for all heads as a flat vector
+#   2. Computes absmax across all heads → scale = absmax / QUANT_MAX
+#   3. Quantizes and stores the data + scale
 #
-# The kernel is parametrised by QUANT_MAX / QUANT_MIN so that the same
-# code path works for int8 (±127/128) and, in the future, fp8 or other
-# low-bitwidth formats with different representable ranges.
+# All heads are loaded once (not twice) by using a flat 1D index that
+# maps to (head_idx, dim_idx).  This halves global memory reads
+# compared to a two-pass approach (absmax pass + quantize pass).
+#
+# Parametrised by QUANT_MAX / QUANT_MIN so the same code path works
+# for int8 (±127/128), fp8_e4m3 (±448), and other formats.
 # ---------------------------------------------------------------------------
 @triton.jit
 def _reshape_cache_per_token(
@@ -149,6 +152,8 @@ def _reshape_cache_per_token(
     head_size_v: tl.constexpr,
     head_size_padded: tl.constexpr,  # >= max(head_size, head_size_v), power-of-2
     NUM_KV_HEADS: tl.constexpr = 1,
+    FLAT_K_SIZE: tl.constexpr = 128,  # next_power_of_2(NUM_KV_HEADS * head_size_padded)
+    FLAT_V_SIZE: tl.constexpr = 128,  # next_power_of_2(NUM_KV_HEADS * head_size_padded)
     QUANT_MAX: tl.constexpr = 127.0,  # e.g. 127 for int8, 448 for fp8_e4m3
     QUANT_MIN: tl.constexpr = -128.0,  # e.g. -128 for int8, -448 for fp8_e4m3
 ):
@@ -161,83 +166,60 @@ def _reshape_cache_per_token(
     blk = slot // block_size
     slot_in_blk = slot % block_size
 
-    offs = tl.arange(0, head_size_padded)
+    # ---- Key: single-pass load → absmax → quantize → store ----------------
+    # Load all heads as a flat vector: offs maps to (head, dim).
+    k_offs = tl.arange(0, FLAT_K_SIZE)
+    k_head = k_offs // head_size_padded
+    k_dim = k_offs % head_size_padded
+    k_mask = (k_head < NUM_KV_HEADS) & (k_dim < head_size)
 
-    # ---- Key: compute absmax across ALL heads, then quantize each ----------
-    k_mask = offs < head_size
-    k_global_absmax = tl.zeros([], dtype=tl.float32)
-    for h in tl.static_range(NUM_KV_HEADS):
-        k = tl.load(
-            key_ptr + tok * stride_key_tok + h * stride_key_head + offs,
-            mask=k_mask,
-            other=0.0,
-        ).to(tl.float32)
-        k_global_absmax = tl.maximum(
-            k_global_absmax,
-            tl.max(tl.abs(tl.where(k_mask, k, 0.0)), axis=0),
-        )
-    k_scale = tl.maximum(k_global_absmax / QUANT_MAX, 1e-6)
+    k_all = tl.load(
+        key_ptr + tok * stride_key_tok + k_head * stride_key_head + k_dim,
+        mask=k_mask,
+        other=0.0,
+    ).to(tl.float32)
 
-    # Store the single per-token scale.
+    k_scale = tl.maximum(tl.max(tl.abs(tl.where(k_mask, k_all, 0.0))) / QUANT_MAX, 1e-6)
+
+    tl.store(k_scale_cache_ptr + blk * stride_ks_blk + slot_in_blk, k_scale)
+
+    k_q = tl.clamp(k_all / k_scale, QUANT_MIN, QUANT_MAX)
     tl.store(
-        k_scale_cache_ptr + blk * stride_ks_blk + slot_in_blk,
-        k_scale,
+        key_cache_ptr
+        + blk * stride_kc_blk
+        + slot_in_blk * stride_kc_slot
+        + k_head * stride_kc_head
+        + k_dim,
+        k_q,
+        mask=k_mask,
     )
 
-    # Quantize each head with the shared scale.
-    for h in tl.static_range(NUM_KV_HEADS):
-        k = tl.load(
-            key_ptr + tok * stride_key_tok + h * stride_key_head + offs,
-            mask=k_mask,
-            other=0.0,
-        ).to(tl.float32)
-        k_q = tl.clamp(k / k_scale, QUANT_MIN, QUANT_MAX)
-        tl.store(
-            key_cache_ptr
-            + blk * stride_kc_blk
-            + slot_in_blk * stride_kc_slot
-            + h * stride_kc_head
-            + offs,
-            k_q,
-            mask=k_mask,
-        )
+    # ---- Value: same single-pass approach ----------------------------------
+    v_offs = tl.arange(0, FLAT_V_SIZE)
+    v_head = v_offs // head_size_padded
+    v_dim = v_offs % head_size_padded
+    v_mask = (v_head < NUM_KV_HEADS) & (v_dim < head_size_v)
 
-    # ---- Value: same approach ----------------------------------------------
-    v_mask = offs < head_size_v
-    v_global_absmax = tl.zeros([], dtype=tl.float32)
-    for h in tl.static_range(NUM_KV_HEADS):
-        v = tl.load(
-            value_ptr + tok * stride_val_tok + h * stride_val_head + offs,
-            mask=v_mask,
-            other=0.0,
-        ).to(tl.float32)
-        v_global_absmax = tl.maximum(
-            v_global_absmax,
-            tl.max(tl.abs(tl.where(v_mask, v, 0.0)), axis=0),
-        )
-    v_scale = tl.maximum(v_global_absmax / QUANT_MAX, 1e-6)
+    v_all = tl.load(
+        value_ptr + tok * stride_val_tok + v_head * stride_val_head + v_dim,
+        mask=v_mask,
+        other=0.0,
+    ).to(tl.float32)
 
+    v_scale = tl.maximum(tl.max(tl.abs(tl.where(v_mask, v_all, 0.0))) / QUANT_MAX, 1e-6)
+
+    tl.store(v_scale_cache_ptr + blk * stride_vs_blk + slot_in_blk, v_scale)
+
+    v_q = tl.clamp(v_all / v_scale, QUANT_MIN, QUANT_MAX)
     tl.store(
-        v_scale_cache_ptr + blk * stride_vs_blk + slot_in_blk,
-        v_scale,
+        value_cache_ptr
+        + blk * stride_vc_blk
+        + slot_in_blk * stride_vc_slot
+        + v_head * stride_vc_head
+        + v_dim,
+        v_q,
+        mask=v_mask,
     )
-
-    for h in tl.static_range(NUM_KV_HEADS):
-        v = tl.load(
-            value_ptr + tok * stride_val_tok + h * stride_val_head + offs,
-            mask=v_mask,
-            other=0.0,
-        ).to(tl.float32)
-        v_q = tl.clamp(v / v_scale, QUANT_MIN, QUANT_MAX)
-        tl.store(
-            value_cache_ptr
-            + blk * stride_vc_blk
-            + slot_in_blk * stride_vc_slot
-            + h * stride_vc_head
-            + offs,
-            v_q,
-            mask=v_mask,
-        )
 
 
 # Mapping from cache torch dtype to (QUANT_MAX, QUANT_MIN) for the
@@ -283,12 +265,16 @@ def triton_reshape_and_cache_flash_per_token_quant(
     head_size_v = value.shape[2]
     head_size_padded = triton.next_power_of_2(max(head_size, head_size_v))
 
+    # Flat vector sizes for single-pass load of all heads.
+    flat_k = triton.next_power_of_2(num_kv_heads * head_size_padded)
+    flat_v = triton.next_power_of_2(num_kv_heads * head_size_padded)
+
     block_size = key_cache.shape[1]
 
     if current_platform.is_rocm() or current_platform.is_xpu():
         num_warps = 4
     else:
-        num_warps = min(16, max(1, head_size_padded // 32))
+        num_warps = min(16, max(1, flat_k // 32))
 
     _reshape_cache_per_token[(num_tokens,)](
         key_ptr=key,
@@ -315,6 +301,8 @@ def triton_reshape_and_cache_flash_per_token_quant(
         head_size_v=head_size_v,
         head_size_padded=head_size_padded,
         NUM_KV_HEADS=num_kv_heads,
+        FLAT_K_SIZE=flat_k,
+        FLAT_V_SIZE=flat_v,
         QUANT_MAX=quant_max,
         QUANT_MIN=quant_min,
         num_warps=num_warps,
