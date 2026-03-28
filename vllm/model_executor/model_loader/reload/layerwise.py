@@ -109,8 +109,11 @@ def initialize_layerwise_reload(model: torch.nn.Module):
 
 def initialize_online_processing(layer: torch.nn.Module):
     """
-    :param layer:
+    Wrap a layer's weight loaders with online processing loaders.
+    Called by either `initialize_layerwise_reload` or an online quantization scheme,
+    prevents double wrapping in the case of online quantization + reloading
 
+    :param layer: layer whose parameter weight loaders will be wrapped
     """
     info = get_layerwise_info(layer)
 
