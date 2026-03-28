@@ -1119,8 +1119,7 @@ def get_kv_cache_config_from_groups(
         per_layer_specs = spec.kv_cache_specs
         kv_cache_tensors = [
             KVCacheTensor(
-                size=per_layer_specs[layer_name].total_bytes_per_block
-                * num_blocks,
+                size=per_layer_specs[layer_name].total_bytes_per_block * num_blocks,
                 shared_by=[layer_name],
             )
             for layer_name in kv_cache_groups[0].layer_names
@@ -1137,8 +1136,7 @@ def get_kv_cache_config_from_groups(
         group_size = max(len(group.layer_names) for group in kv_cache_groups)
 
         effective_page_size = max(
-            group.kv_cache_spec.total_bytes_per_block
-            for group in kv_cache_groups
+            group.kv_cache_spec.total_bytes_per_block for group in kv_cache_groups
         )
         assert group_size > 0, "group_size must be greater than 0"
         num_blocks = get_num_blocks(
