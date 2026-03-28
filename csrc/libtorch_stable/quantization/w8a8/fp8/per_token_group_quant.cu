@@ -156,9 +156,9 @@ inline int GetGroupsPerBlock(int64_t num_groups) {
   return 1;
 }
 
-void per_token_group_quant_8bit(const torch::stable::Tensor& input,
-                                torch::stable::Tensor& output_q,
-                                torch::stable::Tensor& output_s,
+void per_token_group_quant_8bit(torch::stable::Tensor input,
+                                torch::stable::Tensor output_q,
+                                torch::stable::Tensor output_s,
                                 int64_t group_size, double eps, double min_8bit,
                                 double max_8bit, bool scale_ue8m0) {
   STD_TORCH_CHECK(input.is_contiguous());
@@ -296,9 +296,9 @@ __global__ void per_token_group_quant_8bit_packed_kernel(
                               threads_per_group, y_s, min_8bit, max_8bit);
 }
 
-void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
-                                       torch::stable::Tensor& output_q,
-                                       torch::stable::Tensor& output_s_packed,
+void per_token_group_quant_8bit_packed(torch::stable::Tensor input,
+                                       torch::stable::Tensor output_q,
+                                       torch::stable::Tensor output_s_packed,
                                        int64_t group_size, double eps,
                                        double min_8bit, double max_8bit) {
   STD_TORCH_CHECK(input.is_contiguous());
@@ -379,9 +379,9 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
 #undef LAUNCH_PACKED_KERNEL
 }
 
-void per_token_group_quant_fp8(const torch::stable::Tensor& input,
-                               torch::stable::Tensor& output_q,
-                               torch::stable::Tensor& output_s,
+void per_token_group_quant_fp8(torch::stable::Tensor input,
+                               torch::stable::Tensor output_q,
+                               torch::stable::Tensor output_s,
                                int64_t group_size, double eps, double fp8_min,
                                double fp8_max, bool scale_ue8m0,
                                bool dummy_is_scale_transposed = false,
