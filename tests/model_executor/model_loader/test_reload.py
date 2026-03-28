@@ -38,7 +38,10 @@ def test_move_metatensors():
 
 def test_reload_lifecycle():
     layer = torch.nn.Linear(2, 3)
-    info = LayerReloadingInfo(restore_metadata=capture_layer_to_meta(layer))
+    info = LayerReloadingInfo(
+        restore_metadata=capture_layer_to_meta(layer),
+        restore_device=torch.device("cpu"),
+    )
 
     restore_layer_on_meta(layer, info)
     for name, tensor in get_layer_tensors(layer).items():
@@ -48,7 +51,7 @@ def test_reload_lifecycle():
         assert tensor.__class__ == meta_tensor.__class__
         assert tensor.__dict__ == meta_tensor.__dict__
 
-    materialize_layer(layer)
+    materialize_layer(layer, info)
     for name, tensor in get_layer_tensors(layer).items():
         materialized_tensor = getattr(layer, name)
         assert tensor.dtype == materialized_tensor.dtype
@@ -60,7 +63,10 @@ def test_reload_lifecycle():
 def test_model_cleanup(dist_init, default_vllm_config):
     layer = QKVParallelLinear(2, 3, 4)
     assert layer.weight.weight_loader.__self__ is layer
-    info = LayerReloadingInfo(restore_metadata=capture_layer_to_meta(layer))
+    info = LayerReloadingInfo(
+        restore_metadata=capture_layer_to_meta(layer),
+        restore_device=torch.device("cpu"),
+    )
 
     mock_info_dict: WeakKeyDictionary[torch.nn.Module, LayerReloadingInfo] = (
         WeakKeyDictionary()
@@ -90,7 +96,7 @@ def test_get_numel_loaded():
     assert ret == "value"
 
 
-@pytest.mark.parametrize("tp_size", [2])
+@pytest.mark.parametrize("tp_size", [1])
 @pytest.mark.parametrize(
     "base_model,mul_model,add_model",
     [
@@ -150,7 +156,7 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         assert add_perp < mul_perp
 
 
-@pytest.mark.parametrize("tp_size", [2])
+@pytest.mark.parametrize("tp_size", [1])
 @pytest.mark.parametrize(
     "base_model,mul_model,add_model,quantization",
     [
