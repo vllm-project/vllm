@@ -729,16 +729,6 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """Return the KV cache quantization mode for this layer."""
         return get_kv_quant_mode(self.kv_cache_dtype)
 
-    def bind_auxiliary_buffers(self, buffers: dict[str, torch.Tensor]) -> None:
-        """Bind packed scale views (e.g. per-token scale caches).
-
-        Called by the model runner after KV cache allocation.  The
-        *buffers* dict maps buffer names (e.g. ``"k_scale_cache"``)
-        to ``as_strided`` views into the packed KV cache allocation.
-
-        Override in subclasses that use per-token quantization.
-        """
-
     @abstractmethod
     def __init__(
         self,

@@ -76,32 +76,11 @@ class KVCacheSpec:
     def page_size_bytes(self) -> int:
         """
         The size of a page with `block_size` tokens in bytes.
-        Does NOT include packed scale bytes — use
-        :attr:`allocation_size_per_block` for memory budgeting.
 
         Returns:
             The page size
         """
         raise NotImplementedError
-
-    @property
-    def packed_scale_bytes_per_block(self) -> int:
-        """Extra bytes per block for packed per-token scales.
-
-        Returns 0 by default.  Override in subclasses that pack
-        quantization scales into the KV cache allocation.
-        """
-        return 0
-
-    @property
-    def allocation_size_per_block(self) -> int:
-        """Total bytes to allocate per block: data + packed scales.
-
-        Use this (not ``page_size_bytes``) when computing how many
-        blocks fit in a given memory budget and when sizing raw
-        tensor allocations.
-        """
-        return self.page_size_bytes + self.packed_scale_bytes_per_block
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
@@ -146,25 +125,22 @@ class AttentionSpec(KVCacheSpec):
         return real_page_size
 
     @property
-    def packed_scale_bytes_per_block(self) -> int:
-        if self.kv_quant_mode in (
-            KVQuantMode.INT8_PER_TOKEN,
-            KVQuantMode.FP8_PER_TOKEN,
-        ):
-            # 2 scales per token (K and V), each float32 (4 bytes).
-            # Packed into the same allocation after each K/V data region.
-            return 2 * self.block_size * get_dtype_size(torch.float32)
-        return 0
-
-    @property
     def real_page_size_bytes(self) -> int:
-        return (
+        data_bytes = (
             2
             * self.block_size
             * self.num_kv_heads
             * self.head_size
             * get_dtype_size(self.dtype)
         )
+        if self.kv_quant_mode in (
+            KVQuantMode.INT8_PER_TOKEN,
+            KVQuantMode.FP8_PER_TOKEN,
+        ):
+            # Per-token scales packed after each K/V data region:
+            # one float32 scale per token for K and one for V.
+            data_bytes += 2 * self.block_size * get_dtype_size(torch.float32)
+        return data_bytes
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -260,12 +236,18 @@ class FullAttentionSpec(AttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
-        return (
+        data_bytes = (
             self.block_size
             * self.num_kv_heads
             * (self.head_size + self.head_size_v)
             * get_dtype_size(self.dtype)
         )
+        if self.kv_quant_mode in (
+            KVQuantMode.INT8_PER_TOKEN,
+            KVQuantMode.FP8_PER_TOKEN,
+        ):
+            data_bytes += 2 * self.block_size * get_dtype_size(torch.float32)
+        return data_bytes
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -468,12 +450,6 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     @property
     def page_size_bytes(self) -> int:
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
-
-    @property
-    def allocation_size_per_block(self) -> int:
-        return sum(
-            spec.allocation_size_per_block for spec in self.kv_cache_specs.values()
-        )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_num_pages = max(

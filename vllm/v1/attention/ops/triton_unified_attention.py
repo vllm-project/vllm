@@ -66,7 +66,7 @@ def _dequant_kv_tile(
         scale_idx = physical_block_idx * stride_s_blk + (seq_offset % BLOCK_SIZE)
         token_scales = tl.load(scale_cache_ptr + scale_idx, mask=tile_mask, other=1.0)
         return data.to(Q.dtype), token_scales
-    return data.to(Q.dtype), dummy_scales  # no quant
+    return data, dummy_scales  # no quant — preserve original dtype
 
 
 @triton.jit

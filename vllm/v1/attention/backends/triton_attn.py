@@ -359,19 +359,83 @@ class TritonAttentionBackend(AttentionBackend):
 
 
 class TritonAttentionImpl(AttentionImpl):
-    # Per-token quant: typed data views and scale views, bound by the
-    # model runner via bind_auxiliary_buffers().  These are as_strided
-    # views into the flat packed KV cache tensor.
+    # Per-token quant: typed data and scale views extracted from the
+    # flat packed KV cache tensor.  Created lazily on first forward.
     _key_data: torch.Tensor | None = None
     _value_data: torch.Tensor | None = None
     _k_scale_cache: torch.Tensor | None = None
     _v_scale_cache: torch.Tensor | None = None
+    _packed_views_ready: bool = False
 
-    def bind_auxiliary_buffers(self, buffers: dict[str, torch.Tensor]) -> None:
-        self._key_data = buffers.get("key_data")
-        self._value_data = buffers.get("value_data")
-        self._k_scale_cache = buffers.get("k_scale_cache")
-        self._v_scale_cache = buffers.get("v_scale_cache")
+    def _unpack_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        """Extract typed data and scale views from packed KV cache.
+
+        The flat tensor has shape ``(num_blocks, 2, kv_half_bytes)``
+        where each kv-half is laid out as::
+
+            [data: bs * nkv * hs bytes][scales: bs * 4 bytes]
+
+        Called once on the first forward pass; the views are cached
+        for subsequent calls.
+        """
+        from vllm.platforms import current_platform
+        from vllm.utils.torch_utils import get_dtype_size
+
+        num_blocks, _, kv_half = kv_cache.shape
+        if self.kv_quant_mode == KVQuantMode.FP8_PER_TOKEN:
+            dtype = current_platform.fp8_dtype()
+        else:
+            dtype = torch.int8
+        dtype_sz = get_dtype_size(dtype)
+        scale_sz = get_dtype_size(torch.float32)
+
+        bs = kv_half // (self.num_kv_heads * self.head_size * dtype_sz + scale_sz)
+        data_per_kv = bs * self.num_kv_heads * self.head_size * dtype_sz
+        full_block = 2 * kv_half
+        raw = kv_cache.untyped_storage()
+
+        # Typed data views
+        base_q = torch.tensor([], dtype=dtype, device=kv_cache.device).set_(raw)
+        self._key_data = torch.as_strided(
+            base_q,
+            size=(num_blocks, bs, self.num_kv_heads, self.head_size),
+            stride=(
+                full_block // dtype_sz,
+                self.num_kv_heads * self.head_size,
+                self.head_size,
+                1,
+            ),
+            storage_offset=0,
+        )
+        self._value_data = torch.as_strided(
+            base_q,
+            size=(num_blocks, bs, self.num_kv_heads, self.head_size),
+            stride=(
+                full_block // dtype_sz,
+                self.num_kv_heads * self.head_size,
+                self.head_size,
+                1,
+            ),
+            storage_offset=kv_half // dtype_sz,
+        )
+
+        # Scale views
+        base_f32 = torch.tensor([], dtype=torch.float32, device=kv_cache.device).set_(
+            raw
+        )
+        self._k_scale_cache = torch.as_strided(
+            base_f32,
+            size=(num_blocks, bs),
+            stride=(full_block // scale_sz, 1),
+            storage_offset=data_per_kv // scale_sz,
+        )
+        self._v_scale_cache = torch.as_strided(
+            base_f32,
+            size=(num_blocks, bs),
+            stride=(full_block // scale_sz, 1),
+            storage_offset=(kv_half + data_per_kv) // scale_sz,
+        )
+        self._packed_views_ready = True
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
@@ -488,13 +552,14 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # Per-token quantized KV cache: use cached typed data views
-        # and per-token scale caches (no unbind needed — views were
-        # created at init from the flat packed tensor).
+        # Per-token quantized KV cache: unpack data and scale views
+        # from the flat packed tensor on first call, then reuse.
         if self.kv_quant_mode in (
             KVQuantMode.INT8_PER_TOKEN,
             KVQuantMode.FP8_PER_TOKEN,
         ):
+            if not self._packed_views_ready:
+                self._unpack_kv_cache(kv_cache)
             key_cache = self._key_data
             value_cache = self._value_data
             k_descale = None
@@ -632,7 +697,8 @@ class TritonAttentionImpl(AttentionImpl):
             KVQuantMode.INT8_PER_TOKEN,
             KVQuantMode.FP8_PER_TOKEN,
         ):
-            # Use cached typed data views into the flat packed tensor.
+            if not self._packed_views_ready:
+                self._unpack_kv_cache(kv_cache)
             triton_reshape_and_cache_flash_per_token_quant(
                 key,
                 value,

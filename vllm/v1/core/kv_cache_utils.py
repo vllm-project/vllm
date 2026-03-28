@@ -1111,13 +1111,12 @@ def get_kv_cache_config_from_groups(
         # different hidden size. Allocate different amount of memory for each
         # layer based on its hidden size.
         spec = kv_cache_groups[0].kv_cache_spec
-        # Use allocation_size_per_block to account for packed scale bytes.
-        num_blocks = available_memory // spec.allocation_size_per_block
+        num_blocks = available_memory // spec.page_size_bytes
         num_blocks = may_override_num_blocks(vllm_config, num_blocks)
         per_layer_specs = spec.kv_cache_specs
         kv_cache_tensors = [
             KVCacheTensor(
-                size=per_layer_specs[layer_name].allocation_size_per_block * num_blocks,
+                size=per_layer_specs[layer_name].page_size_bytes * num_blocks,
                 shared_by=[layer_name],
             )
             for layer_name in kv_cache_groups[0].layer_names
@@ -1133,9 +1132,8 @@ def get_kv_cache_config_from_groups(
         # full.1, sw.2: share another Tensor with size=available_memory//2
         group_size = max(len(group.layer_names) for group in kv_cache_groups)
 
-        # Use allocation_size_per_block to account for packed scale bytes.
         effective_page_size = max(
-            group.kv_cache_spec.allocation_size_per_block for group in kv_cache_groups
+            group.kv_cache_spec.page_size_bytes for group in kv_cache_groups
         )
         assert group_size > 0, "group_size must be greater than 0"
         num_blocks = get_num_blocks(
