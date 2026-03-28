@@ -76,10 +76,8 @@ def _quant_nvfp4_linear_scales(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Quantize to NVFP4 with linear (non-swizzled) block scales for Triton."""
     x_amax = torch.abs(x).max().to(torch.float32)
-    global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / x_amax
-    fp4, scale = ops.scaled_fp4_quant(
-        x, global_scale, is_sf_swizzled_layout=False
-    )
+    global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / (x_amax + 1e-12)
+    fp4, scale = ops.scaled_fp4_quant(x, global_scale, is_sf_swizzled_layout=False)
     return fp4, scale, global_scale
 
 
@@ -87,16 +85,14 @@ def build_triton_nvfp4_runner(cfg, a, b, dtype, device):
     """Build a runner for the Triton NVFP4 GEMM kernel."""
     b_fp4, scale_b, b_global_scale = _quant_nvfp4_linear_scales(b, device)
     a_amax = torch.abs(a).max().to(torch.float32)
-    a_global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / a_amax
+    a_global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / (a_amax + 1e-12)
     alpha = 1.0 / (a_global_scale * b_global_scale)
 
     if cfg["no_a_quant"]:
         a_fp4, scale_a, _ = _quant_nvfp4_linear_scales(a, device)
 
         def run():
-            return triton_scaled_fp4_mm(
-                a_fp4, b_fp4, scale_a, scale_b, alpha, dtype
-            )
+            return triton_scaled_fp4_mm(a_fp4, b_fp4, scale_a, scale_b, alpha, dtype)
 
         return run
 
