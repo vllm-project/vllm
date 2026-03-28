@@ -172,7 +172,22 @@ class SchedulerStats:
     """Stats associated with the scheduler."""
 
     num_running_reqs: int = 0
+
+    # Total requests in the WAITING state.  This is the sum of two distinct
+    # sub-populations (see below) and is kept for backward compatibility with
+    # existing dashboards that already scrape this field.
     num_waiting_reqs: int = 0
+
+    # Subset of num_waiting_reqs that were *attempted* for scheduling in the
+    # most recent scheduling pass but deferred because a transient constraint
+    # blocked them (e.g. LoRA budget exhausted, async KV-transfer in flight,
+    # or a blocked request status).  Operators can use this to distinguish:
+    #   - pure backlog pressure  → num_waiting_reqs - num_skipped_waiting_reqs
+    #   - constraint-blocked pressure → num_skipped_waiting_reqs
+    # A persistently high skipped count relative to the total waiting count is
+    # a signal that a resource constraint (LoRA slots, KV-connector bandwidth,
+    # etc.) is the scheduling bottleneck rather than raw throughput.
+    num_skipped_waiting_reqs: int = 0
 
     # These are used for internal DP load-balancing.
     step_counter: int = 0
