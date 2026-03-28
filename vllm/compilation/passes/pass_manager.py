@@ -39,6 +39,9 @@ if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
     from .fusion.collective_fusion import AsyncTPPass
     from .fusion.minimax_qk_norm_fusion import MiniMaxQKNormPass
+    from .fusion.qk_norm_rope_cache_quant_fusion import (
+        QKNormRopeCacheQuantFusionPass,
+    )
 
 from .inductor_pass import (
     CustomGraphPass,
@@ -167,6 +170,10 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.enable_qk_norm_rope_fusion:
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [QKNormRoPEFusionPass(config)]
+
+            if self.pass_config.fuse_qk_norm_rope_cache_quant:
+                self.passes += [SplitCoalescingPass(config)]
+                self.passes += [QKNormRopeCacheQuantFusionPass(config)]
 
             self.ir_lowering = VllmIRLoweringPass(config)
             self.post_cleanup = PostCleanupPass(config)
