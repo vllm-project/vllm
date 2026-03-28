@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import mmap
+import os
 from collections import deque
 from dataclasses import dataclass
 
@@ -259,28 +261,54 @@ class CpuGpuOffloadingHandlers:
         kv_caches: CanonicalKVCaches,
         block_size_factor: int,
         num_cpu_blocks: int,
+        disk_path: str | None = None,
     ):
-        pin_memory = is_pin_memory_available()
-        # TODO(debug): remove this diagnostic log after fixing off-by-one
-        logger.info(
-            "Allocating %d CPU tensors with num_cpu_blocks=%d "
-            "block_size_factor=%d",
-            len(kv_caches.tensors), num_cpu_blocks, block_size_factor,
-        )
+        use_mmap = disk_path is not None
+        pin_memory = is_pin_memory_available() and not use_mmap
+
+        if use_mmap:
+            os.makedirs(disk_path, exist_ok=True)
+            logger.info(
+                "Allocating %d mmap-backed CPU tensors with "
+                "num_cpu_blocks=%d disk_path=%s",
+                len(kv_caches.tensors), num_cpu_blocks, disk_path,
+            )
+        else:
+            logger.info(
+                "Allocating %d CPU tensors with num_cpu_blocks=%d",
+                len(kv_caches.tensors), num_cpu_blocks,
+            )
+
+        # Keep references to mmap objects to prevent GC
+        self._mmap_files: list[object] = []
+
         gpu_tensors: list[torch.Tensor] = []
         cpu_tensors: list[torch.Tensor] = []
-        for kv_cache_tensor in kv_caches.tensors:
+        for tensor_idx, kv_cache_tensor in enumerate(kv_caches.tensors):
             gpu_page_size_bytes = kv_cache_tensor.page_size_bytes
             gpu_tensor = kv_cache_tensor.tensor.view(torch.int8).view(
                 (-1, gpu_page_size_bytes)
             )
             cpu_page_size_bytes = gpu_page_size_bytes * block_size_factor
-            cpu_tensor = torch.zeros(
-                (num_cpu_blocks, cpu_page_size_bytes),
-                dtype=torch.int8,
-                device="cpu",
-                pin_memory=pin_memory,
-            )
+            total_bytes = num_cpu_blocks * cpu_page_size_bytes
+
+            if use_mmap:
+                filepath = os.path.join(disk_path, f"kv_cache_{tensor_idx}.bin")
+                fd = os.open(filepath, os.O_RDWR | os.O_CREAT | os.O_TRUNC)
+                os.ftruncate(fd, total_bytes)
+                mm = mmap.mmap(fd, total_bytes)
+                os.close(fd)
+                self._mmap_files.append(mm)
+                cpu_tensor = torch.frombuffer(
+                    mm, dtype=torch.int8
+                ).view(num_cpu_blocks, cpu_page_size_bytes)
+            else:
+                cpu_tensor = torch.zeros(
+                    (num_cpu_blocks, cpu_page_size_bytes),
+                    dtype=torch.int8,
+                    device="cpu",
+                    pin_memory=pin_memory,
+                )
 
             gpu_tensors.append(gpu_tensor)
             cpu_tensors.append(cpu_tensor)

@@ -47,20 +47,6 @@ class CPUOffloadingSpec(OffloadingSpec):
             else 0
         )
 
-        # TODO(debug): remove this diagnostic log after fixing off-by-one
-        from vllm.logger import init_logger as _init_logger
-        _logger = _init_logger(__name__)
-        _logger.info(
-            "CPUOffloadingSpec: cpu_bytes_to_use=%s page_size_bytes=%d "
-            "world_size=%d kv_bytes_per_block=%d block_size_factor=%d "
-            "num_blocks=%d num_kv_cache_groups=%d num_kv_cache_tensors=%d",
-            cpu_bytes_to_use, page_size_bytes,
-            vllm_config.parallel_config.world_size,
-            kv_bytes_per_block, self.block_size_factor,
-            self.num_blocks,
-            len(kv_cache_config.kv_cache_groups),
-            len(kv_cache_config.kv_cache_tensors),
-        )
 
         # scheduler-side
         self._manager: OffloadingManager | None = None
@@ -69,6 +55,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._handlers: CpuGpuOffloadingHandlers | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
+        self.disk_path: str | None = self.extra_config.get("disk_path")
 
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
@@ -116,6 +103,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_caches=kv_caches,
                 block_size_factor=self.block_size_factor,
                 num_cpu_blocks=self.num_blocks,
+                disk_path=self.disk_path,
             )
 
         assert self._handlers is not None
