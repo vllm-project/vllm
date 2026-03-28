@@ -229,9 +229,17 @@ class TestBackupTokenAsyncSpec:
             f"{num_spec_tokens} spec tokens"
         )
 
-    def test_buggy_vs_fixed_diverge_only_with_inflation(self):
-        """Buggy and fixed code agree when there is no inflation
-        (seq_lens == num_tokens_no_spec), and diverge when inflated."""
+    def test_buggy_code_was_always_off_by_one(self):
+        """Verify that the original buggy code was always off-by-one.
+
+        This test confirms that the buggy and fixed code paths diverge even
+        without async inflation. The original code used ``seq_len`` as an
+        index into ``get_token_id()``, which is an off-by-one error: the
+        valid range is ``[0, num_tokens - 1]``, so ``seq_len`` (= ``num_tokens``)
+        is always out of range. The fixed code correctly uses
+        ``num_tokens_no_spec - 1`` (= ``num_tokens - 1``) to address the last
+        committed token.
+        """
         req_ids = ["r0"]
         requests = {"r0": _FakeRequest([0, 1, 2], [1000, 1001])}
         actual_seq_len = 5  # 3 prompt + 2 output
