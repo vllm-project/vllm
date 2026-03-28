@@ -824,29 +824,9 @@ class SpecDecodeBaseProposer:
         gpu_input_batch: InputBatch,
         discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        This function is used to prepare the inputs for speculative decoding.
-        It calculates the next token ids and the number of valid sampled tokens
-        for each request, considering the "discarded" requests whose next token
-        is not sampled and comes from `request.get_token_id()` instead. This is denoted
-        the "backup" token id. It also counts rejected tokens via `sampled_token_ids`.
-        """
-        # Precompute get_token_id for when there is no valid next token.
-        # NOTE: We intentionally use (num_tokens_no_spec - 1) — the index of
-        # the last *committed* output token — rather than seq_lens_cpu (which
-        # is optimistic_seq_lens_cpu and may be inflated by un-corrected draft
-        # token placeholders when async scheduling is enabled).
-        #
-        # seq_lens_cpu = num_computed_tokens + num_scheduled_tokens, which
-        # points one past the end of the committed output_token_ids when async
-        # scheduling has appended -1 placeholders.  get_token_id() at that
-        # inflated index returns -1, feeding garbage to the drafter and
-        # degrading the draft acceptance rate.
-        #
-        # (num_tokens_no_spec - 1) is the index of the last real token before
-        # the current step, which is the correct input for the drafter when a
-        # request is discarded (all spec tokens rejected).
-        # See: vllm-project/vllm#38098
+        # Use num_tokens_no_spec - 1 (last committed token) instead of
+        # seq_lens_cpu, which is inflated by async-scheduling placeholders
+        # and causes get_token_id() to return -1. See #38098.
         num_reqs = gpu_input_batch.num_reqs
         actual_last_token_idx = (
             gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1

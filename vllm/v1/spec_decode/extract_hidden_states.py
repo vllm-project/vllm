@@ -292,24 +292,12 @@ class ExtractHiddenStatesProposer:
         gpu_input_batch: InputBatch,
         discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Prepare next token IDs for speculative decoding.
-
-        Since num_speculative_tokens == 1, sampled_token_ids has shape
-        (batch_size, 1). For each request we either use the sampled token
-        (if valid and not discarded) or a backup token from the request state.
-        """
         num_reqs = gpu_input_batch.num_reqs
         device = sampled_token_ids.device
 
-        # Compute backup tokens for discarded / invalid requests.
-        # NOTE: Use (num_tokens_no_spec - 1) — the index of the last
-        # *committed* output token — rather than seq_lens (which is
-        # optimistic_seq_lens_cpu and may be inflated by un-corrected draft
-        # token placeholders when async scheduling is enabled). Using the
-        # inflated index causes get_token_id() to return -1 (placeholder),
-        # feeding garbage to the drafter and degrading draft acceptance rate.
-        # See: vllm-project/vllm#38098
+        # Use num_tokens_no_spec - 1 (last committed token) instead of
+        # seq_lens, which is inflated by async-scheduling placeholders
+        # and causes get_token_id() to return -1. See #38098.
         actual_last_token_idx = (
             gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1
         ).tolist()
@@ -326,7 +314,6 @@ class ExtractHiddenStatesProposer:
 
         assert discard_request_mask.dtype == torch.bool
 
-        # With num_speculative_tokens == 1, there is exactly one token
         sampled = sampled_token_ids[:, 0]
         is_valid = (sampled >= 0) & (sampled < gpu_input_batch.vocab_size)
         valid_sampled_tokens_count = is_valid.to(torch.int32)
