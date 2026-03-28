@@ -281,7 +281,7 @@ class Executor(ABC):
     def init_kv_output_aggregator(self, connector: "KVConnectorBase") -> None:
         """Init KVOutputAggregator"""
         self.kv_output_aggregator = KVOutputAggregator.from_connector(
-            connector, self.parallel_config.world_size
+            connector, self.parallel_config.world_size * self.parallel_config.data_parallel_size if self.parallel_config.dp_per_domain > 1 else self.parallel_config.world_size
         )
 
     @cached_property  # Avoid unnecessary RPC calls

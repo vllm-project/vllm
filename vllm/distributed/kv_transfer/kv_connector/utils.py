@@ -74,13 +74,26 @@ class KVOutputAggregator:
             req_ids: set[str] | None,
             remaining_count_dict: dict[str, int],
             finished_set: set[str],
+            set_name: str = "",
         ) -> None:
             for req_id in req_ids or ():
                 remaining_count = remaining_count_dict.get(
                     req_id, self._expected_finished_count
                 )
                 remaining_count_dict[req_id] = remaining_count - 1
+
+                # 检测重复通知
+                if req_id in finished_set:
+                    logger.warning(
+                        "[%s] Request %s already in finished_set, duplicate notification detected",
+                        set_name, req_id
+                    )
+
                 if remaining_count_dict[req_id] == 0:
+                    logger.debug(
+                        "[%s] Request %s finished aggregation, adding to finished_set",
+                        set_name, req_id
+                    )
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
 
@@ -109,10 +122,12 @@ class KVOutputAggregator:
                 self._expected_finished_count = kv_output.expected_finished_count
 
             update_finished_set(
-                kv_output.finished_sending, self._send_remaining_count, finished_sending
+                kv_output.finished_sending, self._send_remaining_count, finished_sending,
+                set_name="finished_sending"
             )
             update_finished_set(
-                kv_output.finished_recving, self._recv_remaining_count, finished_recving
+                kv_output.finished_recving, self._recv_remaining_count, finished_recving,
+                set_name="finished_recving"
             )
 
             # Aggregate kv_connector_stats from all workers.
@@ -185,13 +200,26 @@ class KVOutputAggregator:
             req_ids: set[str] | None,
             remaining_count_dict: dict[str, int],
             finished_set: set[str],
+            set_name: str = "",
         ) -> None:
             for req_id in req_ids or ():
                 remaining_count = remaining_count_dict.get(
                     req_id, self._expected_finished_count
                 )
                 remaining_count_dict[req_id] = remaining_count - 1
+
+                # 检测重复通知
+                if req_id in finished_set:
+                    logger.warning(
+                        "[%s] Request %s already in finished_set, duplicate notification detected",
+                        set_name, req_id
+                    )
+
                 if remaining_count_dict[req_id] == 0:
+                    logger.debug(
+                        "[%s] Request %s finished aggregation, adding to finished_set",
+                        set_name, req_id
+                    )
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
 
@@ -221,10 +249,12 @@ class KVOutputAggregator:
                 self._expected_finished_count = kv_output.expected_finished_count
 
             update_finished_set(
-                kv_output.finished_sending, self._send_remaining_count, finished_sending
+                kv_output.finished_sending, self._send_remaining_count, finished_sending,
+                set_name="finished_sending"
             )
             update_finished_set(
-                kv_output.finished_recving, self._recv_remaining_count, finished_recving
+                kv_output.finished_recving, self._recv_remaining_count, finished_recving,
+                set_name="finished_recving"
             )
 
             # Aggregate kv_connector_stats from all workers.

@@ -954,7 +954,7 @@ class EngineArgs:
 
         # dp_per_domain
         parallel_group.add_argument(
-            "--dp-per-domain", 
+            "--dp-per-domain",
             "-dpd",
             **parallel_kwargs["dp_per_domain"]
         )
@@ -2151,6 +2151,7 @@ class EngineArgs:
                 "disabling it for V1 backend."
             )
             self.enable_prefix_caching = False
+        self.enable_chunked_prefill = False   # TODO(wangxiaochao): need to support chunkPrefill
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,

@@ -82,7 +82,7 @@ class RequestManager:
                 return request.cp_ranks
             else:
                 return None
-        
+
         if is_long:
             return [
                 i for i in range(self.cp_world_size)
@@ -92,14 +92,14 @@ class RequestManager:
             # best_dp = min(range(len(self.num_req_per_dp)), key=lambda i: self.num_req_per_dp[i])
             best_dp = self.balancer.dispatch_task_without_id(num_new_tokens)
             return [best_dp]
-    
+
     def add_req(self, request: Request) -> None:
         if len(request.cp_ranks) > 1:
             self.num_long_req_per_domain += 1
 
         for rank in request.cp_ranks:
             self.num_req_per_dp[rank] += 1
-    
+
     def free_req(self, request: Request) -> None:
         if len(request.cp_ranks) > 1:
             self.num_long_req_per_domain -= 1
@@ -194,7 +194,7 @@ class CrossDPScheduler(Scheduler):
                 or (len(request.cp_ranks) > 1 and scheduler_output.cp_rank == 0)
             ):
                 request.num_computed_tokens += num_scheduled_token
-            
+
             # [vllm added]
             request.is_prefill_chunk = request.num_computed_tokens < (
                 request.num_tokens + request.num_output_placeholders
@@ -222,7 +222,7 @@ class CrossDPScheduler(Scheduler):
         assert request.is_finished()
 
         """
-        TODO(AoChen): If the req is removed from the running queue, 
+        TODO(AoChen): If the req is removed from the running queue,
         1. the running_long_count should be decremented.
         2. the request manager should be updated.
         3. the has_slot_for_long_request should be updated.
@@ -234,7 +234,7 @@ class CrossDPScheduler(Scheduler):
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
-        for cp_rank in request.cp_ranks:    
+        for cp_rank in request.cp_ranks:
             self.finished_req_ids[cp_rank].add(request_id)
 
         if self.finished_req_ids_dict is not None:
@@ -279,10 +279,57 @@ class CrossDPScheduler(Scheduler):
             # Hybrid memory allocator should be already turned off for this
             # code path, but let's double-check here.
             assert len(self.kv_cache_config.kv_cache_groups) == 1
-            return self.connector.request_finished(request, block_ids[0])
+            return self.connector.request_finished(request, [block_id[0] for block_id in block_ids])
 
         return self.connector.request_finished_all_groups(request, block_ids)
-    
+
+    def _update_waiting_for_remote_kv(self, request: Request) -> bool:
+        """
+        KV Connector: check if the request_id is finished_recving.
+
+        The finished_recving_kv_req_ids list is populated
+        on the previous steps()'s update_from_output based
+        on the worker side connector.
+
+        When the kv transfer is ready, we cache the blocks
+        and the request state will be moved back to WAITING from
+        WAITING_FOR_REMOTE_KV.
+        """
+        assert self.connector is not None
+        if request.request_id not in self.finished_recving_kv_req_ids:
+            return False
+
+        if request.request_id in self.failed_recving_kv_req_ids:
+            # Request had KV load failures; num_computed_tokens was already
+            # updated in _update_requests_with_invalid_blocks
+            if request.num_computed_tokens:
+                # Cache any valid computed tokens.
+                self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
+            else:
+                # No valid computed tokens, release allocated blocks.
+                # There may be a local cache hit on retry.
+                self.kv_cache_manager.free(request)
+
+            self.failed_recving_kv_req_ids.remove(request.request_id)
+        else:
+            # Now that the blocks are ready, actually cache them.
+            num_computed_tokens = 0
+            for (block_ids,) in self.kv_cache_manager.get_block_ids(request):
+                num_computed_tokens += len(block_ids) * self.block_size
+            # Handle the case where num request tokens less than one block.
+            num_computed_tokens = min(num_computed_tokens, request.num_tokens)
+            if num_computed_tokens == request.num_tokens:
+                num_computed_tokens -= 1
+            # This will cache the blocks iff caching is enabled.
+            self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
+
+            # Update the request state for scheduling.
+            request.num_computed_tokens = num_computed_tokens
+
+        # Return that we are ready.
+        self.finished_recving_kv_req_ids.remove(request.request_id)
+        return True
+
     def update_from_output(
         self,
         scheduler_outputs: list[SchedulerOutput],
@@ -290,12 +337,12 @@ class CrossDPScheduler(Scheduler):
     ) -> dict[int, EngineCoreOutputs]:
 
         """
-        Due to we use example connector now, many stats are None. 
+        Due to we use example connector now, many stats are None.
         So, the scheduler_stats only contain the last dp stats.
         """
         processed_request: list[str] = []
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
-        
+
         for scheduler_output, model_runner_output in zip(scheduler_outputs, model_runner_outputs):
             if model_runner_output is False:
                 continue
@@ -387,7 +434,7 @@ class CrossDPScheduler(Scheduler):
                     # the scheduled spec tokens count and so is similarly adjusted.
                     if request.num_output_placeholders > 0:
                         request.num_output_placeholders -= num_rejected
-                    
+
                     # [vllm add]
                     spec_decoding_stats = self.make_spec_decoding_stats(
                         spec_decoding_stats,
@@ -568,9 +615,9 @@ class CrossDPScheduler(Scheduler):
                 # outputs this step.
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
             eco.scheduler_stats = stats
-        
+
         return engine_core_outputs
-    
+
     def schedule(self) -> list[SchedulerOutput]:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -610,7 +657,7 @@ class CrossDPScheduler(Scheduler):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-                
+
             if (
                 request.num_output_placeholders > 0
                 # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
@@ -685,7 +732,7 @@ class CrossDPScheduler(Scheduler):
                     if new_blocks is not None:
                         # The request can be scheduled.
                         break
-                    
+
                     """
                     TODO(AoChen): PRIORITY is not implemented yet.
                     """
@@ -703,10 +750,10 @@ class CrossDPScheduler(Scheduler):
                         self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
 
                     self._preempt_request(preempted_req, scheduled_timestamp)
-                    
+
                     if len(preempted_req.cp_ranks) > 1:
                         raise RuntimeError("Preempted request has multiple CP ranks is not supported now.")
-                    
+
                     for rank in preempted_req.cp_ranks:
                         preempted_reqs[rank].append(preempted_req)
 
@@ -718,7 +765,7 @@ class CrossDPScheduler(Scheduler):
             if new_blocks is None:
                 # Cannot schedule this request.
                 break
-            
+
             assert len(request.cp_ranks) == len(new_blocks)
             # Schedule the request.
             for i, rank in enumerate(request.cp_ranks):
@@ -727,7 +774,7 @@ class CrossDPScheduler(Scheduler):
                 req_to_new_blocks[rank][request_id] = new_blocks[i]
                 num_scheduled_tokens[rank][request_id] = num_new_tokens
                 cp_rank_scheduled_tokens[rank][request_id] = len(request.cp_ranks)
-            
+
             token_budget -= num_new_tokens
             req_index += 1
 
@@ -794,7 +841,7 @@ class CrossDPScheduler(Scheduler):
                     new_computed_blocks, num_new_local_computed_tokens = (
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
-                    
+
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
                         ext_tokens, load_kv_async = (
@@ -890,19 +937,19 @@ class CrossDPScheduler(Scheduler):
 
                 if len(request.cp_ranks) == 0:
                     selected_dp = self.request_manager.select_dp(
-                        request, 
+                        request,
                         self.waiting.is_long_request(request),
                         num_new_tokens,
                     )
                 else:
                     selected_dp = self.request_manager.select_dp(
-                        request, 
+                        request,
                         self.waiting.is_long_request(request),
                         num_new_tokens,
                     )
                     if selected_dp is None:
                         break
-                
+
                 if len(selected_dp) > 1:
                     logger.info(f"It's a cp req, selected_dp: {selected_dp}, request id: {request.request_id}")
                 else:
@@ -942,7 +989,7 @@ class CrossDPScheduler(Scheduler):
                     self.connector.update_state_after_alloc(
                         request=request,
                         # new_computed_blocks + new_blocks,
-                        blocks=None,
+                        blocks=self.kv_cache_manager.get_blocks(request),
                         num_external_tokens=num_external_computed_tokens,
                     )
 
@@ -976,7 +1023,7 @@ class CrossDPScheduler(Scheduler):
                     request.record_event(
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
                     )
-                
+
                 blocks = self.kv_cache_manager.get_blocks(request)
 
                 for idx, rank in enumerate(request.cp_ranks):
@@ -986,19 +1033,19 @@ class CrossDPScheduler(Scheduler):
                         scheduled_resumed_reqs[rank].append(request)
                     else:
                         raise RuntimeError(f"Invalid request status: {request.status}")
-                    
+
                     req_to_new_blocks[rank][request.request_id] = blocks[idx]
 
                     num_scheduled_tokens[rank][request.request_id] = num_new_tokens
                     cp_rank_scheduled_tokens[rank][request.request_id] = len(request.cp_ranks)
-                    
+
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Count the number of prefix cached tokens.
                 if request.num_cached_tokens < 0:
                     request.num_cached_tokens = num_computed_tokens
-                
+
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
             self.waiting.prepend_requests(skipped_waiting_requests)
@@ -1014,7 +1061,7 @@ class CrossDPScheduler(Scheduler):
         assert len(self.running) <= (
             (self.max_num_running_reqs - self.waiting.running_long_count) * self.cp_world_size + self.waiting.running_long_count
         )
-        
+
         total_scheduled = (
             len(list(chain.from_iterable(scheduled_new_reqs)))
             + len(list(chain.from_iterable(scheduled_resumed_reqs)))
@@ -1027,7 +1074,7 @@ class CrossDPScheduler(Scheduler):
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
 
         assert sum(len(sub) for sub in scheduled_resumed_reqs) == 0, "Scheduled resumed requests are not supported now."
-        
+
         self.request_manager.balancer.release_all_tasks()
 
         # Construct the scheduler output.
@@ -1042,7 +1089,7 @@ class CrossDPScheduler(Scheduler):
                     for req in scheduled_new_reqs[idx]
                 ] for idx in range(self.cp_world_size)
             ]
-        
+
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             total_cached_reqs_data = [
                     self._make_cached_request_data(
@@ -1064,7 +1111,7 @@ class CrossDPScheduler(Scheduler):
         none_tokens_in_peer_sched = all([sum(num_scheduled_tokens[idx].values()) == 0 for idx in range(self.cp_world_size)])
 
         for idx in range(self.cp_world_size):
-            
+
             if sum(num_scheduled_tokens[idx].values()) == 0 and len(preempted_reqs[idx]) == 0 and len(self.finished_req_ids[idx]) == 0:
                 scheduler_output = SchedulerOutput.make_empty()
                 scheduler_output.none_tokens_in_peer_sched = none_tokens_in_peer_sched
@@ -1104,6 +1151,7 @@ class CrossDPScheduler(Scheduler):
                     scheduler_output
                 )
                 scheduler_output.kv_connector_metadata = meta
+            self.connector.clear_reqs_need_recv()
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             # self._update_after_schedule(scheduler_output)
@@ -1111,7 +1159,7 @@ class CrossDPScheduler(Scheduler):
                 if scheduler_output is None:
                     continue
                 self._update_after_schedule(scheduler_output)
-        
+
         return total_scheduler_output
 
 
