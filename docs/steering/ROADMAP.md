@@ -65,39 +65,58 @@ The request-indexed gather approach is dramatically cheaper than the per-token b
 
 ---
 
-## Phase 3: Additional Intervention Points
+## Phase 3: Additional Intervention Points — DONE
 
-**Goal**: Support pre-attention and post-attention steering in addition to post-MLP.
+**Goal**: Support pre-attention, post-attention, and post-MLP-post-layernorm steering in addition to the default post-MLP-pre-layernorm.
 
-**Status**: Not started.
+### What was built
 
-### Scope Changes
+Four hook points on the residual stream, selectable via `--steering-hook-points`:
 
-- Add `steering_table_pre_attn` and `steering_table_post_attn` buffers
-- Same indexed-gather pattern at each intervention point
-- Per-request capable (reuses Phase 2 infrastructure)
+- `pre_attn` — after `input_layernorm`, before `self_attn`
+- `post_attn` — after `post_attention_layernorm`, before `pre_feedforward_layernorm`
+- `post_mlp_pre_ln` — after `mlp`, before `post_feedforward_layernorm` **(default, backward compatible)**
+- `post_mlp_post_ln` — after `post_feedforward_layernorm`
+
+Key design decisions:
+
+- **Opt-in via CLI**: `--steering-hook-points pre_attn,post_mlp_pre_ln` — only active hook points allocate buffers and register `apply_steering` splitting ops. Default is `post_mlp_pre_ln` only (zero additional overhead vs Phase 2).
+- **`hasattr`-guarded forward calls**: Each hook point uses `if hasattr(self, "steering_table_<hook>")` which is a trace-time constant for torch.compile, so inactive hooks are eliminated during tracing.
+- **Per-hook-point buffers**: Each active hook point gets its own `steering_table_<hook>` and `steering_vector_<hook>` buffer. The shared `steering_index` is reused across all hook points (token→row mapping is the same).
+- **API**: `SamplingParams.steering_hook_vectors: dict[str, dict[int, list[float]]]` and `SetSteeringRequest.hook_vectors` for explicit hook point targeting. Legacy `steering_vectors` field maps to `post_mlp_pre_ln`.
 
 ### Gemma 3 Intervention Points
 
 ```
-input_layernorm(hidden_states, residual)
+input_layernorm(hidden_states, residual)     # fused add + norm → updates residual
   ↓
-[steering_pre_attn]          ← before attention
+[pre_attn]                                   ← steer residual before attention
   ↓
 self_attn(hidden_states)
+post_attention_layernorm(hidden_states)       # hidden_states only
   ↓
-post_attention_layernorm(hidden_states)
+[post_attn]                                  ← steer residual after attention
   ↓
-[steering_post_attn]         ← after attention, before MLP
-  ↓
-pre_feedforward_layernorm(hidden_states, residual)
-  ↓
+pre_feedforward_layernorm(hidden_states, residual)  # fused add + norm → updates residual
 mlp(hidden_states)
   ↓
-post_feedforward_layernorm(hidden_states)
+[post_mlp_pre_ln]                            ← default (backward compat)
   ↓
-[steering_post_mlp]          ← after MLP (current)
+post_feedforward_layernorm(hidden_states)     # hidden_states only
+  ↓
+[post_mlp_post_ln]                           ← steer residual after post_ff_ln
 ```
+
+### Memory
+
+With all 4 hook points active (`--steering-hook-points pre_attn,post_attn,post_mlp_pre_ln,post_mlp_post_ln`):
+
+| Config | Per Layer (Gemma 3 4B, bf16) | 26 Layers |
+|--------|------------------------------|-----------|
+| `max_steering_configs=4` (default) | 4 × 6 rows × 3072 × 2B = ~144 KB | ~3.6 MB |
+| `max_steering_configs=16` | 4 × 18 rows × 3072 × 2B = ~432 KB | ~11.2 MB |
+
+With default (1 hook point), memory is identical to Phase 2.
 
 ---
 

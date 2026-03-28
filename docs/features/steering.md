@@ -12,10 +12,10 @@ never modified.
 **In scope:**
 
 - Global (server-wide) steering via HTTP API
-- Per-request steering via `SamplingParams.steering_vectors`
-- Per-request multi-hook steering via `SamplingParams.steering_hook_vectors`
-- Multiple hook points: pre_attn, post_attn, post_mlp_pre_ln, post_mlp_post_ln
+- Per-request steering via `SamplingParams.steering_vectors` / `steering_hook_vectors`
 - Additive combination: global + per-request vectors are summed
+- Multiple intervention points: `pre_attn`, `post_attn`, `post_mlp_pre_ln`, `post_mlp_post_ln`
+- Opt-in hook point selection via `--steering-hook-points` CLI flag
 - Scheduler admission control for per-request configs
 - CUDA graph and torch.compile compatibility
 - Gemma 3 model family
@@ -35,12 +35,17 @@ vllm serve google/gemma-3-4b-it
 
 # Per-request steering (allocates larger tables, enables scheduler admission)
 vllm serve google/gemma-3-4b-it --enable-steering --max-steering-configs 4
+
+# Multiple hook points (opt-in, adds graph breaks per active hook point)
+vllm serve google/gemma-3-4b-it --enable-steering \
+  --steering-hook-points pre_attn,post_mlp_pre_ln
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--enable-steering` | `False` | Allocate per-request steering table rows |
 | `--max-steering-configs` | `4` | Max distinct per-request configs in one batch |
+| `--steering-hook-points` | `post_mlp_pre_ln` | Comma-separated list of active hook points. Each adds a `apply_steering` splitting op per decoder layer. Valid: `pre_attn`, `post_attn`, `post_mlp_pre_ln`, `post_mlp_post_ln` |
 
 Without `--enable-steering`, each layer gets a 2-row table (zeros + global).
 Per-request `steering_vectors` in `SamplingParams` are silently ignored by
@@ -58,7 +63,7 @@ curl -X POST http://localhost:8000/v1/steering/set \
   -H "Content-Type: application/json" \
   -d '{"vectors": {"15": [0.1, 0.2, ...]}, "scales": {"15": 1.5}}'
 
-# Set steering with explicit hook points
+# Set steering at specific hook points
 curl -X POST http://localhost:8000/v1/steering/set \
   -H "Content-Type: application/json" \
   -d '{
@@ -78,10 +83,6 @@ curl -X POST http://localhost:8000/v1/steering/clear
 
 Global vectors affect **all** decode tokens in **all** requests until cleared.
 
-The `vectors` field is shorthand for `hook_vectors` with the `post_mlp_pre_ln`
-hook point. Both can be combined in a single request; `hook_vectors` entries
-for `post_mlp_pre_ln` merge with (and override on conflict) the `vectors` field.
-
 ### Per-Request Steering (SamplingParams)
 
 ```python
@@ -100,7 +101,7 @@ steered = SamplingParams(
     steering_vectors={15: [0.1, 0.2, ...]},  # layer 15
 )
 
-# Request with multi-hook steering
+# Request with explicit hook points
 multi_hook = SamplingParams(
     max_tokens=100,
     temperature=0.7,
@@ -113,10 +114,10 @@ multi_hook = SamplingParams(
 # Request without steering (unaffected)
 normal = SamplingParams(max_tokens=100, temperature=0.7)
 
-# All can run in the same batch
+# Both can run in the same batch
 outputs = llm.generate(
-    ["Be creative:", "Summarize this:", "Explain:"],
-    [steered, multi_hook, normal],
+    ["Be creative:", "Summarize this:"],
+    [steered, normal],
 )
 ```
 
@@ -127,7 +128,6 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
 
-# Simple per-request steering (default hook point)
 response = client.chat.completions.create(
     model="google/gemma-3-4b-it",
     messages=[{"role": "user", "content": "Hello"}],
@@ -135,38 +135,7 @@ response = client.chat.completions.create(
         "steering_vectors": {15: [0.1, 0.2, ...]},
     },
 )
-
-# Multi-hook per-request steering
-response = client.chat.completions.create(
-    model="google/gemma-3-4b-it",
-    messages=[{"role": "user", "content": "Hello"}],
-    extra_body={
-        "steering_hook_vectors": {
-            "pre_attn": {15: [0.1, 0.2, ...]},
-            "post_mlp_pre_ln": {15: [0.3, 0.4, ...]},
-        },
-    },
-)
 ```
-
-## Hook Points
-
-Steering vectors can be applied at four positions within each decoder layer:
-
-| Hook Point | Enum Value | Position |
-|-----------|------------|----------|
-| `PRE_ATTN` | `pre_attn` | After input_layernorm, before self_attn |
-| `POST_ATTN` | `post_attn` | After post_attention_layernorm, before pre_feedforward_layernorm |
-| `POST_MLP_PRE_LN` | `post_mlp_pre_ln` | After mlp, before post_feedforward_layernorm (default) |
-| `POST_MLP_POST_LN` | `post_mlp_post_ln` | After post_feedforward_layernorm |
-
-The `steering_vectors` field is shorthand for applying vectors at the
-`post_mlp_pre_ln` hook point. The `steering_hook_vectors` field allows
-specifying vectors for any combination of hook points simultaneously.
-
-When both `steering_vectors` and `steering_hook_vectors` are provided,
-they are merged. If both specify vectors for the same hook point and layer,
-`steering_hook_vectors` takes precedence.
 
 ## Data Flow
 
@@ -175,7 +144,7 @@ SamplingParams.steering_vectors / steering_hook_vectors
     │
     ▼
 Request.steering_config_hash  ◄── deterministic SHA-256 hash
-    │
+    │                              (includes all hook points)
     ▼
 Scheduler ── checks capacity against max_steering_configs
     │         (same pattern as LoRA admission control)
@@ -187,25 +156,27 @@ NewRequestData.steering_config_hash
 Model Runner._update_states()
     ├── CachedRequestState.steering_config_hash
     ├── InputBatch.request_steering_config_hash[req_idx]
-    └── SteeringManager.register_config(hash, vectors) → row assignment
+    └── SteeringManager.register_config(hash, hook_vectors) → row assignment
     │
     ▼
 Model Runner._update_steering_buffers()  (called before each forward pass)
     ├── SteeringManager.populate_steering_tables(layers)
-    │     Row 0 = zeros (prefill sentinel)
-    │     Row 1 = global vector
-    │     Rows 2+ = global + per_request (additive)
-    └── Build steering_index: token → table row
+    │     For EACH active hook point's table:
+    │       Row 0 = zeros (prefill sentinel)
+    │       Row 1 = global vector for that hook point
+    │       Rows 2+ = global + per_request (additive)
+    └── Build steering_index: token → table row (shared across hook points)
           prefill tokens → 0
           decode, no per-request → 1
           decode, per-request → assigned row
     │
     ▼
 Gemma3DecoderLayer.forward()
+    # At each active hook point position:
     residual = torch.ops.vllm.apply_steering(
-        residual, self.steering_table, self.steering_index
+        residual, self.steering_table_<hook>, self.steering_index
     )
-    # = residual + steering_table[steering_index[:N]]
+    # = residual + steering_table_<hook>[steering_index[:N]]
 ```
 
 ## CUDA Graph and torch.compile Compatibility
@@ -223,15 +194,18 @@ This is the same mechanism used for KV cache updates.
 
 ## Steering Table Layout
 
-Each steerable decoder layer has a `steering_table` buffer:
+Each steerable decoder layer has a `steering_table_<hook>` buffer per active
+hook point (e.g., `steering_table_post_mlp_pre_ln`):
 
 ```
 Row 0:  [0, 0, 0, ..., 0]          ← prefill / no steering
-Row 1:  [g₁, g₂, g₃, ..., gₕ]     ← global vector
+Row 1:  [g₁, g₂, g₃, ..., gₕ]     ← global vector for this hook point
 Row 2:  [g₁+a₁, g₂+a₂, ..., gₕ+aₕ] ← global + per-request config A
 Row 3:  [g₁+b₁, g₂+b₂, ..., gₕ+bₕ] ← global + per-request config B
 ...
 ```
+
+Each hook point has its own table with independent global/per-request vectors.
 
 The shared `steering_index` buffer maps each token position to a row:
 
@@ -283,7 +257,8 @@ If `max_steering_configs` slots are occupied by distinct configs:
 2. **Prefill tokens always index row 0.** Steering is decode-only.
 3. **Combined rows are recomputed every step.** `populate_steering_tables()` runs before each forward pass, so changes to global vectors are immediately reflected.
 4. **Buffer shapes are fixed at init.** The table has `max_steering_configs + 2` rows regardless of how many are active. This is required for CUDA graph compatibility.
-5. **The steering_index tensor is shared across all layers.** One in-place update is visible to all decoder layers.
+5. **The steering_index tensor is shared across all layers and all hook points.** One in-place update is visible to all decoder layers. Token-to-row mapping is independent of hook point.
 6. **Reference counting is exact.** Every `register_config` is balanced by a `release_config` when the request finishes. Rows are only freed at refcount 0.
-7. **Validation is all-or-nothing.** `SamplingParams._validate_steering_vectors()` checks all keys and values in both `steering_vectors` and `steering_hook_vectors` before any request processing begins. Hook point names are validated against `VALID_HOOK_POINT_NAMES`.
-8. **Hook point merging is deterministic.** `steering_config_hash` builds a canonical representation merging `steering_vectors` (as `post_mlp_pre_ln`) with `steering_hook_vectors`, ensuring identical inputs always produce identical hashes.
+7. **Validation is all-or-nothing.** `SamplingParams._validate_steering_vectors()` checks all keys and values before any request processing begins.
+8. **Active hook points are fixed at init.** Changing `--steering-hook-points` requires a server restart. This is a compile-time constant for torch.compile.
+9. **Hook point API is additive.** `steering_vectors` (legacy) maps to `post_mlp_pre_ln`. Both `steering_vectors` and `steering_hook_vectors` can be specified; they are merged deterministically.
