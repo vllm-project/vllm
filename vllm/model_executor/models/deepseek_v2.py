@@ -33,6 +33,7 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
@@ -534,6 +535,16 @@ class DeepseekV2Attention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
+        self.prefix = prefix
+        if envs.VLLM_NAN_DETECT:
+            from vllm.model_executor.layers.nan_detector import NaNDetector
+
+            self._nan_detect_indices = {
+                "attn_output": NaNDetector.get().register(
+                    f"{prefix}.attn_output"
+                ),
+            }
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -577,6 +588,14 @@ class DeepseekV2Attention(nn.Module):
         attn_output = attn_output.view(-1, self.num_local_heads, self.qk_head_dim)[
             ..., : self.v_head_dim
         ].reshape(-1, self.num_local_heads * self.v_head_dim)
+
+        if envs.VLLM_NAN_DETECT and hasattr(self, "_nan_detect_indices"):
+            from vllm.model_executor.layers.nan_detector import NaNDetector
+
+            NaNDetector.get().check_tensor(
+                attn_output, self._nan_detect_indices["attn_output"]
+            )
+
         output, _ = self.o_proj(attn_output)
         return output
 
