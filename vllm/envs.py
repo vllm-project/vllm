@@ -190,6 +190,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
+    VLLM_NIXL_NAN_DETECT: bool = False
     VLLM_MORIIO_CONNECTOR_READ_MODE: bool = False
     VLLM_MORIIO_QP_PER_TRANSFER: int = 1
     VLLM_MORIIO_POST_BATCH_SIZE: int = -1
@@ -1384,6 +1385,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # disaggregated decode-prefill setup.
     "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "480")
+    ),
+    # Enable NaN/Inf detection in KV cache blocks during NIXL transfers.
+    # Logs errors when NaN/Inf values are found on send or receive side.
+    "VLLM_NIXL_NAN_DETECT": lambda: bool(
+        int(os.getenv("VLLM_NIXL_NAN_DETECT", "0"))
     ),
     # Controls the read mode for the Mori-IO connector
     "VLLM_MORIIO_CONNECTOR_READ_MODE": lambda: (
