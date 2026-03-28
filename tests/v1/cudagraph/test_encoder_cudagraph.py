@@ -6,24 +6,26 @@ Test organization:
   No GPU required:
     - TestFindBudgetGraph      — greedy budget selection logic
     - TestGetCumulativeStats   — hit/miss rate statistics
+    - TestGetInputModality     — modality routing from mm_kwargs keys
   GPU required:
     - TestEncoderCudaGraphCaptureReplay — capture, replay, fallback, counters, chunking
+    - TestEncoderCudaGraphVideoReplay   — video modality capture, replay
 """
 
 from typing import Any
 
 import pytest
 import torch
-from vllm.v1.worker.gpu.mm.encoder_cudagraph import (
+
+from vllm.platforms import current_platform
+from vllm.v1.worker.encoder_cudagraph import (
     EncoderCudaGraphManager,
 )
-from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
     EncoderCudaGraphReplayBuffers,
 )
-
-from vllm.platforms import current_platform
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -303,6 +305,7 @@ class SimpleMockViTModel(torch.nn.Module):
         self,
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
+        max_frames_per_batch: int,
     ) -> EncoderCudaGraphReplayBuffers:
         grid_thw = mm_kwargs["image_grid_thw"]
         n_out = _count_output_tokens(grid_thw, _SPATIAL_MERGE)
@@ -336,11 +339,16 @@ def _make_manager_for_gpu(
     max_batch_size: int,
     device: torch.device,
     dtype: torch.dtype,
+    *,
+    max_frames_per_batch: int | None = None,
 ) -> EncoderCudaGraphManager:
     """Create EncoderCudaGraphManager bypassing VllmConfig for GPU tests."""
     mgr = object.__new__(EncoderCudaGraphManager)
     mgr.token_budgets = sorted(token_budgets)
     mgr.max_batch_size = max_batch_size
+    mgr.max_frames_per_batch = (
+        max_frames_per_batch if max_frames_per_batch is not None else max_batch_size * 2
+    )
     mgr.use_dp = False
     mgr.budget_graphs = {}
     mgr.graph_hits = 0
@@ -372,6 +380,18 @@ def _make_mm_kwargs(
     return {
         "pixel_values": _make_pixel_values(grid_thw_list, device, dtype),
         "image_grid_thw": grid_thw_list,
+    }
+
+
+def _make_video_mm_kwargs(
+    grid_thw_list: list[list[int]],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict[str, Any]:
+    """Create video mm_kwargs (pixel_values_videos / video_grid_thw) for testing."""
+    return {
+        "pixel_values_videos": _make_pixel_values(grid_thw_list, device, dtype),
+        "video_grid_thw": grid_thw_list,
     }
 
 
@@ -458,3 +478,285 @@ class TestEncoderCudaGraphCaptureReplay:
         assert len(result) == n_images
         for out in result:
             assert out.shape == (4, _HIDDEN)
+
+
+# ---------------------------------------------------------------------------
+# SimpleMockViTVideoModel — extends SimpleMockViTModel with video support
+# ---------------------------------------------------------------------------
+
+
+class SimpleMockViTVideoModel(SimpleMockViTModel):
+    """ViT mock that supports both image and video modalities.
+
+    Reuses SimpleMockViTModel's NN weights and _forward() logic.
+    Only the protocol methods that are key-dependent are overridden.
+    """
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["image", "video"],
+            input_key_by_modality={
+                "image": "pixel_values",
+                "video": "pixel_values_videos",
+            },
+            buffer_keys=["dummy_buf"],
+            out_hidden_size=_HIDDEN,
+        )
+
+    def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
+        return "video" if "video_grid_thw" in mm_kwargs else "image"
+
+    # ------------------------------------------------------------------
+    # Private helpers — route to the correct mm_kwargs keys
+    # ------------------------------------------------------------------
+
+    def _get_grid_thw(self, mm_kwargs: dict[str, Any]) -> list[list[int]]:
+        key = (
+            "video_grid_thw"
+            if self.get_input_modality(mm_kwargs) == "video"
+            else "image_grid_thw"
+        )
+        return mm_kwargs[key]
+
+    def _get_pixel_values(self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
+        key = (
+            "pixel_values_videos"
+            if self.get_input_modality(mm_kwargs) == "video"
+            else "pixel_values"
+        )
+        return mm_kwargs[key]
+
+    # ------------------------------------------------------------------
+    # Protocol overrides that depend on modality keys
+    # ------------------------------------------------------------------
+
+    def get_encoder_cudagraph_num_items(self, mm_kwargs: dict[str, Any]) -> int:
+        return len(self._get_grid_thw(mm_kwargs))
+
+    def get_encoder_cudagraph_per_item_output_tokens(
+        self, mm_kwargs: dict[str, Any]
+    ) -> list[int]:
+        m = _SPATIAL_MERGE
+        return [t * (h // m) * (w // m) for t, h, w in self._get_grid_thw(mm_kwargs)]
+
+    def get_encoder_cudagraph_per_item_input_sizes(
+        self, mm_kwargs: dict[str, Any]
+    ) -> list[int]:
+        return [t * h * w for t, h, w in self._get_grid_thw(mm_kwargs)]
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        modality = self.get_input_modality(mm_kwargs)
+        pv_key = "pixel_values_videos" if modality == "video" else "pixel_values"
+        grid_key = "video_grid_thw" if modality == "video" else "image_grid_thw"
+
+        grid_thw = self._get_grid_thw(mm_kwargs)
+        pixel_values = self._get_pixel_values(mm_kwargs)
+
+        if len(indices) == 0:
+            return {pv_key: pixel_values[:0], grid_key: []}
+
+        patches_per_item = [t * h * w for t, h, w in grid_thw]
+        cum_patches = [0]
+        for p in patches_per_item:
+            cum_patches.append(cum_patches[-1] + p)
+
+        selected_pv = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        return {pv_key: selected_pv, grid_key: [grid_thw[i] for i in indices]}
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> EncoderCudaGraphCaptureInputs:
+        per_item_output = token_budget // max_batch_size
+        frames_per_item = max_frames_per_batch // max_batch_size
+        if frames_per_item > 1:
+            # Video-format capture: size cu_seqlens for T frames per item.
+            tokens_per_frame = (
+                per_item_output + frames_per_item - 1
+            ) // frames_per_item
+            grid_config = [
+                [frames_per_item, _SPATIAL_MERGE, tokens_per_frame * _SPATIAL_MERGE]
+                for _ in range(max_batch_size)
+            ]
+        else:
+            grid_config = [
+                [1, _SPATIAL_MERGE, per_item_output * _SPATIAL_MERGE]
+                for _ in range(max_batch_size)
+            ]
+        total_patches = _count_input_patches(grid_config)
+        # Use pixel_values (image key) for capture — same patch shape as video.
+        dummy_pixel_values = torch.randn(
+            total_patches, _FLAT, device=device, dtype=dtype
+        )
+        n_out = _count_output_tokens(grid_config, _SPATIAL_MERGE)
+        dummy_buf = torch.zeros(n_out, _HIDDEN, device=device, dtype=dtype)
+        return EncoderCudaGraphCaptureInputs(
+            mm_kwargs={
+                "pixel_values": dummy_pixel_values,
+                "image_grid_thw": grid_config,
+            },
+            buffers={"dummy_buf": dummy_buf},
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+    ) -> EncoderCudaGraphReplayBuffers:
+        n_out = _count_output_tokens(self._get_grid_thw(mm_kwargs), _SPATIAL_MERGE)
+        p = next(self.parameters())
+        dummy_buf = torch.zeros(n_out, _HIDDEN, device=p.device, dtype=p.dtype)
+        return EncoderCudaGraphReplayBuffers(buffers={"dummy_buf": dummy_buf})
+
+    def encoder_cudagraph_forward(
+        self, mm_kwargs: dict[str, Any], buffers: dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        return self._forward(self._get_pixel_values(mm_kwargs))
+
+    def encoder_eager_forward(self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
+        return self._forward(self._get_pixel_values(mm_kwargs))
+
+
+# ---------------------------------------------------------------------------
+# No-GPU tests — get_input_modality routing
+# ---------------------------------------------------------------------------
+
+
+class TestGetInputModality:
+    """get_input_modality returns correct modality based on mm_kwargs keys."""
+
+    def test_image_only_model_always_returns_image(self):
+        model = SimpleMockViTModel()
+        mm_kwargs = {
+            "pixel_values": torch.zeros(1, _FLAT),
+            "image_grid_thw": [[1, 4, 4]],
+        }
+        assert model.get_input_modality(mm_kwargs) == "image"
+
+    def test_video_model_returns_image_for_image_kwargs(self):
+        model = SimpleMockViTVideoModel()
+        mm_kwargs = {
+            "pixel_values": torch.zeros(1, _FLAT),
+            "image_grid_thw": [[1, 4, 4]],
+        }
+        assert model.get_input_modality(mm_kwargs) == "image"
+
+    def test_video_model_returns_video_for_video_kwargs(self):
+        model = SimpleMockViTVideoModel()
+        mm_kwargs = {
+            "pixel_values_videos": torch.zeros(8, _FLAT),
+            "video_grid_thw": [[2, 4, 4]],
+        }
+        assert model.get_input_modality(mm_kwargs) == "video"
+
+    def test_video_model_config_has_both_modalities(self):
+        model = SimpleMockViTVideoModel()
+        cfg = model.get_encoder_cudagraph_config()
+        assert "image" in cfg.modalities
+        assert "video" in cfg.modalities
+        assert cfg.input_key_by_modality["image"] == "pixel_values"
+        assert cfg.input_key_by_modality["video"] == "pixel_values_videos"
+
+
+# ---------------------------------------------------------------------------
+# GPU tests — video capture, replay, fallback, and mixed image+video
+# ---------------------------------------------------------------------------
+
+_VIDEO_MAX_BATCH = 4
+_VIDEO_MAX_FRAMES = 8  # 2 frames per item at max_batch_size=4
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+class TestEncoderCudaGraphVideoReplay:
+    def setup_method(self):
+        self.device = torch.device("cuda:0")
+        self.dtype = torch.float16
+        self.model = SimpleMockViTVideoModel().to(self.device).half()
+        self.mgr = _make_manager_for_gpu(
+            self.model,
+            _BUDGETS,
+            _VIDEO_MAX_BATCH,
+            self.device,
+            self.dtype,
+            max_frames_per_batch=_VIDEO_MAX_FRAMES,
+        )
+        self.mgr.capture()
+
+    # --- capture ---
+
+    def test_capture_creates_one_graph_per_budget(self):
+        assert len(self.mgr.budget_graphs) == len(_BUDGETS)
+        assert set(self.mgr.budget_graphs.keys()) == set(_BUDGETS)
+
+    # --- output shape ---
+
+    def test_video_execute_returns_one_tensor_per_video(self):
+        # T=2, 4x4 → 2*(4//2)*(4//2) = 8 tokens per video
+        grid_thw = [[2, 4, 4], [2, 4, 4]]
+        mm_kwargs = _make_video_mm_kwargs(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert len(result) == 2
+
+    def test_video_output_tokens_per_item(self):
+        # T=2,4x4 → 8 tokens; T=1,4x4 → 4 tokens
+        grid_thw = [[2, 4, 4], [1, 4, 4]]
+        mm_kwargs = _make_video_mm_kwargs(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert result[0].shape == (8, _HIDDEN)
+        assert result[1].shape == (4, _HIDDEN)
+
+    # --- budget fallback ---
+
+    def test_video_eager_fallback_when_tokens_exceed_all_budgets(self):
+        # T=2, 18x18 → 2*(18//2)*(18//2) = 162 tokens > max budget 64
+        grid_thw = [[2, 18, 18]]
+        mm_kwargs = _make_video_mm_kwargs(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(mm_kwargs)
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].shape == (162, _HIDDEN)
+        assert self.mgr.graph_misses == 1
+
+    # --- counters ---
+
+    def test_video_hit_counter_increments_by_num_videos(self):
+        grid_thw = [[2, 4, 4], [1, 4, 4]]
+        mm_kwargs = _make_video_mm_kwargs(grid_thw, self.device, self.dtype)
+        self.mgr.execute(mm_kwargs)
+        assert self.mgr.graph_hits == 2
+
+    def test_video_miss_counter_increments_for_oversized_video(self):
+        grid_thw = [[2, 18, 18]]  # 162 tokens > 64
+        mm_kwargs = _make_video_mm_kwargs(grid_thw, self.device, self.dtype)
+        self.mgr.execute(mm_kwargs)
+        assert self.mgr.graph_misses == 1
+
+    # --- image and video sharing the same manager ---
+
+    def test_image_and_video_share_manager(self):
+        """Image and video inputs can both be executed through the same manager."""
+        img_grid = [[1, 4, 4], [1, 4, 4]]
+        img_result = self.mgr.execute(
+            _make_mm_kwargs(img_grid, self.device, self.dtype)
+        )
+
+        vid_grid = [[2, 4, 4]]
+        vid_result = self.mgr.execute(
+            _make_video_mm_kwargs(vid_grid, self.device, self.dtype)
+        )
+
+        assert len(img_result) == 2
+        assert len(vid_result) == 1
+        assert img_result[0].shape == (4, _HIDDEN)
+        assert vid_result[0].shape == (8, _HIDDEN)
