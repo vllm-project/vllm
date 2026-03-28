@@ -383,11 +383,12 @@ def kernel_unified_attention_2d(
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
 
-        S += scale * tl.dot(Q, K)
-
-        # Per-token quant: apply k_scale after dot product.
+        # Per-token quant: fuse softmax_scale with per-token k_scale
+        # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
         if KV_QUANT_MODE >= 2:
-            S *= k_token_scales[None, :]
+            S += tl.dot(Q, K) * (scale * k_token_scales[None, :])
+        else:
+            S += scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -762,11 +763,13 @@ def kernel_unified_attention_3d(
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-        S += scale * tl.dot(Q, K)
 
-        # Per-token quant: apply k_scale after dot product.
+        # Per-token quant: fuse softmax_scale with per-token k_scale
+        # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
         if KV_QUANT_MODE >= 2:
-            S *= k_token_scales[None, :]
+            S += tl.dot(Q, K) * (scale * k_token_scales[None, :])
+        else:
+            S += scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
