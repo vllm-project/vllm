@@ -125,22 +125,29 @@ class AttentionSpec(KVCacheSpec):
         return real_page_size
 
     @property
+    def scale_bytes_per_block(self) -> int:
+        """Bytes for per-token scales packed into the KV cache block.
+
+        For per-token quantization (int8/fp8), one float32 scale per
+        token for K and one for V are appended after each data region.
+        Returns 0 for other quantization modes.
+        """
+        if self.kv_quant_mode in (
+            KVQuantMode.INT8_PER_TOKEN,
+            KVQuantMode.FP8_PER_TOKEN,
+        ):
+            return 2 * self.block_size * get_dtype_size(torch.float32)
+        return 0
+
+    @property
     def real_page_size_bytes(self) -> int:
-        data_bytes = (
+        return (
             2
             * self.block_size
             * self.num_kv_heads
             * self.head_size
             * get_dtype_size(self.dtype)
         )
-        if self.kv_quant_mode in (
-            KVQuantMode.INT8_PER_TOKEN,
-            KVQuantMode.FP8_PER_TOKEN,
-        ):
-            # Per-token scales packed after each K/V data region:
-            # one float32 scale per token for K and one for V.
-            data_bytes += 2 * self.block_size * get_dtype_size(torch.float32)
-        return data_bytes
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -236,18 +243,12 @@ class FullAttentionSpec(AttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
-        data_bytes = (
+        return (
             self.block_size
             * self.num_kv_heads
             * (self.head_size + self.head_size_v)
             * get_dtype_size(self.dtype)
         )
-        if self.kv_quant_mode in (
-            KVQuantMode.INT8_PER_TOKEN,
-            KVQuantMode.FP8_PER_TOKEN,
-        ):
-            data_bytes += 2 * self.block_size * get_dtype_size(torch.float32)
-        return data_bytes
 
 
 @dataclass(frozen=True, kw_only=True)
