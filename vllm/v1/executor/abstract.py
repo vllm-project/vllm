@@ -12,6 +12,8 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
+import psutil
+
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -338,6 +340,14 @@ class Executor(ABC):
 
     def _acquire_gpu_access(self):
         """Acquire atomic signals for all GPUs managed by this executor."""
+        my_pid = os.getpid()
+        try:
+            # Obtain the current process's startup time and add a uniqueness check.
+            my_create_time = psutil.Process(my_pid).create_time()
+        except psutil.Error:
+            my_create_time = -1.0
+
+        my_lock_info = f"{my_pid}:{my_create_time}"
         device_ids = self.device_config.device_ids
         if not device_ids:
             logger.warning(
@@ -348,7 +358,6 @@ class Executor(ABC):
             device_ids = [0]
 
         sorted_ids = sorted(list(set(device_ids)))
-        my_pid = os.getpid()
         acquired_paths: list[Path] = []
 
         for d_id in sorted_ids:
@@ -358,24 +367,33 @@ class Executor(ABC):
                     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
                     fd = os.open(str(sig_path), flags)
                     with os.fdopen(fd, "w") as f:
-                        f.write(str(my_pid))
+                        f.write(str(my_lock_info))
                     acquired_paths.append(sig_path)
                     break
                 except FileExistsError:
                     try:
-                        with open(sig_path) as f:
-                            content = f.read().strip()
-                            owner_pid = int(content) if content else -1
-                        if owner_pid == my_pid:
+                        content = sig_path.read_text().strip()
+                        if not content:
+                            raise ValueError("Lock file is empty.")
+                        owner_pid_str, owner_create_time_str = content.split(":", 1)
+                        owner_pid = int(owner_pid_str)
+                        owner_create_time = float(owner_create_time_str)
+                        if owner_pid == my_pid and owner_create_time == my_create_time:
+                            acquired_paths.append(sig_path)
                             break
-
-                        # Use safer check to avoid os.kill(-1, 0)
-                        if owner_pid != -1:
-                            os.kill(owner_pid, 0)
-                        else:
+                        # Verify whether the lock holder is still alive
+                        # and whether the startup time is consistent.
+                        p = psutil.Process(owner_pid)
+                        if p.create_time() != owner_create_time:
                             raise ProcessLookupError
-                    except (ProcessLookupError, ValueError, OSError):
-                        with contextlib.suppress(Exception):
+
+                    except (
+                        psutil.NoSuchProcess,
+                        ProcessLookupError,
+                        ValueError,
+                        OSError,
+                    ):
+                        with contextlib.suppress(OSError):
                             sig_path.unlink(missing_ok=True)
                         continue
 
