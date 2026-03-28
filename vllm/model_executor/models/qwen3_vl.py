@@ -546,7 +546,7 @@ class Qwen3_VisionTransformer(nn.Module):
 
         Args:
             grid_thw_list: Grid configurations as list of [t, h, w].
-            max_batch_size: If set, pad cu_seqlens to at least this size
+            max_batch_size: If set, pad cu_seqlens to this size
                 (needed for CUDA graph capture/replay).
             max_frames_per_batch: If set, overrides max_batch_size for
                 cu_seqlens padding. For video inputs each item contributes
@@ -1605,8 +1605,7 @@ class Qwen3VLForConditionalGeneration(
 
         return EncoderCudaGraphConfig(
             modalities=modalities,
-            input_key="pixel_values",
-            modality_input_keys={
+            input_key_by_modality={
                 "image": "pixel_values",
                 "video": "pixel_values_videos",
             },
@@ -1654,8 +1653,8 @@ class Qwen3VLForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
     ) -> list[tuple[int, int, int]]:
-        input_modality = f"{self.get_input_modality(mm_kwargs)}_grid_thw"
-        grid_thw = mm_kwargs[input_modality]
+        grid_thw_key = f"{self.get_input_modality(mm_kwargs)}_grid_thw"
+        grid_thw = mm_kwargs[grid_thw_key]
         if not isinstance(grid_thw, list):
             grid_thw = grid_thw.tolist()
         return grid_thw
@@ -1736,26 +1735,21 @@ class Qwen3VLForConditionalGeneration(
         )
 
         spatial_merge_size = self.visual.spatial_merge_size
-        per_image_output = token_budget // max_batch_size
+        per_mm_item_output = token_budget // max_batch_size
 
-        # Build the capture grid using a video-format layout so that
-        # cu_seqlens is sized for video replays from the start.
-        # cu_seqlens has one entry per attention sequence (= one per frame),
-        # so using T > 1 per item makes the buffer large enough without
-        # relying solely on padding.
-        #
-        # frames_per_item: frames distributed evenly across max_batch_size slots.
-        # tokens_per_frame: spatial tokens per frame (ceiling so total patches
-        #   >= original, keeping pixel_values buffer large enough for replay).
         frames_per_item = max_frames_per_batch // max_batch_size
         if frames_per_item > 1:
-            # Video-format: each item has frames_per_item temporal frames with
-            # minimal-but-sufficient spatial size.
-            # ceil ensures frames_per_item * tokens_per_frame >= per_image_output
+            # Build the capture grid using a video-format layout so that
+            # cu_seqlens is sized for video replays from the start.
+            # cu_seqlens has one entry per attention sequence (one per frame),
+            # so using T > 1 per item makes the buffer large enough without
+            # relying solely on padding.
+            # Ceiling ensures frames_per_item * tokens_per_frame >= per_mm_item_output
             # so the pixel_values buffer covers any valid single-item replay.
             tokens_per_frame = (
-                per_image_output + frames_per_item - 1
+                per_mm_item_output + frames_per_item - 1
             ) // frames_per_item
+            # Video-format grid_config (T=frames_per_item).
             grid_config = [
                 [
                     frames_per_item,
@@ -1765,11 +1759,9 @@ class Qwen3VLForConditionalGeneration(
                 for _ in range(max_batch_size)
             ]
         else:
-            # Image-format fallback (T=1): happens when max_frames_per_batch
-            # is at most max_batch_size (rare for auto-infer, possible for
-            # user-specified very small values).
+            # Image-format grid_config (T=1).
             grid_config = [
-                [1, spatial_merge_size, per_image_output * spatial_merge_size]
+                [1, spatial_merge_size, per_mm_item_output * spatial_merge_size]
                 for _ in range(max_batch_size)
             ]
 
@@ -1791,10 +1783,6 @@ class Qwen3VLForConditionalGeneration(
         # so the capture value must cover any replay scenario.
         # Worst case: 1 item consuming the full budget ->
         # seq_len = token_budget * spatial_merge_size^2.
-        #
-        # Also pass max_frames_per_batch to prepare_encoder_metadata so the
-        # cu_seqlens buffer is padded to cover the remainder when
-        # max_frames_per_batch % max_batch_size != 0.
         buffers = self.visual.prepare_encoder_metadata(
             grid_config,
             max_batch_size=max_batch_size,
@@ -1803,6 +1791,8 @@ class Qwen3VLForConditionalGeneration(
             device=device,
         )
 
+        # Just use image-modality dummy input_buffer for capturing, since it's also
+        # compatible for video inputs (has the same shape: [num_patches, C*T*P*P]).
         mm_kwargs = {
             "pixel_values": dummy_pixel_values,
             "image_grid_thw": grid_config,

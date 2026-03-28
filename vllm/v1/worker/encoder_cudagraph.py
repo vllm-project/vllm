@@ -36,6 +36,7 @@ class BudgetGraphMetadata:
 
     token_budget: int
     max_batch_size: int  # Max number of images/videos per batch
+    max_frames_per_batch: int  # Max total frames per batch (for video)
     graph: torch.cuda.CUDAGraph
     # The input tensor updated before replay (e.g. pixel_values)
     input_buffer: torch.Tensor
@@ -66,13 +67,13 @@ class EncoderCudaGraphManager:
 
         comp_config = vllm_config.compilation_config
         user_budgets = comp_config.encoder_cudagraph_token_budgets
-        user_max_images = comp_config.encoder_cudagraph_max_mm_items_per_batch
+        user_max_mm_items = comp_config.encoder_cudagraph_max_mm_items_per_batch
         user_max_frames = comp_config.encoder_cudagraph_max_frames_per_batch
 
-        if user_budgets and user_max_images > 0:
+        if user_budgets and user_max_mm_items > 0:
             # Fully user-specified
             self.token_budgets = sorted(user_budgets)
-            self.max_batch_size = user_max_images
+            self.max_batch_size = user_max_mm_items
         else:
             # Auto-infer missing values from model
             min_budget, max_budget = model.get_encoder_cudagraph_budget_range(
@@ -84,11 +85,14 @@ class EncoderCudaGraphManager:
                 else self._generate_budgets(min_budget, max_budget)
             )
             self.max_batch_size = (
-                user_max_images if user_max_images > 0 else max_budget // min_budget
+                user_max_mm_items if user_max_mm_items > 0 else max_budget // min_budget
             )
 
-        # 0 = auto-infer per budget level at capture time (= token_budget).
-        self.max_frames_per_batch = user_max_frames
+        if user_max_frames > 0:
+            self.max_frames_per_batch = user_max_frames
+        else:
+            # TODO(shen-shanshan): optimize this auto-infer for max_frames_per_batch.
+            self.max_frames_per_batch = self.max_batch_size * 2
 
         mm_config = vllm_config.model_config.multimodal_config
         self.use_dp = (
@@ -140,22 +144,20 @@ class EncoderCudaGraphManager:
 
     def _capture_budget_graph(self, token_budget: int):
         """Capture CUDA graph for a single token budget."""
-        # Auto-infer: worst case = token_budget frames (each frame yields
-        # >= 1 output token, so sum(T_i) <= token_budget by packing).
-        # TODO(shen-shanshan): optimize this auto-infer for max_frames.
-        max_frames = (
-            self.max_frames_per_batch if self.max_frames_per_batch > 0 else token_budget
-        )
         logger.debug(
             "Capturing encoder cudagraph for budget=%d, max_batch_size=%d, "
             "max_frames_per_batch=%d",
             token_budget,
             self.max_batch_size,
-            max_frames,
+            self.max_frames_per_batch,
         )
 
         capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
-            token_budget, self.max_batch_size, max_frames, self.device, self.dtype
+            token_budget,
+            self.max_batch_size,
+            self.max_frames_per_batch,
+            self.device,
+            self.dtype,
         )
 
         mm_kwargs = capture_inputs.mm_kwargs
@@ -170,10 +172,11 @@ class EncoderCudaGraphManager:
             output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
             output_buffer.copy_(output)
 
-        input_key = self.config.input_key
+        input_key = self.config.input_key_by_modality["image"]
         self.budget_graphs[token_budget] = BudgetGraphMetadata(
             token_budget=token_budget,
             max_batch_size=self.max_batch_size,
+            max_frames_per_batch=self.max_frames_per_batch,
             graph=graph,
             input_buffer=mm_kwargs[input_key],
             metadata_buffers=buffers,
@@ -192,17 +195,6 @@ class EncoderCudaGraphManager:
             if budget >= total_tokens:
                 return budget
         return None
-
-    def _get_input_key_by_modality(self, mm_kwargs: dict[str, Any]) -> str:
-        """Return the correct input tensor key for the current mm_kwargs modality.
-
-        Detects video modality by the presence of ``video_grid_thw`` and
-        looks up the per-modality key from ``config.modality_input_keys``,
-        falling back to ``config.input_key`` when not configured.
-        """
-        return self.config.modality_input_keys.get(
-            self.model.get_input_modality(mm_kwargs), self.config.input_key
-        )
 
     def _get_per_item_out_tokens(self, mm_kwargs: dict[str, Any]) -> list[int]:
         """Get per-item output token counts as plain ints."""
@@ -254,7 +246,9 @@ class EncoderCudaGraphManager:
         # Copy the input tensor. Buffers are sized for the full budget;
         # actual inputs may be smaller. Zero then slice-copy so padded
         # positions are invisible to attention (cu_seqlens masks them out).
-        input_key = self._get_input_key_by_modality(mm_kwargs)
+        input_key = self.config.input_key_by_modality[
+            self.model.get_input_modality(mm_kwargs)
+        ]
         src = mm_kwargs[input_key]
         n = src.shape[0]
         graph_meta.input_buffer[:n].copy_(src)

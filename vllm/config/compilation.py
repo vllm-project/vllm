@@ -506,7 +506,7 @@ class CompilationConfig:
     Example: [2048, 4096, 8192, 13824]"""
 
     encoder_cudagraph_max_mm_items_per_batch: int = 0
-    """Maximum number of images per batch for encoder CUDA graph capture.
+    """Maximum number of images/videos per batch for encoder CUDA graph capture.
     Determines the fixed batch size used during graph capture.
     If 0 (default), auto-inferred as max_budget // min_budget from the
     model's budget range. User-provided positive value overrides
