@@ -160,15 +160,18 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
-        # Enable fused RoPE+quant for FP8 attention
-        self.use_fused_rope_quant = kv_cache_dtype.startswith("fp8")
-        self.use_fused_rope_cache = (
-            self.use_fused_rope_quant
-            and os.getenv("VLLM_MLA_FUSED_ROPE_CACHE", "0") == "1"
-        )
-        self.use_fused_absorption = (
-            self.use_fused_rope_quant
-            and os.getenv("VLLM_MLA_FUSED_ABSORPTION", "0") == "1"
+        # Enable fused RoPE+quant for FP8 attention.
+        # use_fused_rope_quant requires at least one fused path
+        # (rope_cache or absorption) to be enabled, otherwise the
+        # standalone fused-quant path outputs FP8 K tensors that
+        # concat_and_cache_mla cannot accept.
+        _is_fp8 = kv_cache_dtype.startswith("fp8")
+        _want_rope_cache = os.getenv("VLLM_MLA_FUSED_ROPE_CACHE", "0") == "1"
+        _want_absorption = os.getenv("VLLM_MLA_FUSED_ABSORPTION", "0") == "1"
+        self.use_fused_rope_cache = _is_fp8 and _want_rope_cache
+        self.use_fused_absorption = _is_fp8 and _want_absorption
+        self.use_fused_rope_quant = (
+            self.use_fused_rope_cache or self.use_fused_absorption
         )
 
         # Pre-allocate constant scale_b=1.0 for absorption BMM to avoid
