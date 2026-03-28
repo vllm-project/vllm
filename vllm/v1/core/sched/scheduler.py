@@ -79,6 +79,7 @@ class Scheduler(SchedulerInterface):
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self.steering_config = vllm_config.steering_config
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
@@ -553,6 +554,18 @@ class Scheduler(SchedulerInterface):
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
+        # Record steering configs in scheduled_running_reqs
+        scheduled_steering_configs: set[int] = set()
+        if self.steering_config:
+            scheduled_steering_configs = set(
+                req.steering_config_hash
+                for req in scheduled_running_reqs
+                if req.steering_config_hash != 0
+            )
+            assert len(scheduled_steering_configs) <= (
+                self.steering_config.max_steering_configs
+            )
+
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
@@ -591,6 +604,21 @@ class Scheduler(SchedulerInterface):
                     )
                 ):
                     # Scheduling would exceed max_loras, skip.
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
+
+                # Check steering config capacity
+                if (
+                    self.steering_config
+                    and request.steering_config_hash != 0
+                    and (
+                        len(scheduled_steering_configs)
+                        == self.steering_config.max_steering_configs
+                        and request.steering_config_hash
+                        not in scheduled_steering_configs
+                    )
+                ):
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
                     continue
@@ -812,6 +840,8 @@ class Scheduler(SchedulerInterface):
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
+                if self.steering_config and request.steering_config_hash != 0:
+                    scheduled_steering_configs.add(request.steering_config_hash)
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(
                     request_id
                 )
