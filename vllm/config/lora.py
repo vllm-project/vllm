@@ -24,8 +24,8 @@ MaxLoRARanks = Literal[1, 8, 16, 32, 64, 128, 256, 320, 512]
 LoRAExtraVocabSize = Literal[256, 512]
 
 
-@config(config=ConfigDict(arbitrary_types_allowed=True))  # type: ignore[arg-type,misc]
-class LoRAConfig:  # type: ignore[misc]
+@config(config=ConfigDict(arbitrary_types_allowed=True))
+class LoRAConfig:
     """Configuration for LoRA."""
 
     max_lora_rank: MaxLoRARanks = 16

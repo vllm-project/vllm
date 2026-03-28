@@ -145,14 +145,14 @@ class MultiModalConfig:
     parallelism (TP).
 
     - `"weights"`: Within the same vLLM engine, split the weights of
-        each layer across TP ranks. (default TP behavior)\n
+      each layer across TP ranks. (default TP behavior)
     - `"data"`: Within the same vLLM engine, split the batched input data
-        across TP ranks to process the data in parallel, while hosting
-        the full weights on each TP rank.
-        This batch-level DP is not to be confused with API request-level
-        DP (which is controlled by `--data-parallel-size`).
-        This is only supported on a per-model basis and falls back to
-        `"weights"` if the encoder does not support DP."""
+      across TP ranks to process the data in parallel, while hosting
+      the full weights on each TP rank.
+      This batch-level DP is not to be confused with API request-level
+      DP (which is controlled by `--data-parallel-size`).
+      This is only supported on a per-model basis and falls back to
+      `"weights"` if the encoder does not support DP."""
     mm_encoder_attn_backend: AttentionBackendEnum | None = None
     """Optional override for the multi-modal encoder attention backend when
     using vision transformers. Accepts any value from

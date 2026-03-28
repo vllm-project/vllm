@@ -9,6 +9,7 @@ from pydantic import Field, SkipValidation, model_validator
 from typing_extensions import Self
 
 from vllm.config import LoadConfig
+from vllm.config.kernel import MoEBackend
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import CompileFactors, config, normalize_value
@@ -56,7 +57,7 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
 ]
-RejectionSampleMethod = Literal["strict", "probabilistic"]
+RejectionSampleMethod = Literal["strict", "probabilistic", "synthetic"]
 
 
 @config
@@ -92,6 +93,11 @@ class SpeculativeConfig:
     """Quantization method that was used to quantize the draft model weights.
     If `None`, we assume the model weights are not quantized. Note that it only
     takes effect when using the draft model-based speculative method."""
+    moe_backend: MoEBackend | None = None
+    """MoE backend to use for the draft model. When `None`, the draft model
+    inherits the target model's `--moe-backend` setting. Useful when the
+    drafter and generator require different MoE kernels (e.g. quantized
+    generator with unquantized drafter)."""
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
@@ -176,6 +182,13 @@ class SpeculativeConfig:
     or probabilistic rejection sampling. Both respect the target model
     distribution, but the latter yields a higher acceptance rate at the cost
     of more memory to cache draft logits."""
+
+    synthetic_acceptance_rate: float | None = None
+    """Average acceptance rate for synthetic rejection sampling. Draft
+    tokens are accepted with a position-dependent probability that decays
+    geometrically, calibrated so that the mean rate across all speculative
+    positions equals this value. Only used when rejection_sample_method
+    is 'synthetic'. Must be in [0, 1]."""
 
     def compile_factors(self) -> CompileFactors:
         """
