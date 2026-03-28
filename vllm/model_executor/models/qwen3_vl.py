@@ -98,6 +98,7 @@ from vllm.tokenizers.protocol import TokenizerLike
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
+from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -1501,9 +1502,6 @@ class Qwen3VLForConditionalGeneration(
         self.visual_dim = config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
-        # Cache for cuda graph replay buffers keyed by (modality, grid_thw_list).
-        self._replay_buffer_cache: dict[tuple, Any] = {}
-
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
@@ -1815,28 +1813,45 @@ class Qwen3VLForConditionalGeneration(
             buffers=buffers,
         )
 
+    def _maybe_get_cached_replay_buffers(
+        self,
+        cache_key: tuple,
+    ) -> EncoderCudaGraphReplayBuffers | None:
+        # Cache keyed by (modality, grid_thw_list): identical grid shapes
+        # produce identical cu_seqlens, rotary embeddings, and positional
+        # embeddings, so the expensive CPU-side NumPy work inside
+        # prepare_encoder_metadata need only run once per unique shape.
+        self._replay_buffer_cache: dict[tuple, EncoderCudaGraphReplayBuffers] = {}
+        cached = self._replay_buffer_cache.get(cache_key, None)
+        return cached
+
+    def _maybe_set_cached_replay_buffers(
+        self,
+        cache_key: tuple,
+        buffers: EncoderCudaGraphReplayBuffers,
+    ) -> None:
+        # Update cuda graph replay buffer cache with the newly computed buffers, so
+        # that subsequent replays with the same grid_thw pattern can reuse them.
+        self._replay_buffer_cache[cache_key] = buffers
+
+        # TODO(shen-shanshan): Design more appropriate cache eviction strategy.
+        if len(self._replay_buffer_cache) > 10:
+            self._replay_buffer_cache.popitem(last=False)
+
     def prepare_encoder_cudagraph_replay_buffers(
         self,
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
     ):
-        from vllm.v1.worker.encoder_cudagraph_defs import (
-            EncoderCudaGraphReplayBuffers,
-        )
-
         modality = self.get_input_modality(mm_kwargs)
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
 
-        # Cache keyed by (modality, grid_thw_list): identical grid shapes
-        # produce identical cu_seqlens, rotary embeddings, and positional
-        # embeddings, so the expensive CPU-side NumPy work inside
-        # prepare_encoder_metadata need only run once per unique shape.
         cache_key = (
             modality,
             tuple(tuple(thw) for thw in grid_thw_list),
         )
-        cached = self._replay_buffer_cache.get(cache_key)
+        cached = self._maybe_get_cached_replay_buffers(cache_key)
         if cached is not None:
             return cached
 
@@ -1852,11 +1867,7 @@ class Qwen3VLForConditionalGeneration(
             )
 
         result = EncoderCudaGraphReplayBuffers(buffers=buffers)
-        # Update cuda graph replay buffer cache with the newly computed buffers, so
-        # that subsequent replays with the same grid_thw pattern can reuse them.
-        self._replay_buffer_cache[cache_key] = result
-        # TODO(shen-shanshan): Move this caching mechanism to cuda graph interface
-        # and add cache eviction strategy.
+        self._maybe_set_cached_replay_buffers(cache_key, result)
         return result
 
     def encoder_cudagraph_forward(
