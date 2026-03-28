@@ -883,7 +883,7 @@ class Scheduler(SchedulerInterface):
 
         new_block_ids_to_zero = (
             (self.kv_cache_manager.take_new_block_ids() or None)
-            if self.needs_kv_cache_zeroing
+            if self.needs_kv_cache_zeroing or envs.VLLM_NAN_DETECT
             else None
         )
 

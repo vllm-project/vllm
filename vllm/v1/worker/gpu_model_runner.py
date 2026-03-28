@@ -1057,7 +1057,26 @@ class GPUModelRunner(
 
         # Zero GPU memory for freshly allocated cache blocks to prevent
         # stale NaN/data from corrupting attention or SSM computation.
+        #
+        # NOTE: Block zeroing only happens for Mamba/SSM models
+        # (needs_kv_cache_zeroing=True). For standard attention models,
+        # _zero_block_ids is a no-op — recycled blocks keep whatever
+        # the previous request wrote. This means stale NaN from a
+        # previous request can persist in recycled KV cache blocks and
+        # corrupt subsequent requests via attention.
+        #
+        # When VLLM_NAN_DETECT=1, the scheduler also collects new
+        # block IDs (even for attention models) so we can check them
+        # for stale NaN before they are reused.
         if scheduler_output.new_block_ids_to_zero:
+            if envs.VLLM_NAN_DETECT:
+                from vllm.model_executor.layers.nan_detector import (
+                    NaNDetector,
+                )
+
+                NaNDetector.get().check_kv_blocks(
+                    scheduler_output.new_block_ids_to_zero
+                )
             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
 
         # Free the cached encoder outputs.
@@ -4642,7 +4661,9 @@ class GPUModelRunner(
 
             detector = NaNDetector.get()
             detector.update_layer_names(self.model)
-            detector.finalize(self.device, self.max_num_tokens)
+            detector.finalize(
+                self.device, self.max_num_tokens, self.kv_caches
+            )
 
         if (
             self.vllm_config.compilation_config.mode

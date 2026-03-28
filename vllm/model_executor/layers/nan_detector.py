@@ -12,6 +12,13 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+def _as_fp8(data: torch.Tensor) -> torch.Tensor:
+    """View uint8 KV cache data as fp8 so torch.isnan works."""
+    if data.dtype == torch.uint8:
+        return data.view(torch.float8_e4m3fn)
+    return data
+
+
 class NaNDetector:
     """Manages per-token NaN/Inf detection flags for RMSNorm kernels.
 
@@ -33,6 +40,7 @@ class NaNDetector:
         self._nan_flags: torch.Tensor | None = None
         self._host_flags: torch.Tensor | None = None
         self._finalized: bool = False
+        self._kv_caches: list[torch.Tensor] = []
 
     @classmethod
     def get(cls) -> NaNDetector:
@@ -67,7 +75,12 @@ class NaNDetector:
     def max_num_tokens(self) -> int:
         return self._max_num_tokens
 
-    def finalize(self, device: torch.device, max_num_tokens: int) -> None:
+    def finalize(
+        self,
+        device: torch.device,
+        max_num_tokens: int,
+        kv_caches: list[torch.Tensor] | None = None,
+    ) -> None:
         """Allocate ``int8[num_layers, max_num_tokens]`` flag tensors."""
         if self._finalized:
             return
@@ -80,6 +93,8 @@ class NaNDetector:
             n, max_num_tokens, dtype=torch.int8, device=device
         )
         self._host_flags = torch.zeros(n, max_num_tokens, dtype=torch.int8).pin_memory()
+        if kv_caches is not None:
+            self._kv_caches = kv_caches
         self._finalized = True
         logger.info(
             "NaN/Inf detector initialized: %d layers, max %d tokens "
@@ -136,11 +151,37 @@ class NaNDetector:
 
         pad_bad = pad_flags.any(dim=1).nonzero(as_tuple=True)[0]
         if len(pad_bad) > 0:
-            for layer_idx in pad_bad.tolist():
-                name = self._layer_names.get(layer_idx, f"layer_{layer_idx}")
-                logger.warning(
-                    "NaN/Inf detected in PADDING tokens at '%s' "
-                    "(layer %d) — may leak into real data",
-                    name,
-                    layer_idx,
+            logger.debug(
+                "NaN/Inf in padding tokens at %d layers",
+                len(pad_bad),
+            )
+
+    def check_kv_blocks(self, block_ids: list[int]) -> None:
+        """Check specific KV cache blocks for NaN/Inf.
+
+        Called when blocks are recycled from the pool to a new request,
+        to detect stale NaN left by a previous request.
+        """
+        if not block_ids or not self._kv_caches:
+            return
+
+        device = self._kv_caches[0].device
+        indices = torch.tensor(block_ids, device=device, dtype=torch.long)
+
+        for group_idx, kv_cache in enumerate(self._kv_caches):
+            if not isinstance(kv_cache, torch.Tensor):
+                continue
+            if indices.max().item() >= kv_cache.shape[0]:
+                continue
+            blocks = _as_fp8(kv_cache[indices])
+            nan_count = torch.isnan(blocks).sum().item()
+            if nan_count > 0:
+                logger.error(
+                    "Stale NaN in recycled KV cache blocks "
+                    "(group %d, block_ids=%s, nan_count=%d, "
+                    "total_elements=%d)",
+                    group_idx,
+                    block_ids[:10],
+                    nan_count,
+                    blocks.numel(),
                 )
