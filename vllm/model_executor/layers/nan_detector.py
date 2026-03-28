@@ -155,6 +155,7 @@ class NaNDetector:
         if self._nan_flags is not None:
             self._nan_flags.zero_()
 
+    @torch.compiler.disable
     def check_tensor(
         self, tensor: torch.Tensor, checkpoint_idx: int
     ) -> None:
@@ -162,6 +163,7 @@ class NaNDetector:
 
         Uses ``torch.isfinite`` -- all ops stay on GPU, no D2H sync.
         CUDA-graph compatible (fixed output address).
+        Decorated with ``@torch.compiler.disable`` to avoid graph breaks.
 
         Args:
             tensor: 2-D ``[num_tokens, hidden_size]`` tensor to check.
