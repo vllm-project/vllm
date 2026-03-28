@@ -183,6 +183,10 @@ class BlockPool:
         # Priority eviction queue for blocks with explicit retention
         # priority. Blocks without priority stay in the LRU free_block_queue.
         self.priority_eviction_queue = PriorityEvictionQueue()
+        # Fast-path flag: set to True when any block receives a priority
+        # via _apply_retention_to_block. Avoids per-block checks in
+        # free_blocks/touch/get_new_blocks when retention is never used.
+        self._has_prioritized_blocks = False
 
         self.metrics_collector = metrics_collector
 
@@ -363,22 +367,27 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = []
+        # Fast path: no prioritized blocks → pure LRU (zero overhead).
+        if self.priority_eviction_queue.num_blocks == 0:
+            ret = self.free_block_queue.popleft_n(num_blocks)
+        else:
+            ret: list[KVCacheBlock] = []
 
-        # Phase 1: Drain unprioritized blocks from LRU free list first.
-        num_from_free = min(num_blocks, self.free_block_queue.num_free_blocks)
-        if num_from_free > 0:
-            ret.extend(self.free_block_queue.popleft_n(num_from_free))
+            # Phase 1: Drain unprioritized blocks from LRU free list first.
+            num_from_free = min(
+                num_blocks, self.free_block_queue.num_free_blocks)
+            if num_from_free > 0:
+                ret.extend(self.free_block_queue.popleft_n(num_from_free))
 
-        # Phase 2: If still need more, take from priority queue
-        # (lowest priority first).
-        num_remaining = num_blocks - len(ret)
-        for _ in range(num_remaining):
-            block = self.priority_eviction_queue.pop_lowest()
-            assert block is not None, (
-                "Priority eviction queue is empty but we need more blocks"
-            )
-            ret.append(block)
+            # Phase 2: If still need more, take from priority queue
+            # (lowest priority first).
+            num_remaining = num_blocks - len(ret)
+            for _ in range(num_remaining):
+                block = self.priority_eviction_queue.pop_lowest()
+                assert block is not None, (
+                    "Priority eviction queue is empty but we need "
+                    "more blocks")
+                ret.append(block)
 
         # Finalize: evict cached state and increment ref counts.
         if self.enable_caching:
@@ -444,13 +453,12 @@ class BlockPool:
         Args:
             blocks: A list of blocks to touch.
         """
+        has_prioritized = self.priority_eviction_queue.num_blocks > 0
         for block in blocks:
             # ref_cnt=0 means this block is in an eviction queue, remove it.
             if block.ref_cnt == 0 and not block.is_null:
-                # Check priority queue membership first (O(1) set lookup).
-                # A block might have priority=None due to TTL expiry but
-                # still be logically in the priority queue.
-                if block.block_id in self.priority_eviction_queue._block_ids_in_queue:
+                if has_prioritized and block.block_id in \
+                        self.priority_eviction_queue._block_ids_in_queue:
                     self.priority_eviction_queue.remove(block)
                 else:
                     self.free_block_queue.remove(block)
@@ -470,17 +478,25 @@ class BlockPool:
                 priority.
         """
         blocks_list = list(ordered_blocks)
-        now = time.monotonic()
+
         unprioritized: list[KVCacheBlock] = []
+        prioritized: list[KVCacheBlock] = []
         for block in blocks_list:
             block.ref_cnt -= 1
             if block.ref_cnt == 0 and not block.is_null:
-                block.last_freed_time = now
                 if block.priority is not None:
-                    self.priority_eviction_queue.insert(block)
+                    prioritized.append(block)
                 else:
                     unprioritized.append(block)
         self.free_block_queue.append_n(unprioritized)
+
+        # Only call time.monotonic and touch the priority queue when
+        # there are actually prioritized blocks to insert.
+        if prioritized:
+            now = time.monotonic()
+            for block in prioritized:
+                block.last_freed_time = now
+                self.priority_eviction_queue.insert(block)
 
     def _apply_retention_to_block(
         self,
@@ -537,6 +553,7 @@ class BlockPool:
             # Escalation: any scope can raise priority and take ownership.
             block.priority = best_priority
             block.priority_scope = scope
+            self._has_prioritized_blocks = True
             if best_duration is not None:
                 block.priority_expiry = time.monotonic() + best_duration
             else:
@@ -592,6 +609,7 @@ class BlockPool:
         # Clear the priority eviction queue — all prioritized free blocks
         # lose their priority when hashes are reset below.
         self.priority_eviction_queue = PriorityEvictionQueue()
+        self._has_prioritized_blocks = False
 
         # Remove all hashes from all blocks.
         for block in self.blocks:
