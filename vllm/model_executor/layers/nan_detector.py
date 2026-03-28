@@ -157,10 +157,39 @@ class NaNDetector:
             )
 
         if len(real_bad) > 0:
+            self._check_all_kv_cache()
             raise RuntimeError(
                 f"NaN/Inf detected in {len(real_bad)} layer(s). "
                 "See ERROR logs above for details."
             )
+
+    def _check_all_kv_cache(self) -> None:
+        """Scan all KV cache blocks for NaN. Called once before crash."""
+        if not self._kv_caches:
+            return
+        for group_idx, kv_cache in enumerate(self._kv_caches):
+            if not isinstance(kv_cache, torch.Tensor):
+                continue
+            data = _as_fp8(kv_cache)
+            nan_per_block = (
+                torch.isnan(data.view(data.shape[0], -1)).any(dim=1)
+            )
+            bad_blocks = nan_per_block.nonzero(as_tuple=True)[0]
+            if len(bad_blocks) > 0:
+                logger.error(
+                    "KV cache group %d: %d / %d blocks contain NaN "
+                    "(block IDs: %s)",
+                    group_idx,
+                    len(bad_blocks),
+                    data.shape[0],
+                    bad_blocks.tolist()[:20],
+                )
+            else:
+                logger.info(
+                    "KV cache group %d: all %d blocks clean",
+                    group_idx,
+                    data.shape[0],
+                )
 
     def check_kv_blocks(self, block_ids: list[int]) -> None:
         """Check specific KV cache blocks for NaN/Inf.
