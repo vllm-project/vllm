@@ -504,7 +504,10 @@ class FusedMoE(CustomOp):
         # self.quant_method = self.routed_experts.quant_method
 
         # Move XXXXXXXXXXXXX
-        if eplb_manager is not None and not self.quant_method.supports_eplb:
+        if (
+            eplb_manager is not None
+            and not self.routed_experts.quant_method.supports_eplb
+        ):
             # TODO: Add support for additional quantization methods.
             # The implementation for other quantization methods does not
             # contain essential differences, but the current quant API

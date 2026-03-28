@@ -888,7 +888,9 @@ def make_fused_moe_layer(
                 name, torch.nn.Parameter(value, requires_grad=False)
             )
 
-    layer.quant_method.process_weights_after_loading(layer.routed_experts)
+    layer.routed_experts.quant_method.process_weights_after_loading(
+        layer.routed_experts
+    )
 
     # Temporary hack until #36286 or #36732 lands
     if quantization is None:
