@@ -50,16 +50,21 @@ class MistralCommonImageProcessor:
 class MistralCommonPixtralProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
 
-    def __init__(self, tokenizer: MistralTokenizer) -> None:
+    def __init__(
+        self,
+        tokenizer: MistralTokenizer,
+        image_processor: MistralCommonImageProcessor | None = None,
+    ) -> None:
         self.tokenizer = tokenizer.transformers_tokenizer
 
         # Back-compatibility for Transformers v4
         if not hasattr(self.tokenizer, "init_kwargs"):
             self.tokenizer.init_kwargs = {}
 
-        self.image_processor = MistralCommonImageProcessor(
-            tokenizer.instruct.mm_encoder
-        )
+        if image_processor is None:
+            image_processor = MistralCommonImageProcessor(tokenizer.instruct.mm_encoder)
+
+        self.image_processor = image_processor
 
         image_special_ids = self.image_processor.mm_encoder.special_ids
         self.image_break_id = image_special_ids.img_break
