@@ -3,6 +3,10 @@
 !!! warning
     Profiling is only intended for vLLM developers and maintainers to understand the proportion of time spent in different parts of the codebase. **vLLM end-users should never turn on profiling** as it will significantly slow down the inference.
 
+!!! tip "Choosing a profiler"
+    - Use **Nsight Systems** for low-overhead, performance-critical profiling.
+    - Use **PyTorch Profiler** for medium-overhead profiling with richer debugging information (e.g., stack traces, memory, shapes). Note that enabling these features adds overhead and is not recommended for benchmarking.
+
 ## Profile with PyTorch Profiler
 
 We support tracing vLLM workers using different profilers. You can enable profiling by setting the `--profiler-config` flag when launching the server.

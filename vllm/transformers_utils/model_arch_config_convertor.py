@@ -28,7 +28,10 @@ class ModelArchConfigConvertorBase:
         self.hf_text_config = hf_text_config
 
     def get_architectures(self) -> list[str]:
-        return getattr(self.hf_config, "architectures", [])
+        # Sometimes we get here from `vllm_config.with_hf_config(text_config)` where
+        # `text_config` is a sub-config from a multi-modal model. If this is the case,
+        # the sub-config will not have `architectures` and it will explicitly be `None`
+        return getattr(self.hf_config, "architectures", None) or []
 
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_hidden_layers", 0)
@@ -128,7 +131,7 @@ class ModelArchConfigConvertorBase:
         hf_config: PretrainedConfig,
         model_id: str,
         revision: str | None,
-        config_format: ConfigFormat,
+        config_format: str | ConfigFormat,
     ):
         # NOTE: getattr(config, "dtype", torch.float32) is not correct
         # because config.dtype can be None.
@@ -228,7 +231,7 @@ class ModelArchConfigConvertorBase:
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
         ):
-            return self.hf_text_config.kv_lora_rank is not None
+            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
         elif self.hf_text_config.model_type == "eagle":
             # if the model is an EAGLE module, check for the
             # underlying architecture
@@ -241,7 +244,7 @@ class ModelArchConfigConvertorBase:
                     "deepseek_v32",
                     "deepseek_mtp",
                 )
-                and self.hf_text_config.kv_lora_rank is not None
+                and getattr(self.hf_text_config, "kv_lora_rank", None) is not None
             )
         return False
 

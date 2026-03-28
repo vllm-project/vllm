@@ -19,6 +19,7 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
+import vllm._C_stable_libtorch  # noqa
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -509,6 +510,11 @@ class CudaPlatformBase(Platform):
     @classmethod
     def support_static_graph_mode(cls) -> bool:
         return True
+
+    @classmethod
+    def support_deep_gemm(cls) -> bool:
+        """Currently, only Hopper and Blackwell GPUs are supported."""
+        return cls.is_device_capability(90) or cls.is_device_capability_family(100)
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:

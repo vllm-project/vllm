@@ -91,6 +91,9 @@ def clear_kv_transfer():
     yield
     if has_kv_transfer_group():
         ensure_kv_transfer_shutdown()
+    # Reset any KV cache layout override set during tests so it doesn't
+    # leak into tests in other modules.
+    set_kv_cache_layout(None)
 
 
 def get_default_xfer_telemetry(
@@ -2007,7 +2010,7 @@ def test_transfer_failure_logging(
     connector = NixlConnector(
         vllm_config,
         KVConnectorRole.WORKER,
-        make_kv_cache_config(block_size=16, hma_enabled=enable_hma),
+        make_kv_cache_config(block_size=16, swa_enabled=enable_hma),
     )
     connector.connector_worker = FakeNixlConnectorWorker(
         vllm_config,
