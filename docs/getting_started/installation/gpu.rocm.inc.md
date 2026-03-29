@@ -1,7 +1,12 @@
 <!-- markdownlint-disable MD041 MD051 -->
 --8<-- [start:installation]
 
-vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available for ROCm 7.0.
+vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available for ROCm 7.0 and ROCm 7.2.1.
+
+List of release wheels:
+
+- ROCm Variant: `rocm700` (Python 3.12, ROCm 7.0 and `glibc >= 2.35`) is supported from version `0.14.0` to `0.18.0`.
+- ROCm Variant: `rocm721` (Python 3.12, ROCm 7.2.1 and `glibc >= 2.35`) is supported since nightly releases after commit `171775f306a333a9cf105bfd533bf3e113d401d9`
 
 --8<-- [end:installation]
 --8<-- [start:requirements]
@@ -29,20 +34,105 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
 !!! tip
     You can find out about which ROCm version the latest vLLM supports by checking the index in extra-index-url [https://wheels.vllm.ai/rocm/](https://wheels.vllm.ai/rocm/) .
 
+    Another approach is that you can use this following commands to automatically extract the wheel variants:
+
+    ```bash
+    # automatically extract the available rocm variant
+    export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/ | \
+    grep -oP 'rocm\d+' | head -1  | sed 's/%2B/+/g')
+
+    # inspect if the ROCm version is compatible with your environment
+    echo $VLLM_ROCM_VARIANT
+    ```
+
 To install a specific version and ROCm variant of vLLM wheel.
 
 ```bash
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
+# version without the `v`
+uv pip install vllm==${VLLM_VERSION} --extra-index-url https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}
+
+# Example
+uv pip install vllm==0.18.0 --extra-index-url https://wheels.vllm.ai/rocm/0.18.0/rocm700
 ```
 
 !!! warning "Caveats for using `pip`"
 
     We recommend leveraging `uv` to install vLLM wheel. Using `pip` to install from custom indices is cumbersome, because `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install wheel from custom index if exact versions of all packages are specified exactly. In contrast, `uv` gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes).
 
-    If you insist on using `pip`, you have to specify the exact vLLM version and full URL of the wheel path `https://wheels.vllm.ai/rocm/<version>/<rocm-variant>` (which can be obtained from the web page).
+    If you insist on using `pip`, you have to specify the exact vLLM version and full URL of the wheel path `https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}` (which can be obtained from the web page).
 
     ```bash
-    pip install vllm==0.15.0+rocm700 --extra-index-url https://wheels.vllm.ai/rocm/0.15.0/rocm700
+    pip install vllm==0.18.0+rocm700 --extra-index-url https://wheels.vllm.ai/rocm/0.18.0/rocm700
+    ```
+
+#### Install the latest code
+
+LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for every commit since `v0.18.1` on <https://wheels.vllm.ai/rocm/nightly/>. The indices can be used is
+
+- `https://wheels.vllm.ai/rocm/nightly/${VLLM_ROCM_VARIANT}`
+
+The first ROCm Variant that supports nightly wheel is ROCm 7.2.1
+
+To install from latest nightly index, run:
+
+```bash
+# automatically extract the available rocm variant
+export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/nightly | \
+grep -oP 'rocm\d+' | head -1  | sed 's/%2B/+/g')
+
+# inspect if the ROCm version is compatible with your environment
+echo $VLLM_ROCM_VARIANT
+
+uv pip install --pre vllm \
+    --extra-index-url https://wheels.vllm.ai/rocm/nightly/${VLLM_ROCM_VARIANT} \
+    --index-strategy unsafe-best-match \
+    --upgrade
+```
+
+
+##### Install specific revisions
+
+If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
+
+```bash
+export VLLM_COMMIT=5b8c30d62b754b575e043ce2fc0dcbf8a64f6306
+
+export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/${VLLM_COMMIT} | \
+grep -oP 'rocm\d+' | head -1  | sed 's/%2B/+/g')
+
+# Extract the version from the wheel URL
+export VLLM_VERSION=$(curl -s https://wheels.vllm.ai/rocm/${VLLM_COMMIT}/${VLLM_ROCM_VARIANT}/vllm/ | \
+grep -oP 'vllm-\K[^-]+' | head -1  | sed 's/%2B/+/g')
+
+# inspect the version if it is compatible with the ROCm version of your environment
+echo $VLLM_VERSION
+
+uv pip install vllm==${VLLM_VERSION} \
+  --extra-index-url https://wheels.vllm.ai/rocm/${VLLM_COMMIT}/${VLLM_ROCM_VARIANT} \
+  --index-strategy unsafe-best-match
+```
+
+!!! warning "`pip` caveat"
+
+    Using `pip` to install from nightly indices is _not supported_, because `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version. In contrast, `uv` gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes).
+
+    If you insist on using `pip`, you have to specify the full URL of the wheel file (which can be obtained from the web page).
+
+    ```bash
+    export VLLM_COMMIT=5b8c30d62b754b575e043ce2fc0dcbf8a64f6306
+
+    export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/${VLLM_COMMIT} | \
+    grep -oP 'rocm\d+' | head -1  | sed 's/%2B/+/g')
+
+    # Extract the version from the wheel URL
+    export VLLM_VERSION=$(curl -s https://wheels.vllm.ai/rocm/${VLLM_COMMIT}/${VLLM_ROCM_VARIANT}/vllm/ | \
+    grep -oP 'vllm-\K[^-]+' | head -1  | sed 's/%2B/+/g')
+
+    # inspect the version if it is compatible with the ROCm version of your environment
+    echo $VLLM_VERSION
+
+    pip install vllm==${VLLM_VERSION} \
+    --extra-index-url https://wheels.vllm.ai/rocm/${VLLM_COMMIT}/${VLLM_ROCM_VARIANT}
     ```
 
 --8<-- [end:pre-built-wheels]
@@ -192,6 +282,24 @@ docker run --rm \
     vllm/vllm-openai-rocm:<tag> \
     --model Qwen/Qwen3-0.6B
 ```
+
+To use the docker image as base for development, you can launch it in interactive session through overriding the entrypoint.
+
+???+ console "Commands"
+    ```bash
+    docker run --rm -it \
+        --group-add=video \
+        --cap-add=SYS_PTRACE \
+        --security-opt seccomp=unconfined \
+        --device /dev/kfd \
+        --device /dev/dri \
+        -v ~/.cache/huggingface:/root/.cache/huggingface \
+        --env "HF_TOKEN=$HF_TOKEN" \
+        --network=host \
+        --ipc=host \
+        --entrypoint /bin/bash \
+        vllm/vllm-openai-rocm:<tag>
+    ```
 
 #### Use AMD's Docker Images (Deprecated)
 
