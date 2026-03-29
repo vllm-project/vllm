@@ -265,7 +265,7 @@ class Gemma3DecoderLayer(nn.Module):
             )
             self.register_buffer(
                 HOOK_POINT_TABLE_ATTR[hp],
-                torch.zeros(max_steering_configs + 2, config.hidden_size),
+                torch.zeros(max_steering_configs + 3, config.hidden_size),
                 persistent=False,
             )
         # Shared steering index mapping token positions to table rows.

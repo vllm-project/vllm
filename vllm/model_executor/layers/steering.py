@@ -63,9 +63,10 @@ def apply_steering(
     """Apply per-request activation steering via indexed gather.
 
     ``steering_table`` is a per-layer buffer of shape
-    ``(max_configs + 2, hidden_size)`` where row 0 is always zeros
-    (prefill/no-steering sentinel), row 1 holds the global-only vector,
-    and rows 2+ hold combined global + per-request vectors.
+    ``(max_configs + 3, hidden_size)`` where row 0 is always zeros
+    (no-steering sentinel), row 1 holds the global prefill effective
+    vector, row 2 holds the global decode effective vector, and rows
+    3+ hold combined phase-appropriate global + per-request vectors.
 
     ``steering_index`` is a shared buffer of shape ``(max_tokens,)``
     mapping each token position to its steering table row.  Updated
