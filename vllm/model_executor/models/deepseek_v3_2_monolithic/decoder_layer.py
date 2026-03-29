@@ -169,13 +169,6 @@ class MonolithicDecoderLayer(nn.Module):
         # 3. Sparse indexer
         index_q, _ = self.attn.indexer_wq_b(q_c)
         index_q = index_q.view(-1, self.attn.index_n_heads, self.attn.index_head_dim)
-        index_q_pe, index_q_nope = index_q.split(
-            [
-                self.attn.qk_rope_head_dim,
-                self.attn.index_head_dim - self.attn.qk_rope_head_dim,
-            ],
-            dim=-1,
-        )
 
         index_k, _ = self.attn.indexer_wk(hidden_states)
         index_k = layer_norm(
@@ -184,24 +177,16 @@ class MonolithicDecoderLayer(nn.Module):
             self.attn.indexer_k_norm.bias,
             eps=self.attn.rms_norm_eps,
         )
-        index_k_pe, index_k_nope = index_k.split(
-            [
-                self.attn.qk_rope_head_dim,
-                self.attn.index_head_dim - self.attn.qk_rope_head_dim,
-            ],
-            dim=-1,
+        index_k = index_k.unsqueeze(1)
+        qk_rope(
+            positions,
+            index_q,
+            index_k,
+            self.attn.indexer_rope_emb.cos_sin_cache,
+            q_start_offset=0,
+            interleaved=False,
         )
-
-        index_q_pe, index_k_pe = self.attn.indexer_rope_emb(
-            positions, index_q_pe, index_k_pe.unsqueeze(1)
-        )
-        index_q_pe = index_q_pe.reshape(
-            -1, self.attn.index_n_heads, self.attn.qk_rope_head_dim
-        )
-        index_k_pe = index_k_pe.reshape(-1, 1, self.attn.qk_rope_head_dim)
-
-        index_q = torch.cat([index_q_pe, index_q_nope], dim=-1)
-        index_k = torch.cat([index_k_pe.squeeze(-2), index_k_nope], dim=-1)
+        index_k = index_k.squeeze(1)
 
         index_q_fp8, index_q_scale = per_token_group_quant_fp8(
             index_q.view(-1, self.attn.index_head_dim),

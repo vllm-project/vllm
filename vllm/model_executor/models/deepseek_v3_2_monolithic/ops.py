@@ -261,12 +261,12 @@ def _rope_kernel(
     sin,
     NUM_HEADS: tl.constexpr,
     HALF_ROT_DIM: tl.constexpr,
-    NOPE_DIM: tl.constexpr,
+    START_OFFSET: tl.constexpr,
     INTERLEAVED: tl.constexpr,
 ):
     head_offset = tl.arange(0, NUM_HEADS)
     dim_offset = tl.arange(0, HALF_ROT_DIM)
-    base_ptr = base_ptr + head_offset[:, None] * head_stride + NOPE_DIM
+    base_ptr = base_ptr + head_offset[:, None] * head_stride + START_OFFSET
     if INTERLEAVED:
         x1 = tl.load(base_ptr + dim_offset * 2).to(tl.float32)
         x2 = tl.load(base_ptr + dim_offset * 2 + 1).to(tl.float32)
@@ -285,7 +285,7 @@ def _qk_rope_kernel(
     q_stride0,
     q_stride1,
     NUM_Q_HEADS: tl.constexpr,
-    Q_NOPE_DIM: tl.constexpr,
+    Q_START_OFFSET: tl.constexpr,
     k_ptr,
     k_stride0,
     k_stride1,
@@ -315,7 +315,7 @@ def _qk_rope_kernel(
             sin,
             NUM_Q_HEADS,
             HALF_ROT_DIM,
-            Q_NOPE_DIM,
+            Q_START_OFFSET,
             INTERLEAVED,
         )
     elif tl.program_id(0) == 1:
@@ -331,7 +331,7 @@ def qk_rope(
     q: torch.Tensor,
     k: torch.Tensor,
     cos_sin_cache: torch.Tensor,
-    q_nope_dim: int,
+    q_start_offset: int,
     interleaved: bool,
 ) -> None:
     assert q.ndim == 3
@@ -339,7 +339,7 @@ def qk_rope(
     assert q.shape[0] == k.shape[0]
     assert cos_sin_cache.ndim == 2
     assert positions.ndim == 1
-    assert q_nope_dim < q.shape[-1]
+    assert q_start_offset < q.shape[-1]
     num_tokens, num_q_heads, _ = q.shape
     num_tokens, num_k_heads, _ = k.shape
     rot_dim = cos_sin_cache.shape[-1]
@@ -348,7 +348,7 @@ def qk_rope(
         q.stride(0),
         q.stride(1),
         num_q_heads,
-        q_nope_dim,
+        q_start_offset,
         k,
         k.stride(0),
         k.stride(1),
