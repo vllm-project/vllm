@@ -118,7 +118,7 @@ uv pip install vllm==${VLLM_VERSION} \
 
     Using `pip` to install from nightly indices is _not supported_, because `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version. In contrast, `uv` gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes).
 
-    If you insist on using `pip`, you have to specify the full URL of the wheel file (which can be obtained from the web page).
+    If you insist on using `pip`, you need to specify the exact vLLM version in the package name and provide the custom index URL (which can be obtained from the web page).
 
     ```bash
     export VLLM_COMMIT=5b8c30d62b754b575e043ce2fc0dcbf8a64f6306
