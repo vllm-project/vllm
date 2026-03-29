@@ -17,7 +17,7 @@ from ..utils import check_logprobs_close
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_rocm()),
+    not current_platform.is_cuda_alike(),
     reason="FP8 per-token KV cache requires CUDA or ROCm GPU.",
 )
 @pytest.mark.parametrize(

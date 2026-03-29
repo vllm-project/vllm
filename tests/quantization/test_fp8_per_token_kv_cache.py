@@ -17,6 +17,9 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import KVQuantMode, is_quantized_kv_cache
@@ -24,7 +27,7 @@ from vllm.v1.attention.backend import KVQuantMode, is_quantized_kv_cache
 # Skip entire module if no CUDA/ROCm GPU available
 pytestmark = [
     pytest.mark.skipif(
-        not (current_platform.is_cuda() or current_platform.is_rocm()),
+        not current_platform.is_cuda_alike(),
         reason="FP8 per-token KV cache tests require CUDA or ROCm GPU.",
     ),
 ]
@@ -38,11 +41,9 @@ HEAD_SIZES = [64, 128]
 BLOCK_SIZES = [16]
 SEEDS = [0]
 
-# Platform-dependent FP8 dtype
-FP8_DTYPE = torch.float8_e4m3fnuz if current_platform.is_rocm() else torch.float8_e4m3fn
-FP8_INFO = torch.finfo(FP8_DTYPE)
-FP8_MAX = FP8_INFO.max
-FP8_MIN = FP8_INFO.min
+# Platform-dependent FP8 dtype and range
+FP8_DTYPE = current_platform.fp8_dtype()
+FP8_MIN, FP8_MAX = get_fp8_min_max()
 
 
 # ---------------------------------------------------------------------------

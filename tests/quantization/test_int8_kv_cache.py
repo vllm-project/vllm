@@ -24,7 +24,7 @@ from vllm.v1.attention.backend import KVQuantMode, is_quantized_kv_cache
 # Skip entire module if no CUDA/ROCm GPU available
 pytestmark = [
     pytest.mark.skipif(
-        not (current_platform.is_cuda() or current_platform.is_rocm()),
+        not current_platform.is_cuda_alike(),
         reason="INT8 KV cache tests require CUDA or ROCm GPU.",
     ),
 ]

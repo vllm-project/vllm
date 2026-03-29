@@ -3,8 +3,14 @@
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FP8_DTYPE,
+    get_fp8_min_max,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+
+FP8_MIN, FP8_MAX = get_fp8_min_max()
 
 
 @triton.jit
@@ -226,8 +232,7 @@ def _reshape_cache_per_token(
 # per-token quantization kernel.
 _PER_TOKEN_QUANT_PARAMS: dict[torch.dtype, tuple[float, float]] = {
     torch.int8: (127.0, -128.0),
-    torch.float8_e4m3fn: (448.0, -448.0),
-    torch.float8_e4m3fnuz: (240.0, -240.0),
+    FP8_DTYPE: (FP8_MAX, FP8_MIN),
 }
 
 
