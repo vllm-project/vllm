@@ -4,24 +4,22 @@
 
 from unittest.mock import patch
 
-from vllm.config import VllmConfig
+from vllm.config import DeviceConfig, VllmConfig
 from vllm.v1.metrics.loggers import LoggingStatLogger
 from vllm.v1.metrics.stats import IterationStats
 
 
 def _make_logger() -> LoggingStatLogger:
-    return LoggingStatLogger(vllm_config=VllmConfig())
+    return LoggingStatLogger(
+        vllm_config=VllmConfig(device_config=DeviceConfig(device="cpu"))
+    )
 
 
 def _collect_log_output(logger: LoggingStatLogger) -> list[str]:
     messages: list[str] = []
     with patch("vllm.v1.metrics.loggers.logger") as mock_log:
-        mock_log.info.side_effect = lambda msg, *args: messages.append(
-            msg % args
-        )
-        mock_log.debug.side_effect = lambda msg, *args: messages.append(
-            msg % args
-        )
+        mock_log.info.side_effect = lambda msg, *args: messages.append(msg % args)
+        mock_log.debug.side_effect = lambda msg, *args: messages.append(msg % args)
         logger.log()
     return messages
 
@@ -39,51 +37,27 @@ def _make_iteration_stats_with_corrupted(n: int) -> IterationStats:
 
 
 def test_preemptions_appear_in_log_when_nonzero():
-    """Preemption count must be logged when preemptions occurred."""
     logger = _make_logger()
-    logger._track_iteration_stats(_make_iteration_stats_with_preemptions(3))
+    logger.record(None, _make_iteration_stats_with_preemptions(3))
 
-    messages = _collect_log_output(logger)
+    logged_output = "\n".join(_collect_log_output(logger))
 
-    assert any(
-        "Preemptions" in msg for msg in messages
-    ), "Expected 'Preemptions' in log output, but it was missing"
+    assert "Preemptions: 3" in logged_output
 
 
 def test_preemptions_not_in_log_when_zero():
-    """Preemption count must not appear in log when no preemptions occurred."""
     logger = _make_logger()
 
-    messages = _collect_log_output(logger)
+    logged_output = "\n".join(_collect_log_output(logger))
 
-    assert not any(
-        "Preemptions" in msg for msg in messages
-    ), "Expected 'Preemptions' to be absent from log output, but it was present"
-
-
-def test_corrupted_reqs_appear_in_log_when_nonzero():
-    """Corrupted req count must be logged when VLLM_COMPUTE_NANS_IN_LOGITS is set."""
-    logger = _make_logger()
-    logger._track_iteration_stats(_make_iteration_stats_with_corrupted(2))
-
-    with patch("vllm.v1.metrics.loggers.envs") as mock_envs:
-        mock_envs.VLLM_COMPUTE_NANS_IN_LOGITS = True
-        messages = _collect_log_output(logger)
-
-    assert any(
-        "Corrupted" in msg for msg in messages
-    ), "Expected 'Corrupted' in log output, but it was missing"
+    assert "Preemptions:" not in logged_output
 
 
 def test_corrupted_reqs_value_correct_in_log():
-    """Corrupted req count must reflect actual count, not post-reset zero."""
     logger = _make_logger()
-    logger._track_iteration_stats(_make_iteration_stats_with_corrupted(5))
+    logger.record(None, _make_iteration_stats_with_corrupted(5))
 
-    with patch("vllm.v1.metrics.loggers.envs") as mock_envs:
-        mock_envs.VLLM_COMPUTE_NANS_IN_LOGITS = True
-        messages = _collect_log_output(logger)
+    with patch("vllm.v1.metrics.loggers.envs.VLLM_COMPUTE_NANS_IN_LOGITS", True):
+        logged_output = "\n".join(_collect_log_output(logger))
 
-    assert any(
-        "5" in msg and "Corrupted" in msg for msg in messages
-    ), "Expected corrupted count of 5 in log output"
+    assert "Corrupted: 5 reqs" in logged_output
