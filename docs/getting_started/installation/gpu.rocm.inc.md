@@ -70,7 +70,7 @@ uv pip install vllm==0.18.0 --extra-index-url https://wheels.vllm.ai/rocm/0.18.0
 
 #### Install the latest code
 
-LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for every commit since `v0.18.1` on <https://wheels.vllm.ai/rocm/nightly/>. The indices can be used is
+LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for every commit since commit `171775f306a333a9cf105bfd533bf3e113d401d9` on <https://wheels.vllm.ai/rocm/nightly/>. The indices can be used is
 
 - `https://wheels.vllm.ai/rocm/nightly/${VLLM_ROCM_VARIANT}`
 
