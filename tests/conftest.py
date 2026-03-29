@@ -294,6 +294,18 @@ def dynamo_reset():
     torch._dynamo.reset()
 
 
+@pytest.fixture(autouse=True)
+def isolate_compile_cache():
+    """
+    Isolate the torch inductor/compile cache per test.
+
+    Each test gets a fresh compile cache so that cross-test cache reuse
+    cannot cause flaky failures or mask correctness bugs.
+    """
+    with fresh_cache():
+        yield
+
+
 @pytest.fixture
 def example_prompts() -> list[str]:
     return [prompt for filename in _TEST_PROMPTS for prompt in _read_prompts(filename)]
