@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import time
 from vllm.entrypoints.openai.request_stats_headers import (
     build_request_stats_headers,
@@ -66,3 +69,25 @@ def test_build_request_stats_headers_zero_timestamps():
     assert headers["x-prefill-time"] == "0.00"
     assert headers["x-decode-time"] == "0.00"
     assert headers["x-inference-time"] == "0.00"
+
+
+def test_build_request_stats_headers_partial_timestamps():
+    """When scheduled but cancelled before tokens, timing values clamp to 0."""
+    stats = RequestStateStats(
+        arrival_time=time.time() - 0.5,
+        queued_ts=100.0,
+        scheduled_ts=100.05,
+        first_token_ts=0.0,  # no tokens generated
+        last_token_ts=0.0,
+    )
+    usage = UsageInfo(prompt_tokens=20, completion_tokens=0, total_tokens=20)
+    headers = build_request_stats_headers(
+        metrics=stats, usage=usage, num_cached_tokens=0
+    )
+
+    # These would be negative without clamping
+    assert float(headers["x-prefill-time"]) == 0.0
+    assert float(headers["x-decode-time"]) == 0.0
+    assert float(headers["x-inference-time"]) == 0.0
+    # Queue time should still be valid
+    assert float(headers["x-queue-time"]) == 50.0

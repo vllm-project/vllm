@@ -23,16 +23,20 @@ def build_request_stats_headers(
 
     Times are in milliseconds, rounded to 2 decimal places.
     """
-    total_time_ms = round((time.time() - metrics.arrival_time) * 1000, 2)
-    queue_time_ms = round((metrics.scheduled_ts - metrics.queued_ts) * 1000, 2)
-    prefill_time_ms = round(
-        (metrics.first_token_ts - metrics.scheduled_ts) * 1000, 2
+    total_time_ms = max(
+        round((time.time() - metrics.arrival_time) * 1000, 2), 0
     )
-    decode_time_ms = round(
-        (metrics.last_token_ts - metrics.first_token_ts) * 1000, 2
+    queue_time_ms = max(
+        round((metrics.scheduled_ts - metrics.queued_ts) * 1000, 2), 0
     )
-    inference_time_ms = round(
-        (metrics.last_token_ts - metrics.scheduled_ts) * 1000, 2
+    prefill_time_ms = max(
+        round((metrics.first_token_ts - metrics.scheduled_ts) * 1000, 2), 0
+    )
+    decode_time_ms = max(
+        round((metrics.last_token_ts - metrics.first_token_ts) * 1000, 2), 0
+    )
+    inference_time_ms = max(
+        round((metrics.last_token_ts - metrics.scheduled_ts) * 1000, 2), 0
     )
 
     return {
