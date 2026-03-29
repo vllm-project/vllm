@@ -14,6 +14,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.ops.xpu_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
+from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import round_up
 
@@ -48,8 +49,24 @@ class PunicaWrapperXPU(PunicaWrapperBase):
 
         self.lora_config = kwargs["lora_config"]
         self.max_loras = self.lora_config.max_loras
+
+        # Compute captured LoRA counts for cudagraph specialization.
+        captured_lora_counts = get_captured_lora_counts(
+            self.max_loras, self.lora_config.specialize_active_lora
+        )
+
         self.token_mapping_meta = LoRAKernelMeta.make(
-            self.max_loras, max_num_batched_tokens, device=device
+            self.max_loras,
+            max_num_batched_tokens,
+            device=device,
+            captured_lora_counts=captured_lora_counts,
+        )
+
+        self.prompt_mapping_meta = LoRAKernelMeta.make(
+            self.max_loras,
+            max_num_batched_tokens,
+            device=device,
+            captured_lora_counts=captured_lora_counts,
         )
 
     def update_metadata(
@@ -62,6 +79,10 @@ class PunicaWrapperXPU(PunicaWrapperBase):
     ):
         self.is_prefill = mapping.is_prefill
         self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
+
+        # Prepare kernel metadata tensors
+        self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
+        self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
@@ -418,4 +439,240 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             mul_routed_weight,
             fully_sharded,
             offset,
+        )
+
+    def add_lora_w13(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        expert_map: torch.Tensor | None,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        num_tokens: int,
+        top_k_num: int,
+        max_loras: int,
+        adapter_enabled: torch.Tensor,
+        local_num_experts: int,
+        top_k: int,
+        num_slices: int,
+        fully_sharded: bool,
+        use_tuned_config: bool,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        import functools
+
+        from vllm.lora.layers.utils import try_get_optimal_moe_lora_config
+        from vllm.lora.ops.triton_ops.utils import (
+            _normalize_lora_config_keys,
+            get_lora_op_configs,
+        )
+        from vllm.model_executor.layers.fused_moe.config import _get_config_dtype_str
+
+        config_dtype = _get_config_dtype_str(
+            dtype=x.dtype,
+            use_fp8_w8a8=False,
+            use_int8_w8a16=False,
+            use_int4_w4a16=False,
+        )
+        max_lora_rank = lora_a_stacked[0].shape[-2]
+
+        if use_tuned_config:
+            shrink_config = get_lora_op_configs(
+                op_type="fused_moe_lora_w13_shrink",
+                max_loras=max_loras,
+                batch=num_tokens,
+                hidden_size=x.shape[-1],
+                rank=max_lora_rank,
+                num_slices=num_slices,
+                moe_intermediate_size=lora_b_stacked[0].shape[-2],
+            )
+            expand_config = get_lora_op_configs(
+                op_type="fused_moe_lora_w13_expand",
+                max_loras=max_loras,
+                batch=num_tokens,
+                hidden_size=x.shape[-1],
+                rank=max_lora_rank,
+                num_slices=num_slices,
+                moe_intermediate_size=lora_b_stacked[0].shape[-2],
+            )
+        else:
+            get_config = functools.partial(
+                try_get_optimal_moe_lora_config,
+                w1_shape=w1.shape,
+                w2_shape=w2.shape,
+                rank=max_lora_rank,
+                top_k=top_k,
+                dtype=config_dtype,
+                M=num_tokens,
+            )
+            shrink_config = get_config(op_type="fused_moe_lora_w13_shrink")
+            expand_config = get_config(op_type="fused_moe_lora_w13_expand")
+
+        shrink_config = _normalize_lora_config_keys(shrink_config)
+        expand_config = _normalize_lora_config_keys(expand_config)
+
+        SPARSITY_FACTOR = 8
+        naive_block_assignment = (
+            expert_map is None
+            and num_tokens * top_k * SPARSITY_FACTOR <= local_num_experts * max_loras
+        )
+
+        (
+            token_lora_mapping,
+            sorted_token_ids_lora,
+            expert_ids_lora,
+            num_tokens_post_padded_lora,
+        ) = self.moe_lora_align_block_size(
+            topk_ids,
+            num_tokens,
+            int(shrink_config.get("BLOCK_SIZE_M") or 64),
+            local_num_experts,
+            max_loras,
+            adapter_enabled,
+            expert_map,
+            naive_block_assignment=naive_block_assignment,
+        )
+
+        _sorted = sorted_token_ids_lora
+        _eids = expert_ids_lora
+        if _sorted is not None:
+            _eids = _eids.view(max_loras, -1)
+            _sorted = _sorted.view(max_loras, -1)
+
+        self.add_lora_fused_moe(
+            y.view(-1, top_k_num, y.shape[-1]),
+            x,
+            lora_a_stacked,
+            lora_b_stacked,
+            topk_weights,
+            _sorted,
+            _eids,
+            num_tokens_post_padded_lora,
+            max_lora_rank,
+            top_k,
+            shrink_config,
+            expand_config,
+            adapter_enabled,
+            fully_sharded=fully_sharded,
+            token_lora_mapping=token_lora_mapping,
+        )
+
+        return (
+            sorted_token_ids_lora,
+            expert_ids_lora,
+            num_tokens_post_padded_lora,
+            token_lora_mapping,
+        )
+
+    def add_lora_w2(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        topk_weights: torch.Tensor,
+        sorted_token_ids_lora: torch.Tensor | None,
+        expert_ids_lora: torch.Tensor | None,
+        num_tokens_post_padded_lora: torch.Tensor | None,
+        token_lora_mapping: torch.Tensor | None,
+        num_tokens: int,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        top_k_num: int,
+        max_loras: int,
+        adapter_enabled: torch.Tensor,
+        top_k: int,
+        fully_sharded: bool,
+        tp_rank: int,
+        use_tuned_config: bool,
+    ) -> None:
+        import functools
+
+        from vllm.lora.layers.utils import try_get_optimal_moe_lora_config
+        from vllm.lora.ops.triton_ops.utils import (
+            _normalize_lora_config_keys,
+            get_lora_op_configs,
+        )
+        from vllm.model_executor.layers.fused_moe.config import _get_config_dtype_str
+
+        config_dtype = _get_config_dtype_str(
+            dtype=x.dtype,
+            use_fp8_w8a8=False,
+            use_int8_w8a16=False,
+            use_int4_w4a16=False,
+        )
+        max_lora_rank = lora_a_stacked[0].shape[-2]
+
+        if use_tuned_config:
+            shrink_config = get_lora_op_configs(
+                op_type="fused_moe_lora_w2_shrink",
+                max_loras=max_loras,
+                batch=num_tokens,
+                hidden_size=y.shape[-1],
+                rank=max_lora_rank,
+                num_slices=1,
+                moe_intermediate_size=lora_a_stacked[0].shape[-1],
+            )
+            expand_config = get_lora_op_configs(
+                op_type="fused_moe_lora_w2_expand",
+                max_loras=max_loras,
+                batch=num_tokens,
+                hidden_size=y.shape[-1],
+                rank=max_lora_rank,
+                num_slices=1,
+                moe_intermediate_size=lora_a_stacked[0].shape[-1],
+            )
+        else:
+            get_config = functools.partial(
+                try_get_optimal_moe_lora_config,
+                w1_shape=w1.shape,
+                w2_shape=w2.shape,
+                rank=max_lora_rank,
+                top_k=top_k,
+                dtype=config_dtype,
+                M=num_tokens,
+            )
+            shrink_config = get_config(op_type="fused_moe_lora_w2_shrink")
+            expand_config = get_config(op_type="fused_moe_lora_w2_expand")
+
+        shrink_config = _normalize_lora_config_keys(shrink_config)
+        expand_config = _normalize_lora_config_keys(expand_config)
+
+        _sorted = sorted_token_ids_lora
+        _eids = expert_ids_lora
+        if _sorted is not None:
+            assert _eids is not None
+            _eids = _eids.view(max_loras, -1)
+            _sorted = _sorted.view(max_loras, -1)
+
+        # w2_lora_b shape[-2] is hidden_size // tp_size when fully_sharded
+        shard_size = lora_b_stacked[0].shape[-2]
+        offset = shard_size * tp_rank if fully_sharded else 0
+
+        self.add_lora_fused_moe(
+            y,
+            x,
+            lora_a_stacked,
+            lora_b_stacked,
+            topk_weights,
+            _sorted,
+            _eids,
+            num_tokens_post_padded_lora,
+            max_lora_rank,
+            top_k,
+            shrink_config,
+            expand_config,
+            adapter_enabled,
+            True,  # mul_routed_weight
+            fully_sharded=fully_sharded,
+            offset=offset,
+            token_lora_mapping=token_lora_mapping,
         )
