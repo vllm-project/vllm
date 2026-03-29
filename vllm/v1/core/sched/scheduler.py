@@ -555,19 +555,24 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Record steering configs in scheduled_running_reqs.
-        # Track the union of currently-active hashes: prefill hash for
-        # requests still in prefill, decode hash for those in decode.
-        scheduled_steering_configs: set[int] = set()
+        # Track the union of currently-active (hash, phase) pairs so that
+        # capacity counting matches the worker's SteeringManager which
+        # allocates separate rows per (hash, phase) key.
+        scheduled_steering_configs: set[tuple[int, str]] = set()
         if self.steering_config:
             for req in scheduled_running_reqs:
                 if req.num_computed_tokens < req.num_prompt_tokens:
                     # Still in prefill
                     if req.prefill_steering_config_hash != 0:
-                        scheduled_steering_configs.add(req.prefill_steering_config_hash)
+                        scheduled_steering_configs.add(
+                            (req.prefill_steering_config_hash, "prefill")
+                        )
                 else:
                     # In decode
                     if req.decode_steering_config_hash != 0:
-                        scheduled_steering_configs.add(req.decode_steering_config_hash)
+                        scheduled_steering_configs.add(
+                            (req.decode_steering_config_hash, "decode")
+                        )
             assert len(scheduled_steering_configs) <= (
                 self.steering_config.max_steering_configs
             )
@@ -615,15 +620,19 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 # Check steering config capacity.  A new request may
-                # need *two* distinct hashes (prefill + decode) over its
+                # need *two* distinct (hash, phase) pairs over its
                 # lifetime, so we count how many genuinely new unique
-                # hashes it would add to the scheduled set.
+                # pairs it would add to the scheduled set.
                 if self.steering_config:
-                    new_hashes: set[int] = set()
+                    new_hashes: set[tuple[int, str]] = set()
                     if request.prefill_steering_config_hash != 0:
-                        new_hashes.add(request.prefill_steering_config_hash)
+                        new_hashes.add(
+                            (request.prefill_steering_config_hash, "prefill")
+                        )
                     if request.decode_steering_config_hash != 0:
-                        new_hashes.add(request.decode_steering_config_hash)
+                        new_hashes.add(
+                            (request.decode_steering_config_hash, "decode")
+                        )
                     if new_hashes:
                         new_unique = new_hashes - scheduled_steering_configs
                         if (
@@ -854,11 +863,11 @@ class Scheduler(SchedulerInterface):
                 if self.steering_config:
                     if request.prefill_steering_config_hash != 0:
                         scheduled_steering_configs.add(
-                            request.prefill_steering_config_hash
+                            (request.prefill_steering_config_hash, "prefill")
                         )
                     if request.decode_steering_config_hash != 0:
                         scheduled_steering_configs.add(
-                            request.decode_steering_config_hash
+                            (request.decode_steering_config_hash, "decode")
                         )
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(
                     request_id
