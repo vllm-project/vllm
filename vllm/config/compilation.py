@@ -1074,7 +1074,6 @@ class CompilationConfig:
                         self.pass_config.fuse_rope_kvcache = False
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
-                    self.splitting_ops.append("vllm::apply_steering")
 
             elif len(self.splitting_ops) == 0:
                 if (
