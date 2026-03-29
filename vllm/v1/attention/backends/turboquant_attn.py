@@ -558,7 +558,9 @@ class TurboQuantAttentionImpl(AttentionImpl):
                         bv = ((qjl_sign_data[:, bi] >> b) & 1).float()
                         signs[:, s + b] = bv * 2 - 1
                 scale = math.sqrt(math.pi / 2.0) / normal_size
-                qjl_corr = scale * qjl_r_norm.float().unsqueeze(-1) * (signs @ state.S)
+                qjl_corr = (
+                    scale * qjl_r_norm.float().unsqueeze(-1) * (signs @ state.S.float())
+                )
                 normal_decoded = (normal_decoded.float() + qjl_corr).to(torch.bfloat16)
 
             full = torch.empty(N, head_size, dtype=torch.bfloat16, device=cache.device)
@@ -867,7 +869,7 @@ class TurboQuantAttentionImpl(AttentionImpl):
                 residual_rot = rotated - mse_recon
                 residual = state.unrotate(residual_rot)
                 r_norm = torch.norm(residual, dim=-1)
-                projected = residual @ state.S.T
+                projected = residual @ state.S.float().T
                 sign_bits = (projected >= 0).to(torch.uint8)
                 sign_bc = math.ceil(normal_size / 8)
                 packed_signs = torch.zeros(
