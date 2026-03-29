@@ -527,7 +527,6 @@ class EngineArgs:
     # Steering fields
     enable_steering: bool = False
     max_steering_configs: int = SteeringConfig.max_steering_configs
-    steering_hook_points: str | None = None
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
@@ -1865,23 +1864,13 @@ class EngineArgs:
             else None
         )
 
-        steering_hook_points_set = None
-        if self.steering_hook_points is not None:
-            from vllm.model_executor.layers.steering import SteeringHookPoint
-            steering_hook_points_set = frozenset(
-                SteeringHookPoint(name.strip())
-                for name in self.steering_hook_points.split(",")
+        steering_config = (
+            SteeringConfig(
+                max_steering_configs=self.max_steering_configs,
             )
-
-        if self.enable_steering:
-            kwargs: dict = {
-                "max_steering_configs": self.max_steering_configs,
-            }
-            if steering_hook_points_set is not None:
-                kwargs["steering_hook_points"] = steering_hook_points_set
-            steering_config = SteeringConfig(**kwargs)
-        else:
-            steering_config = None
+            if self.enable_steering
+            else None
+        )
 
         if (
             lora_config is not None

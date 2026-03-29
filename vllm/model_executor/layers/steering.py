@@ -49,8 +49,6 @@ HOOK_POINT_VECTOR_ATTR: dict[SteeringHookPoint, str] = {
     SteeringHookPoint.POST_MLP_POST_LN: "steering_vector_post_mlp_post_ln",
 }
 
-ALL_HOOK_POINTS: frozenset[SteeringHookPoint] = frozenset(SteeringHookPoint)
-
 # Valid hook point string values for validation.
 VALID_HOOK_POINT_NAMES: frozenset[str] = frozenset(hp.value for hp in SteeringHookPoint)
 
