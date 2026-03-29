@@ -353,3 +353,251 @@ def test_sparse_not_supported(mock_vllm_config):
         RocmPlatform.get_attn_backend_cls(
             selected_backend=None, attn_selector_config=attn_selector_config
         )
+
+
+# ---------------------------------------------------------------------------
+# V1: Hybrid model block-size regression tests (issue #36994 / PR #36274)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "block_size, expected_backend",
+    [
+        # Standard block sizes: must still work
+        (16, AttentionBackendEnum.ROCM_ATTN),
+        (32, AttentionBackendEnum.ROCM_ATTN),
+        # Qwen3.5 hybrid model block sizes (multiples of 16, non-standard)
+        # block_size=784: computed for Qwen3.5-14B on certain configs
+        (784, AttentionBackendEnum.ROCM_ATTN),
+        # block_size=1056: computed for Qwen3.5 when mamba page aligns to 1056 tokens
+        (1056, AttentionBackendEnum.ROCM_ATTN),
+        # block_size=544: Qwen3-Next style hybrid block size
+        (544, AttentionBackendEnum.ROCM_ATTN),
+        # block_size=512: another common hybrid-computed value
+        (512, AttentionBackendEnum.ROCM_ATTN),
+    ],
+)
+def test_hybrid_model_block_sizes_accepted(
+    block_size,
+    expected_backend,
+    mock_vllm_config,
+    mock_on_gfx9,
+    mock_on_mi3xx,
+):
+    """Test that non-standard block sizes from hybrid models (e.g. Qwen3.5)
+    are accepted by the ROCm attention backend selector.
+
+    Regression test for: supports_block_size wrongly rejected dynamically
+    computed block sizes (fixed in PR #36274, issue #36994).
+    Non-standard multiples of 16 must pass, not just {1,8,16,32,64,128,256}.
+    """
+    import importlib
+
+    import vllm.envs as envs
+
+    importlib.reload(envs)
+
+    from vllm.platforms.rocm import RocmPlatform
+
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        block_size=block_size,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+    )
+
+    # Must not raise — regression guard for issue #36994
+    backend_path = RocmPlatform.get_attn_backend_cls(
+        selected_backend=None,
+        attn_selector_config=attn_selector_config,
+    )
+
+    assert backend_path == expected_backend.get_path()
+
+
+def test_supports_block_size_rocm_attn():
+    """RocmAttentionBackend accepts any multiple of 16, rejects non-multiples.
+
+    Unit test for the MultipleOf(16) kernel block-size contract introduced by
+    PR #36274 to fix issue #36994 (Qwen3.5 hybrid models on ROCm).
+    """
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
+
+    # Standard sizes must be accepted
+    assert RocmAttentionBackend.supports_block_size(16)
+    assert RocmAttentionBackend.supports_block_size(32)
+    # Qwen3.5 / Qwen3-Next hybrid model block sizes must also be accepted
+    assert RocmAttentionBackend.supports_block_size(784)
+    assert RocmAttentionBackend.supports_block_size(1056)
+    assert RocmAttentionBackend.supports_block_size(544)
+    assert RocmAttentionBackend.supports_block_size(512)
+    # Non-multiples of 16 must be rejected
+    assert not RocmAttentionBackend.supports_block_size(15)
+    assert not RocmAttentionBackend.supports_block_size(1)
+
+
+# ---------------------------------------------------------------------------
+# V2: RDNA3/RDNA4 (gfx11xx/gfx12xx) backend selection tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def mock_on_gfx1x():
+    """Mock gfx1x arch detection (RDNA3/RDNA4) to return True."""
+    with patch("vllm.platforms.rocm.on_gfx1x", return_value=True):
+        yield
+
+
+@pytest.mark.parametrize(
+    "env_vars, selected_backend, expected_backend_path",
+    [
+        # Case 1: gfx1151 default (no env vars, no explicit backend)
+        # ROCM_ATTN has no compute cap restriction, should be selected
+        (
+            {},
+            None,
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
+        ),
+        # Case 2: gfx1151 with explicit TRITON_ATTN
+        # TritonAttentionBackend.supports_compute_capability always returns True
+        (
+            {},
+            "TRITON_ATTN",
+            AttentionBackendEnum.TRITON_ATTN.get_path(),
+        ),
+        # Case 3: gfx1151 + VLLM_ROCM_USE_AITER=1 (aiter not available on RDNA)
+        # Falls back to ROCM_ATTN since is_mha_enabled() returns False
+        (
+            {"VLLM_ROCM_USE_AITER": "1"},
+            None,
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
+        ),
+        # Case 4: explicit ROCM_ATTN on gfx1151
+        (
+            {},
+            "ROCM_ATTN",
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
+        ),
+    ],
+)
+def test_gfx1x_rdna_attention_backend_selection(
+    env_vars,
+    selected_backend,
+    expected_backend_path,
+    mock_vllm_config,
+    mock_on_gfx1x,
+    monkeypatch,
+):
+    """Test attention backend selection on RDNA3/RDNA4 (gfx11xx/gfx12xx) GPUs.
+
+    RDNA devices are NOT mi3xx and NOT gfx9. Tests ensure:
+    - Default backend selection does not require MI3XX-only backends
+    - ROCM_AITER_FA is correctly rejected (mi3xx required)
+    - TRITON_ATTN is always valid as fallback
+    - VLLM_ROCM_USE_AITER=1 still falls back gracefully when aiter unavailable
+    """
+    # on_gfx9 and on_mi3xx must return False for a pure RDNA simulation
+    with (
+        patch("vllm.platforms.rocm.on_gfx9", return_value=False),
+        patch("vllm.platforms.rocm.on_mi3xx", return_value=False),
+    ):
+        for key, value in env_vars.items():
+            monkeypatch.setenv(key, value)
+
+        import importlib
+
+        import vllm.envs as envs
+
+        importlib.reload(envs)
+
+        backend_enum = None
+        if selected_backend:
+            backend_enum = getattr(AttentionBackendEnum, selected_backend)
+
+        from vllm.platforms.rocm import RocmPlatform
+
+        attn_selector_config = AttentionSelectorConfig(
+            head_size=128,
+            dtype=torch.float16,
+            kv_cache_dtype="auto",
+            block_size=16,
+            use_mla=False,
+            has_sink=False,
+            use_sparse=False,
+        )
+
+        backend_path = RocmPlatform.get_attn_backend_cls(
+            selected_backend=backend_enum,
+            attn_selector_config=attn_selector_config,
+        )
+
+        assert backend_path == expected_backend_path
+
+
+def test_aiter_fa_rejected_on_gfx1x(mock_vllm_config):
+    """ROCM_AITER_FA must be rejected on RDNA hardware (requires mi3xx).
+
+    Validates that explicitly selecting ROCM_AITER_FA on a gfx1151 (RDNA4)
+    device raises ValueError with a clear "compute capability not supported"
+    message, because ROCM_AITER_FA.supports_compute_capability checks
+    on_mi3xx() which returns False on RDNA.
+    """
+    from vllm.platforms.rocm import RocmPlatform
+
+    with (
+        patch("vllm.platforms.rocm.on_gfx9", return_value=False),
+        patch("vllm.platforms.rocm.on_mi3xx", return_value=False),
+        patch("vllm.platforms.rocm.on_gfx1x", return_value=True),
+        pytest.raises(ValueError, match="compute capability not supported"),
+    ):
+        attn_selector_config = AttentionSelectorConfig(
+            head_size=128,
+            dtype=torch.float16,
+            kv_cache_dtype="auto",
+            block_size=16,
+            use_mla=False,
+            has_sink=False,
+            use_sparse=False,
+        )
+        RocmPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.ROCM_AITER_FA,
+            attn_selector_config=attn_selector_config,
+        )
+
+
+def test_gfx1x_with_triton_flash_attn_enabled(mock_vllm_config):
+    """On gfx1x with flash_attn_triton_available mocked True, the main
+    attention path still selects ROCM_ATTN (not FLASH_ATTN).
+
+    flash_attn_triton_available() only affects the ViT attention path
+    (get_vit_attn_backend), not the main LLM decode/prefill path handled by
+    get_attn_backend_cls. The main path on RDNA selects ROCM_ATTN as the
+    highest-priority backend since it has no compute capability restriction.
+    """
+    with (
+        patch("vllm.platforms.rocm.on_gfx9", return_value=False),
+        patch("vllm.platforms.rocm.on_mi3xx", return_value=False),
+        patch("vllm.platforms.rocm.on_gfx1x", return_value=True),
+        patch("vllm.platforms.rocm.flash_attn_triton_available", return_value=True),
+    ):
+        from vllm.platforms.rocm import RocmPlatform
+
+        attn_selector_config = AttentionSelectorConfig(
+            head_size=128,
+            dtype=torch.float16,
+            kv_cache_dtype="auto",
+            block_size=16,
+            use_mla=False,
+            has_sink=False,
+            use_sparse=False,
+        )
+
+        # Main attention path: ROCM_ATTN (flash_attn_triton only affects ViT)
+        backend_path = RocmPlatform.get_attn_backend_cls(
+            selected_backend=None,
+            attn_selector_config=attn_selector_config,
+        )
+        assert backend_path == AttentionBackendEnum.ROCM_ATTN.get_path()
