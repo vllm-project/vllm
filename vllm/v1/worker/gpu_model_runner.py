@@ -3100,6 +3100,28 @@ class GPUModelRunner(
                             self._steering_manager.update_global_vectors(
                                 hp.value, layer_idx, vec, phase="base"
                             )
+                # Register any configs that were added to the batch
+                # before the manager existed (first-step race).
+                for i in range(self.input_batch.num_reqs):
+                    rid = self.input_batch.req_ids[i]
+                    rs = self.requests.get(rid)
+                    if rs is None or rs.sampling_params is None:
+                        continue
+                    ri = self.input_batch.req_id_to_index.get(rid)
+                    if ri is None:
+                        continue
+                    ph = int(
+                        self.input_batch.request_prefill_steering_hash[ri]
+                    )
+                    if (
+                        ph != 0
+                        and ph not in self._steering_manager.config_to_row
+                    ):
+                        eff = rs.sampling_params.effective_prefill_steering
+                        if eff:
+                            self._steering_manager.register_config(
+                                ph, eff, phase="prefill"
+                            )
             else:
                 self._steering_manager = None
                 self._steerable_layers = {}

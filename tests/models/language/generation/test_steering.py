@@ -399,11 +399,18 @@ def test_prefill_and_decode_different_steering(
 
 @pytest.mark.parametrize("model", [MODEL])
 def test_additive_composition(vllm_runner, monkeypatch, model: str) -> None:
-    """Verify the three-tier additive model: base + decode-specific should
-    equal a single vector with the summed magnitude.
+    """Verify the three-tier additive model works correctly.
 
-    base=250 + decode=250 should produce the same decode-phase output as
-    base=500 alone (since base applies to decode too).
+    To test additive composition we must ensure BOTH prefill and decode
+    effective vectors match between the two approaches.  We use:
+
+    Approach A:  prefill_steering=P, steering_vectors=X, decode_steering=Y
+        → prefill_effective = P + X,  decode_effective = X + Y
+
+    Approach B:  prefill_steering=P+X, decode_steering=X+Y
+        → prefill_effective = P + X,  decode_effective = X + Y
+
+    Both should produce identical output.
     """
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -422,55 +429,45 @@ def test_additive_composition(vllm_runner, monkeypatch, model: str) -> None:
 
             H = hidden_size
 
-            # 1. Base only at 250
-            base_only = SamplingParams(
+            # Approach A: three-tier additive
+            # prefill = P(200) + base(300) = 500
+            # decode  = base(300) + D(200) = 500
+            approach_a = SamplingParams(
                 max_tokens=10,
                 temperature=0.0,
-                steering_vectors={
-                    _HP: {target_layer: [250.0] * H},
+                prefill_steering_vectors={
+                    _HP: {target_layer: [200.0] * H},
                 },
-            )
-
-            result_base = _gen_tokens(llm, prompt, base_only)
-
-            assert llm.llm.reset_prefix_cache()
-
-            # 2. Base 250 + decode 250 (additive = 500 for decode)
-            additive = SamplingParams(
-                max_tokens=10,
-                temperature=0.0,
                 steering_vectors={
-                    _HP: {target_layer: [250.0] * H},
+                    _HP: {target_layer: [300.0] * H},
                 },
                 decode_steering_vectors={
-                    _HP: {target_layer: [250.0] * H},
+                    _HP: {target_layer: [200.0] * H},
                 },
             )
 
-            result_additive = _gen_tokens(llm, prompt, additive)
+            result_a = _gen_tokens(llm, prompt, approach_a)
 
             assert llm.llm.reset_prefix_cache()
 
-            # 3. Base only at 500
-            full = SamplingParams(
+            # Approach B: phase-specific only (no base), same totals
+            # prefill = 500, decode = 500
+            approach_b = SamplingParams(
                 max_tokens=10,
                 temperature=0.0,
-                steering_vectors={
+                prefill_steering_vectors={
+                    _HP: {target_layer: [500.0] * H},
+                },
+                decode_steering_vectors={
                     _HP: {target_layer: [500.0] * H},
                 },
             )
 
-            result_full = _gen_tokens(llm, prompt, full)
+            result_b = _gen_tokens(llm, prompt, approach_b)
 
-            # Sanity: base-only at 250 should differ from base at 500
-            # (confirms the magnitudes are meaningfully different).
-            assert result_base != result_full, "base=250 should differ from base=500"
-
-            # The additive composition (250+250=500 for decode) should match
-            # the single 500 vector (since most generated tokens are decode).
-            assert result_additive == result_full, (
-                "Additive composition (base=250 + decode=250) should equal "
-                "a single base=500 vector for decode-phase tokens"
+            assert result_a == result_b, (
+                "Three-tier additive (P=200 + base=300 + D=200) should "
+                "produce same output as direct (P=500, D=500)"
             )
 
 
