@@ -869,31 +869,14 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
-        arrival_time = time.time()
-
-        if tok_params is None:
-            tok_params = self.default_chat_tok_params
-
-        rendered = [
-            self.render_messages(conversation, chat_params)
-            for conversation in conversations
-        ]
-
-        out_conversations = list[list["ConversationMessage"]]()
-        dict_prompts = list[DictPrompt]()
-        for conv, prompt in rendered:
-            out_conversations.append(conv)
-            dict_prompts.append(prompt)
-
-        tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
-
-        self._apply_prompt_extras(tok_prompts, prompt_extras)
-
-        eng_prompts = [
-            self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts
-        ]
-
-        return out_conversations, eng_prompts
+        return asyncio.run(
+            self.render_chat_async(
+                conversations,
+                chat_params,
+                tok_params,
+                prompt_extras=prompt_extras,
+            )
+        )
 
     async def render_chat_async(
         self,
