@@ -5,6 +5,7 @@ import flashinfer
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -25,6 +26,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+
+logger = init_logger(__name__)
 
 
 class TrtLlmNvFp4ExpertsBase:
@@ -309,6 +312,11 @@ class TrtLlmNvFp4ExpertsMonolithic(
             if self.routing_method_type == RoutingMethodType.DeepSeekV3
             else router_logits
         )
+
+        # Currently FI requires bfloat16 routing bias.
+        # https://github.com/flashinfer-ai/flashinfer/issues/2909
+        if e_score_correction_bias is not None:
+            e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
 
         # Invoke kernel.
         return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
