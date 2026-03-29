@@ -108,11 +108,14 @@ class MultiprocExecutor(Executor):
         self.failure_callback: FailureCallback | None = None
 
         tp_size, pp_size, pcp_size = self._get_parallel_sizes()
-        assert self.world_size == tp_size * pp_size * pcp_size, (
-            f"world_size ({self.world_size}) must be equal to the "
-            f"tensor_parallel_size ({tp_size}) x pipeline"
-            f"_parallel_size ({pp_size}) x prefill_context"
-            f"_parallel_size ({pcp_size}). "
+        # world_size may include DCP on prefill (when platform adjusts it).
+        # Check both with and without DCP to handle both cases.
+        base_size = tp_size * pp_size * pcp_size
+        dcp_size = self.parallel_config.decode_context_parallel_size
+        assert self.world_size in (base_size, base_size * dcp_size), (
+            f"world_size ({self.world_size}) must be equal to "
+            f"TP({tp_size}) x PP({pp_size}) x PCP({pcp_size}) = {base_size}"
+            f" or TP x PP x PCP x DCP({dcp_size}) = {base_size * dcp_size}."
         )
 
         # Set multiprocessing envs

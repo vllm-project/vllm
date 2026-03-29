@@ -24,6 +24,7 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
+    DcpTpKVTopology,
     EngineId,
     TpKVTopology,
     get_current_attn_backend,
@@ -263,6 +264,7 @@ class ReqMeta:
     # To be used when logical block size does not match the kernel block size
     local_physical_block_ids: BlockIds
     tp_size: int
+    dcp_size: int = 1
     remote: RemoteMeta | None = None
 
 
@@ -284,6 +286,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             local_physical_block_ids=local_block_ids,
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
+            dcp_size=kv_transfer_params.get("dcp_size", 1),
         )
 
     def add_new_req_to_save(
@@ -707,15 +710,18 @@ class NixlConnectorScheduler:
                     if stop_event.is_set():
                         break
                     continue
-                # Decode the message which contains (GET_META_MSG, rank)
-                msg, target_tp_rank = msgspec.msgpack.decode(msg)
+                # Decode the message: (GET_META_MSG, target_rank)
+                # target_rank is the global rank on the prefill side.
+                # With DCP=1, global_rank == tp_rank (backward compatible).
+                # With DCP>1, global_rank = tp_rank * dcp_size + dcp_rank.
+                msg_type, target_rank = msgspec.msgpack.decode(msg)
                 logger.debug(
-                    "Received message for tp rank %s",
-                    target_tp_rank,
+                    "Received message for rank %s",
+                    target_rank,
                 )
-                if msg != GET_META_MSG:
-                    logger.warning("Connection listener got unexpected message %s", msg)
-                sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
+                if msg_type != GET_META_MSG:
+                    logger.warning("Connection listener got unexpected message %s", msg_type)
+                sock.send_multipart((identity, b"", encoded_data[target_rank]))
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -943,6 +949,7 @@ class NixlConnectorScheduler:
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
         )
 
 
@@ -1166,9 +1173,11 @@ class NixlConnectorWorker:
 
         # lazy initialized in register_kv_caches
         self.compat_hash: str | None = None
-        self.kv_topo: TpKVTopology | None = None
+        self.kv_topo: DcpTpKVTopology | None = None
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
+        local_dcp = vllm_config.parallel_config.decode_context_parallel_size
+        self._dcp_size: dict[EngineId, int] = {self.engine_id: local_dcp}
         self._block_size: dict[EngineId, int] = {self.engine_id: self.block_size}
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
@@ -1208,6 +1217,7 @@ class NixlConnectorWorker:
         port: int,
         remote_tp_size: int,
         expected_engine_id: str,
+        remote_dcp_size: int = 1,
     ) -> dict[int, str]:
         """Do a NIXL handshake with a remote instance."""
 
@@ -1229,14 +1239,33 @@ class NixlConnectorWorker:
         # local rank will read from. Note that With homogeneous TP,
         # this happens to be the same single rank_i.
         assert self.kv_topo is not None
-        p_remote_ranks = self.kv_topo.get_target_remote_ranks(remote_tp_size)
+        p_remote_ranks = self.kv_topo.get_target_remote_ranks(
+            remote_tp_size, remote_dcp_size
+        )
+        # Store remote DCP size for this engine so kv_topo can use it
+        # in get_target_remote_ranks_from_engine_id later.
+        if expected_engine_id not in self._dcp_size:
+            self._dcp_size[expected_engine_id] = remote_dcp_size
+        if self.kv_topo is not None:
+            self.kv_topo.remote_dcp_size[expected_engine_id] = remote_dcp_size
         remote_rank_to_agent_name = {}
         path = make_zmq_path("tcp", host, port)
+        logger.info(
+            "Decode rank (tp=%d, dcp=%d) initiating handshake to prefill "
+            "engine %s (remote_tp=%d, remote_dcp=%d) → target prefill "
+            "global ranks: %s",
+            self.tp_rank,
+            self.kv_topo.dcp_rank if isinstance(self.kv_topo, DcpTpKVTopology) else 0,
+            expected_engine_id,
+            remote_tp_size,
+            remote_dcp_size,
+            p_remote_ranks,
+        )
 
         with zmq_ctx(zmq.REQ, path) as sock:
             for remote_rank in p_remote_ranks:
                 logger.debug(
-                    "Querying metadata on path: %s at remote tp rank %s",
+                    "Querying metadata on path: %s at remote global rank %s",
                     path,
                     remote_rank,
                 )
@@ -1434,12 +1463,14 @@ class NixlConnectorWorker:
         fut = self._handshake_futures.get(remote_engine_id)
         if fut is None:
             assert meta.remote is not None
+            remote_dcp = meta.dcp_size
             fut = self._handshake_initiation_executor.submit(
                 self._nixl_handshake,
                 meta.remote.host,
                 meta.remote.port,
                 meta.tp_size,
                 remote_engine_id,
+                remote_dcp,
             )
             self._handshake_futures[remote_engine_id] = fut
 
@@ -1493,7 +1524,36 @@ class NixlConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
-        self.kv_topo = TpKVTopology(
+        # Get DCP rank/size. On prefill (kv_producer), DCP expands world_size
+        # and the DCP process group is initialized — use it directly.
+        # On decode (kv_consumer), DCP is inner to TP and the DCP group may
+        # not be initialized. Derive dcp_rank from tp_rank instead.
+        from vllm.distributed.parallel_state import (
+            get_decode_context_model_parallel_rank,
+            get_decode_context_model_parallel_world_size,
+        )
+        dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
+        kv_role = (
+            self.kv_transfer_config.kv_role
+            if self.kv_transfer_config is not None
+            else None
+        )
+        if dcp_size > 1 and kv_role in ("kv_producer", "kv_both"):
+            # Prefill: DCP group is initialized
+            try:
+                dcp_rank = get_decode_context_model_parallel_rank()
+                dcp_size = get_decode_context_model_parallel_world_size()
+            except AssertionError:
+                dcp_rank = 0
+                dcp_size = 1
+        elif dcp_size > 1:
+            # Decode: DCP is inner to TP, derive from tp_rank
+            dcp_rank = self.tp_rank % dcp_size
+        else:
+            dcp_rank = 0
+            dcp_size = 1
+
+        self.kv_topo = DcpTpKVTopology(
             tp_rank=self.tp_rank,
             engine_id=self.engine_id,
             remote_tp_size=self._tp_size,  # shared state
@@ -1506,6 +1566,9 @@ class NixlConnectorWorker:
             if not self._has_mamba
             else None,
             is_mamba=self._has_mamba,
+            dcp_rank=dcp_rank,
+            dcp_size=dcp_size,
+            remote_dcp_size=self._dcp_size,  # shared state
         )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks

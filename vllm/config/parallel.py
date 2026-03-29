@@ -413,11 +413,15 @@ class ParallelConfig:
         # because the world size does not change by dcp, it simply
         # reuses the GPUs of TP group, and split one TP group into
         # tp_size//dcp_size DCP groups.
-        if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
-            raise ValueError(
-                f"tp_size={self.tensor_parallel_size} must be divisible by"
-                f"dcp_size={self.decode_context_parallel_size}."
-            )
+        #
+        # Lifted for prefill-side DCP in disaggregated inference where
+        # DCP expands world_size (TP * DCP workers) and TP doesn't need
+        # to be divisible by DCP. See cp_di_strategy.md.
+        # if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
+        #     raise ValueError(
+        #         f"tp_size={self.tensor_parallel_size} must be divisible by"
+        #         f"dcp_size={self.decode_context_parallel_size}."
+        #     )
 
         if self.dcp_comm_backend == "a2a" and self.decode_context_parallel_size <= 1:
             raise ValueError(

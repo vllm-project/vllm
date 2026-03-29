@@ -5,7 +5,7 @@ KV cache helper for store.
 """
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
@@ -512,6 +512,101 @@ class TpKVTopology:
 
         # Regular case: backends like FA register K/V in separate regions
         return cache if self.split_k_and_v else [cache]
+
+
+# =============================================================================
+# DCP-aware extensions for disaggregated inference
+# =============================================================================
+
+
+@dataclass
+class DcpTpKVTopology(TpKVTopology):
+    """Extends TpKVTopology with DCP (Decode Context Parallelism) awareness.
+
+    Rank layout differs between prefill and decode:
+    - Prefill: global_rank = tp_rank * dcp_size + dcp_rank
+      (DCP expands the rank count within each TP group)
+    - Decode: global_rank = tp_rank, DCP is an inner dimension of TP
+      (each rank has a unique TP position; DCP rank is an attribute)
+
+    See cp_di_strategy.md for concrete examples.
+
+    Note: This is a temporary approach. We use DCP for both prefill and decode
+    while waiting for the vLLM community to finalize the CP sharding layout
+    (which will unify PCP and DCP). Once that lands, this class should be
+    updated to align with the new layout.
+    """
+    dcp_rank: int = 0
+    dcp_size: int = 1
+    remote_dcp_size: dict[EngineId, int] = field(default_factory=dict)
+
+    def get_target_remote_ranks_from_engine_id(
+        self,
+        remote_engine_id: EngineId,
+    ) -> list[int]:
+        remote_tp_size = self.remote_tp_size[remote_engine_id]
+        remote_dcp_size = self.remote_dcp_size.get(remote_engine_id, 1)
+        return self.get_target_remote_ranks(remote_tp_size, remote_dcp_size)
+
+    def get_target_remote_ranks(
+        self,
+        remote_tp_size: int,
+        remote_dcp_size: int = 1,
+    ) -> list[int]:
+        """Map local (tp_rank, dcp_rank) to prefill global rank(s).
+
+        Only called by the decode side:
+        - In _nixl_handshake: to determine which prefill ranks to connect to
+        - In _read_blocks_for_req: to determine which prefill ranks to read from
+        The prefill side never calls this — it only serves metadata and waits
+        for notifications.
+
+        Args:
+            remote_tp_size: TP degree on the remote (prefill) side.
+            remote_dcp_size: DCP degree on the remote (prefill) side.
+
+        Returns:
+            List of prefill global ranks this decode rank should read from.
+            Prefill global_rank = remote_tp * remote_dcp_size + remote_dcp.
+
+        When remote_dcp_size is 1 (no DCP), this reduces to the parent
+        TpKVTopology behavior.
+        """
+        # TP mapping: which remote TP rank(s) do we read from?
+        # Reuse parent logic (handles hetero TP in both directions).
+        remote_tp_ranks = super().get_target_remote_ranks(remote_tp_size)
+
+        # No DCP on remote side: TP ranks are global ranks directly.
+        if remote_dcp_size <= 1:
+            return remote_tp_ranks
+
+        # DCP mapping: which remote DCP rank(s) do we read from?
+        remote_dcp_ranks = self._get_target_remote_dcp_ranks(remote_dcp_size)
+
+        # Combine using prefill layout: global = tp * dcp_size + dcp
+        result = []
+        for r_tp in remote_tp_ranks:
+            for r_dcp in remote_dcp_ranks:
+                result.append(r_tp * remote_dcp_size + r_dcp)
+        return result
+
+    def _get_target_remote_dcp_ranks(
+        self, remote_dcp_size: int
+    ) -> list[int]:
+        """Map local DCP rank to remote DCP rank(s).
+
+        When D DCP >= P DCP (decode splits): multiple D ranks map to one P
+        rank using modulo. E.g., D DCP=4, P DCP=2:
+          local dcp=0,2 → remote dcp=0; local dcp=1,3 → remote dcp=1.
+
+        When D DCP < P DCP (decode aggregates): one D rank reads from
+        multiple P ranks at stride = local_dcp_size. E.g., D DCP=2, P DCP=4:
+          local dcp=0 → remote dcp=[0, 2]; local dcp=1 → remote dcp=[1, 3].
+        """
+        if self.dcp_size >= remote_dcp_size:
+            return [self.dcp_rank % remote_dcp_size]
+        dcp_ratio = remote_dcp_size // self.dcp_size
+        return [self.dcp_rank + i * self.dcp_size for i in range(dcp_ratio)]
 
 
 def get_current_attn_backends(
