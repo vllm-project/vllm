@@ -93,6 +93,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 from contextlib import contextmanager, suppress
@@ -4048,6 +4049,173 @@ def cleanup_docker_disk():
         info(f"  Disk after aggressive prune: {used_gb}GB ({used_pct}%)")
 
 
+# ==========================================================================
+# Background health watchdog
+#
+# A daemon thread that samples system health during the test run and
+# writes to a log file in results_dir. Uploaded as a Buildkite artifact
+# so post-mortem debugging has a timeline of resource usage.
+#
+# Why: when a pod is evicted, disk fills from a model download, or
+# host memory spikes, we only find out after the container dies. The
+# watchdog captures a timeline so we can see WHAT was happening in
+# the seconds/minutes before the failure.
+#
+# The watchdog is:
+#   - A daemon thread (killed automatically on process exit).
+#   - Writes to a file, not stdout (avoids interleaving with test logs).
+#   - Tolerant of all errors (never crashes the main script).
+#   - Stoppable via an Event so cleanup can flush it before uploading.
+# ==========================================================================
+
+# Watchdog sampling interval in seconds.
+WATCHDOG_INTERVAL_S = int(os.environ.get("VLLM_ROCM_CI_WATCHDOG_INTERVAL", "30"))
+
+
+class _HealthWatchdog:
+    """Background thread that periodically samples system health.
+
+    Writes timestamped snapshots to a log file that is uploaded
+    as a Buildkite artifact alongside container.log and results.xml.
+
+    Monitors:
+      - Host memory (MemAvailable from /proc/meminfo)
+      - Disk usage (Docker root and cache root partitions)
+      - GPU VRAM (via amd-smi/rocm-smi, best-effort)
+      - Container status (running, OOMKilled, exited)
+
+    All sampling is wrapped in try/except so a single failed read
+    (e.g., /proc temporarily unavailable during cgroup migration)
+    never kills the watchdog.
+    """
+
+    def __init__(self, log_path, container_name):
+        # type: (Path, str) -> None
+        self._log_path = log_path
+        self._container = container_name
+        self._stop = threading.Event()
+        self._thread = None  # type: threading.Thread | None
+
+    def start(self):
+        # type: () -> None
+        """Start the watchdog daemon thread."""
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="health-watchdog"
+        )
+        self._thread.start()
+        info(
+            f"Health watchdog started "
+            f"(interval={WATCHDOG_INTERVAL_S}s, "
+            f"log={self._log_path})"
+        )
+
+    def stop(self):
+        # type: () -> None
+        """Signal the watchdog to stop and wait for it."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+    def _run(self):
+        # type: () -> None
+        """Main loop: sample, write, sleep, repeat."""
+        with open(self._log_path, "w") as f:
+            f.write(
+                f"# Health watchdog log -- "
+                f"container {self._container}\n"
+                f"# Sampling every {WATCHDOG_INTERVAL_S}s\n"
+                f"# Format: timestamp | metric | value\n\n"
+            )
+            f.flush()
+            while not self._stop.is_set():
+                with suppress(Exception):
+                    self._sample(f)
+                self._stop.wait(timeout=WATCHDOG_INTERVAL_S)
+
+    def _sample(self, f):
+        # type: (...) -> None
+        """Take one snapshot of all metrics."""
+        ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        # -- Host memory --
+        try:
+            meminfo = Path("/proc/meminfo").read_text()
+            for line in meminfo.splitlines():
+                if line.startswith("MemAvailable:"):
+                    kb = int(line.split()[1])
+                    gb = kb / (1024 * 1024)
+                    f.write(f"{ts} | mem_avail_gb | {gb:.1f}\n")
+                    break
+        except (OSError, ValueError, IndexError):
+            pass
+
+        # -- Disk usage (Docker root) --
+        try:
+            r = sh(
+                "docker info -f '{{.DockerRootDir}}'",
+                capture=True,
+                timeout=10,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                pct, used_gb, total_gb = _get_disk_info(r.stdout.strip())
+                if pct is not None:
+                    f.write(f"{ts} | disk_docker_gb | {used_gb}/{total_gb} ({pct}%)\n")
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+        # -- Disk usage (cache root) --
+        try:
+            pct, used_gb, total_gb = _get_disk_info(str(CACHE_ROOT))
+            if pct is not None:
+                f.write(f"{ts} | disk_cache_gb | {used_gb}/{total_gb} ({pct}%)\n")
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+        # -- GPU VRAM (best-effort, short timeout) --
+        try:
+            data = _smi_json("metric --mem-usage", timeout=10)
+            if isinstance(data, list):
+                for entry in data:
+                    gpu = entry.get("gpu", "?")
+                    mem = entry.get("mem_usage", {})
+                    used = mem.get("used_vram", {})
+                    total = mem.get("total_vram", {})
+                    u = used.get("value", "?")
+                    t = total.get("value", "?")
+                    f.write(f"{ts} | gpu{gpu}_vram_mb | {u}/{t}\n")
+            elif _SMI_TOOL == "rocm-smi":
+                # Fallback: just log whether VRAM is non-zero.
+                r = _smi_cmd("--showmemuse --json", timeout=10)
+                if r.returncode == 0:
+                    f.write(f"{ts} | gpu_vram_raw | {r.stdout.strip()[:200]}\n")
+        except (
+            OSError,
+            subprocess.SubprocessError,
+            subprocess.TimeoutExpired,
+        ):
+            pass
+
+        # -- Container status --
+        try:
+            r = sh(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.State.Status}} {{.State.OOMKilled}} {{.State.ExitCode}}",
+                    self._container,
+                ],
+                capture=True,
+                timeout=10,
+            )
+            if r.returncode == 0:
+                f.write(f"{ts} | container | {r.stdout.strip()}\n")
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+        f.flush()
+
+
 def run_container(
     *,
     image,  # type: str
@@ -4253,6 +4421,11 @@ def run_container(
     # Close our copy of the pipe so log_proc gets SIGPIPE if tee dies.
     log_proc.stdout.close()
 
+    # -- Step 2b: Start background health watchdog --
+    watchdog_log = results_dir / "health_watchdog.log"
+    watchdog = _HealthWatchdog(watchdog_log, name)
+    watchdog.start()
+
     # -- Step 3: Wait for container exit with timeout watchdog --
     timed_out = False
     wait_start = time.monotonic()
@@ -4297,6 +4470,13 @@ def run_container(
         log_proc.wait()
 
     info(f"Container exit code (docker wait): {exit_code}")
+
+    # -- Step 4b: Stop health watchdog --
+    watchdog.stop()
+    if watchdog_log.is_file():
+        info(
+            f"Health watchdog log: {watchdog_log} ({watchdog_log.stat().st_size} bytes)"
+        )
 
     # -- Step 5: Post-test snapshots (compare with step 0 for leaks/growth) --
     snapshot_gpu_vram("post-test")
@@ -4399,10 +4579,27 @@ def run_container(
         )
 
     # -- Step 7: JUnit XML -- the AUTHORITATIVE result source --
-    # Pytest writes the XML during pytest_sessionfinish, BEFORE Python's
-    # atexit handlers run. Libraries that register atexit hooks calling
-    # os._exit(0) overwrite pytest's exit code, but the XML is already
-    # on disk (bind-mounted to the host) at that point.
+    #
+    # PYTEST_ADDOPTS is injected as a container env var for EVERY job,
+    # so any pytest invoked inside the container (whether directly in
+    # the command string or inside a bash wrapper script) will produce
+    # JUnit XML at the bind-mounted results path.
+    #
+    # Not all CI steps invoke pytest at all. Scheduled integration
+    # tests (server+eval, accuracy benchmarks) and standalone examples
+    # run bash/Python scripts that never import pytest. For these,
+    # no XML is produced and the container's exit code (protected by
+    # set -euo pipefail) is the only result source.
+    #
+    # Strategy:
+    #   1. Always check if XML exists (it costs nothing).
+    #   2. If XML exists + has failures + exit 0 -- override (atexit fix).
+    #   3. If XML exists + 0 failures + exit 0 -- pass.
+    #   4. If XML missing + exit 0:
+    #      a. If pytest actually ran (session header in log) -- fail-safe
+    #         (pytest ran but XML didn't reach host).
+    #      b. If pytest never ran -- trust exit code (non-pytest test).
+    #   5. If exit non-zero -- propagate regardless.
     xml_path = results_dir / "results.xml"
     if not ENABLE_JUNIT_OVERRIDE:
         info("JUnit XML override DISABLED (VLLM_ROCM_CI_JUNIT_OVERRIDE=0)")
@@ -4451,61 +4648,78 @@ def run_container(
             )
             exit_code = 1
         elif failures is None:
-            # The safety net itself failed. This MUST be visible.
-            error(
-                f"{_DIAG_PREFIX} JUNIT XML MISSING OR UNPARSABLE\n"
-                f"  What happened: Container exited 0 but the "
-                f"JUnit XML could\n"
-                f"                 not be read or parsed. The "
-                f"exit-code override\n"
-                f"                 cannot verify whether tests "
-                f"actually passed.\n"
-                f"  Expected at:   {xml_path}\n"
-                f"  Container:     {name}\n"
-                f"  Bind mount:    -v {results_dir}:{RESULTS_MOUNT}\n"
-                f"  Action:        Overriding exit code from 0 "
-                f"to 1 (fail-safe).\n"
-                f"  Debug:         Check that the bind mount is "
-                f"working and that\n"
-                f"                 pytest ran (look for "
-                f"'generated xml file' in the\n"
-                f"                 container log above)."
-            )
-            annotate_build(
-                "### :warning: JUnit XML missing -- exit code "
-                "override failed\n\n"
-                "Container exited 0 but the JUnit XML was not "
-                "found on the host.\n"
-                "Cannot verify test results. **Failing the job "
-                "as a safety measure.**\n\n"
-                f"Expected at: `{xml_path}`\n"
-                f"Bind mount: `-v {results_dir}:{RESULTS_MOUNT}`",
-                style="error",
-                context="junit-missing",
-            )
-            exit_code = 1
+            # XML missing or unparsable. The next step depends on
+            # whether pytest actually ran inside the container.
+            pytest_ran = diag.get("pytest_ran", False)
+            if pytest_ran:
+                # Pytest ran (session header found in log) but the
+                # XML didn't make it to the host. This is a bind-mount
+                # or docker-cp failure. We MUST fail because we can't
+                # verify whether tests passed.
+                error(
+                    f"{_DIAG_PREFIX} JUNIT XML MISSING "
+                    f"(pytest ran but XML not found)\n"
+                    f"  What happened: Container exited 0 and "
+                    f"the pytest session\n"
+                    f"                 header was found in the "
+                    f"log, but the JUnit\n"
+                    f"                 XML could not be read. "
+                    f"The bind mount or\n"
+                    f"                 docker cp failed.\n"
+                    f"  Expected at:   {xml_path}\n"
+                    f"  Container:     {name}\n"
+                    f"  Bind mount:    "
+                    f"-v {results_dir}:{RESULTS_MOUNT}\n"
+                    f"  Action:        Overriding exit code "
+                    f"from 0 to 1 (fail-safe)."
+                )
+                annotate_build(
+                    "### :warning: JUnit XML missing\n\n"
+                    "Pytest ran but the XML result file was "
+                    "not found on the host. Cannot verify "
+                    "test results.\n"
+                    "**Failing as a safety measure.** Check "
+                    "the bind mount.\n\n"
+                    f"Expected: `{xml_path}`\n"
+                    f"Mount: "
+                    f"`-v {results_dir}:{RESULTS_MOUNT}`",
+                    style="error",
+                    context="junit-missing",
+                )
+                exit_code = 1
+            else:
+                # Pytest never ran (no session header in log).
+                # This is a non-pytest test (bash script, standalone
+                # Python eval, accuracy benchmark). The exit code
+                # from set -euo pipefail is the only result source.
+                # Trusting it.
+                info(
+                    "No JUnit XML and no pytest session "
+                    "detected -- non-pytest test. "
+                    "Trusting container exit code (0)."
+                )
 
     # -- Step 7b: Non-zero exit with no JUnit XML --
-    # If the container exited non-zero but there is no JUnit XML, pytest
-    # likely never ran. A pre-test bash command or Python setup script
-    # failed. Produce a clear diagnostic so the user doesn't hunt for
-    # test failures that don't exist.
+    # When exit is non-zero and no XML exists, provide diagnostics
+    # about whether pytest ran or not. For non-pytest tests, this
+    # just confirms the non-zero exit code is from the test itself.
     if exit_code != 0 and not xml_path.is_file():
         pytest_ran = diag.get("pytest_ran", True)
         if not pytest_ran:
             error(
                 f"{_DIAG_PREFIX} PYTEST NEVER RAN\n"
-                f"  What happened: Container exited {exit_code} "
-                f"and no JUnit XML\n"
-                f"                 was produced. The container "
-                f"log shows no pytest\n"
-                f"                 output markers. A pre-test "
-                f"command likely failed.\n"
+                f"  What happened: Container exited "
+                f"{exit_code} and no JUnit XML\n"
+                f"                 was produced. The "
+                f"container log shows no pytest\n"
+                f"                 output markers. A "
+                f"pre-test command likely failed.\n"
                 f"  Container:     {name}\n"
                 f"  How to fix:\n"
-                f"    - Check the container log for the first "
-                f"error (pip install,\n"
-                f"      cd, missing binary, import failure)\n"
+                f"    - Check the container log for the "
+                f"first error (pip install,\n"
+                f"      cd, missing binary, import "
+                f"failure)\n"
                 f"    - The test commands were:\n"
                 f"      {commands[:200]}"
             )
@@ -4520,9 +4734,10 @@ def run_container(
             )
         else:
             warn(
-                f"Container exited {exit_code} with no JUnit XML "
-                f"-- pytest may have crashed before writing XML "
-                f"(segfault, import error, fixture failure)"
+                f"Container exited {exit_code} with no "
+                f"JUnit XML -- pytest may have crashed "
+                f"before writing XML (segfault, import "
+                f"error, fixture failure)"
             )
 
     # -- Step 8: Buildkite annotation with failure details --
