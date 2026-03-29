@@ -216,6 +216,18 @@ def apply_nvfp4_linear(
     output_dtype = x.dtype
     output_shape = [*x.shape[:-1], output_size]
 
+    # TODO(performance): This NaN masking adds ~19us/layer overhead (~50% on the
+    # quantization step) because it can't fuse into the CUDA kernel. Proper fixes:
+    # 1. Add NaN check to scaled_fp4_quant CUDA kernel (zero-cost)
+    # 2. Fix upstream attention to never produce NaN
+    # 3. Integrate with check_tensor infrastructure
+    # For now, ~0.6ms overhead for 32 layers is acceptable vs 100% NaN crash.
+    #
+    # Background: NaN in any block causes that block's scale to be NaN, which
+    # contaminates the entire token output during GEMM (100% NaN for that token).
+    # Masking NaN→0 before quantization prevents block scale contamination.
+    x = torch.where(torch.isnan(x), torch.zeros_like(x), x)
+
     # Quantize BF16 or FP16 to (FP4 and interleaved block scale)
     x_fp4, x_blockscale = scaled_fp4_quant(
         x, input_global_scale_inv, is_sf_swizzled_layout=True, backend=backend.value
