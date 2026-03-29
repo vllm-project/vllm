@@ -30,9 +30,3 @@ def test_rocm_device_id_map_known_entries():
     assert _ROCM_DEVICE_ID_NAME_MAP["0x1586"] == "AMD_Radeon_8060S"  # gfx1151
     # RDNA 4 discrete (Navi 48)
     assert _ROCM_DEVICE_ID_NAME_MAP["0x7550"] == "AMD_Radeon_RX9070XT"  # gfx1201
-
-
-def test_rocm_device_id_map_no_duplicate_keys():
-    """Each device ID must appear only once (dict enforces this, but be explicit)."""
-    keys = list(_ROCM_DEVICE_ID_NAME_MAP.keys())
-    assert len(keys) == len(set(keys)), "Duplicate device ID keys found"
