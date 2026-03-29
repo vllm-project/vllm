@@ -8,19 +8,29 @@ Global steering affects all requests. For per-request steering, see the Sampling
 
 ### POST /v1/steering/set
 
-Set steering vectors on specific decoder layers. Only listed layers are modified; other layers keep their current state.
+Set steering vectors on specific decoder layers. Supports three-tier steering: base (both phases), prefill-specific, and decode-specific. Only listed layers are modified; other layers keep their current state.
+
+Setting `vectors` or `prefill_vectors` triggers prefix cache invalidation (all cached blocks are cleared and running requests are preempted).
 
 **Request body** (`SetSteeringRequest`):
 
 ```json
 {
   "vectors": {
-    "14": [0.1, -0.2, 0.3, "...hidden_size floats"],
-    "20": [0.5, 0.1, -0.4, "...hidden_size floats"]
+    "post_mlp_pre_ln": {
+      "14": [0.1, -0.2, 0.3, "...hidden_size floats"],
+      "20": {"vector": [0.5, 0.1, -0.4, "..."], "scale": 2.0}
+    }
   },
-  "scales": {
-    "14": 1.5,
-    "20": 2.0
+  "prefill_vectors": {
+    "pre_attn": {
+      "14": [0.3, 0.4, "...hidden_size floats"]
+    }
+  },
+  "decode_vectors": {
+    "post_attn": {
+      "14": [0.2, -0.1, "...hidden_size floats"]
+    }
   },
   "replace": false
 }
@@ -28,15 +38,21 @@ Set steering vectors on specific decoder layers. Only listed layers are modified
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `vectors` | `dict[int, list[float]]` | Yes | Layer index to steering vector. Each vector must have length equal to the model's `hidden_size`. |
-| `scales` | `dict[int, float]` | No | Per-layer scale factors. Defaults to 1.0 for unspecified layers. Scales are pre-multiplied into vectors before sending to workers. |
-| `replace` | `bool` | No | When `true`, atomically clears all existing vectors before applying the new ones. Default `false`. |
+| `vectors` | `SteeringVectorSpec` | No | Base vectors applied to both phases. |
+| `prefill_vectors` | `SteeringVectorSpec` | No | Additive prefill-specific vectors. |
+| `decode_vectors` | `SteeringVectorSpec` | No | Additive decode-specific vectors. |
+| `replace` | `bool` | No | When `true`, atomically clears all existing vectors across all tiers before applying. Default `false`. |
+
+Each `SteeringVectorSpec` is `{hook_point: {layer_idx: entry}}` where `entry` is either a bare `list[float]` (scale=1.0) or `{"vector": [...], "scale": float}`.
+
+At least one of `vectors`, `prefill_vectors`, or `decode_vectors` must be provided.
 
 **Success response** (200):
 
 ```json
 {
   "status": "ok",
+  "hook_points": ["post_mlp_pre_ln", "pre_attn", "post_attn"],
   "layers_updated": [14, 20]
 }
 ```
@@ -44,10 +60,10 @@ Set steering vectors on specific decoder layers. Only listed layers are modified
 **Error responses** (400):
 
 ```json
-{"error": "No vectors provided. Include at least one layer index and vector."}
+{"error": "No vectors provided. Include at least one of vectors, prefill_vectors, or decode_vectors with hook point/layer data."}
+{"error": "Invalid hook point name(s): ['invalid']. Valid values: ['post_attn', 'post_mlp_post_ln', 'post_mlp_pre_ln', 'pre_attn']"}
 {"error": "Layer(s) [99] not found in model. Steerable layers that matched: [0, 1, ..., 25]"}
 {"error": "Layer 14: expected vector of size 3584, got 100"}
-{"error": "Layer 14: steering vector contains non-finite values (NaN or Infinity)"}
 ```
 
 ### POST /v1/steering/clear
@@ -83,21 +99,40 @@ Returns an empty `active_layers` object when no steering is active.
 
 Per-request steering does not require the HTTP API or dev mode. It requires `--enable-steering` on the server.
 
-### SamplingParams Field
+### SamplingParams Fields
 
 ```python
 from vllm import SamplingParams
 
+# Base steering (both phases)
 params = SamplingParams(
     max_tokens=100,
     temperature=0.7,
-    steering_vectors={15: [0.1, 0.2, ...], 20: [0.3, 0.4, ...]},
+    steering_vectors={"post_mlp_pre_ln": {15: [0.1, 0.2, ...]}},
+)
+
+# Phase-specific
+params = SamplingParams(
+    max_tokens=100,
+    temperature=0.7,
+    steering_vectors={"post_mlp_pre_ln": {15: [0.1, 0.2, ...]}},
+    prefill_steering_vectors={"pre_attn": {15: [0.5, 0.6, ...]}},
+    decode_steering_vectors={"pre_attn": {15: [0.3, 0.4, ...]}},
+)
+
+# Co-located scale
+params = SamplingParams(
+    max_tokens=100,
+    temperature=0.7,
+    steering_vectors={"post_mlp_pre_ln": {15: {"vector": [0.1, 0.2, ...], "scale": 1.5}}},
 )
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `steering_vectors` | `dict[int, list[float]] \| None` | Layer index to steering vector. Keys are non-negative ints, values are lists of finite floats with length `hidden_size`. |
+| `steering_vectors` | `SteeringVectorSpec \| None` | Base vectors (both phases). |
+| `prefill_steering_vectors` | `SteeringVectorSpec \| None` | Prefill-specific additive vectors. |
+| `decode_steering_vectors` | `SteeringVectorSpec \| None` | Decode-specific additive vectors. |
 
 ### OpenAI Client (extra_body)
 
@@ -110,114 +145,66 @@ response = client.chat.completions.create(
     model="google/gemma-3-4b-it",
     messages=[{"role": "user", "content": "Hello"}],
     extra_body={
-        "steering_vectors": {15: [0.1, 0.2, ...]},
+        "steering_vectors": {
+            "pre_attn": {15: [0.1, 0.2, ...]},
+            "post_mlp_pre_ln": {15: [0.3, 0.4, ...]},
+        },
+        "prefill_steering_vectors": {
+            "pre_attn": {15: [0.5, 0.6, ...]},
+        },
     },
 )
 ```
 
-### Additive Combination
+### Additive Composition
 
-When both global and per-request steering are active, the effective vector per layer is:
+All tiers are additive. The effective vectors per phase are:
 
 ```
-effective = global_vector + per_request_vector
+effective_prefill = global_base + global_prefill + request_base + request_prefill
+effective_decode  = global_base + global_decode  + request_base + request_decode
 ```
 
-Per-request steering without global steering applies just the per-request vector. Requests without per-request steering get just the global vector (or nothing if no global steering is set).
+Each component is independently pre-scaled by its co-located scale factor before addition.
 
 ## Data Flow
 
-### Global Steering
-
-```
-Client POST /v1/steering/set
-    │
-    ▼
-api_router.py: set_steering()
-    │  Pre-multiply scales into vectors
-    │  Acquire asyncio lock
-    │
-    ▼
-Phase 1 — Validate (collective_rpc → all workers)
-    │  set_steering_vectors(vectors, validate_only=True)
-    │  Workers return layer indices they own
-    │  Router checks: all requested layers found?
-    │
-    ▼
-Phase 2 — Apply (collective_rpc → all workers)
-    │  If replace=true: clear_steering_vectors() first
-    │  set_steering_vectors(vectors, validate_only=False)
-    │  Workers copy vectors into steering_vector buffers
-    │  Workers notify SteeringManager.update_global_vectors()
-    │
-    ▼
-Model forward pass
-    │  SteeringManager.populate_steering_tables() writes global to row 1
-    │  _update_steering_buffers() sets steering_index for each token
-    │  apply_steering(residual, table, index) adds table[index[:N]] to residual
-    │
-    ▼
-Steered output
-```
-
-### Per-Request Steering
-
-```
-SamplingParams(steering_vectors={15: [...]})
-    │
-    ▼
-Request.steering_config_hash = SHA-256 hash of vectors dict
-    │
-    ▼
-Scheduler: check len(scheduled_steering_configs) < max_steering_configs
-    │  If at capacity with new hash → skipped_waiting queue
-    │
-    ▼
-NewRequestData.steering_config_hash → Model Runner
-    │
-    ▼
-SteeringManager.register_config(hash, vectors) → assigns table row
-    │
-    ▼
-InputBatch.request_steering_config_hash[req_idx] = hash
-    │
-    ▼
-_update_steering_buffers():
-    │  populate_steering_tables() → row N = global + per_request
-    │  steering_index[token_offset] = row N for this request's decode tokens
-    │
-    ▼
-apply_steering(residual, table, index) → per-token steering via gather
-```
-
-The two-phase flow in global steering prevents partial application in pipeline-parallel setups — if any worker would reject a vector (wrong size, non-finite values), no worker applies anything.
+See [docs/features/steering.md](../features/steering.md) for the full data flow diagram covering three-tier composition, phase detection, and prefix cache integration.
 
 ## Usage Examples
 
-### Python (requests) — Global
+### Python (requests) — Global Three-Tier
 
 ```python
 import requests
 
 base = "http://localhost:8000"
-
-# Set steering on layer 14 with scale 1.5
 hidden_size = 3584  # Gemma 3 4B
 vector = [0.01] * hidden_size
 
+# Base steering (both phases) with co-located scale
 resp = requests.post(f"{base}/v1/steering/set", json={
-    "vectors": {14: vector},
-    "scales": {14: 1.5},
+    "vectors": {
+        "post_mlp_pre_ln": {
+            "14": {"vector": vector, "scale": 1.5},
+        },
+    },
 })
-print(resp.json())  # {"status": "ok", "layers_updated": [14]}
+print(resp.json())
+
+# Prefill-specific (additive)
+resp = requests.post(f"{base}/v1/steering/set", json={
+    "prefill_vectors": {
+        "pre_attn": {"14": vector},
+    },
+})
 
 # Check status
 resp = requests.get(f"{base}/v1/steering")
-print(resp.json())  # {"active_layers": {"14": {"norm": ...}}}
+print(resp.json())
 
-# Clear all
+# Clear all tiers
 resp = requests.post(f"{base}/v1/steering/clear")
-print(resp.json())  # {"status": "ok"}
 ```
 
 ### Python (programmatic, no server) — Global
@@ -227,9 +214,18 @@ from vllm import LLM
 
 llm = LLM(model="google/gemma-3-4b-it")
 
-# Set global steering
+# Set global base steering
 vec = [10.0] * 3584
-llm.collective_rpc("set_steering_vectors", args=({14: vec}, False))
+llm.collective_rpc(
+    "set_steering_vectors",
+    kwargs={"vectors": {"post_mlp_pre_ln": {14: vec}}},
+)
+
+# Set prefill-specific global
+llm.collective_rpc(
+    "set_steering_vectors",
+    kwargs={"prefill_vectors": {"pre_attn": {14: vec}}},
+)
 
 # Generate with steering active
 outputs = llm.generate(["Hello"], sampling_params)
@@ -238,7 +234,7 @@ outputs = llm.generate(["Hello"], sampling_params)
 llm.collective_rpc("clear_steering_vectors")
 ```
 
-### Python (programmatic) — Per-Request
+### Python (programmatic) — Per-Request Three-Tier
 
 ```python
 from vllm import LLM, SamplingParams
@@ -249,31 +245,28 @@ llm = LLM(
     max_steering_configs=4,
 )
 
-# Different steering per request
-steered_a = SamplingParams(
+# Base + phase-specific
+steered = SamplingParams(
     max_tokens=100,
-    steering_vectors={15: [1.0] * 3072},
+    steering_vectors={"post_mlp_pre_ln": {15: [1.0] * 3072}},
+    prefill_steering_vectors={"pre_attn": {15: [0.5] * 3072}},
+    decode_steering_vectors={"pre_attn": {15: [-0.5] * 3072}},
 )
-steered_b = SamplingParams(
+
+# Co-located scale
+scaled = SamplingParams(
     max_tokens=100,
-    steering_vectors={15: [-1.0] * 3072},
+    steering_vectors={
+        "post_mlp_pre_ln": {
+            15: {"vector": [0.5] * 3072, "scale": 2.0},
+        },
+    },
 )
+
 normal = SamplingParams(max_tokens=100)
 
 outputs = llm.generate(
     ["Prompt A", "Prompt B", "Prompt C"],
-    [steered_a, steered_b, normal],
+    [steered, scaled, normal],
 )
 ```
-
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `vllm/entrypoints/serve/steering/api_router.py` | Endpoint handlers, lock, two-phase flow |
-| `vllm/entrypoints/serve/steering/protocol.py` | `SetSteeringRequest` Pydantic model |
-| `vllm/entrypoints/serve/__init__.py` | Router registration |
-| `vllm/v1/worker/worker_base.py` | `set_steering_vectors`, `clear_steering_vectors`, `get_steering_status` |
-| `vllm/sampling_params.py` | `steering_vectors` field on `SamplingParams` |
-| `vllm/v1/request.py` | `steering_config_hash` property |
-| `vllm/engine/arg_utils.py` | `--enable-steering`, `--max-steering-configs` CLI args |

@@ -280,6 +280,130 @@ steering_vectors: dict[str, dict[int, list[float]]]
 
 ---
 
+## Phase 4: Prefill Steering
+
+Phase 4 extended steering from decode-only to both prefill and decode phases, with a three-tier additive composition model and prefix cache correctness.
+
+### The Prefix Cache Problem
+
+Steering modifies the residual stream during prefill, which changes all downstream KV cache entries. Two requests with the same prompt but different prefill steering produce different KV entries. The prefix cache must not share blocks between them.
+
+We chose **steering-aware cache keys**: include the prefill steering config hash in `generate_block_hash_extra_keys()`. This adds zero overhead when no prefill steering is active (empty list contributes nothing to the hash). Global prefill steering changes are handled separately by calling `reset_prefix_cache(reset_running_requests=True)` rather than encoding mutable global state into every block hash.
+
+**Lesson**: The `extra_keys` pattern in `hash_block_tokens()` is designed for exactly this kind of extension — LoRA, multimodal, and now steering all add keys through the same mechanism. Adding a new dimension to the cache key is a one-function change.
+
+### Three-Tier Additive Composition
+
+We debated three API options for specifying prefill vs decode steering:
+1. **Override**: phase-specific replaces base at (hook, layer) granularity
+2. **Mutual exclusion**: error if both base and phase-specific specified for same (hook, layer)
+3. **Additive**: phase-specific adds to base after independent scaling
+
+We chose **additive** because it's consistent with the existing global + per-request model (also additive) and opens up research possibilities (base direction + phase-specific adjustments).
+
+The composition stack is: `global_base + global_phase + request_base + request_phase`, where each component is independently pre-scaled by its co-located scale factor. Resolution happens once at request creation via `resolve_effective_vectors()` and is cached.
+
+**Lesson**: When the existing system already uses additive composition (global + per-request), extending to a new dimension (phase) with additive semantics is the path of least conceptual surprise.
+
+### Co-Located Scales
+
+The original API had a separate `scales: dict[int, float]` field that applied per-layer. With three tiers and per-hook-point granularity, a separate scales dict becomes ambiguous (which tier? which hook?). We moved scales to be co-located with each vector entry:
+
+```python
+# Bare list (scale=1.0)
+{15: [0.1, 0.2, ...]}
+# Explicit scale
+{15: {"vector": [0.1, 0.2, ...], "scale": 1.5}}
+```
+
+This eliminates ambiguity and makes each entry self-describing. The `SamplingParams` validation accepts both forms. Resolution pre-multiplies scales into vectors so downstream code never sees the dict form.
+
+**Lesson**: When adding dimensions to an API (phases, hook points), co-locate metadata (scales) with the data it applies to rather than using a separate parallel structure. The parallel structure doesn't scale.
+
+### Two Hashes, One Active at a Time
+
+Each request has two steering config hashes (`prefill_steering_config_hash` and `decode_steering_config_hash`), but only one is registered with the `SteeringManager` at any time. The lifecycle:
+
+1. Request arrives → register prefill config (if any)
+2. Prefill completes → release prefill config, register decode config
+3. Request finishes → release whichever config is active
+
+This matters for the `max_steering_configs` row budget. If we registered both upfront, a request with different prefill and decode configs would consume two rows for its entire lifetime, even though only one is active at any moment. With one-active-at-a-time, the row is freed for reuse during the other phase.
+
+The transition detection happens in `_update_steering_buffers()`: `num_computed_after = num_computed + n_tokens; if num_computed_after >= num_prompt: _handle_steering_transition(...)`. This runs before the forward pass, so the decode config is ready for the next step's table population.
+
+**Lesson**: For phased resources with a fixed budget, allocate-on-demand and release-on-transition is worth the complexity over allocate-all-upfront when the budget is tight (`max_steering_configs` is typically small, 4-16).
+
+### Lazy Init First-Step Race Condition
+
+The `SteeringManager` is lazily created in `_update_steering_buffers()`, but per-request config registration happens in `_update_states()` which runs BEFORE. On the very first request:
+
+1. `_update_states()` tries to register the config: `getattr(self, "_steering_manager", None)` → `None` → silently skipped
+2. `_update_steering_buffers()` creates the manager
+3. The config was never registered → request gets no steering
+
+This bug only affected the first request in the engine's lifetime. Subsequent requests worked because the manager already existed.
+
+**Fix**: After creating the manager in the lazy init, scan the current batch and register any configs that were skipped:
+
+```python
+for i in range(self.input_batch.num_reqs):
+    ph = int(self.input_batch.request_prefill_steering_hash[ri])
+    if ph != 0 and ph not in self._steering_manager.config_to_row:
+        self._steering_manager.register_config(ph, eff, phase="prefill")
+```
+
+**Lesson**: When using lazy initialization, audit all code paths that depend on the lazily-initialized object. If any run BEFORE the lazy init, they silently fail. The fix is either (a) move init earlier, or (b) backfill state after init. We chose (b) because moving the init earlier would require the model to be loaded, which it may not be during `__init__`.
+
+### Phase Detection: Replacing the n_tokens == 1 Heuristic
+
+The old decode detection heuristic `is_decode = (n_tokens == 1)` was fragile:
+- Chunked prefill can schedule exactly 1 token in the final chunk
+- Speculative decoding can schedule >1 tokens for decode
+
+We replaced it with `is_prefilling = num_computed_tokens < num_prompt_tokens`, which correctly handles both cases. Both arrays are already available in `InputBatch` as numpy arrays, so the check is zero-cost.
+
+**Lesson**: Avoid heuristics that can be computed exactly. The token-count comparison is always correct; the n_tokens heuristic was a shortcut that became a liability.
+
+### Scheduler Admission with Two Hashes
+
+The scheduler must ensure a request's steering configs won't exceed `max_steering_configs` at any point during its lifetime. Since a request uses its prefill hash during prefill and decode hash during decode, both must fit.
+
+The approach: count the union of all non-zero hashes. For running requests, include whichever hash is currently active. For a new request being admitted, count how many genuinely new unique hashes it would add. If `len(existing) + len(new_unique) > max`, skip the request.
+
+This is conservative — a request's prefill hash might be released before its decode hash is needed, freeing a slot. But tracking temporal overlaps would add significant complexity for marginal gain when `max_steering_configs` is small.
+
+**Lesson**: For admission control with phased resources, pessimistic union counting is simpler and safer than optimistic temporal analysis. The capacity loss is bounded by the number of phases (2).
+
+### Global Steering Cache Invalidation
+
+When global `vectors` or `prefill_vectors` change via the HTTP API, all prefix-cached blocks are potentially stale (they were computed with old global steering). Rather than encoding global state into every block hash (which would be expensive and complex), we call `reset_prefix_cache(reset_running_requests=True)` to:
+
+1. Clear all cached blocks
+2. Preempt all running requests (including mid-multi-chunk prefills)
+
+This is conservative but correct. Global steering changes are rare (manual API calls), so the cost of recomputing is acceptable.
+
+The `EngineClient` already exposes `reset_prefix_cache` as an async method, so the API router calls it directly — no new RPC mechanism needed.
+
+**Lesson**: For rare events (global config changes), conservative invalidation (clear everything) is better than clever incremental invalidation (track what changed). The code complexity difference is enormous and the performance impact is negligible for infrequent operations.
+
+### Additive Composition Test Subtlety
+
+The additive composition test initially asserted: `base(250) + decode(250)` should equal `base(500)`. This fails because `steering_vectors` affects BOTH phases. So:
+- `base(250) + decode(250)`: prefill=250, decode=500
+- `base(500)`: prefill=500, decode=500
+
+Different prefill steering → different KV cache → different decode output, even though the decode-phase steering is the same.
+
+The correct test: use explicit `prefill_steering_vectors` and `decode_steering_vectors` to ensure both phases have the same effective vectors:
+- Approach A: `prefill=200 + base=300`, `decode=base(300) + decode(200)` → (500, 500)
+- Approach B: `prefill=500`, `decode=500` → (500, 500)
+
+**Lesson**: When testing additive composition with a multi-phase system, you must account for ALL phases, not just the one you're testing. A steering field that says "both" really means both — changing it for the decode test also changes the prefill input.
+
+---
+
 ## Testing
 
 ### What the tests cover
@@ -287,17 +411,21 @@ steering_vectors: dict[str, dict[int, list[float]]]
 | Test | What it verifies |
 |------|-----------------|
 | `test_steering_op.py` (8 tests) | Indexed gather math: row selection, mixed indices, dtype preservation, oversized buffer slicing, in-place update visibility |
-| `test_steering_manager.py` (18 tests) | SteeringManager: register/release lifecycle, refcounting, dedup, table population, additive combination, capacity exhaustion |
-| `test_worker_steering.py` (25 tests) | WorkerBase methods: set/clear/status, validation (wrong size, NaN, Inf), validate-only mode, no-model-runner edge cases |
-| `test_steering_scheduler.py` (8 tests) | Scheduler admission control logic: capacity checks, hash dedup, freed capacity |
-| `test_steering.py` (3 tests) | E2E with GPU + Gemma 3 dummy weights: global steering, per-request via SamplingParams, concurrent different-steering-in-same-batch with CUDA graphs |
+| `test_steering_types.py` (26 tests) | `SteeringVectorSpec` normalization, `resolve_effective_vectors` additive merge, `hash_steering_config` determinism, co-located scale handling |
+| `test_steering_manager.py` (37 tests) | Phase-aware SteeringManager: 3-row reserved layout, phase-aware `get_row_for_config`, three-tier global population, phase registration/transition |
+| `test_worker_steering.py` (36 tests) | Three-tier set/clear/status, validation, co-located scales, replace mode |
+| `test_steering_scheduler.py` (28 tests) | Dual-hash admission control: union counting, phase-aware tracking, both hashes checked at admission |
+| `test_steering_cache_keys.py` (6 tests) | Prefix cache key integration: prefill hash in extra keys, zero-overhead when unused, decode-only doesn't affect cache |
+| `test_protocol.py` (10 tests) | Three-tier protocol, co-located scale format |
+| `test_api_router.py` (32 tests) | HTTP API three-tier handling, validation, cache invalidation |
+| `test_steering.py` (10 tests) | E2E GPU: global, per-request, CUDA graphs, prefill steering, decode steering, split phases, additive composition, prefix cache correctness, co-located scale, global prefill via worker API |
 
 ### Running tests
 
 ```bash
-# All unit tests (~20s)
-.venv/bin/python -m pytest tests/entrypoints/serve/steering/ tests/model_executor/layers/test_steering_op.py tests/v1/worker/test_steering_manager.py tests/v1/core/test_steering_scheduler.py -v
+# All unit tests (~50s)
+.venv/bin/python -m pytest tests/v1/test_steering_types.py tests/v1/worker/test_steering_manager.py tests/v1/core/test_steering_scheduler.py tests/v1/core/test_steering_cache_keys.py tests/entrypoints/serve/steering/ -v
 
-# E2E integration tests (~80s, needs GPU)
+# E2E integration tests (~4min, needs GPU)
 .venv/bin/python -m pytest tests/models/language/generation/test_steering.py -v --timeout=300
 ```

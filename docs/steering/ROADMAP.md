@@ -118,23 +118,23 @@ All 4 hook points are always allocated:
 
 ---
 
-## Phase 4: Prefill Steering
+## Phase 4: Prefill Steering — DONE
 
 **Goal**: Apply steering during the prefill phase, not just decode.
 
-**Status**: Not started.
+### What was built
 
-### Key Challenge: Prefix Caching
+- **Three-tier additive API**: `steering_vectors` (base, both phases) + `prefill_steering_vectors` (prefill-only) + `decode_steering_vectors` (decode-only). All additive: `effective_prefill = base + prefill_specific`, `effective_decode = base + decode_specific`.
+- **Co-located scales**: Each vector entry is either a bare `list[float]` (scale=1.0) or `{"vector": [...], "scale": float}`. The old separate `scales` dict was removed.
+- **Two hashes per request**: `prefill_steering_config_hash` and `decode_steering_config_hash`. Only one config is registered at a time — prefill during prefill, decode after the transition.
+- **Phase-aware table layout**: Row 0=zeros, Row 1=global prefill effective (base+prefill), Row 2=global decode effective (base+decode), Rows 3+=per-request combined. Buffer shape is now `(max_steering_configs + 3, hidden_size)`.
+- **Proper phase detection**: `is_prefilling = num_computed_tokens < num_prompt_tokens` replaces the fragile `n_tokens == 1` heuristic. Correct for chunked prefill and speculative decoding.
+- **Prefix cache key integration**: Per-request prefill steering hash included in block hash extra keys via `_gen_steering_extra_hash_keys()`. Same tokens + different prefill steering = different cache entries. Zero overhead when unused.
+- **Global cache invalidation**: Global `vectors` or `prefill_vectors` changes trigger `reset_prefix_cache(reset_running_requests=True)` to preempt all running requests and clear the prefix cache.
+- **Three-tier global API**: HTTP API accepts `vectors`, `prefill_vectors`, `decode_vectors`. Worker accepts the same three tiers. `SteeringManager` tracks `global_base_vectors`, `global_prefill_vectors`, `global_decode_vectors`.
+- **Dual-hash scheduler admission**: Scheduler tracks the union of active hashes (prefill hash for prefill requests, decode hash for decode requests). New requests must fit both their prefill and decode hashes.
 
-Steering modifies the residual stream, which changes all downstream KV cache entries. A prefix cached without steering is invalid when steering is applied (and vice versa). Options:
-
-1. **Disable prefix caching when steering is active** — simplest, some performance cost
-2. **Include steering config in cache key** — correct but expensive (different steering = different cache entries, low hit rate)
-3. **Only steer non-cached tokens** — inconsistent behavior across the sequence, not recommended
-
-### Per-Request Prefill Complexity
-
-During prefill, requests have variable token counts. The `steering_index` already handles this — prefill tokens map to row 0 (zeros). To enable prefill steering, prefill tokens would instead map to the request's assigned row, same as their decode tokens.
+See [MVP_IMPLEMENTATION.md](MVP_IMPLEMENTATION.md) Phase 4 section for detailed implementation notes and lessons learned.
 
 ---
 
