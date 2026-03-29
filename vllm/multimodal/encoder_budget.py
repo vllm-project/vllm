@@ -88,8 +88,7 @@ class MultiModalBudget:
                 model_config,
                 mm_registry,
                 processor,
-                mm_counts={m: mm_limits.get(m, 1)
-                           for m in active_modalities},
+                mm_counts={m: mm_limits.get(m, 1) for m in active_modalities},
             )
 
         if embed_only_modalities:
