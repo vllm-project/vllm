@@ -1168,22 +1168,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # Convert layer to NVFP4 linear kernel format
         convert_to_nvfp4_linear_kernel_format(self.backend, layer)
 
-        # Register NaN detection checkpoints for FP4 pipeline.
-        if envs.VLLM_NAN_DETECT:
-            from vllm.model_executor.layers.nan_detector import NaNDetector
-
-            detector = NaNDetector.get()
-            prefix = getattr(layer, "prefix", "nvfp4")
-            layer._nan_detect_indices = {
-                "fp4_input": detector.register(f"{prefix}.fp4_input"),
-                "fp4_act_scales": detector.register(
-                    f"{prefix}.fp4_act_scales"
-                ),
-                "fp4_gemm_output": detector.register(
-                    f"{prefix}.fp4_gemm_output"
-                ),
-            }
-
     def apply(
         self,
         layer: torch.nn.Module,
