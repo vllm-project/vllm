@@ -172,8 +172,10 @@ class StreamingXMLToolCallParser:
             return result_delta
         else:
             # No complete elements, check if there's unoutput text content
-            if self.text_content_buffer and self.tool_call_index == 0:
-                # Has text content but no tool_call yet, output text content
+            # Only emit non-whitespace content to avoid "\n\n" between
+            # reasoning and tool_call in streaming mode (fixes #29562)
+            if self.text_content_buffer.strip() and self.tool_call_index == 0:
+                # Has non-whitespace text content but no tool_call yet
                 text_delta = DeltaMessage(content=self.text_content_buffer)
                 self._emit_delta(text_delta)
                 # Clear buffer to avoid duplicate output
@@ -252,17 +254,17 @@ class StreamingXMLToolCallParser:
                 preprocessed_element = self._preprocess_xml_chunk(element)
                 # Check if this is the first tool_call start
                 if (
-                    (
-                        preprocessed_element.strip().startswith("<tool_call>")
-                        or preprocessed_element.strip().startswith("<function name=")
-                    )
-                    and self.tool_call_index == 0
-                ) and self.text_content_buffer:
+                    preprocessed_element.strip().startswith("<tool_call>")
+                    or preprocessed_element.strip().startswith("<function name=")
+                ) and self.tool_call_index == 0:
                     # First tool_call starts,
                     # output previously collected text content first
-                    text_delta = DeltaMessage(content=self.text_content_buffer)
-                    self._emit_delta(text_delta)
-                    # Clear buffer for potential subsequent text content
+                    # Only emit non-whitespace content to avoid "\n\n"
+                    # between reasoning and tool_call in streaming (fixes #29562)
+                    if self.text_content_buffer.strip():
+                        text_delta = DeltaMessage(content=self.text_content_buffer)
+                        self._emit_delta(text_delta)
+                    # Always clear buffer for potential subsequent text content
                     self.text_content_buffer = ""
 
                 # If a new tool_call starts and
