@@ -3,18 +3,27 @@
 
 from pydantic import BaseModel, Field
 
+from vllm.config.steering_types import SteeringVectorSpec
+
 
 class SetSteeringRequest(BaseModel):
-    vectors: dict[str, dict[int, list[float]]] = Field(
-        description="Steering vectors keyed by hook point name "
-        "(pre_attn, post_attn, post_mlp_pre_ln, post_mlp_post_ln), "
-        "then layer index. Each vector must have length equal to "
-        "the model's hidden_size.",
-    )
-    scales: dict[int, float] | None = Field(
+    vectors: SteeringVectorSpec | None = Field(
         default=None,
-        description="Optional mapping from layer index to scale factor. "
-        "Defaults to 1.0 for any layer not specified.",
+        description="Base steering vectors applied to both prefill and "
+        "decode phases. Keyed by hook point name (pre_attn, post_attn, "
+        "post_mlp_pre_ln, post_mlp_post_ln), then layer index. Values "
+        "are either bare lists (scale=1.0) or "
+        '{"vector": [...], "scale": float}.',
+    )
+    prefill_vectors: SteeringVectorSpec | None = Field(
+        default=None,
+        description="Phase-specific steering vectors added to base during "
+        "prefill only. Same format as vectors.",
+    )
+    decode_vectors: SteeringVectorSpec | None = Field(
+        default=None,
+        description="Phase-specific steering vectors added to base during "
+        "decode only. Same format as vectors.",
     )
     replace: bool = Field(
         default=False,

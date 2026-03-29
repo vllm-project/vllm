@@ -3,7 +3,9 @@
 """Tests for steering config admission control logic.
 
 These tests verify the steering capacity check that mirrors the LoRA
-admission control pattern in the scheduler.
+admission control pattern in the scheduler.  The scheduler now uses
+``prefill_steering_config_hash`` for admission (WS4 will refine to
+check both phases).
 """
 
 
@@ -12,9 +14,9 @@ class TestSteeringAdmissionLogic:
 
     The scheduler checks:
         if (steering_config
-            and request.steering_config_hash != 0
+            and request.prefill_steering_config_hash != 0
             and (len(scheduled_steering_configs) == max_steering_configs
-                 and request.steering_config_hash
+                 and request.prefill_steering_config_hash
                      not in scheduled_steering_configs)):
             skip request
     """
