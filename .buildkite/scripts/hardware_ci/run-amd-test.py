@@ -3797,10 +3797,10 @@ def run_container(
         # Append to any existing PYTEST_ADDOPTS to avoid silently dropping
         # upstream settings (e.g., --timeout from the pipeline).
         "-e",
-        "PYTEST_ADDOPTS={} --junitxml={}/results.xml".format(
-            os.environ.get("PYTEST_ADDOPTS", "").strip(),
+        "PYTEST_ADDOPTS={}--junitxml={}/results.xml".format(
+            _v + " " if (_v := os.environ.get("PYTEST_ADDOPTS", "").strip()) else "",
             RESULTS_MOUNT,
-        ).strip(),
+        ),
     ]
 
     # Persistent cache mounts -- all caches defined in the CACHES registry.
@@ -3982,17 +3982,81 @@ def run_container(
     if not ENABLE_JUNIT_OVERRIDE:
         info("JUnit XML override DISABLED (VLLM_ROCM_CI_JUNIT_OVERRIDE=0)")
     elif exit_code == 0:
+        # If the XML isn't on the host (bind-mount failure, overlay issue,
+        # permissions), try to rescue it from the still-running container
+        # via docker cp BEFORE giving up.
+        if not xml_path.is_file():
+            warn(
+                f"JUnit XML not found at bind-mount path {xml_path} "
+                f"-- attempting docker cp fallback"
+            )
+            r_cp = sh(
+                f"docker cp {name}:{RESULTS_MOUNT}/results.xml {xml_path} 2>/dev/null",
+                capture=True,
+            )
+            if r_cp.returncode == 0 and xml_path.is_file():
+                info(
+                    f"Recovered JUnit XML via docker cp "
+                    f"({xml_path.stat().st_size} bytes)"
+                )
+            else:
+                warn(f"docker cp fallback also failed (rc={r_cp.returncode})")
+
         failures = parse_junit_failures(xml_path)
+        info(
+            f"JUnit XML validation: path={xml_path}, "
+            f"exists={xml_path.is_file()}, failures={failures}"
+        )
         if failures is not None and failures > 0:
             error(
-                f"{_DIAG_PREFIX} EXIT CODE OVERRIDE (atexit hook detected)\n"
-                f"  What happened: The container exited 0 but JUnit XML reports\n"
-                f"                 {failures} failure(s)/error(s). This means a\n"
-                f"                 library's atexit hook called os._exit(0) and\n"
-                f"                 overwrote pytest's real exit code.\n"
+                f"{_DIAG_PREFIX} EXIT CODE OVERRIDE "
+                f"(atexit hook detected)\n"
+                f"  What happened: The container exited 0 but "
+                f"JUnit XML reports\n"
+                f"                 {failures} failure(s)/error(s)."
+                f" This means a\n"
+                f"                 library's atexit hook called "
+                f"os._exit(0) and\n"
+                f"                 overwrote pytest's real exit "
+                f"code.\n"
                 f"  Container:     {name}\n"
                 f"  JUnit XML:     {xml_path}\n"
-                f"  Action:        Overriding exit code from 0 to 1."
+                f"  Action:        Overriding exit code from 0 "
+                f"to 1."
+            )
+            exit_code = 1
+        elif failures is None:
+            # The safety net itself failed. This MUST be visible.
+            error(
+                f"{_DIAG_PREFIX} JUNIT XML MISSING OR UNPARSABLE\n"
+                f"  What happened: Container exited 0 but the "
+                f"JUnit XML could\n"
+                f"                 not be read or parsed. The "
+                f"exit-code override\n"
+                f"                 cannot verify whether tests "
+                f"actually passed.\n"
+                f"  Expected at:   {xml_path}\n"
+                f"  Container:     {name}\n"
+                f"  Bind mount:    -v {results_dir}:{RESULTS_MOUNT}\n"
+                f"  Action:        Overriding exit code from 0 "
+                f"to 1 (fail-safe).\n"
+                f"  Debug:         Check that the bind mount is "
+                f"working and that\n"
+                f"                 pytest ran (look for "
+                f"'generated xml file' in the\n"
+                f"                 container log above)."
+            )
+            annotate_build(
+                "### :warning: JUnit XML missing -- exit code "
+                "override failed\n\n"
+                "Container exited 0 but the JUnit XML was not "
+                "found on the host.\n"
+                "Cannot verify test results. **Failing the job "
+                "as a safety measure.**\n\n"
+                f"Expected at: `{xml_path}`\n"
+                f"Bind mount: `-v {results_dir}:{RESULTS_MOUNT}`",
+                style="error",
+                context="junit-missing",
             )
             exit_code = 1
 
