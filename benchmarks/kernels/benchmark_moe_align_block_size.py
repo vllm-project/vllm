@@ -8,6 +8,7 @@ import torch
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 
 
@@ -44,7 +45,7 @@ configs = list(
 def benchmark(num_tokens, num_experts, topk, ep_size, provider):
     """Benchmark function for Triton."""
     block_size = 256
-    torch.cuda.manual_seed_all(0)
+    current_platform.manual_seed_all(0)
     topk_ids = get_topk_ids(num_tokens, num_experts, topk)
 
     e_map = None
