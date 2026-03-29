@@ -69,6 +69,7 @@ async fn main() -> Result<()> {
         local_host: args.host.clone(),
         ready_timeout,
         client_index: CLIENT_INDEX,
+        enable_inproc_coordinator: false,
     })
     .await
     .context("failed to connect to external vLLM engine")?;

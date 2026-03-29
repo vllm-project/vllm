@@ -344,6 +344,7 @@ async fn chat_streams_text_events() {
             local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(2),
             client_index: 0,
+            enable_inproc_coordinator: false,
         },
         &ipc,
         backend,

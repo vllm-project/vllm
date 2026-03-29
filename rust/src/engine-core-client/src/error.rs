@@ -2,11 +2,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
+use thiserror_ext::Macro;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Public error type for the Rust engine-core client.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Macro)]
 pub enum Error {
     #[error("messagepack encode failed")]
     Encode(#[from] rmp_serde::encode::Error),
@@ -33,8 +34,14 @@ pub enum Error {
     InputRegistrationTimeout { timeout: Duration },
     #[error("unexpected engine id in startup handshake: expected {expected:?}, got {actual:?}")]
     UnexpectedHandshakeIdentity { expected: Vec<u8>, actual: Vec<u8> },
-    #[error("unexpected startup handshake message: {reason}")]
-    UnexpectedHandshakeMessage { reason: String },
+    #[error("unexpected startup handshake message: {message}")]
+    UnexpectedHandshakeMessage { message: String },
+    #[error("unexpected non-control output on coordinator path: {message}")]
+    UnexpectedCoordinatorOutput { message: String },
+    #[error("unexpected dp-control output on main dispatcher path: {message}")]
+    UnexpectedDispatcherOutput { message: String },
+    #[error("coordinator requires a Python-compatible two-byte engine id, got {engine_id:?}")]
+    UnsupportedCoordinatorEngineId { engine_id: Vec<u8> },
     #[error("unsupported auxiliary frame(s): expected 1 frame, got {frame_count}")]
     UnsupportedAuxFrames { frame_count: usize },
     #[error("unsupported field `{field}` in {context}")]

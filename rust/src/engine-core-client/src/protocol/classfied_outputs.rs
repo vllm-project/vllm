@@ -30,11 +30,6 @@ pub struct UtilityCallOutput {
 
 #[derive(Debug, Clone, PartialEq, EnumAsInner)]
 pub enum OtherEngineCoreOutputs {
-    DpControl {
-        engine_index: u32,
-        timestamp: f64,
-        control: DpControlMessage,
-    },
     /// Fallback for wire-shape combinations that do not map cleanly onto the
     /// current semantic families.
     Raw(EngineCoreOutputs),
@@ -49,6 +44,11 @@ pub enum OtherEngineCoreOutputs {
 pub enum ClassifiedEngineCoreOutputs {
     RequestBatch(RequestBatchOutputs),
     Utility(UtilityCallOutput),
+    DpControl {
+        engine_index: u32,
+        timestamp: f64,
+        control: DpControlMessage,
+    },
     Other(OtherEngineCoreOutputs),
 }
 
@@ -81,20 +81,16 @@ impl EngineCoreOutputs {
                     output: self.utility_output.unwrap(),
                 })
             }
-            (false, None, Some(_), None) => {
-                ClassifiedEngineCoreOutputs::Other(OtherEngineCoreOutputs::DpControl {
-                    engine_index: self.engine_index,
-                    timestamp: self.timestamp,
-                    control: DpControlMessage::WaveComplete(self.wave_complete.unwrap()),
-                })
-            }
-            (false, None, None, Some(_)) => {
-                ClassifiedEngineCoreOutputs::Other(OtherEngineCoreOutputs::DpControl {
-                    engine_index: self.engine_index,
-                    timestamp: self.timestamp,
-                    control: DpControlMessage::StartWave(self.start_wave.unwrap()),
-                })
-            }
+            (false, None, Some(_), None) => ClassifiedEngineCoreOutputs::DpControl {
+                engine_index: self.engine_index,
+                timestamp: self.timestamp,
+                control: DpControlMessage::WaveComplete(self.wave_complete.unwrap()),
+            },
+            (false, None, None, Some(_)) => ClassifiedEngineCoreOutputs::DpControl {
+                engine_index: self.engine_index,
+                timestamp: self.timestamp,
+                control: DpControlMessage::StartWave(self.start_wave.unwrap()),
+            },
             _ => ClassifiedEngineCoreOutputs::Other(OtherEngineCoreOutputs::Raw(self)),
         }
     }
@@ -191,15 +187,13 @@ mod tests {
         };
 
         expect_test::expect![[r#"
-            Other(
-                DpControl {
-                    engine_index: 0,
-                    timestamp: 0.0,
-                    control: StartWave(
-                        3,
-                    ),
-                },
-            )
+            DpControl {
+                engine_index: 0,
+                timestamp: 0.0,
+                control: StartWave(
+                    3,
+                ),
+            }
         "#]]
         .assert_debug_eq(&outputs.classify());
     }

@@ -4,6 +4,7 @@ use std::ops::Deref;
 use std::time::Duration;
 
 use bytes::Bytes;
+use enum_as_inner::EnumAsInner;
 use thiserror_ext::AsReport;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -12,7 +13,8 @@ use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{PullSocket, RouterSendHalf, RouterSocket, ZmqError, ZmqMessage};
 
-use crate::error::{Error, Result};
+use crate::coordinator::CoordinatorBootstrap;
+use crate::error::{Error, Result, bail_unexpected_handshake_message};
 use crate::protocol::handshake::{HandshakeAddresses, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::{
     EngineCoreOutputs, decode_engine_core_outputs, decode_msgpack, encode_msgpack,
@@ -41,6 +43,19 @@ impl EngineId {
     /// Convert the engine id into a ZMQ frame for sending.
     pub fn into_frame(self) -> Bytes {
         self.0
+    }
+
+    /// Parse the Python-compatible engine index encoded in the routing identity.
+    ///
+    /// Python `EngineCoreProc` currently uses a two-byte little-endian engine index
+    /// as its ROUTER/DEALER identity. Coordinator control messages such as
+    /// `START_DP_WAVE(exclude_engine_index)` need that engine-side index rather than
+    /// any frontend-local ordering.
+    pub fn engine_index(&self) -> Option<u32> {
+        if self.len() != 2 {
+            return None;
+        }
+        Some(u16::from_le_bytes([self[0], self[1]]) as u32)
     }
 }
 
@@ -73,7 +88,7 @@ impl TryFrom<EngineId> for PeerIdentity {
 }
 
 /// Per-engine handshake result collected while bootstrapping one shared transport.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ConnectedEngine {
     /// The identity of the connected engine.
     pub engine_id: EngineId,
@@ -92,11 +107,19 @@ pub struct ConnectedTransport {
     pub output_address: String,
     /// All engines connected through the startup handshake.
     pub engines: Vec<ConnectedEngine>,
+    /// Optional engine-facing coordinator transport used for in-process wave coordination.
+    pub coordinator: Option<CoordinatorBootstrap>,
 
     /// The sending half of the shared input socket.
     pub input_send: RouterSendHalf,
     /// The shared output socket for receiving responses from all engines.
     pub output_socket: PullSocket,
+}
+
+#[derive(Clone, Debug, EnumAsInner)]
+enum EngineStartupState {
+    HelloReceived,
+    ReadyReceived(ReadyMessage),
 }
 
 /// Connect to one or more engines through the startup handshake protocol, returning the shared
@@ -107,12 +130,11 @@ pub async fn connect(
     local_host: &str,
     local_input_address: Option<&str>,
     local_output_address: Option<&str>,
+    enable_inproc_coordinator: bool,
     ready_timeout: Duration,
 ) -> Result<ConnectedTransport> {
     if engine_count == 0 {
-        return Err(Error::UnexpectedHandshakeMessage {
-            reason: "expected engine_count >= 1".to_string(),
-        });
+        bail_unexpected_handshake_message!("expected engine_count >= 1");
     }
 
     info!(
@@ -132,46 +154,41 @@ pub async fn connect(
         bind_local_sockets(local_host, local_input_address, local_output_address).await?;
     debug!(%input_address, %output_address, "bound local transport sockets");
 
+    let mut coordinator = if enable_inproc_coordinator {
+        Some(CoordinatorBootstrap::bind(local_host).await?)
+    } else {
+        None
+    };
+
     // 2. Bind the shared handshake socket once. All engines connect to this socket with their own
     //    identities, and startup order does not matter.
     let mut handshake_socket = RouterSocket::new();
     handshake_socket.bind(handshake_address).await?;
 
-    // 3. Receive HELLO/READY from each engine on the shared handshake socket until all expected
-    //    engines have completed startup. READY can arrive before later HELLOs, so startup must be
-    //    driven by a single mixed-status loop.
     let mut engines = BTreeMap::new();
-    let mut ready_pending = BTreeSet::new();
-    while engines.len() < engine_count || !ready_pending.is_empty() {
+
+    // 3. Receive HELLO from every engine and send a matching INIT. When coordinator mode is
+    //    enabled, the engines will not emit READY until the coordinator barrier below completes.
+    while engines.len() < engine_count {
         debug!(
             handshake_address,
             connected = engines.len(),
-            ready = engines.len() - ready_pending.len(),
             waiting_for = engine_count,
-            "waiting for engine startup message"
+            "waiting for engine HELLO"
         );
         let message = timeout(ready_timeout, handshake_socket.recv())
             .await
             .map_err(|_| Error::HandshakeTimeout {
-                stage: "HELLO/READY",
+                stage: "HELLO",
                 timeout: ready_timeout,
             })??;
         let (engine_id, handshake_message) = decode_handshake_message(message, None)?;
         match handshake_message.status.as_deref() {
             Some("HELLO") => {
-                if engines.len() >= engine_count {
-                    return Err(Error::UnexpectedHandshakeMessage {
-                        reason: format!(
-                            "received HELLO for unexpected extra engine id {engine_id:?}"
-                        ),
-                    });
-                }
                 if engines.contains_key(&engine_id) {
-                    return Err(Error::UnexpectedHandshakeMessage {
-                        reason: format!(
-                            "duplicate engine id {engine_id:?} observed during startup handshake"
-                        ),
-                    });
+                    bail_unexpected_handshake_message!(
+                        "duplicate engine id {engine_id:?} observed during startup handshake"
+                    );
                 }
                 debug!(handshake_address, ?engine_id, "received HELLO from engine");
 
@@ -180,49 +197,106 @@ pub async fn connect(
                     &engine_id,
                     &input_address,
                     &output_address,
+                    coordinator.as_ref(),
                 )
                 .await?;
                 debug!(handshake_address, ?engine_id, "sent INIT to engine");
 
-                engines.insert(
-                    engine_id.clone(),
-                    ConnectedEngine {
-                        engine_id: engine_id.clone(),
-                        // Haven't received READY yet, use a placeholder for now.
-                        ready_message: ReadyMessage::default(),
-                    },
-                );
-                ready_pending.insert(engine_id);
+                engines.insert(engine_id.clone(), EngineStartupState::HelloReceived);
             }
             Some("READY") => {
-                if !ready_pending.remove(&engine_id) {
-                    return Err(Error::UnexpectedHandshakeMessage {
-                        reason: format!(
-                            "received READY for unexpected or duplicate engine id {engine_id:?}"
-                        ),
-                    });
+                if coordinator.is_some() {
+                    bail_unexpected_handshake_message!(
+                        "received READY for engine id {engine_id:?} before coordinator startup gate completed"
+                    );
                 }
+                let state = match engines.get_mut(&engine_id) {
+                    Some(state) if !state.is_ready_received() => state,
+                    _ => {
+                        bail_unexpected_handshake_message!(
+                            "received READY for unexpected or duplicate engine id {engine_id:?}"
+                        );
+                    }
+                };
+                debug!(
+                    handshake_address,
+                    ?engine_id,
+                    ?handshake_message,
+                    "received overlapping READY from engine during HELLO phase"
+                );
+                *state = EngineStartupState::ReadyReceived(handshake_message);
+            }
+            other => {
+                bail_unexpected_handshake_message!("unexpected handshake status {other:?}");
+            }
+        }
+    }
+
+    // 4. Optional coordinator startup gate. Without coordinator there is nothing to do.
+    if let Some(coordinator) = coordinator.as_mut() {
+        coordinator
+            .wait_for_startup_gate(engine_count, ready_timeout)
+            .await?;
+    }
+
+    // 5. After the optional gate has opened, every engine may now send READY.
+    while engines.values().any(|state| !state.is_ready_received()) {
+        debug!(
+            handshake_address,
+            connected = engines.len(),
+            ready = engines
+                .values()
+                .filter(|state| state.is_ready_received())
+                .count(),
+            waiting_for = engine_count,
+            "waiting for engine READY"
+        );
+        let message = timeout(ready_timeout, handshake_socket.recv())
+            .await
+            .map_err(|_| Error::HandshakeTimeout {
+                stage: "READY",
+                timeout: ready_timeout,
+            })??;
+        let (engine_id, handshake_message) = decode_handshake_message(message, None)?;
+        match handshake_message.status.as_deref() {
+            Some("READY") => {
+                let state = match engines.get_mut(&engine_id) {
+                    Some(state) if !state.is_ready_received() => state,
+                    _ => {
+                        bail_unexpected_handshake_message!(
+                            "received READY for unexpected or duplicate engine id {engine_id:?}"
+                        );
+                    }
+                };
                 debug!(
                     handshake_address,
                     ?engine_id,
                     ?handshake_message,
                     "received READY from engine"
                 );
-                engines
-                    .get_mut(&engine_id)
-                    .expect("READY must only be accepted for a previously HELLO'd engine")
-                    .ready_message = handshake_message;
+                *state = EngineStartupState::ReadyReceived(handshake_message);
+            }
+            Some("HELLO") => {
+                bail_unexpected_handshake_message!(
+                    "received duplicate HELLO for engine id {engine_id:?} after INIT phase completed"
+                );
             }
             other => {
-                return Err(Error::UnexpectedHandshakeMessage {
-                    reason: format!("unexpected handshake status {other:?}"),
-                });
+                bail_unexpected_handshake_message!("unexpected handshake status {other:?}");
             }
         }
     }
 
     // 4. Wait for every engine to connect to the shared input socket and register itself.
-    let engines: Vec<_> = engines.into_values().collect();
+    let engines: Vec<_> = engines
+        .into_iter()
+        .map(|(engine_id, state)| ConnectedEngine {
+            engine_id,
+            ready_message: state
+                .into_ready_received()
+                .expect("startup state must be ready after READY phase completes"),
+        })
+        .collect();
 
     wait_for_input_registrations(&mut input_socket, &engines, ready_timeout).await?;
     debug!(
@@ -240,6 +314,7 @@ pub async fn connect(
         input_send,
         output_socket,
         engines,
+        coordinator,
     })
 }
 
@@ -270,9 +345,7 @@ fn decode_handshake_message(
     expected_id: Option<&EngineId>,
 ) -> Result<(EngineId, ReadyMessage)> {
     if message.len() != 2 {
-        return Err(Error::UnexpectedHandshakeMessage {
-            reason: format!("expected 2 frames, got {}", message.len()),
-        });
+        bail_unexpected_handshake_message!("expected 2 frames, got {}", message.len());
     }
 
     let frames = message.into_vec();
@@ -297,13 +370,14 @@ async fn send_init_message(
     engine_id: &EngineId,
     input_address: &str,
     output_address: &str,
+    coordinator: Option<&CoordinatorBootstrap>,
 ) -> Result<()> {
     let init_message = HandshakeInitMessage {
         addresses: HandshakeAddresses {
             inputs: vec![input_address.to_string()],
             outputs: vec![output_address.to_string()],
-            coordinator_input: None,
-            coordinator_output: None,
+            coordinator_input: coordinator.map(|c| c.input_address.clone()),
+            coordinator_output: coordinator.map(|c| c.output_address.clone()),
             frontend_stats_publish_address: None,
         },
         parallel_config: Default::default(),
@@ -336,27 +410,23 @@ async fn wait_for_input_registrations(
             })??;
 
         if registration.len() != 2 {
-            return Err(Error::UnexpectedHandshakeMessage {
-                reason: format!(
-                    "expected 2 frames for engine input registration, got {}",
-                    registration.len()
-                ),
-            });
+            bail_unexpected_handshake_message!(
+                "expected 2 frames for engine input registration, got {}",
+                registration.len()
+            );
         }
 
         let frames = registration.into_vec();
         let actual_id = EngineId(frames[0].clone());
         if !pending.remove(&actual_id) {
-            return Err(Error::UnexpectedHandshakeMessage {
-                reason: format!(
-                    "received input registration for unexpected engine id {actual_id:?}"
-                ),
-            });
+            bail_unexpected_handshake_message!(
+                "received input registration for unexpected engine id {actual_id:?}"
+            );
         }
         if !frames[1].is_empty() {
-            return Err(Error::UnexpectedHandshakeMessage {
-                reason: "expected empty payload for engine input registration".to_string(),
-            });
+            bail_unexpected_handshake_message!(
+                "expected empty payload for engine input registration"
+            );
         }
     }
 

@@ -55,7 +55,7 @@ pub enum EngineCoreRequestType {
 }
 
 impl EngineCoreRequestType {
-    pub fn as_frame(self) -> Bytes {
+    pub fn to_frame(self) -> Bytes {
         Bytes::from_static(match self {
             Self::Add => b"\x00",
             Self::Abort => b"\x01",

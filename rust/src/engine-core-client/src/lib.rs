@@ -1,6 +1,8 @@
 #![feature(iterator_try_collect)]
+#![feature(try_blocks)]
 
 mod client;
+mod coordinator;
 mod error;
 mod metrics;
 pub mod protocol;

@@ -153,7 +153,7 @@ impl ClientInner {
         let input_send = guard
             .as_mut()
             .ok_or_else(|| Error::ControlClosed("input sender already shut down".to_string()))?;
-        transport::send_message(input_send, engine_id, request_type.as_frame(), payload).await?;
+        transport::send_message(input_send, engine_id, request_type.to_frame(), payload).await?;
         Ok(())
     }
 
@@ -309,8 +309,20 @@ pub(crate) async fn run_output_dispatcher_loop(
                     );
                 }
             }
+            ClassifiedEngineCoreOutputs::DpControl {
+                engine_index,
+                timestamp,
+                control,
+            } => {
+                inner.close_registries(Arc::new(Error::UnexpectedDispatcherOutput {
+                    message: format!(
+                        "received dp-control output on main dispatcher path: engine_index={engine_index}, timestamp={timestamp}, control={control:?}"
+                    ),
+                }));
+                return;
+            }
             ClassifiedEngineCoreOutputs::Other(other) => match other {
-                OtherEngineCoreOutputs::DpControl { .. } | OtherEngineCoreOutputs::Raw(_) => {
+                OtherEngineCoreOutputs::Raw(_) => {
                     warn!(outputs = ?other, "ignoring non-request engine-core output");
                 }
             },

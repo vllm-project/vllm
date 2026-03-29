@@ -1,18 +1,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::future::try_join_all;
+use futures::future::{join_all, try_join_all};
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
+use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result};
 use crate::protocol::handshake::ReadyMessage;
 use crate::protocol::{EngineCoreRequest, EngineCoreRequestType, EngineCoreUtilityRequest};
 use crate::transport::{self, ConnectedEngine};
 
-mod imp;
+pub(crate) mod imp;
 mod state;
 mod stream;
 
@@ -34,6 +35,8 @@ pub struct EngineCoreClientConfig {
     pub ready_timeout: Duration,
     /// Frontend client index stamped onto every request.
     pub client_index: u32,
+    /// Enable the in-process wave coordinator for single-frontend deployments.
+    pub enable_inproc_coordinator: bool,
 }
 
 impl EngineCoreClientConfig {
@@ -47,6 +50,7 @@ impl EngineCoreClientConfig {
             local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(30),
             client_index: 0,
+            enable_inproc_coordinator: false,
         }
     }
 }
@@ -58,10 +62,15 @@ pub struct EngineCoreClient {
     output_address: String,
     engines: Vec<ConnectedEngine>,
     inner: Arc<ClientInner>,
+    coordinator: Option<CoordinatorHandle>,
     abort_tx: mpsc::UnboundedSender<String>,
+
+    // Background tasks
     output_task: AbortOnDropHandle<()>,
     dispatcher_task: AbortOnDropHandle<()>,
     abort_task: AbortOnDropHandle<()>,
+    coordinator_output_task: Option<AbortOnDropHandle<()>>,
+    coordinator_task: Option<AbortOnDropHandle<()>>,
 }
 
 impl EngineCoreClient {
@@ -84,6 +93,7 @@ impl EngineCoreClient {
             &config.local_host,
             local_input_address.as_deref(),
             local_output_address.as_deref(),
+            config.enable_inproc_coordinator,
             config.ready_timeout,
         )
         .await?;
@@ -116,16 +126,40 @@ impl EngineCoreClient {
         let abort_task =
             AbortOnDropHandle::new(tokio::spawn(run_abort_loop(inner.clone(), abort_rx)));
 
+        let (coordinator, coordinator_output_task, coordinator_task) =
+            if let Some(coordinator_transport) = connected.coordinator {
+                let (handle, runner) = CoordinatorHandle::new(coordinator_transport.input_socket);
+                let (coordinator_output_tx, coordinator_output_rx) = mpsc::channel(64);
+                let coordinator_output_task =
+                    AbortOnDropHandle::new(tokio::spawn(transport::run_output_loop(
+                        coordinator_transport.output_socket,
+                        coordinator_output_tx,
+                    )));
+                let coordinator_task = AbortOnDropHandle::new(tokio::spawn(
+                    runner.run(coordinator_output_rx, inner.clone()),
+                ));
+                (
+                    Some(handle),
+                    Some(coordinator_output_task),
+                    Some(coordinator_task),
+                )
+            } else {
+                (None, None, None)
+            };
+
         Ok(Self {
             config,
             input_address: connected.input_address,
             output_address: connected.output_address,
             engines,
             inner,
+            coordinator,
             abort_tx,
             output_task,
             dispatcher_task,
             abort_task,
+            coordinator_output_task,
+            coordinator_task,
         })
     }
 
@@ -185,23 +219,36 @@ impl EngineCoreClient {
         trace!(
             request_id = %req.request_id,
             client_index = req.client_index,
+            current_wave = req.current_wave,
             request = ?req,
             "sending add request"
         );
 
         let request_id = req.request_id.clone();
         let (engine_id, rx) = self.inner.register_request(request_id.clone())?;
-        debug!(
-            request_id = req.request_id,
-            ?engine_id,
-            "registered request to engine"
-        );
 
-        if let Err(error) = self
-            .inner
-            .send_to_engine(&engine_id, EngineCoreRequestType::Add, &req)
-            .await
-        {
+        let result = try {
+            if let Some(coordinator) = self.coordinator.as_ref() {
+                let snapshot = coordinator.snapshot();
+                req.current_wave = snapshot.current_wave;
+                if !snapshot.engines_running {
+                    coordinator.notify_first_request(engine_id.clone())?;
+                }
+            }
+
+            debug!(
+                request_id = req.request_id,
+                ?engine_id,
+                "registered request to engine"
+            );
+
+            self.inner
+                .send_to_engine(&engine_id, EngineCoreRequestType::Add, &req)
+                .await?;
+        };
+
+        // Failed to send the request to the engine, roll back the registration.
+        if let Err(error) = result {
             self.inner.rollback_request(&request_id);
             return Err(error);
         }
@@ -327,6 +374,8 @@ impl EngineCoreClient {
             output_task,
             dispatcher_task,
             abort_task,
+            coordinator_output_task,
+            coordinator_task,
             ..
         } = self;
 
@@ -334,12 +383,14 @@ impl EngineCoreClient {
         inner.shutdown().await;
         drop(abort_tx);
 
-        // Abort all client tasks and wait for them to finish.
+        // Abort all client tasks first, then await them.
         // Note the aborting orders here.
-        abort_task.abort();
-        dispatcher_task.abort();
-        output_task.abort();
-        let _ = tokio::join!(abort_task, dispatcher_task, output_task);
+        let mut tasks = vec![abort_task, dispatcher_task, output_task];
+        tasks.extend(coordinator_task);
+        tasks.extend(coordinator_output_task);
+
+        tasks.iter().for_each(|t| t.abort());
+        join_all(tasks).await;
 
         info!("engine-core client shut down");
         Ok(())

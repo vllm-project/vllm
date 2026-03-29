@@ -7,7 +7,7 @@ use tempfile::TempDir;
 use tokio::sync::oneshot;
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
-use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
+use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, ZmqMessage};
 
 use crate::EngineId;
 use crate::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
@@ -63,14 +63,32 @@ fn ready_message(status: &str) -> ReadyMessage {
     }
 }
 
-/// Complete the engine-core handshake and connect mock input/output sockets.
-///
-/// This returns the decoded handshake init message plus the `DealerSocket` used to receive client
-/// requests and the `PushSocket` used to send engine outputs back to the client.
-pub async fn setup_mock_engine_with_init(
+/// Coordinator-side sockets connected by one mock engine when coordinator mode is enabled.
+pub struct MockCoordinatorConnections {
+    /// Subscription socket that receives coordinator broadcasts such as `START_DP_WAVE`.
+    pub input_sub: SubSocket,
+    /// Push socket used to send coordinator-only `EngineCoreOutputs` back to the frontend.
+    pub output_push: PushSocket,
+}
+
+/// Fully connected mock engine transport state used by tests.
+pub struct MockEngineConnections {
+    /// Decoded INIT message sent by the frontend during handshake.
+    pub init: HandshakeInitMessage,
+    /// Socket used to receive frontend requests.
+    pub dealer: DealerSocket,
+    /// Socket used to publish normal request outputs back to the frontend.
+    pub push: PushSocket,
+    /// Optional coordinator sockets when the client enabled the in-process coordinator.
+    pub coordinator: Option<MockCoordinatorConnections>,
+}
+
+/// Complete the engine-core handshake and connect mock input/output sockets plus optional
+/// coordinator sockets.
+pub async fn setup_mock_engine_connections(
     engine_handshake: String,
     engine_id: impl Into<EngineId>,
-) -> (HandshakeInitMessage, DealerSocket, PushSocket) {
+) -> MockEngineConnections {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let peer_identity = PeerIdentity::try_from(engine_id.into()).expect("peer id");
@@ -115,6 +133,44 @@ pub async fn setup_mock_engine_with_init(
         .await
         .expect("connect mock engine output socket");
 
+    let coordinator = match (
+        init.addresses.coordinator_input.as_deref(),
+        init.addresses.coordinator_output.as_deref(),
+    ) {
+        (Some(coordinator_input), Some(coordinator_output)) => {
+            let mut input_sub = SubSocket::new();
+            input_sub
+                .connect(coordinator_input)
+                .await
+                .expect("connect mock engine coordinator input socket");
+            input_sub
+                .subscribe("")
+                .await
+                .expect("subscribe mock engine coordinator input socket");
+
+            let mut output_push = PushSocket::new();
+            output_push
+                .connect(coordinator_output)
+                .await
+                .expect("connect mock engine coordinator output socket");
+
+            let ready = input_sub
+                .recv()
+                .await
+                .expect("receive coordinator READY marker")
+                .into_vec();
+            assert_eq!(ready.len(), 1);
+            assert_eq!(ready[0].as_ref(), b"READY");
+
+            Some(MockCoordinatorConnections {
+                input_sub,
+                output_push,
+            })
+        }
+        (None, None) => None,
+        _ => panic!("coordinator handshake addresses must be both present or both absent"),
+    };
+
     handshake
         .send(ZmqMessage::from(
             rmp_serde::to_vec_named(&ready_message("READY")).expect("encode READY ready message"),
@@ -122,6 +178,25 @@ pub async fn setup_mock_engine_with_init(
         .await
         .expect("send READY ready message");
 
+    MockEngineConnections {
+        init,
+        dealer,
+        push,
+        coordinator,
+    }
+}
+
+/// Complete the engine-core handshake and connect mock input/output sockets.
+///
+/// This returns the decoded handshake init message plus the `DealerSocket` used to receive client
+/// requests and the `PushSocket` used to send engine outputs back to the client.
+pub async fn setup_mock_engine_with_init(
+    engine_handshake: String,
+    engine_id: impl Into<EngineId>,
+) -> (HandshakeInitMessage, DealerSocket, PushSocket) {
+    let MockEngineConnections {
+        init, dealer, push, ..
+    } = setup_mock_engine_connections(engine_handshake, engine_id).await;
     (init, dealer, push)
 }
 

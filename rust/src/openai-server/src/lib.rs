@@ -36,6 +36,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         local_host: config.advertised_host.clone(),
         ready_timeout: config.ready_timeout,
         client_index: 0,
+        enable_inproc_coordinator: config.enable_inproc_coordinator,
     })
     .await?;
 

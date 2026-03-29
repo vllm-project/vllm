@@ -184,6 +184,7 @@ async fn connect_async_llm_with_ipc(
             local_host: "127.0.0.1".to_string(),
             ready_timeout: Duration::from_secs(2),
             client_index,
+            enable_inproc_coordinator: false,
         },
         Some(ipc.input_endpoint()),
         Some(ipc.output_endpoint()),

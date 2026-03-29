@@ -45,6 +45,9 @@ pub struct FrontendRuntimeArgs {
     /// Maximum time to wait for the engine handshake to complete.
     #[arg(long, env = "VLLM_ENGINE_READY_TIMEOUT_S", default_value_t = 300)]
     pub ready_timeout_secs: u64,
+    /// Enable the in-process coordinator for single-frontend wave control.
+    #[arg(long)]
+    pub enable_inproc_coordinator: bool,
     /// Select the tool call parser depending on the model that you're using.
     /// When not specified, the parser is auto-detected from the model.
     #[arg(long)]
@@ -74,6 +77,7 @@ impl FrontendRuntimeArgs {
             host: self.host,
             port: self.port,
             advertised_host,
+            enable_inproc_coordinator: self.enable_inproc_coordinator,
             ready_timeout: Duration::from_secs(self.ready_timeout_secs),
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
@@ -209,6 +213,7 @@ mod tests {
                             host: "127.0.0.1",
                             port: 8000,
                             ready_timeout_secs: 300,
+                            enable_inproc_coordinator: false,
                             tool_call_parser: None,
                             reasoning_parser: None,
                             max_model_len: Some(
@@ -253,6 +258,7 @@ mod tests {
                             host: "127.0.0.1",
                             port: 8000,
                             ready_timeout_secs: 300,
+                            enable_inproc_coordinator: false,
                             tool_call_parser: None,
                             reasoning_parser: None,
                             max_model_len: None,
@@ -293,6 +299,7 @@ mod tests {
                             host: "127.0.0.1",
                             port: 8000,
                             ready_timeout_secs: 300,
+                            enable_inproc_coordinator: false,
                             tool_call_parser: None,
                             reasoning_parser: None,
                             max_model_len: None,
@@ -373,6 +380,7 @@ mod tests {
                 host: "127.0.0.1",
                 port: 8000,
                 advertised_host: "10.99.48.128",
+                enable_inproc_coordinator: false,
                 ready_timeout: 300s,
                 tool_call_parser: None,
                 reasoning_parser: None,
