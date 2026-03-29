@@ -39,15 +39,19 @@ def _make_iteration_stats_with_corrupted(n: int) -> IterationStats:
 
 
 def test_preemptions_appear_in_log_when_nonzero():
-    """Preemption count must be logged when preemptions occurred."""
+    """Preemption count must be logged when preemptions occurred.
+
+    This test would have failed before the fix: _update_stats() called _reset()
+    which zeroed num_preemptions before the > 0 guard was checked.
+    """
     logger = _make_logger()
     logger._track_iteration_stats(_make_iteration_stats_with_preemptions(3))
 
     messages = _collect_log_output(logger)
 
     assert any(
-        "Preemptions" in msg for msg in messages
-    ), "Expected 'Preemptions' in log output, but it was missing"
+        "Preemptions: 3" in msg for msg in messages
+    ), "Expected 'Preemptions: 3' in log output, but it was missing"
 
 
 def test_preemptions_not_in_log_when_zero():
@@ -61,22 +65,12 @@ def test_preemptions_not_in_log_when_zero():
     ), "Expected 'Preemptions' to be absent from log output, but it was present"
 
 
-def test_corrupted_reqs_appear_in_log_when_nonzero():
-    """Corrupted req count must be logged when VLLM_COMPUTE_NANS_IN_LOGITS is set."""
-    logger = _make_logger()
-    logger._track_iteration_stats(_make_iteration_stats_with_corrupted(2))
-
-    with patch("vllm.v1.metrics.loggers.envs") as mock_envs:
-        mock_envs.VLLM_COMPUTE_NANS_IN_LOGITS = True
-        messages = _collect_log_output(logger)
-
-    assert any(
-        "Corrupted" in msg for msg in messages
-    ), "Expected 'Corrupted' in log output, but it was missing"
-
-
 def test_corrupted_reqs_value_correct_in_log():
-    """Corrupted req count must reflect actual count, not post-reset zero."""
+    """Corrupted req count must reflect actual count, not post-reset zero.
+
+    This test would have failed before the fix: _update_stats() called _reset()
+    which zeroed num_corrupted_reqs before it was read for logging.
+    """
     logger = _make_logger()
     logger._track_iteration_stats(_make_iteration_stats_with_corrupted(5))
 
@@ -85,5 +79,5 @@ def test_corrupted_reqs_value_correct_in_log():
         messages = _collect_log_output(logger)
 
     assert any(
-        "5" in msg and "Corrupted" in msg for msg in messages
-    ), "Expected corrupted count of 5 in log output"
+        "Corrupted: 5 reqs" in msg for msg in messages
+    ), "Expected 'Corrupted: 5 reqs' in log output, but it was missing"
