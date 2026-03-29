@@ -214,6 +214,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "                                     int sm_count, int num_kv_splits) "
       "-> int");
 #endif
+
+  // Hadamard transforms
+  // conditionally compiled so impl registration is in source file
+  ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
