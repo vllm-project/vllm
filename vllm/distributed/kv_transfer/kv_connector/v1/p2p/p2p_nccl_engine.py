@@ -325,10 +325,19 @@ class P2pNcclEngine:
             if tensor is not None:
                 if isinstance(tensor, tuple):
                     addr, dtype, shape = tensor
-                    tensor = self.pool.load_tensor(addr, dtype, shape, self.device)
-                    # Release the pinned-memory slot immediately after the
-                    # tensor has been copied back to device.
-                    self.pool.free(addr)
+                    # Use try/finally so the pinned-memory slot is always
+                    # returned to the pool even if load_tensor raises.
+                    # Without this, a raise would leave the addr permanently
+                    # allocated (the entry is already popped from recv_store
+                    # so the straggler path in get_finished cannot reclaim it).
+                    try:
+                        tensor = self.pool.load_tensor(
+                            addr, dtype, shape, self.device
+                        )
+                    finally:
+                        # Release the pinned-memory slot immediately after the
+                        # tensor has been copied back to device.
+                        self.pool.free(addr)
                 else:
                     self.buffer_size -= tensor.element_size() * tensor.numel()
             else:
@@ -546,7 +555,7 @@ class P2pNcclEngine:
         return True
 
     def get_finished(
-        self, finished_req_ids: set[str], no_compile_layers
+        self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
         """
         Notifies worker-side connector ids of requests that have
@@ -565,21 +574,25 @@ class P2pNcclEngine:
         # loop is a safety net for any tensors that were received but never
         # consumed (e.g. if start_load_kv was skipped or errored out).
         for request_id in finished_req_ids:
-            tensor_ids = self.recv_request_id_to_tensor_ids.pop(request_id, set())
-            if tensor_ids:
-                with self.recv_store_cv:
-                    for tensor_id in tensor_ids:
-                        tensor = self.recv_store.pop(tensor_id, None)
-                        if tensor is not None:
-                            if isinstance(tensor, tuple):
-                                addr, _, _ = tensor
-                                self.pool.free(addr)
-                            else:
-                                # Reclaim buffer quota for non-pool tensors
-                                # that were never consumed.
-                                self.buffer_size -= (
-                                    tensor.element_size() * tensor.numel()
-                                )
+            # Both recv_request_id_to_tensor_ids and recv_store are written
+            # by the listener thread under recv_store_cv; hold the lock for
+            # all reads and mutations to keep the protocol consistent.
+            with self.recv_store_cv:
+                tensor_ids = self.recv_request_id_to_tensor_ids.pop(
+                    request_id, set()
+                )
+                for tensor_id in tensor_ids:
+                    tensor = self.recv_store.pop(tensor_id, None)
+                    if tensor is not None:
+                        if isinstance(tensor, tuple):
+                            addr, _, _ = tensor
+                            self.pool.free(addr)
+                        else:
+                            # Reclaim buffer quota for non-pool tensors
+                            # that were never consumed.
+                            self.buffer_size -= (
+                                tensor.element_size() * tensor.numel()
+                            )
             self.send_request_id_to_tensor_ids.pop(request_id, None)
 
         # TODO:Retrieve requests that have already sent the KV cache.

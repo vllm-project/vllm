@@ -327,8 +327,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         assert self.p2p_nccl_engine is not None
 
-        no_compile_layers = self._vllm_config.compilation_config.static_forward_context
-        return self.p2p_nccl_engine.get_finished(finished_req_ids, no_compile_layers)
+        return self.p2p_nccl_engine.get_finished(finished_req_ids)
 
     # ==============================
     # Scheduler-side methods

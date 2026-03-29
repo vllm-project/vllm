@@ -270,6 +270,26 @@ class TestRecvTensorPoolBackedEntries(unittest.TestCase):
         self.engine.pool.free.assert_not_called()
         self.assertNotIn(tensor_id, self.engine.recv_store)
 
+    def test_pool_free_called_even_if_load_tensor_raises(self):
+        """pool.free(addr) must be called via try/finally even if
+        pool.load_tensor() raises an exception, to prevent pinned-memory
+        leaks.  Without the try/finally the addr would be permanently lost
+        because the entry is already popped from recv_store before the
+        load attempt."""
+        fake_addr = 0xDEADC0DE
+        tensor_id = "req-014#attn.0"
+
+        self.engine.pool.load_tensor.side_effect = RuntimeError("simulated OOM")
+        _register_pool_tensor(
+            self.engine, tensor_id, fake_addr, torch.float16, (2, 4)
+        )
+
+        with self.assertRaises(RuntimeError):
+            self.engine.recv_tensor(tensor_id)
+
+        self.engine.pool.free.assert_called_once_with(fake_addr)
+        self.assertNotIn(tensor_id, self.engine.recv_store)
+
     def test_pool_free_called_once_per_entry_not_twice(self):
         """pool.free must be called exactly once per pool-backed entry.
         A second call with the same addr would corrupt the pool's free-list."""
@@ -287,7 +307,7 @@ class TestRecvTensorPoolBackedEntries(unittest.TestCase):
 
         # Simulate request finishing – get_finished should be a no-op for
         # already-consumed entries.
-        self.engine.get_finished({req_id}, no_compile_layers={})
+        self.engine.get_finished({req_id})
 
         self.assertEqual(
             self.engine.pool.free.call_count,
@@ -320,7 +340,7 @@ class TestGetFinishedStragglerCleanup(unittest.TestCase):
         self.assertEqual(self.engine.buffer_size, size)
 
         # recv_tensor was NEVER called; call get_finished to trigger cleanup.
-        self.engine.get_finished({req_id}, no_compile_layers={})
+        self.engine.get_finished({req_id})
 
         self.assertNotIn(tensor_id, self.engine.recv_store)
         self.assertEqual(
@@ -339,7 +359,7 @@ class TestGetFinishedStragglerCleanup(unittest.TestCase):
         _register_pool_tensor(
             self.engine, tensor_id, fake_addr, torch.float16, (2, 4)
         )
-        self.engine.get_finished({req_id}, no_compile_layers={})
+        self.engine.get_finished({req_id})
 
         self.engine.pool.free.assert_called_once_with(fake_addr)
         self.assertNotIn(tensor_id, self.engine.recv_store)
@@ -357,7 +377,7 @@ class TestGetFinishedStragglerCleanup(unittest.TestCase):
             total_size += t.element_size() * t.numel()
 
         self.assertEqual(self.engine.buffer_size, total_size)
-        self.engine.get_finished({req_id}, no_compile_layers={})
+        self.engine.get_finished({req_id})
 
         self.assertEqual(len(self.engine.recv_store), 0)
         self.assertEqual(self.engine.buffer_size, 0)
@@ -377,7 +397,7 @@ class TestGetFinishedStragglerCleanup(unittest.TestCase):
 
         size_b = tensor_b.element_size() * tensor_b.numel()
 
-        self.engine.get_finished({req_a}, no_compile_layers={})
+        self.engine.get_finished({req_a})
 
         self.assertNotIn(tid_a, self.engine.recv_store)
         self.assertIn(
@@ -407,7 +427,7 @@ class TestGetFinishedStragglerCleanup(unittest.TestCase):
         self.assertNotIn(tensor_id, self.engine.recv_store)
 
         # get_finished should not raise and must not corrupt buffer_size.
-        self.engine.get_finished({req_id}, no_compile_layers={})
+        self.engine.get_finished({req_id})
 
         self.assertEqual(self.engine.buffer_size, 0)
         self.engine.pool.free.assert_not_called()
@@ -419,7 +439,7 @@ class TestGetFinishedStragglerCleanup(unittest.TestCase):
         tensor_id = f"{req_id}#layer.0"
         self.engine.send_request_id_to_tensor_ids[req_id] = {tensor_id}
 
-        self.engine.get_finished({req_id}, no_compile_layers={})
+        self.engine.get_finished({req_id})
 
         self.assertNotIn(
             req_id,
@@ -434,7 +454,7 @@ class TestGetFinishedStragglerCleanup(unittest.TestCase):
         tensor_id = f"{req_id}#layer.0"
         _register_gpu_tensor(self.engine, tensor_id, tensor)
 
-        self.engine.get_finished({req_id}, no_compile_layers={})
+        self.engine.get_finished({req_id})
 
         self.assertNotIn(
             req_id,
@@ -443,19 +463,20 @@ class TestGetFinishedStragglerCleanup(unittest.TestCase):
         )
 
 
-class TestGetFinishedNoCompileLayersParamUnused(unittest.TestCase):
-    """Regression guard: the fixed get_finished() uses
-    recv_request_id_to_tensor_ids (the set of actually-received tensor_ids)
-    rather than iterating no_compile_layers.  Passing an empty
-    no_compile_layers dict must still find and clean up straggler tensors."""
+class TestGetFinishedUsesRecvTracking(unittest.TestCase):
+    """Regression guard: get_finished() must use recv_request_id_to_tensor_ids
+    (the set of actually-received tensor_ids) rather than iterating
+    no_compile_layers.  The old implementation would silently skip all straggler
+    cleanup for any request whose tensors were not reflected in that dict."""
 
     def setUp(self):
         self.engine = _make_engine()
 
-    def test_straggler_found_with_empty_no_compile_layers(self):
-        """Stragglers must be found even if no_compile_layers={}.
-        In the OLD buggy implementation (iterating no_compile_layers) this
-        would silently skip all cleanup when the dict was empty."""
+    def test_straggler_found_via_recv_tracking_dict(self):
+        """Stragglers are found via recv_request_id_to_tensor_ids regardless
+        of which layer names exist elsewhere.  The old code iterated
+        no_compile_layers and would miss an entry whose key wasn't in that
+        dict (or miss everything when the dict was empty)."""
         req_id = "req-no-layers"
         tensor = torch.zeros(4, 4, dtype=torch.float16)
         size = tensor.element_size() * tensor.numel()
@@ -465,8 +486,7 @@ class TestGetFinishedNoCompileLayersParamUnused(unittest.TestCase):
         self.engine.recv_store[tensor_id] = tensor
         self.engine.recv_request_id_to_tensor_ids[req_id] = {tensor_id}
 
-        # Pass an empty no_compile_layers – the old code would miss everything.
-        self.engine.get_finished({req_id}, no_compile_layers={})
+        self.engine.get_finished({req_id})
 
         self.assertNotIn(tensor_id, self.engine.recv_store)
         self.assertEqual(self.engine.buffer_size, 0)
@@ -496,7 +516,7 @@ class TestPoolFreeCalledOnce(unittest.TestCase):
         self.engine.recv_tensor(tensor_id)
 
         # Step 2: request finishes (many decode steps later).
-        self.engine.get_finished({req_id}, no_compile_layers={})
+        self.engine.get_finished({req_id})
 
         self.assertEqual(
             self.engine.pool.free.call_count,
