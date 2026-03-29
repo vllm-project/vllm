@@ -4335,8 +4335,6 @@ def run_container(
         # Container-only env vars.
         "-e",
         "PYTHONPATH=..",
-        "-e",
-        "PYTORCH_ROCM_ARCH=",
         # NCCL tuning for ROCm multi-GPU tests.
         # NCCL_DEBUG=WARN: log NCCL warnings (INFO is too noisy for CI).
         # NCCL_CUMEM_HOST_ENABLE=0: workaround for NCCL host memory issue
@@ -4360,6 +4358,13 @@ def run_container(
     # Persistent cache mounts -- all caches defined in the CACHES registry.
     docker_cmd += build_cache_docker_args()
 
+    # Unset PYTORCH_ROCM_ARCH inside the container so PyTorch
+    # auto-detects the GPU arch at runtime. The image is pre-compiled;
+    # a stale value from the host/build env can cause PyTorch to skip
+    # arch-specific kernels or attempt recompilation.
+    # See: https://github.com/vllm-project/vllm/pull/38272
+    container_commands = f"unset PYTORCH_ROCM_ARCH && {commands}"
+
     docker_cmd += [
         "--name",
         name,
@@ -4368,7 +4373,7 @@ def run_container(
         "-euo",
         "pipefail",
         "-c",
-        commands,
+        container_commands,
     ]
 
     # -- Step 0: Pre-test baselines --
