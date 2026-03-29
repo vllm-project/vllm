@@ -9,6 +9,15 @@ from pathlib import Path
 from typing import Any
 
 
+@functools.lru_cache(maxsize=None)
+def hash_file(path: Path) -> str:
+    """Hash the contents of a single file. Cached per path so multiple
+    implementations defined in the same file share one read."""
+    hasher = hashlib.sha256()
+    hasher.update(path.read_text().encode("utf-8"))
+    return hasher.hexdigest()
+
+
 def hash_source(*srcs: str | Any) -> str:
     """
     Utility method to hash the sources of functions or objects.

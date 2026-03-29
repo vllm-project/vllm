@@ -9,7 +9,7 @@ from typing import Any, ClassVar, overload
 import torch
 from torch.library import Library, infer_schema
 
-from vllm.ir.util import hash_source, weak_cache
+from vllm.ir.util import hash_file
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy, tensors_str_no_data
 
@@ -400,15 +400,13 @@ class IrOpImpl:
 
         return self._supports_args(*args, **kwargs)
 
-    @weak_cache
-    def uuid(self):
+    def uuid(self) -> str:
         """
         Compile-time hash to uniquely determine whether the implementation has changed.
         Used by vllm-compile hash mechanism and torch.compile lowering pass uuid to
         control the vLLM compile cache and AOTAutograd/Inductor caches respectively.
 
-        Source file contents do not change so we cache uuid.
-        TODO(luka): Cache the file hash as multiple impls are likely in the same file.
+        Cached at the file level via hash_file: all impls in the same file share
+        one read and one hash computation.
         """
-        sources = [Path(inspect.getfile(self.impl_fn))]
-        return hash_source(*sources)
+        return hash_file(Path(inspect.getfile(self.impl_fn)))
