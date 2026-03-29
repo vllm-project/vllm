@@ -226,7 +226,9 @@ def hadamard_turboquant_encode(
         idx_stride_head=indices.stride(1),
         norm_stride_token=norms.stride(0),
         BLOCK_D=BLOCK_D,
-        num_warps=4,
+        # num_warps=1: required for Hadamard butterfly correctness.
+        # Multi-warp causes inter-warp races on scratch buffer.
+        num_warps=1,
         num_stages=1,
     )
 
@@ -271,7 +273,7 @@ def hadamard_turboquant_decode(
         out_stride_head=out.stride(1),
         BLOCK_D=BLOCK_D,
         OUTPUT_BF16=(output_dtype == torch.bfloat16),
-        num_warps=4,
+        num_warps=1,
         num_stages=1,
     )
 

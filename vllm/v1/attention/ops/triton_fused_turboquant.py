@@ -223,7 +223,7 @@ def fused_hadamard_encode_and_store(
         cache_stride_head=cache.stride(2),
         norm_stride_token=norms.stride(0),
         BLOCK_D=BLOCK_D,
-        num_warps=4,
+        num_warps=1,
         num_stages=1,
     )
 
@@ -392,7 +392,7 @@ def fused_hadamard_decode_from_slots(
         packed_bytes=packed_bytes,
         LOG2_D=LOG2_D,
         BLOCK_D=BLOCK_D,
-        num_warps=4,
+        num_warps=1,
         num_stages=1,
     )
 
