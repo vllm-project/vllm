@@ -200,6 +200,57 @@ def _create_weighted_output_token_list(
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize(
+    "all_greedy, max_num_logprobs",
+    [
+        (True, None),  # greedy, no logprobs
+        (False, None),  # random, no logprobs
+        (True, -1),  # greedy, full unsorted logprobs (skips gather_logprobs)
+        (False, -1),  # random, full unsorted logprobs
+        (True, 5),  # greedy, with logprobs (exercises gather_logprobs)
+        (False, 5),  # random, with logprobs
+    ],
+)
+def test_sampler_output_dtype(
+    device: str,
+    batch_size: int,
+    all_greedy: bool,
+    max_num_logprobs: int | None,
+):
+    """
+    Test that sampler always outputs int32 sampled_token_ids regardless of
+    whether logprobs are requested, and that the logprobs branch presence
+    matches the num_logprobs setting.
+    """
+    torch.set_default_device(device)
+    fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
+    sampling_metadata = _create_default_sampling_metadata(
+        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device)
+    )
+    sampling_metadata.max_num_logprobs = max_num_logprobs
+    if all_greedy:
+        sampling_metadata.temperature = torch.full((batch_size,), 0.0)
+        sampling_metadata.all_greedy = True
+        sampling_metadata.all_random = False
+    else:
+        sampling_metadata.temperature = torch.full((batch_size,), 1.0)
+        sampling_metadata.all_greedy = False
+        sampling_metadata.all_random = True
+
+    sampler = Sampler()
+    sampler_output = sampler.forward(fake_logits, sampling_metadata)
+
+    # Output token IDs must always be int32.
+    assert sampler_output.sampled_token_ids.dtype == torch.int32
+
+    if max_num_logprobs is None:
+        assert sampler_output.logprobs_tensors is None
+    else:
+        assert sampler_output.logprobs_tensors is not None
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
 @pytest.mark.parametrize("presence_penalty", [-2.0, 2.0])
 def test_sampler_presence_penalty(
