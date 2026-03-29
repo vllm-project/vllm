@@ -9,7 +9,7 @@ handling of GPU lifecycle, exit code propagation, and cleanup.
 Designed to run inside Kubernetes pods with Docker socket access, handling
 the unique challenges of containerized GPU CI:
 
-  - Cross-PID-namespace GPU zombie detection (via ``rocm-smi --showpids``)
+  - Cross-PID-namespace GPU zombie detection (via ``amd-smi``/``rocm-smi``)
   - File-locked GPU state coordination (safe with parallel agents on same node)
   - Driver-level GPU health validation (VRAM checks, hardware reset fallback)
   - JUnit XML as authoritative exit code source (immune to ``os._exit(0)``
@@ -26,7 +26,7 @@ The script is organized into these layers, each with a single responsibility:
     Shell helper        - Thin wrapper around subprocess.run
     Buildkite layer     - Artifact upload, build annotations, metadata
     Container diagnosis - OOM detection, signal analysis via ``docker inspect``
-    GPU VRAM monitoring - Pre/post-test VRAM snapshots via ``rocm-smi``
+    GPU VRAM monitoring - Pre/post-test VRAM snapshots via ``amd-smi``/``rocm-smi``
     JUnit XML parsing   - Failure annotation builder and exit-code validator
     K8s detection       - Pod/node/namespace context for debug logs
     GPU state locking   - flock-based coordination for parallel agents
@@ -1108,13 +1108,18 @@ def diagnose_container_exit(container_name, log_file=None):
     Returns:
         Dict with keys:
           "oom_killed" (bool), "exit_code" (int), "error" (str),
-          "pids_exhausted" (bool).
+          "pids_exhausted" (bool), "pytest_ran" (bool),
+          "pre_pytest_traceback" (bool),
+          "pre_pytest_crash" (str).
     """
     diag = {
         "oom_killed": False,
         "exit_code": -1,
         "error": "",
         "pids_exhausted": False,
+        "pytest_ran": True,
+        "pre_pytest_traceback": False,
+        "pre_pytest_crash": "",
     }  # type: dict[str, object]
 
     # -- Docker inspect --
@@ -1147,26 +1152,88 @@ def diagnose_container_exit(container_name, log_file=None):
     if len(parts) >= 3:
         diag["error"] = parts[2]
 
-    # -- Scan container log for resource-limit patterns --
+    # -- Scan container log --
+    #
+    # The log has two zones with different trust levels:
+    #
+    #   PRE-PYTEST: everything before the pytest session header.
+    #     Contains only setup output (export, cd, pip install, etc.).
+    #     No test output exists here. Tracebacks, "command not found",
+    #     and crash patterns are UNAMBIGUOUS in this zone -- they
+    #     indicate a genuine pre-test failure.
+    #
+    #   DURING-PYTEST: everything from the session header onward.
+    #     Contains test output that can legitimately include
+    #     tracebacks (expected failures, xfail, captured stderr),
+    #     "command not found" (tests asserting missing binaries),
+    #     and any other string. Pattern matching here is UNRELIABLE
+    #     for crash detection.
+    #
+    # We split the log at the session header and only use aggressive
+    # pattern matching in the pre-pytest zone.
+
+    _PYTEST_HEADER = "============================= test session starts"
+
     if log_file and log_file.is_file():
         try:
-            # Read only the last 100KB to avoid loading huge logs into memory.
+            # Read up to 2MB. Pre-pytest output is typically <100KB,
+            # but we read more to always find the session header.
             size = log_file.stat().st_size
+            read_limit = min(size, 2 * 1024 * 1024)
+            with open(log_file, errors="replace") as f:
+                log_content = f.read(read_limit)
+            # Also read the tail for PID-limit patterns that can
+            # appear anywhere in the log (during-pytest zone too).
             with open(log_file, errors="replace") as f:
                 if size > 100_000:
                     f.seek(size - 100_000)
                 tail = f.read()
         except OSError as exc:
             warn(f"Could not read container log {log_file} for diagnosis: {exc}")
+            log_content = ""
             tail = ""
 
-        # PID limit: when --pids-limit is hit, fork/clone syscalls fail.
-        # The error appears in the test output as one of these patterns.
+        # Split into pre-pytest and during-pytest zones.
+        header_pos = log_content.find(_PYTEST_HEADER)
+        if header_pos >= 0:
+            pre_pytest = log_content[:header_pos]
+            diag["pytest_ran"] = True
+        else:
+            # No session header found. Either pytest never ran,
+            # or the header is beyond our 2MB read window (rare).
+            pre_pytest = log_content
+            diag["pytest_ran"] = False
+
+        # -- Pre-pytest zone: reliable crash detection --
+        # These patterns are SAFE here because no test output
+        # has been produced yet. A traceback in this zone IS a
+        # crash. A "command not found" here IS a missing binary.
+        if pre_pytest:
+            # Python traceback in pre-test setup.
+            if "Traceback (most recent call last):" in pre_pytest:
+                diag["pre_pytest_traceback"] = True
+
+            # Bash/shell crash patterns (unambiguous in this zone).
+            pre_test_crash_patterns = [
+                ": command not found",
+                "ERROR: Could not install packages",
+                "error: Failed to download and build",
+                "bash: cd:",
+                "bash: syntax error",
+                "bash: line ",
+            ]
+            for pattern in pre_test_crash_patterns:
+                if pattern in pre_pytest:
+                    diag["pre_pytest_crash"] = pattern
+                    break
+
+        # -- Full log: resource-limit patterns --
+        # PID limit can appear anywhere (during long test runs).
         pid_patterns = [
             "fork: Resource temporarily unavailable",
             "Cannot allocate memory",
-            "OSError: [Errno 11]",  # EAGAIN from Python os.fork()
-            "BlockingIOError: [Errno 11]",  # EAGAIN from subprocess
+            "OSError: [Errno 11]",  # EAGAIN from os.fork()
+            "BlockingIOError: [Errno 11]",  # EAGAIN
             "RuntimeError: can't start new thread",
         ]
         for pattern in pid_patterns:
@@ -1267,22 +1334,118 @@ def diagnose_container_exit(container_name, log_file=None):
 # ==========================================================================
 
 
-def snapshot_gpu_vram(label=""):
-    # type: (str) -> dict[int, dict[str, int]]
-    """Capture per-GPU VRAM usage via rocm-smi and log it.
+# --------------------------------------------------------------------------
+# SMI tool detection: prefer amd-smi, fall back to rocm-smi
+# --------------------------------------------------------------------------
 
-    Attempts JSON output first (``--showmemuse --json``); falls back to
-    plain-text ``--showmeminfo vram`` if JSON is not supported by the
-    installed rocm-smi version.
 
-    Args:
-        label: Optional prefix for log lines (e.g., "pre-test", "post-test").
+def _detect_smi_tool():
+    # type: () -> str
+    """Detect whether ``amd-smi`` or ``rocm-smi`` is available.
+
+    Prefers ``amd-smi`` (the modern AMD System Management Interface).
+    Falls back to ``rocm-smi`` (legacy ROCm SMI) when ``amd-smi`` is
+    not on ``$PATH``.
 
     Returns:
-        Dict mapping GPU index to {"used": bytes, "total": bytes}.
-        Empty dict if rocm-smi is unavailable.
+        ``"amd-smi"`` or ``"rocm-smi"``.
     """
-    prefix = f"[{label}] " if label else ""
+    if shutil.which("amd-smi"):
+        info("GPU SMI tool detected: amd-smi")
+        return "amd-smi"
+    if shutil.which("rocm-smi"):
+        info("GPU SMI tool detected: rocm-smi (fallback)")
+        return "rocm-smi"
+    warn("Neither amd-smi nor rocm-smi found on $PATH")
+    return "rocm-smi"  # will fail gracefully at call sites
+
+
+_SMI_TOOL = _detect_smi_tool()
+
+
+def _smi_cmd(args, *, timeout=ROCM_SMI_TIMEOUT_S, capture=True):
+    # type: (str, ...) -> subprocess.CompletedProcess
+    """Run the detected SMI tool with *args*.
+
+    Args:
+        args:    Arguments to append after the tool name.
+        timeout: Maximum seconds to wait.
+        capture: If True, capture stdout/stderr.
+
+    Returns:
+        ``subprocess.CompletedProcess``.
+
+    Raises:
+        subprocess.TimeoutExpired: if the command exceeds *timeout*.
+    """
+    return sh(
+        f"{_SMI_TOOL} {args} 2>/dev/null",
+        capture=capture,
+        timeout=timeout,
+    )
+
+
+def _smi_json(args, *, timeout=ROCM_SMI_TIMEOUT_S):
+    # type: (str, ...) -> object | None
+    """Run the SMI tool with ``--json`` and parse the JSON output.
+
+    Args:
+        args:    Arguments to append (``--json`` is added automatically).
+        timeout: Maximum seconds to wait.
+
+    Returns:
+        Parsed JSON (list or dict), or ``None`` on any failure.
+    """
+    try:
+        r = _smi_cmd(f"{args} --json", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        warn(f"{_SMI_TOOL} {args} --json timed out after {timeout}s")
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+# --------------------------------------------------------------------------
+# VRAM snapshot
+# --------------------------------------------------------------------------
+
+
+def _snapshot_vram_amd_smi(prefix):
+    # type: (str) -> dict[int, dict[str, int]]
+    """VRAM snapshot via ``amd-smi metric --mem-usage --json``."""
+    data = _smi_json("metric --mem-usage")
+    if not isinstance(data, list):
+        return {}
+    result = {}  # type: dict[int, dict[str, int]]
+    for entry in data:
+        try:
+            idx = int(entry["gpu"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        mem = entry.get("mem_usage", {})
+        used_info = mem.get("used_vram", {})
+        total_info = mem.get("total_vram", {})
+        try:
+            used = int(used_info["value"]) * 1024 * 1024
+            total = int(total_info["value"]) * 1024 * 1024
+        except (KeyError, TypeError, ValueError):
+            continue
+        if total > 0 and used > total:
+            warn(
+                f"GPU {idx}: VRAM used ({used}) > total "
+                f"({total}) -- data may be corrupted"
+            )
+        result[idx] = {"used": used, "total": total}
+    return result
+
+
+def _snapshot_vram_rocm_smi(prefix):
+    # type: (str) -> dict[int, dict[str, int]]
+    """VRAM snapshot via ``rocm-smi --showmemuse --json`` (fallback)."""
     try:
         r = sh(
             "rocm-smi --showmemuse --json 2>/dev/null",
@@ -1293,7 +1456,6 @@ def snapshot_gpu_vram(label=""):
         warn(f"{prefix}rocm-smi --showmemuse timed out after {ROCM_SMI_TIMEOUT_S}s")
         return {}
     if r.returncode != 0:
-        # Fallback: non-JSON output for older rocm-smi versions.
         try:
             r = sh(
                 "rocm-smi --showmeminfo vram 2>/dev/null",
@@ -1316,31 +1478,52 @@ def snapshot_gpu_vram(label=""):
 
     result = {}  # type: dict[int, dict[str, int]]
     for key, val in data.items():
-        # rocm-smi JSON keys are "card0", "card1", etc.
         if not key.startswith("card"):
             continue
         try:
             idx = int(key.replace("card", ""))
         except ValueError:
             continue
-        # Prefer byte-level keys; fall back to 0 if missing.
         used_raw = val.get("VRAM Total Used Memory (B)")
         total_raw = val.get("VRAM Total Memory (B)")
         if used_raw is None or total_raw is None:
             warn(
-                f"GPU {idx}: VRAM keys missing from rocm-smi JSON -- "
-                f"available keys: {list(val.keys())}"
+                f"GPU {idx}: VRAM keys missing from "
+                f"rocm-smi JSON -- available keys: "
+                f"{list(val.keys())}"
             )
             continue
         used = int(used_raw)
         total = int(total_raw)
-        # Sanity check: used should not exceed total.
         if total > 0 and used > total:
             warn(
-                f"GPU {idx}: VRAM used ({used}) > total ({total}) -- "
-                f"data may be corrupted"
+                f"GPU {idx}: VRAM used ({used}) > total "
+                f"({total}) -- data may be corrupted"
             )
         result[idx] = {"used": used, "total": total}
+    return result
+
+
+def snapshot_gpu_vram(label=""):
+    # type: (str) -> dict[int, dict[str, int]]
+    """Capture per-GPU VRAM usage via amd-smi/rocm-smi and log it.
+
+    Uses ``amd-smi metric --mem-usage --json`` when available; falls
+    back to ``rocm-smi --showmemuse --json`` otherwise.
+
+    Args:
+        label: Optional prefix for log lines
+            (e.g., "pre-test", "post-test").
+
+    Returns:
+        Dict mapping GPU index to ``{"used": bytes, "total": bytes}``.
+        Empty dict if neither tool is available.
+    """
+    prefix = f"[{label}] " if label else ""
+    if _SMI_TOOL == "amd-smi":
+        result = _snapshot_vram_amd_smi(prefix)
+    else:
+        result = _snapshot_vram_rocm_smi(prefix)
 
     if result:
         for idx, mem in sorted(result.items()):
@@ -1575,7 +1758,7 @@ def _gpu_state_lock(blocking=True, timeout=30.0):
 # K8s, each pod has its own PID namespace, so fuser only sees processes
 # in the *current* pod. A zombie from a *previous* pod is invisible.
 #
-# ``rocm-smi --showpids`` queries the AMD kernel driver directly and
+# ``amd-smi``/``rocm-smi`` queries the AMD kernel driver directly and
 # returns PIDs in the *host* PID namespace, regardless of which container
 # they came from. This is the only reliable detection method in K8s.
 # ==========================================================================
@@ -1586,7 +1769,7 @@ def _device_pids(device):
     """Return PIDs holding a device file open, via ``fuser``.
 
     Limitation: in K8s, fuser only sees PIDs in the current PID namespace.
-    Use ``rocm_smi_gpu_pids()`` for cross-namespace visibility.
+    Use ``gpu_pids()`` for cross-namespace visibility.
 
     Args:
         device: Device path (e.g., "/dev/kfd", "/dev/dri/renderD128").
@@ -1625,9 +1808,9 @@ def _kill_pid(pid):
         os.kill(pid, signal.SIGKILL)
 
 
-def rocm_smi_gpu_pids():
+def gpu_pids():
     # type: () -> list[int]
-    """Get PIDs using GPUs via ``rocm-smi --showpids``.
+    """Get PIDs using GPUs via ``amd-smi``/``rocm-smi``.
 
     Unlike ``fuser /dev/kfd``, this queries the AMD kernel driver directly
     and returns PIDs in the host PID namespace. In K8s, this sees processes
@@ -1637,11 +1820,39 @@ def rocm_smi_gpu_pids():
 
     Returns:
         List of integer PIDs with PID > MIN_SYSTEM_PID.
-        Empty list if rocm-smi is unavailable or reports no processes.
+        Empty list if the SMI tool is unavailable or reports no processes.
     """
+    if _SMI_TOOL == "amd-smi":
+        return _gpu_pids_amd_smi()
+    return _gpu_pids_rocm_smi()
+
+
+def _gpu_pids_amd_smi():
+    # type: () -> list[int]
+    """PID enumeration via ``amd-smi process --json``."""
+    data = _smi_json("process")
+    if not isinstance(data, list):
+        return []
+    pids = []  # type: list[int]
+    for entry in data:
+        for proc in entry.get("process_list", []):
+            try:
+                pid = int(proc["pid"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if pid > MIN_SYSTEM_PID:
+                pids.append(pid)
+    return pids
+
+
+def _gpu_pids_rocm_smi():
+    # type: () -> list[int]
+    """PID enumeration via ``rocm-smi --showpids`` (fallback)."""
     try:
         r = sh(
-            "rocm-smi --showpids 2>/dev/null", capture=True, timeout=ROCM_SMI_TIMEOUT_S
+            "rocm-smi --showpids 2>/dev/null",
+            capture=True,
+            timeout=ROCM_SMI_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
         warn(f"rocm-smi --showpids timed out after {ROCM_SMI_TIMEOUT_S}s")
@@ -1651,10 +1862,6 @@ def rocm_smi_gpu_pids():
 
     pids = []  # type: list[int]
     for line in r.stdout.splitlines():
-        # Output format varies by rocm-smi version. Common formats:
-        #   "  PID  12345  ..."     (tabular)
-        #   "12345"                 (one PID per line)
-        # We take the first numeric token on each line as the PID.
         for token in line.split():
             if token.isdigit():
                 pid = int(token)
@@ -1664,17 +1871,55 @@ def rocm_smi_gpu_pids():
     return pids
 
 
-def rocm_smi_check_vram():
+def check_vram_clear():
     # type: () -> bool
     """Verify that no GPUs have allocated VRAM.
 
-    Parses ``rocm-smi --showmeminfo vram`` output, looking for "Used"
-    lines with non-zero values.
+    Uses ``amd-smi metric --mem-usage --json`` when available; falls
+    back to ``rocm-smi --showmeminfo vram`` text parsing otherwise.
 
     Returns:
-        True if all GPUs report zero VRAM usage (or if rocm-smi fails,
-        in which case we return True optimistically to avoid blocking CI).
+        True if all GPUs report zero VRAM usage (or if the SMI tool
+        fails, in which case we return True optimistically to avoid
+        blocking CI).
     """
+    if _SMI_TOOL == "amd-smi":
+        return _check_vram_clear_amd_smi()
+    return _check_vram_clear_rocm_smi()
+
+
+def _check_vram_clear_amd_smi():
+    # type: () -> bool
+    """VRAM check via ``amd-smi metric --mem-usage --json``."""
+    data = _smi_json("metric --mem-usage")
+    if not isinstance(data, list):
+        warn("amd-smi mem-usage query failed -- cannot verify VRAM")
+        annotate_build(
+            "### :warning: VRAM check skipped "
+            "(amd-smi failed)\n\n"
+            "GPU VRAM state could not be verified. Tests may "
+            "run on a GPU with leaked VRAM from a previous job.",
+            style="warning",
+            context="vram-check-skip",
+        )
+        return True
+    for entry in data:
+        mem = entry.get("mem_usage", {})
+        used_info = mem.get("used_vram", {})
+        try:
+            val = int(used_info["value"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if val > 0:
+            gpu = entry.get("gpu", "?")
+            warn(f"GPU {gpu}: VRAM still in use ({val} MB)")
+            return False
+    return True
+
+
+def _check_vram_clear_rocm_smi():
+    # type: () -> bool
+    """VRAM check via ``rocm-smi --showmeminfo vram`` (fallback)."""
     try:
         r = sh(
             "rocm-smi --showmeminfo vram 2>/dev/null",
@@ -1684,33 +1929,30 @@ def rocm_smi_check_vram():
     except subprocess.TimeoutExpired:
         warn(f"rocm-smi --showmeminfo timed out after {ROCM_SMI_TIMEOUT_S}s")
         annotate_build(
-            "### :warning: VRAM check skipped (rocm-smi timeout)\n\n"
-            "GPU VRAM state could not be verified. Tests may run on "
-            "a GPU with leaked VRAM from a previous job.",
+            "### :warning: VRAM check skipped "
+            "(rocm-smi timeout)\n\n"
+            "GPU VRAM state could not be verified. Tests may "
+            "run on a GPU with leaked VRAM from a previous job.",
             style="warning",
             context="vram-check-skip",
         )
-        return True  # optimistic: don't block CI on tooling failure
+        return True
     if r.returncode != 0:
         warn("rocm-smi --showmeminfo failed -- cannot verify VRAM")
         annotate_build(
-            "### :warning: VRAM check skipped (rocm-smi failed)\n\n"
-            "GPU VRAM state could not be verified. Tests may run on "
-            "a GPU with leaked VRAM from a previous job.",
+            "### :warning: VRAM check skipped "
+            "(rocm-smi failed)\n\n"
+            "GPU VRAM state could not be verified. Tests may "
+            "run on a GPU with leaked VRAM from a previous job.",
             style="warning",
             context="vram-check-skip",
         )
-        return True  # optimistic: don't block CI on tooling failure
+        return True
 
     for line in r.stdout.splitlines():
         lower = line.lower()
         if "used" in lower and ":" in line:
-            # Extract the numeric value after the last colon.
-            # rocm-smi formats: "VRAM Total Used Memory (B): 0" or
-            # "GPU[1] : Used : 0". Splitting on ":" and taking the
-            # last part avoids false-positives from GPU index numbers.
             value_part = line.rsplit(":", 1)[1].strip()
-            # Strip unit suffixes: B, KB, MB, MiB, GB, GiB, etc.
             cleaned = re.sub(r"[BKMGT]i?[Bb]?$", "", value_part.rstrip()).strip()
             try:
                 val = float(cleaned)
@@ -1722,9 +1964,9 @@ def rocm_smi_check_vram():
     return True
 
 
-def rocm_smi_hard_reset():
+def gpu_hard_reset():
     # type: () -> bool
-    """Attempt a hardware-level GPU reset via ``rocm-smi --gpureset``.
+    """Attempt a hardware-level GPU reset via amd-smi/rocm-smi.
 
     This is the last resort when soft reset (writing "reset" to gpu_state)
     and zombie cleanup have both failed to free GPU memory. It resets the
@@ -1734,43 +1976,152 @@ def rocm_smi_hard_reset():
     Returns:
         True if the reset succeeded, False otherwise.
     """
-    info("Attempting hardware GPU reset via rocm-smi...")
+    info(f"Attempting hardware GPU reset via {_SMI_TOOL}...")
+    if _SMI_TOOL == "amd-smi":
+        return _hard_reset_amd_smi()
+    return _hard_reset_rocm_smi()
+
+
+def _hard_reset_amd_smi():
+    # type: () -> bool
+    """GPU reset via ``amd-smi reset --gpureset --gpu all``."""
     try:
-        r = sh("rocm-smi --gpureset 2>&1", capture=True, timeout=ROCM_SMI_TIMEOUT_S)
+        r = _smi_cmd("reset --gpureset --gpu all")
     except subprocess.TimeoutExpired:
-        warn(f"rocm-smi --gpureset timed out after {ROCM_SMI_TIMEOUT_S}s")
+        warn(f"amd-smi reset timed out after {ROCM_SMI_TIMEOUT_S}s")
         return False
     if r.returncode == 0:
-        info("rocm-smi --gpureset succeeded")
+        info("amd-smi reset --gpureset succeeded")
         return True
-    warn(f"rocm-smi --gpureset failed (rc={r.returncode}): {r.stdout.strip()}")
+    warn(f"amd-smi reset failed (rc={r.returncode}): {r.stdout.strip()}")
     return False
 
 
-def rocm_smi_validate_health():
+def _hard_reset_rocm_smi():
+    # type: () -> bool
+    """GPU reset via ``rocm-smi --gpureset -d <idx>`` (fallback).
+
+    ``rocm-smi --gpureset`` requires exactly one device, so we
+    enumerate GPU indices first and reset each one individually.
+    """
+    # Enumerate GPU indices from --showid text output.
+    try:
+        r = sh(
+            "rocm-smi --showid 2>/dev/null",
+            capture=True,
+            timeout=ROCM_SMI_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        warn(f"rocm-smi --showid timed out after {ROCM_SMI_TIMEOUT_S}s")
+        return False
+    if r.returncode != 0:
+        warn("rocm-smi --showid failed -- cannot enumerate GPUs")
+        return False
+
+    indices = []  # type: list[int]
+    for line in r.stdout.splitlines():
+        m = re.search(r"GPU\[(\d+)\]", line)
+        if m:
+            indices.append(int(m.group(1)))
+    if not indices:
+        warn("rocm-smi --showid returned no GPU indices")
+        return False
+
+    all_ok = True
+    for idx in indices:
+        try:
+            r = sh(
+                f"rocm-smi --gpureset -d {idx} 2>&1",
+                capture=True,
+                timeout=ROCM_SMI_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            warn(f"rocm-smi --gpureset -d {idx} timed out after {ROCM_SMI_TIMEOUT_S}s")
+            all_ok = False
+            continue
+        if r.returncode != 0:
+            warn(
+                f"rocm-smi --gpureset -d {idx} failed "
+                f"(rc={r.returncode}): {r.stdout.strip()}"
+            )
+            all_ok = False
+        else:
+            info(f"rocm-smi --gpureset -d {idx} succeeded")
+    return all_ok
+
+
+def validate_gpu_health():
     # type: () -> None
-    """Pre-flight GPU health validation.
+    """Pre-flight GPU health validation via amd-smi/rocm-smi.
 
     Checks three things before allowing tests to run:
 
-    1. GPU enumeration (``--showid``): Confirms GPUs are visible. Fails
-       hard if not -- likely means the K8s device plugin did not allocate
-       any GPUs to this pod.
+    1. GPU enumeration: Confirms GPUs are visible. Fails hard if not --
+       likely means the K8s device plugin did not allocate any GPUs to
+       this pod.
 
-    2. Temperature (``--showtemp``): Warns if any GPU exceeds 90C. Does
-       not fail -- thermal throttling degrades performance but tests may
-       still pass.
+    2. Temperature: Warns if any GPU exceeds 90C. Does not fail --
+       thermal throttling degrades performance but tests may still pass.
 
-    3. ECC errors (``--showrasinfo``): Warns on uncorrectable errors.
-       Does not fail -- hardware errors are the infra team's problem, not
-       the test's.
+    3. ECC errors: Warns on uncorrectable errors. Does not fail --
+       hardware errors are the infra team's problem, not the test's.
     """
     section("Validating GPU health")
 
+    if _SMI_TOOL == "amd-smi":
+        _validate_health_amd_smi()
+    else:
+        _validate_health_rocm_smi()
+
+
+def _validate_health_amd_smi():
+    # type: () -> None
+    """Health validation via ``amd-smi``."""
+    # 1. Enumeration
+    data = _smi_json("list")
+    if not isinstance(data, list) or not data:
+        error("amd-smi list failed -- GPUs may not be accessible")
+        error("Check that the K8s device plugin allocated GPUs to this pod")
+        sys.exit(1)
+    info(f"amd-smi: {len(data)} GPU(s) detected")
+
+    # 2. Temperature
+    temp_data = _smi_json("metric --temperature")
+    if isinstance(temp_data, list):
+        for entry in temp_data:
+            gpu = entry.get("gpu", "?")
+            temp_info = entry.get("temperature", {})
+            hotspot = temp_info.get("hotspot", {})
+            try:
+                val = float(hotspot["value"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if val > 90.0:
+                warn(f"GPU {gpu}: hotspot temperature {val}C > 90C -- throttling risk")
+
+    # 3. ECC errors
+    ecc_data = _smi_json("metric --ecc")
+    if isinstance(ecc_data, list):
+        for entry in ecc_data:
+            gpu = entry.get("gpu", "?")
+            ecc = entry.get("ecc", {})
+            try:
+                uncorr = int(ecc["total_uncorrectable_count"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if uncorr > 0:
+                warn(f"GPU {gpu}: {uncorr} uncorrectable ECC error(s)")
+
+
+def _validate_health_rocm_smi():
+    # type: () -> None
+    """Health validation via ``rocm-smi`` (fallback)."""
     # 1. Enumeration
     try:
         r = sh(
-            "rocm-smi --showid 2>/dev/null", capture=True, timeout=ROCM_SMI_TIMEOUT_S
+            "rocm-smi --showid 2>/dev/null",
+            capture=True,
+            timeout=ROCM_SMI_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
         error(f"rocm-smi --showid timed out after {ROCM_SMI_TIMEOUT_S}s")
@@ -1784,7 +2135,9 @@ def rocm_smi_validate_health():
     # 2. Temperature
     try:
         r = sh(
-            "rocm-smi --showtemp 2>/dev/null", capture=True, timeout=ROCM_SMI_TIMEOUT_S
+            "rocm-smi --showtemp 2>/dev/null",
+            capture=True,
+            timeout=ROCM_SMI_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
         warn(f"rocm-smi --showtemp timed out after {ROCM_SMI_TIMEOUT_S}s")
@@ -1793,8 +2146,6 @@ def rocm_smi_validate_health():
         info(r.stdout.strip())
         for line in r.stdout.splitlines():
             lower = line.lower()
-            # Only parse temperature from lines that mention temperature,
-            # to avoid false positives from GPU indices, fan speeds, etc.
             if "temp" not in lower and "temperature" not in lower:
                 continue
             for token in line.split():
@@ -1835,7 +2186,7 @@ def kill_gpu_zombies():
        Finds processes holding GPU device files open. Only sees the
        current PID namespace (useless for cross-container zombies in K8s).
 
-    2. ``rocm-smi --showpids``:
+    2. ``amd-smi``/``rocm-smi`` process query:
        Queries the AMD kernel driver directly. Sees ALL processes using
        GPUs on the node, regardless of PID namespace. This is the primary
        detection method for K8s.
@@ -1867,11 +2218,11 @@ def kill_gpu_zombies():
                 found = True
                 _kill_pid(pid)
 
-    # Method 2: rocm-smi (cross PID namespace -- the one that matters in K8s)
-    driver_pids = rocm_smi_gpu_pids()
+    # Method 2: amd-smi/rocm-smi (cross PID namespace -- the one that matters in K8s)
+    driver_pids = gpu_pids()
     if driver_pids:
         found = True
-        warn(f"rocm-smi reports GPU processes (driver-level): {driver_pids}")
+        warn(f"{_SMI_TOOL} reports GPU processes (driver-level): {driver_pids}")
         for pid in driver_pids:
             _kill_pid(pid)
 
@@ -1900,11 +2251,11 @@ def kill_gpu_zombies():
         time.sleep(5)
 
         # Verify VRAM was actually released.
-        if not rocm_smi_check_vram():
+        if not check_vram_clear():
             warn("VRAM still allocated after cleanup -- attempting hardware reset")
-            rocm_smi_hard_reset()
+            gpu_hard_reset()
             time.sleep(3)
-            if not rocm_smi_check_vram():
+            if not check_vram_clear():
                 error("VRAM still allocated after hardware reset -- GPUs may be stuck")
                 error(
                     "This node may need manual intervention "
@@ -1942,7 +2293,7 @@ def wait_for_clean_gpus(timeout=GPU_CLEAN_TIMEOUT_S):
 
     **Skipped in K8s** (or any environment where the state file does not
     exist). In that case, GPU readiness is validated via ``rocm-smi``
-    instead (see ``rocm_smi_validate_health``).
+    instead (see ``validate_gpu_health``).
 
     Args:
         timeout: Maximum seconds to wait. Exits the script if exceeded.
@@ -3169,42 +3520,77 @@ def check_infra_health():
         info(f"Docker registry ({registry}): reachable")
 
     # -- 2b. Network throughput --
-    # A slow but functional network is a common source of pull timeouts
-    # and model download failures. Download a small payload and measure
-    # throughput. We use curl's built-in speed reporting to avoid parsing.
-    # The test URL is the registry's /v2/ endpoint (already proven reachable
-    # above, tiny payload, no auth needed). If that is not available, fall
-    # back to a small HuggingFace API call.
-    speed_url = f"https://{registry}/v2/"
-    r = sh(
-        f"curl -sf --connect-timeout 5 --max-time 10 "
-        f"-o /dev/null -w '%{{speed_download}}' "
-        f"'{speed_url}' 2>/dev/null",
-        capture=True,
-    )
-    if r.returncode == 0 and r.stdout.strip():
+    # Download 1MB from a real endpoint and measure speed. We try
+    # multiple URLs across different providers so a single repo or
+    # CDN being down doesn't blind us. Each URL is a file that our
+    # test suite actually uses (models downloaded during tests).
+    # Last resort: ping our own GitHub repo (always available if
+    # the network is functional at all).
+    _throughput_probes = [
+        # HF models used by the test suite (1MB range request each).
+        (
+            "HF/TitanML-tiny-mixtral",
+            "https://huggingface.co/TitanML/tiny-mixtral"
+            "/resolve/main/model.safetensors",
+        ),
+        (
+            "HF/Qwen2.5-0.5B",
+            "https://huggingface.co/Qwen/Qwen2.5-0.5B/resolve/main/model.safetensors",
+        ),
+        (
+            "HF/whisper-tiny",
+            "https://huggingface.co/openai/whisper-tiny/resolve/main/model.safetensors",
+        ),
+        # GitHub: our own repo (raw file, always available).
+        (
+            "GitHub/vllm-project",
+            "https://raw.githubusercontent.com/vllm-project/vllm/main/README.md",
+        ),
+    ]
+    speed_measured = False
+    for probe_name, probe_url in _throughput_probes:
+        r = sh(
+            f"curl -sf --connect-timeout 5 --max-time 15 "
+            f"-r 0-1048575 "
+            f"-o /dev/null -w '%{{speed_download}}' "
+            f"'{probe_url}' 2>/dev/null",
+            capture=True,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            continue
         try:
-            # curl reports speed_download in bytes/sec.
             speed_bps = float(r.stdout.strip())
-            speed_mbps = speed_bps / (1024 * 1024)
-            if speed_bps < 1024 * 100:  # < 100 KB/s
-                warn(
-                    f"{_DIAG_PREFIX} Network throughput: {speed_mbps:.2f} MB/s "
-                    f"(very slow, <100KB/s). "
-                    f"Docker pull and model downloads will be severely affected. "
-                    f"Check network bandwidth, proxy throttling, and NIC health."
-                )
-            elif speed_bps < 1024 * 1024:  # < 1 MB/s
-                warn(
-                    f"Network throughput: {speed_mbps:.2f} MB/s "
-                    f"(slow, may cause pull timeouts)"
-                )
-            else:
-                info(f"Network throughput: {speed_mbps:.1f} MB/s (OK)")
         except (ValueError, OverflowError):
-            pass
-    else:
-        info("Network throughput: could not measure (registry probe failed)")
+            continue
+        # Skip bogus measurements (empty response, <1KB transferred).
+        if speed_bps < 1:
+            continue
+        speed_mbps = speed_bps / (1024 * 1024)
+        speed_measured = True
+        if speed_bps < 1024 * 100:  # < 100 KB/s
+            warn(
+                f"{_DIAG_PREFIX} Network throughput: "
+                f"{speed_mbps:.2f} MB/s via {probe_name} "
+                f"(very slow, <100KB/s). "
+                f"Docker pull and model downloads will be "
+                f"severely affected. Check network bandwidth, "
+                f"proxy throttling, and NIC health."
+            )
+        elif speed_bps < 1024 * 1024:  # < 1 MB/s
+            warn(
+                f"Network throughput: {speed_mbps:.2f} MB/s "
+                f"via {probe_name} "
+                f"(slow, may cause pull timeouts)"
+            )
+        else:
+            info(f"Network throughput: {speed_mbps:.1f} MB/s via {probe_name} (OK)")
+        break  # first successful probe is enough
+    if not speed_measured:
+        warn(
+            f"{_DIAG_PREFIX} Network throughput: could not "
+            f"measure (all {len(_throughput_probes)} probes "
+            f"failed). Network may be unreachable."
+        )
 
     # -- 3. Available memory --
     r = sh("cat /proc/meminfo 2>/dev/null", capture=True)
@@ -3811,6 +4197,8 @@ def run_container(
         name,
         image,
         "/bin/bash",
+        "-euo",
+        "pipefail",
         "-c",
         commands,
     ]
@@ -3923,6 +4311,9 @@ def run_container(
             "exit_code": exit_code,
             "error": "",
             "pids_exhausted": False,
+            "pytest_ran": True,
+            "pre_pytest_traceback": False,
+            "pre_pytest_crash": "",
         }
 
     if diag["oom_killed"]:
@@ -3947,6 +4338,40 @@ def run_container(
         )
         if exit_code == 0:
             exit_code = 1
+
+    # -- Step 6b: Pre-pytest log hints (ADVISORY ONLY) --
+    #
+    # Tracebacks and crash patterns in the pre-pytest log zone
+    # (before "test session starts") MIGHT indicate a setup crash,
+    # but they can also be informational: pip/uv print tracebacks
+    # during normal dependency resolution, build scripts log handled
+    # exceptions, etc. We CANNOT reliably distinguish a real crash
+    # from a logged-and-handled exception in the pre-test output.
+    #
+    # These are NEVER used to override the exit code. The exit code
+    # is governed by:
+    #   - set -euo pipefail (bash failures)
+    #   - JUnit XML override (pytest atexit masking)
+    #   - XML-missing fail-safe (pytest never ran + exit 0)
+    #
+    # These hints only produce warnings so operators can investigate.
+    if diag.get("pre_pytest_traceback") and exit_code == 0:
+        warn(
+            f"{_DIAG_PREFIX} Python traceback found in "
+            f"pre-test setup output (before pytest started) "
+            f"but the container exited 0. This may be an "
+            f"informational exception from pip/uv, or it may "
+            f"indicate a masked crash. Check the container "
+            f"log to verify."
+        )
+    if diag.get("pre_pytest_crash") and exit_code == 0:
+        warn(
+            f"{_DIAG_PREFIX} Pre-test setup output contains "
+            f"'{diag['pre_pytest_crash']}' but the container "
+            f"exited 0. This may be normal (e.g., a fallback "
+            f"path was taken) or it may indicate a masked "
+            f"failure. Check the container log."
+        )
 
     if timed_out:
         timeout_min = CONTAINER_TIMEOUT_S // 60
@@ -4059,6 +4484,46 @@ def run_container(
                 context="junit-missing",
             )
             exit_code = 1
+
+    # -- Step 7b: Non-zero exit with no JUnit XML --
+    # If the container exited non-zero but there is no JUnit XML, pytest
+    # likely never ran. A pre-test bash command or Python setup script
+    # failed. Produce a clear diagnostic so the user doesn't hunt for
+    # test failures that don't exist.
+    if exit_code != 0 and not xml_path.is_file():
+        pytest_ran = diag.get("pytest_ran", True)
+        if not pytest_ran:
+            error(
+                f"{_DIAG_PREFIX} PYTEST NEVER RAN\n"
+                f"  What happened: Container exited {exit_code} "
+                f"and no JUnit XML\n"
+                f"                 was produced. The container "
+                f"log shows no pytest\n"
+                f"                 output markers. A pre-test "
+                f"command likely failed.\n"
+                f"  Container:     {name}\n"
+                f"  How to fix:\n"
+                f"    - Check the container log for the first "
+                f"error (pip install,\n"
+                f"      cd, missing binary, import failure)\n"
+                f"    - The test commands were:\n"
+                f"      {commands[:200]}"
+            )
+            annotate_build(
+                f"### :x: Pytest never ran (exit code "
+                f"{exit_code})\n\n"
+                f"No JUnit XML was produced. A pre-test "
+                f"setup command likely failed.\n"
+                f"Check the build log for the root cause.",
+                style="error",
+                context="pytest-never-ran",
+            )
+        else:
+            warn(
+                f"Container exited {exit_code} with no JUnit XML "
+                f"-- pytest may have crashed before writing XML "
+                f"(segfault, import error, fixture failure)"
+            )
 
     # -- Step 8: Buildkite annotation with failure details --
     if exit_code != 0:
@@ -4634,7 +5099,7 @@ def run_multi_node(commands, image, results_dir):
         info(f"  Pair [{i}] node1 (with JUnit): {mod1[:120]}...")
 
     # Build the composite command that run-multi-node-test.sh will execute.
-    composite = "(command rocm-smi || true)"
+    composite = f"(command {_SMI_TOOL} || true)"
     for cmd0, cmd1 in zip(modified_node0, modified_node1):
         # shlex.quote() prevents shell injection if commands ever contain
         # metacharacters (single quotes, backticks, $(), etc.).
@@ -4778,7 +5243,7 @@ class _Cleanup:
     Cleanup steps (in order):
       1. Remove the test container (``docker rm -f``).
       2. Kill GPU zombie processes via fuser (same PID namespace).
-      3. Kill GPU zombie processes via rocm-smi (cross PID namespace).
+      3. Kill GPU zombie processes via amd-smi/rocm-smi (cross PID namespace).
       4. Reset GPU state file (write "reset", locked).
       5. Remove stale containers from this commit.
       6. Remove the Docker image.
@@ -4855,11 +5320,11 @@ class _Cleanup:
                 for pid in _device_pids(str(dev)):
                     _kill_pid(pid)
 
-        # 3. Kill GPU zombies (rocm-smi -- cross PID namespace).
-        info("  [3/8] Checking for GPU zombies (rocm-smi, cross-namespace)")
-        smi_pids = rocm_smi_gpu_pids()
+        # 3. Kill GPU zombies (amd-smi/rocm-smi -- cross PID namespace).
+        info("  [3/8] Checking for GPU zombies (amd-smi/rocm-smi, cross-namespace)")
+        smi_pids = gpu_pids()
         if smi_pids:
-            info(f"         Found {len(smi_pids)} process(es) via rocm-smi")
+            info(f"         Found {len(smi_pids)} process(es) via {_SMI_TOOL}")
         for pid in smi_pids:
             _kill_pid(pid)
 
@@ -4996,7 +5461,7 @@ def main():
             warn(f"rocminfo timed out after {ROCM_SMI_TIMEOUT_S}s")
 
         # -- Phase 4: GPU health --
-        rocm_smi_validate_health()
+        validate_gpu_health()
     else:
         info("GPU pre-flight DISABLED (VLLM_ROCM_CI_GPU_PREFLIGHT=0)")
 
