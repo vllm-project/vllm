@@ -39,11 +39,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             * len(kv_cache_config.kv_cache_tensors)
             * vllm_config.parallel_config.world_size
         )
-        self.mmap_page_size = (
-            page_size_bytes
-            * self.block_size_factor
-            * len(kv_cache_config.kv_cache_tensors)
-        )
+        self.mmap_page_size = page_size_bytes * len(kv_cache_config.kv_cache_tensors)
         kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factor
         self.num_blocks = (
             int(cpu_bytes_to_use) // kv_bytes_per_offloaded_block

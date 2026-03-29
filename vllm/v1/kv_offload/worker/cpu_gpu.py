@@ -146,7 +146,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             assert cpu_tensor.device.type == "cpu"
             _, gpu_page_size = gpu_tensor.shape
             _, cpu_page_size = cpu_tensor.shape
-            assert cpu_page_size == gpu_page_size * block_size_factor
+            assert cpu_page_size == gpu_page_size  # * block_size_factor
 
         self.src_tensors: list[torch.Tensor] = (
             gpu_tensors if gpu_to_cpu else cpu_tensors
@@ -317,7 +317,9 @@ class CpuGpuOffloadingHandlers:
             cpu_page_size_bytes = gpu_page_size_bytes * block_size_factor
 
             if mmap_region is not None:
-                cpu_tensor = mmap_region.alloc_tensor(cpu_page_size_bytes)
+                cpu_tensor = mmap_region.alloc_tensor(
+                    gpu_page_size_bytes, block_size_factor
+                )
             else:
                 cpu_tensor = torch.zeros(
                     (num_cpu_blocks, cpu_page_size_bytes),
