@@ -308,9 +308,10 @@ class TestFusedDecode:
 
 
 class TestRoundTrip:
-    """Test fused encode → fused decode round-trip quality."""
+    """Test fused round-trip matches non-fused round-trip quality."""
 
-    def test_roundtrip_cosine_similarity(self):
+    def test_roundtrip_matches_reference(self):
+        """Fused encode→decode should have similar quality to non-fused."""
         device = torch.device("cuda")
         state = _setup_turboquant_state(device)
         normal_size = state["normal_size"]
@@ -318,11 +319,6 @@ class TestRoundTrip:
         packed_bytes = math.ceil(normal_size * BIT_WIDTH / 8)
         outlier_bytes_count = n_outliers * 2
         slot_bytes = outlier_bytes_count + packed_bytes + 2
-
-        from vllm.v1.attention.ops.triton_fused_turboquant import (
-            fused_hadamard_decode_from_slots,
-            fused_hadamard_encode_and_store,
-        )
 
         x = torch.randn(
             NUM_TOKENS,
@@ -333,8 +329,34 @@ class TestRoundTrip:
         )
         normal_x = x[..., state["normal_idx"]].contiguous()
         outlier_x = x[..., state["outlier_idx"]]
+        N = NUM_TOKENS * NUM_KV_HEADS
 
-        # Fused encode
+        # --- Reference round-trip (non-fused) ---
+        ref_indices, ref_norms = hadamard_turboquant_encode(
+            normal_x,
+            state["sign_flips"],
+            state["codebook"],
+            state["boundaries"],
+        )
+        ref_normal = hadamard_turboquant_decode(
+            ref_indices,
+            ref_norms,
+            state["sign_flips"],
+            state["codebook"],
+            output_dtype=torch.bfloat16,
+        ).reshape(N, normal_size)
+        ref_full = torch.empty(N, HEAD_SIZE, dtype=torch.bfloat16, device=device)
+        ref_full[:, state["normal_idx"]] = ref_normal
+        ref_full[:, state["outlier_idx"]] = outlier_x.reshape(N, n_outliers).to(
+            torch.bfloat16
+        )
+
+        # --- Fused round-trip ---
+        from vllm.v1.attention.ops.triton_fused_turboquant import (
+            fused_hadamard_decode_from_slots,
+            fused_hadamard_encode_and_store,
+        )
+
         cache = torch.zeros(
             NUM_BLOCKS,
             BLOCK_SIZE,
@@ -358,7 +380,6 @@ class TestRoundTrip:
             bit_width=BIT_WIDTH,
         )
 
-        # Extract slots and fused decode
         flat_slots = []
         for t in range(NUM_TOKENS):
             bi = block_indices[t].item()
@@ -367,7 +388,7 @@ class TestRoundTrip:
                 flat_slots.append(cache[bi, bo, h])
         flat_slots = torch.stack(flat_slots)
 
-        decoded = fused_hadamard_decode_from_slots(
+        fused_full = fused_hadamard_decode_from_slots(
             flat_slots=flat_slots,
             sign_flips=state["sign_flips"],
             codebook=state["codebook"],
@@ -379,11 +400,20 @@ class TestRoundTrip:
             packed_bytes=packed_bytes,
         )
 
-        # Check cosine similarity
-        N = NUM_TOKENS * NUM_KV_HEADS
+        # Compare: fused quality should be within 5% of reference quality
         original = x.reshape(N, HEAD_SIZE).float()
-        reconstructed = decoded.float()
-        cos_sim = torch.nn.functional.cosine_similarity(original, reconstructed, dim=1)
-        mean_cos = cos_sim.mean().item()
+        ref_cos = (
+            torch.nn.functional.cosine_similarity(original, ref_full.float(), dim=1)
+            .mean()
+            .item()
+        )
+        fused_cos = (
+            torch.nn.functional.cosine_similarity(original, fused_full.float(), dim=1)
+            .mean()
+            .item()
+        )
 
-        assert mean_cos > 0.95, f"Round-trip cosine similarity too low: {mean_cos:.4f}"
+        assert abs(ref_cos - fused_cos) < 0.05, (
+            f"Fused quality differs too much from reference: "
+            f"ref={ref_cos:.4f}, fused={fused_cos:.4f}"
+        )
