@@ -93,8 +93,16 @@ class AllBlocksCleared(KVCacheEvent):
     pass
 
 
+class BloomFilterSync(KVCacheEvent):
+    """Periodic bloom filter exchange between nodes for OfflineState
+    cooperative caching discovery."""
+    node_id: int
+    bloom_data: bytes
+    cache_entry_count: int
+
+
 class KVEventBatch(EventBatch):
-    events: list[BlockStored | BlockRemoved | AllBlocksCleared]
+    events: list[BlockStored | BlockRemoved | AllBlocksCleared | BloomFilterSync]
 
 
 class KVEventAggregator:
