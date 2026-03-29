@@ -28,20 +28,23 @@ If you need a different ROCm version or want to use an existing PyTorch installa
 To install the latest version of vLLM for Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
 
 ```bash
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/ --upgrade
 ```
 
 !!! tip
-    You can find out about which ROCm version the latest vLLM supports by checking the index in extra-index-url [https://wheels.vllm.ai/rocm/](https://wheels.vllm.ai/rocm/) .
+    You can find out about which ROCm version the latest vLLM supports by checking the `vllm` package in index in extra-index-url <https://wheels.vllm.ai/rocm/> at [https://wheels.vllm.ai/rocm/vllm](https://wheels.vllm.ai/rocm/vllm) .
 
     Another approach is that you can use this following commands to automatically extract the wheel variants:
 
     ```bash
+    # automatically extract the vLLM version
+    export VLLM_VERSION=$(curl -s https://wheels.vllm.ai/rocm/vllm | grep -oP 'vllm-\K[0-9.]+' | head -1)
+
     # automatically extract the available rocm variant
-    export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/ | \
-    grep -oP 'rocm\d+' | head -1  | sed 's/%2B/+/g')
+    export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/vllm | grep -oP 'rocm\d+' | head -1)
 
     # inspect if the ROCm version is compatible with your environment
+    echo $VLLM_VERSION
     echo $VLLM_ROCM_VARIANT
     ```
 
