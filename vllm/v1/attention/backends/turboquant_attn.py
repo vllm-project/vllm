@@ -727,10 +727,14 @@ class TurboQuantAttentionImpl(AttentionImpl):
 
             flat_indices = indices.reshape(-1, normal_size)
             N = flat_indices.shape[0]
-            align = {4: 2, 2: 4, 3: 10}.get(bits, 1)
-            if normal_size % align != 0:
-                pad = align - (normal_size % align)
-                flat_indices = torch.nn.functional.pad(flat_indices, (0, pad), value=0)
+            # Pad for 4-bit/2-bit interleaving (3-bit packs internally)
+            if bits in (4, 2):
+                align = {4: 2, 2: 4}[bits]
+                if normal_size % align != 0:
+                    pad = align - (normal_size % align)
+                    flat_indices = torch.nn.functional.pad(
+                        flat_indices, (0, pad), value=0
+                    )
             if bits == 4:
                 packed = flat_indices[:, 0::2] | (flat_indices[:, 1::2] << 4)
             elif bits == 2:
