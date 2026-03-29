@@ -575,9 +575,6 @@ class Fp8MoEKernelMixin:
     to share fp8 backend selection, kernel format conversion, and dispatch.
     """
 
-    # Type annotations for attributes provided by FusedMoEMethodBase at runtime.
-    # Bare annotations don't create descriptors and won't shadow the actual
-    # attributes/properties set by the base class.
     moe: FusedMoEConfig
     moe_quant_config: FusedMoEQuantConfig | None
     moe_kernel: mk.FusedMoEKernel | None
@@ -681,7 +678,7 @@ class Fp8MoEKernelMixin:
 
     def maybe_make_prepare_finalize(
         self,
-        routing_tables: (tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None) = None,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel "
