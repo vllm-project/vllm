@@ -37,7 +37,7 @@ class ProfilerConfig:
     profiler: ProfilerKind | None = None
     """Which profiler to use. Defaults to None. Options are:
 
-    - 'torch': Use PyTorch profiler.\n
+    - 'torch': Use PyTorch profiler.
     - 'cuda': Use CUDA profiler."""
 
     torch_profiler_dir: str = ""
