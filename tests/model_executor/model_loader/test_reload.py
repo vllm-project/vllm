@@ -151,7 +151,7 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         tensor_parallel_size=tp_size,
         enable_expert_parallel=(tp_size > 1 and "DeepSeek" in base_model),
         enable_prefix_caching=False,
-        max_model_len=10,
+        max_model_len=16,
         max_num_seqs=1,
     ) as llm:
         llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
@@ -176,13 +176,13 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
             "inference-optimization/Qwen3-0.6B-debug-multiply",
             "inference-optimization/Qwen3-0.6B-debug-add",
             "fp8",
-            marks=[pytest.mark.slow_test],
         ),
         pytest.param(
             "inference-optimization/DeepSeek-V3-debug-empty",
             "inference-optimization/DeepSeek-V3-debug-multiply",
             "inference-optimization/DeepSeek-V3-debug-add",
             "fp8",
+            marks=[pytest.mark.slow_test],
         ),
         pytest.param(
             "Qwen/Qwen3-0.6B",
@@ -218,7 +218,7 @@ def test_online_quantize_reload(
         tensor_parallel_size=tp_size,
         enable_expert_parallel=(tp_size > 1 and "DeepSeek" in base_model),
         enable_prefix_caching=False,
-        max_model_len=10,
+        max_model_len=16,
         max_num_seqs=1,
     ) as llm:
         llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
