@@ -580,6 +580,48 @@ class FusedMoE(CustomOp):
         )
 
         self.runner = self._init_runner()
+        self._attach_moe_sharding_metadata(intermediate_size, unpadded_hidden_size)
+
+    def _attach_moe_sharding_metadata(
+        self, intermediate_size: int, hidden_size: int
+    ) -> None:
+        from vllm.model_executor.layers.sharding import (
+            Sharding,
+            ShardingType,
+            _attach_sharding,
+        )
+
+        ep_size = self.ep_size if self.use_ep else 1
+
+        w13 = getattr(self, "w13_weight", None)
+        if w13 is not None:
+            _attach_sharding(
+                w13,
+                Sharding(
+                    shape=(
+                        self.global_num_experts,
+                        2 * intermediate_size,
+                        hidden_size,
+                    ),
+                    nd_num_shards=(ep_size, self.tp_size, 1),
+                    sharding_type=ShardingType.EXPERT_PARALLEL,
+                ),
+            )
+
+        w2 = getattr(self, "w2_weight", None)
+        if w2 is not None:
+            _attach_sharding(
+                w2,
+                Sharding(
+                    shape=(
+                        self.global_num_experts,
+                        hidden_size,
+                        intermediate_size,
+                    ),
+                    nd_num_shards=(ep_size, 1, self.tp_size),
+                    sharding_type=ShardingType.EXPERT_PARALLEL,
+                ),
+            )
 
     def _init_runner(self):
         # Storing the runner in the FusedMoE is an intermediate state, eventually

@@ -73,6 +73,8 @@ def replace_parameter(
     if old_param is not None and hasattr(old_param, "weight_loader"):
         weight_loader = old_param.weight_loader
         set_weight_attrs(new_param, {"weight_loader": weight_loader})
+    if old_param is not None and hasattr(old_param, "sharding"):
+        set_weight_attrs(new_param, {"sharding": old_param.sharding})
 
     setattr(layer, param_name, new_param)
 

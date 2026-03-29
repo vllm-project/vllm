@@ -38,4 +38,9 @@ def replace_parameter(
         # parameters for `torch.compile` compatibility
         if not isinstance(new, torch.nn.Parameter):
             new = torch.nn.Parameter(new, requires_grad=False)
-        mod.register_parameter(name, torch.nn.Parameter(new, requires_grad=False))
+        final = torch.nn.Parameter(new, requires_grad=False)
+        if hasattr(old, "sharding"):
+            from vllm.model_executor.utils import set_weight_attrs
+
+            set_weight_attrs(final, {"sharding": old.sharding})
+        mod.register_parameter(name, final)

@@ -25,6 +25,11 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.sharding import (
+    Sharding,
+    ShardingType,
+    _attach_sharding,
+)
 from vllm.model_executor.layers.utils import (
     dispatch_unquantized_gemm,
 )
@@ -358,6 +363,28 @@ class ReplicatedLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
+        self._attach_sharding_metadata()
+
+    def _attach_sharding_metadata(self) -> None:
+        sharding = Sharding(
+            shape=(self.output_size, self.input_size),
+            nd_num_shards=(1, 1),
+            sharding_type=ShardingType.REPLICATED,
+        )
+        weight = getattr(self, "weight", None)
+        if weight is not None:
+            _attach_sharding(weight, sharding)
+        bias = getattr(self, "bias", None)
+        if bias is not None:
+            _attach_sharding(
+                bias,
+                Sharding(
+                    shape=(self.output_size,),
+                    nd_num_shards=(1,),
+                    sharding_type=ShardingType.REPLICATED,
+                ),
+            )
+
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         # If the weight on disk does not have a shape, give it one
         # (such scales for AutoFp8).
@@ -498,6 +525,27 @@ class ColumnParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
         self.update_param_tp_status()
+        self._attach_sharding_metadata()
+
+    def _attach_sharding_metadata(self) -> None:
+        sharding = Sharding(
+            shape=(self.output_size, self.input_size),
+            nd_num_shards=(self.tp_size, 1),
+            sharding_type=ShardingType.COLUMN_WISE,
+        )
+        weight = getattr(self, "weight", None)
+        if weight is not None:
+            _attach_sharding(weight, sharding)
+        bias = getattr(self, "bias", None)
+        if bias is not None:
+            _attach_sharding(
+                bias,
+                Sharding(
+                    shape=(self.output_size,),
+                    nd_num_shards=(self.tp_size,),
+                    sharding_type=ShardingType.COLUMN_WISE,
+                ),
+            )
 
     def _maybe_allow_fp8_block_shape_mismatch(self) -> None:
         quant_config = getattr(self, "quant_config", None)
@@ -1040,6 +1088,32 @@ class QKVParallelLinear(ColumnParallelLinear):
             disable_tp=disable_tp,
         )
 
+    def _attach_sharding_metadata(self) -> None:
+        qk_ratio = self.total_num_heads // self.total_num_kv_heads
+        sharding = Sharding(
+            shape=(
+                qk_ratio + 2,
+                self.total_num_kv_heads,
+                self.head_size,
+                self.hidden_size,
+            ),
+            nd_num_shards=(1, self.tp_size, 1, 1),
+            sharding_type=ShardingType.QKV_PARALLEL,
+        )
+        weight = getattr(self, "weight", None)
+        if weight is not None:
+            _attach_sharding(weight, sharding)
+        bias = getattr(self, "bias", None)
+        if bias is not None:
+            _attach_sharding(
+                bias,
+                Sharding(
+                    shape=(qk_ratio + 2, self.total_num_kv_heads, self.head_size),
+                    nd_num_shards=(1, self.tp_size, 1),
+                    sharding_type=ShardingType.QKV_PARALLEL,
+                ),
+            )
+
     def validate_shard_id(self, loaded_shard_id: str | None):
         if loaded_shard_id is None:
             return
@@ -1464,6 +1538,28 @@ class RowParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
         self.update_param_tp_status()
+        self._attach_sharding_metadata()
+
+    def _attach_sharding_metadata(self) -> None:
+        sharding = Sharding(
+            shape=(self.output_size, self.input_size),
+            nd_num_shards=(1, self.tp_size),
+            sharding_type=ShardingType.ROW_WISE,
+        )
+        weight = getattr(self, "weight", None)
+        if weight is not None:
+            _attach_sharding(weight, sharding)
+        # Bias in RowParallel is replicated (not sharded)
+        bias = getattr(self, "bias", None)
+        if bias is not None:
+            _attach_sharding(
+                bias,
+                Sharding(
+                    shape=(self.output_size,),
+                    nd_num_shards=(1,),
+                    sharding_type=ShardingType.REPLICATED,
+                ),
+            )
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         input_dim = getattr(param, "input_dim", None)
