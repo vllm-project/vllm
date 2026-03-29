@@ -8,6 +8,10 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 import vllm.envs as envs
+from vllm.config.steering_types import (
+    SteeringVectorSpec,
+    normalize_layer_entry,
+)
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.serve.steering.protocol import SetSteeringRequest
 from vllm.exceptions import SteeringVectorError
@@ -28,21 +32,36 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
-def _scale_layer_vectors(
-    layer_vecs: dict[int, list[float]],
-    scales: dict[int, float] | None,
-) -> dict[int, list[float]]:
-    """Pre-multiply per-layer scale factors into vectors."""
-    scaled: dict[int, list[float]] = {}
-    for layer_idx, vec in layer_vecs.items():
-        scale = 1.0
-        if scales and layer_idx in scales:
-            scale = scales[layer_idx]
-        if scale != 1.0:
-            scaled[layer_idx] = [v * scale for v in vec]
-        else:
-            scaled[layer_idx] = vec
-    return scaled
+def _normalize_spec(
+    spec: SteeringVectorSpec,
+) -> dict[str, dict[int, list[float]]]:
+    """Convert a SteeringVectorSpec with co-located scales to pre-scaled
+    flat vectors.
+
+    Each layer entry may be a bare ``list[float]`` (scale=1.0) or
+    ``{"vector": [...], "scale": float}``.  This function applies the
+    scale and returns plain ``list[float]`` values.
+    """
+    result: dict[str, dict[int, list[float]]] = {}
+    for hook_name, layer_vecs in spec.items():
+        normalized_layers: dict[int, list[float]] = {}
+        for layer_idx, entry in layer_vecs.items():
+            vec, scale = normalize_layer_entry(entry)
+            if scale != 1.0:
+                normalized_layers[layer_idx] = [v * scale for v in vec]
+            else:
+                normalized_layers[layer_idx] = vec
+        result[hook_name] = normalized_layers
+    return result
+
+
+def _validate_hook_points(
+    spec: SteeringVectorSpec,
+) -> set[str] | None:
+    """Return invalid hook point names from *spec*, or ``None`` if all
+    are valid."""
+    invalid = set(spec.keys()) - VALID_HOOK_POINT_NAMES
+    return invalid if invalid else None
 
 
 @router.post("/v1/steering/set")
@@ -52,21 +71,52 @@ async def set_steering(
 ) -> JSONResponse:
     """Set activation steering vectors on decoder layers.
 
-    The ``vectors`` field maps hook point names to per-layer vector dicts.
+    Supports three-tier steering:
+    - ``vectors``: base vectors applied to both prefill and decode
+    - ``prefill_vectors``: added to base during prefill only
+    - ``decode_vectors``: added to base during decode only
 
-    When ``replace`` is ``True``, all existing vectors are cleared
-    atomically before the new ones are applied.
+    Each layer entry is either a bare ``list[float]`` (scale=1.0) or
+    ``{"vector": [...], "scale": float}``.
+
+    When ``replace`` is ``True``, all existing vectors across all tiers
+    are cleared atomically before the new ones are applied.
     """
     engine = engine_client(raw_request)
 
-    # Validate hook point names.
-    invalid_hooks = set(request.vectors.keys()) - VALID_HOOK_POINT_NAMES
-    if invalid_hooks:
+    # Collect all tiers that have data.
+    tiers: dict[str, SteeringVectorSpec] = {}
+    if request.vectors:
+        tiers["vectors"] = request.vectors
+    if request.prefill_vectors:
+        tiers["prefill_vectors"] = request.prefill_vectors
+    if request.decode_vectors:
+        tiers["decode_vectors"] = request.decode_vectors
+
+    if not tiers:
+        return JSONResponse(
+            content={
+                "error": (
+                    "No vectors provided. Include at least one of "
+                    "vectors, prefill_vectors, or decode_vectors "
+                    "with hook point/layer data."
+                ),
+            },
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
+
+    # Validate hook point names across all tiers.
+    all_invalid: set[str] = set()
+    for spec in tiers.values():
+        invalid = _validate_hook_points(spec)
+        if invalid:
+            all_invalid.update(invalid)
+    if all_invalid:
         return JSONResponse(
             content={
                 "error": (
                     f"Invalid hook point name(s): "
-                    f"{sorted(invalid_hooks)}. "
+                    f"{sorted(all_invalid)}. "
                     f"Valid values: "
                     f"{sorted(VALID_HOOK_POINT_NAMES)}"
                 ),
@@ -74,38 +124,42 @@ async def set_steering(
             status_code=HTTPStatus.BAD_REQUEST.value,
         )
 
-    # Scale vectors.
-    all_hook_vectors: dict[str, dict[int, list[float]]] = {}
-    for hook_name, layer_vecs in request.vectors.items():
-        all_hook_vectors[hook_name] = _scale_layer_vectors(layer_vecs, request.scales)
+    # Normalize co-located scales to pre-scaled flat vectors.
+    normalized_base: dict[str, dict[int, list[float]]] | None = None
+    normalized_prefill: dict[str, dict[int, list[float]]] | None = None
+    normalized_decode: dict[str, dict[int, list[float]]] | None = None
 
-    if not all_hook_vectors:
-        return JSONResponse(
-            content={
-                "error": (
-                    "No vectors provided. Include at least one hook "
-                    "point with layer vectors."
-                ),
-            },
-            status_code=HTTPStatus.BAD_REQUEST.value,
-        )
+    if "vectors" in tiers:
+        normalized_base = _normalize_spec(tiers["vectors"])
+    if "prefill_vectors" in tiers:
+        normalized_prefill = _normalize_spec(tiers["prefill_vectors"])
+    if "decode_vectors" in tiers:
+        normalized_decode = _normalize_spec(tiers["decode_vectors"])
 
     try:
         async with _steering_lock:
             # Phase 1 -- validate on every worker without mutating
-            # buffers.
+            # buffers.  We validate all tiers together.
             results = await engine.collective_rpc(
                 "set_steering_vectors",
-                args=(all_hook_vectors, True),
+                args=(),
+                kwargs=dict(
+                    vectors=normalized_base,
+                    prefill_vectors=normalized_prefill,
+                    decode_vectors=normalized_decode,
+                    validate_only=True,
+                ),
             )
             validated_layers: set[int] = set()
             for per_worker in results:
                 validated_layers.update(per_worker)
 
-            # Collect all requested layers across all hook points.
+            # Collect all requested layers across all tiers.
             requested_layers: set[int] = set()
-            for layer_vecs in all_hook_vectors.values():
-                requested_layers.update(layer_vecs.keys())
+            for spec in [normalized_base, normalized_prefill, normalized_decode]:
+                if spec:
+                    for layer_vecs in spec.values():
+                        requested_layers.update(layer_vecs.keys())
 
             missing = requested_layers - validated_layers
             if missing:
@@ -138,13 +192,53 @@ async def set_steering(
             # Phase 2 -- apply.
             await engine.collective_rpc(
                 "set_steering_vectors",
-                args=(all_hook_vectors, False),
+                args=(),
+                kwargs=dict(
+                    vectors=normalized_base,
+                    prefill_vectors=normalized_prefill,
+                    decode_vectors=normalized_decode,
+                    replace=False,
+                    validate_only=False,
+                ),
             )
+
+            # Invalidate prefix cache if prefill-affecting vectors
+            # were changed.  Base vectors affect prefill (they are
+            # added to prefill-specific vectors), and explicit
+            # prefill_vectors do as well.  This preempts all running
+            # requests and clears the prefix cache so that subsequent
+            # prefills use the new steering state.
+            affects_prefill = (
+                normalized_base is not None
+                or normalized_prefill is not None
+                or request.replace  # replace clears all tiers including prefill
+            )
+            if affects_prefill:
+                success = await engine.reset_prefix_cache(
+                    reset_running_requests=True
+                )
+                if success:
+                    logger.info(
+                        "Prefix cache invalidated after "
+                        "prefill-affecting steering change."
+                    )
+                else:
+                    logger.warning(
+                        "Prefix cache reset requested after "
+                        "prefill-affecting steering change but "
+                        "some blocks were still in use."
+                    )
+
+        # Build response with all hook points across tiers.
+        all_hooks: set[str] = set()
+        for spec in [normalized_base, normalized_prefill, normalized_decode]:
+            if spec:
+                all_hooks.update(spec.keys())
 
         return JSONResponse(
             content={
                 "status": "ok",
-                "hook_points": sorted(all_hook_vectors.keys()),
+                "hook_points": sorted(all_hooks),
                 "layers_updated": sorted(validated_layers),
             },
         )
@@ -175,6 +269,9 @@ async def clear_steering(raw_request: Request) -> JSONResponse:
     try:
         async with _steering_lock:
             await engine.collective_rpc("clear_steering_vectors")
+            # Clearing may remove prefill-affecting vectors, so
+            # invalidate prefix cache to stay consistent.
+            await engine.reset_prefix_cache(reset_running_requests=True)
         return JSONResponse(content={"status": "ok"})
     except Exception as err:
         logger.exception("Failed to clear steering vectors")
