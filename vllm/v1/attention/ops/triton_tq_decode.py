@@ -12,14 +12,13 @@ Supports both FP8 (E4M3) and uniform quantized (2/4-bit) values.
 
 import math
 import os
-import logging
-
 import torch
 import torch.nn.functional as F
 
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -752,7 +751,7 @@ def triton_tq_decode_attention(
     if _no_qjl:
         # No QJL: only need q_rot = q @ Pi.T (D×D instead of D×2D)
         q_float = query.float()
-        q_rot = (q_float @ Pi.T.contiguous()).contiguous()
+        q_rot = (q_float @ _get_pi_t(Pi)).contiguous()
         q_proj = torch.zeros_like(q_rot)
     else:
         Pi_S = _get_fused_pi_s(Pi, S)
@@ -776,11 +775,10 @@ def triton_tq_decode_attention(
 
     # Increase splits if grid is too small for GPU occupancy.
     # Target: B * Hk * splits >= 192 (96 SMs × 2 blocks/SM).
-    SM_COUNT = 96  # RTX PRO 6000 Blackwell
+    SM_COUNT = torch.cuda.get_device_properties(0).multi_processor_count
     TARGET_GRID = SM_COUNT * 2
     grid_blocks = B * Hk * NUM_KV_SPLITS
     if grid_blocks < TARGET_GRID:
-        import math
         needed = math.ceil(TARGET_GRID / (B * Hk))
         ns = NUM_KV_SPLITS
         while ns < needed and ns < 128:

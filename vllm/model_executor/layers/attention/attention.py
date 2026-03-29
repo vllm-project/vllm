@@ -403,7 +403,6 @@ class Attention(nn.Module, AttentionLayerBase):
         self, cache_dtype: str, head_size: int, prefix: str
     ) -> None:
         """Initialize TurboQuant rotation/projection matrices and centroids."""
-        import re
         from vllm.turboquant.config import TurboQuantConfig
         from vllm.turboquant.quantizer import (
             generate_rotation_matrix,
@@ -414,8 +413,8 @@ class Attention(nn.Module, AttentionLayerBase):
         tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype, head_size)
 
         # Extract layer index from prefix (e.g. "model.layers.5.self_attn")
-        match = re.search(r"layers\.(\d+)", prefix)
-        layer_idx = int(match.group(1)) if match else 0
+        from vllm.model_executor.models.utils import extract_layer_index
+        layer_idx = extract_layer_index(prefix)
         seed = tq_config.seed + layer_idx * 1337
 
         self.register_buffer(

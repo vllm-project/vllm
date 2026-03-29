@@ -136,7 +136,7 @@ __device__ __forceinline__ int shuffle_pack_8(int shifted_val) {
 // =====================================================================
 // Main fused store kernel
 // =====================================================================
-template <bool NO_ROTATION, bool NO_QJL, int VQB>
+template <bool NO_QJL, int VQB>
 __global__ void __launch_bounds__(THREADS, 4)
 tq_fused_store_kernel(
     const __half* __restrict__ key_ptr,       // [N, H, D] half
@@ -186,26 +186,22 @@ tq_fused_store_kernel(
     // ================================================================
     // STEP 2: Rotate (tiled GEMV) or skip
     // ================================================================
-    float y;
-    if constexpr (NO_ROTATION) {
-        y = x_hat;
-    } else {
-        // Write x_hat to shared memory for broadcast access
-        vec_smem[tid] = x_hat;
-        __syncthreads();
+    // STEP 2: Rotate (tiled GEMV)
+    // Write x_hat to shared memory for broadcast access
+    vec_smem[tid] = x_hat;
+    __syncthreads();
 
-        // y[tid] = sum_k x_hat[k] * PiT[k, tid]
-        float accum = 0.0f;
-        #pragma unroll 8
-        for (int k = 0; k < D; k += TILE_K) {
-            #pragma unroll
-            for (int ki = 0; ki < TILE_K; ki++) {
-                accum += vec_smem[k + ki] * PiT_ptr[(k + ki) * D + tid];
-            }
+    // y[tid] = sum_k x_hat[k] * PiT[k, tid]
+    float accum_rot = 0.0f;
+    #pragma unroll 8
+    for (int k = 0; k < D; k += TILE_K) {
+        #pragma unroll
+        for (int ki = 0; ki < TILE_K; ki++) {
+            accum_rot += vec_smem[k + ki] * PiT_ptr[(k + ki) * D + tid];
         }
-        y = accum;
-        __syncthreads();
     }
+    float y = accum_rot;
+    __syncthreads();
 
     // ================================================================
     // STEP 3: Bucketize
@@ -387,7 +383,7 @@ void tq_fused_store_launch(
     int N, int H, int block_size,
     int64_t stride_cache_block, int stride_cache_pos, int stride_cache_head,
     int key_packed_size, int value_packed_size,
-    bool no_rotation, bool no_qjl, int value_quant_bits
+    bool no_qjl, int value_quant_bits
 ) {
     int NH = N * H;
     if (NH <= 0) return;
@@ -415,22 +411,14 @@ void tq_fused_store_launch(
             key_packed_size, value_packed_size \
         );
 
-    if (no_rotation && no_qjl) {
-        if      (value_quant_bits == 8) { LAUNCH(true, true, 8); }
-        else if (value_quant_bits == 4) { LAUNCH(true, true, 4); }
-        else                            { LAUNCH(true, true, 2); }
-    } else if (no_rotation && !no_qjl) {
-        if      (value_quant_bits == 8) { LAUNCH(true, false, 8); }
-        else if (value_quant_bits == 4) { LAUNCH(true, false, 4); }
-        else                            { LAUNCH(true, false, 2); }
-    } else if (!no_rotation && no_qjl) {
-        if      (value_quant_bits == 8) { LAUNCH(false, true, 8); }
-        else if (value_quant_bits == 4) { LAUNCH(false, true, 4); }
-        else                            { LAUNCH(false, true, 2); }
+    if (no_qjl) {
+        if      (value_quant_bits == 8) { LAUNCH(true, 8); }
+        else if (value_quant_bits == 4) { LAUNCH(true, 4); }
+        else                            { LAUNCH(true, 2); }
     } else {
-        if      (value_quant_bits == 8) { LAUNCH(false, false, 8); }
-        else if (value_quant_bits == 4) { LAUNCH(false, false, 4); }
-        else                            { LAUNCH(false, false, 2); }
+        if      (value_quant_bits == 8) { LAUNCH(false, 8); }
+        else if (value_quant_bits == 4) { LAUNCH(false, 4); }
+        else                            { LAUNCH(false, 2); }
     }
     #undef LAUNCH
 }

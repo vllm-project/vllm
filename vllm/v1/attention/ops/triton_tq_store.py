@@ -1,201 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fused Triton kernels for TurboQuant KV store.
 
-Two kernel variants:
-1. _tq_fully_fused_store: Single-kernel path (no rotation, no QJL).
-   Reads raw key/value float16, does normalize → bucketize → pack → scatter
-   in ONE kernel launch. Eliminates ~15 intermediate kernel launches.
-
-2. _tq_fused_store: Pack-only kernel for rotation/QJL paths.
-   Pre-computed idx/proj/norms/gamma passed in. Handles packing + scatter.
+Three kernel variants:
+1. _tq_semifused_store: Single-kernel normalize + bucketize + residual + pack.
+2. _tq_fused_store: Pack-only kernel (idx/proj/norms pre-computed).
+3. CUDA fused store: Full pipeline in one CUDA kernel (compiled at runtime).
 
 The launcher `triton_tq_store` selects the appropriate path.
 """
 
 import math
-import logging
-
 import torch
 
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Kernel 1: FULLY FUSED — normalize + bucketize + pack + value quant
-#           + scatter in ONE kernel. No rotation, no QJL.
-# ═══════════════════════════════════════════════════════════════════════
-
-@triton.jit
-def _tq_fully_fused_store(
-    # Raw inputs
-    Key_ptr,           # [N, H, D] float16 — raw keys (post-RoPE)
-    Value_ptr,         # [N, H, D] float16 — raw values
-    # Cache and indexing
-    KV_cache_ptr,      # [total_bytes] uint8 (flattened view)
-    Slot_mapping_ptr,  # [N] int32 — per-token slot indices
-    # TQ constants
-    Centroids_ptr,     # [n_centroids] float32
-    Midpoints_ptr,     # [n_centroids-1] float32
-    # Cache strides (for computing byte offsets)
-    stride_cache_block: tl.constexpr,
-    stride_cache_pos: tl.constexpr,
-    stride_cache_head: tl.constexpr,
-    # Key/value input strides
-    stride_kv_n: tl.constexpr,     # H * D
-    stride_kv_h: tl.constexpr,     # D
-    # Dimensions
-    D: tl.constexpr,
-    H: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    # TQ layout
-    MSE_BITS: tl.constexpr,
-    MSE_BYTES: tl.constexpr,
-    QJL_BYTES: tl.constexpr,
-    KPS: tl.constexpr,
-    N_CENTROIDS: tl.constexpr,
-    # Value quantization
-    VQB: tl.constexpr,
-    VAL_DATA_BYTES: tl.constexpr,
-    # Packing block sizes
-    BLOCK_MSE: tl.constexpr,
-    BLOCK_QJL: tl.constexpr,
-    BLOCK_VAL: tl.constexpr,
-    # Feature flags
-    NO_QJL: tl.constexpr,
-):
-    """Fully-fused TQ store: read raw K/V → normalize → quantize → pack → scatter.
-
-    One program per (token, head) pair. Eliminates all intermediate tensors.
-    """
-    pid = tl.program_id(0)
-    token_idx = pid // H
-    head_idx = pid % H
-
-    # Compute cache byte offset from slot_mapping
-    slot = tl.load(Slot_mapping_ptr + token_idx)
-    if slot < 0:
-        return
-    blk = slot // BLOCK_SIZE
-    off = slot % BLOCK_SIZE
-    slot_base = (blk * stride_cache_block + off * stride_cache_pos
-                 + head_idx * stride_cache_head)
-
-    # ================================================================
-    # 1. LOAD KEY AND NORMALIZE
-    # ================================================================
-    d_offs = tl.arange(0, BLOCK_D)
-    d_mask = d_offs < D
-    key_base = token_idx * stride_kv_n + head_idx * stride_kv_h
-    key_vec = tl.load(Key_ptr + key_base + d_offs, mask=d_mask,
-                      other=0.0).to(tl.float32)
-
-    # L2 norm
-    norm_sq = tl.sum(key_vec * key_vec, axis=0)
-    norm_val = tl.sqrt(norm_sq + 1e-16)
-    x_hat = key_vec / norm_val
-
-    # ================================================================
-    # 2. BUCKETIZE (threshold quantization)
-    # ================================================================
-    # Load centroids and midpoints (small — fits in registers)
-    if N_CENTROIDS == 4:  # TQ3: 2-bit MSE
-        mp0 = tl.load(Midpoints_ptr)
-        mp1 = tl.load(Midpoints_ptr + 1)
-        mp2 = tl.load(Midpoints_ptr + 2)
-        idx = tl.where(x_hat < mp0, 0,
-              tl.where(x_hat < mp1, 1,
-              tl.where(x_hat < mp2, 2, 3)))
-        c0 = tl.load(Centroids_ptr)
-        c1 = tl.load(Centroids_ptr + 1)
-        c2 = tl.load(Centroids_ptr + 2)
-        c3 = tl.load(Centroids_ptr + 3)
-        y_hat = tl.where(idx == 0, c0,
-                tl.where(idx == 1, c1,
-                tl.where(idx == 2, c2, c3)))
-    else:  # TQ4: 3-bit MSE, 8 centroids
-        mp0 = tl.load(Midpoints_ptr)
-        mp1 = tl.load(Midpoints_ptr + 1)
-        mp2 = tl.load(Midpoints_ptr + 2)
-        mp3 = tl.load(Midpoints_ptr + 3)
-        mp4 = tl.load(Midpoints_ptr + 4)
-        mp5 = tl.load(Midpoints_ptr + 5)
-        mp6 = tl.load(Midpoints_ptr + 6)
-        idx = tl.where(x_hat < mp0, 0,
-              tl.where(x_hat < mp1, 1,
-              tl.where(x_hat < mp2, 2,
-              tl.where(x_hat < mp3, 3,
-              tl.where(x_hat < mp4, 4,
-              tl.where(x_hat < mp5, 5,
-              tl.where(x_hat < mp6, 6, 7)))))))
-        c_offs = tl.arange(0, 8)
-        centroids_vec = tl.load(Centroids_ptr + c_offs)
-        # Gather: y_hat[d] = centroids[idx[d]]
-        y_hat = tl.load(Centroids_ptr + idx)
-
-    # ================================================================
-    # 3. RESIDUAL AND RESIDUAL NORM
-    # ================================================================
-    r = x_hat - y_hat
-    gamma_sq = tl.sum(r * r, axis=0)
-    gamma_val = tl.sqrt(gamma_sq + 1e-16)
-
-    # ================================================================
-    # 4. PACK MSE INDICES (2-bit: 4 per byte)
-    # ================================================================
-    if MSE_BITS == 2:
-        mse_offs = tl.arange(0, BLOCK_MSE)
-        mse_mask = mse_offs < MSE_BYTES
-        i0 = tl.load(Key_ptr + 0, mask=False, other=0)  # dummy — recompute from idx
-        # We need to read idx at positions mse_offs*4+{0,1,2,3}
-        # idx is in registers as [BLOCK_D] — we need to re-index.
-        # Triton doesn't support gather from registers, so we use
-        # a staging buffer approach: store idx to BLOCK_D, read back packed.
-
-        # Direct vectorized packing from the idx register vector:
-        # For D=256, MSE_BYTES=64. Each byte = 4 consecutive 2-bit indices.
-        # idx is [BLOCK_D] int32. We need idx[4b], idx[4b+1], idx[4b+2], idx[4b+3].
-        # Approach: create shifted versions and combine.
-        shift = (d_offs % 4) * 2   # [0, 2, 4, 6, 0, 2, 4, 6, ...]
-        shifted_idx = (idx << shift).to(tl.int32)
-
-        # Now we need to reduce groups of 4 into packed bytes.
-        # byte_idx = d_offs // 4  → [0,0,0,0, 1,1,1,1, ...]
-        # We can OR-reduce within each group by storing shifted values
-        # and reading them back in groups.
-
-        # Simpler approach: use the original pack-from-loads pattern
-        # but loading from the idx vector via pointer arithmetic.
-        # Actually, since idx is computed in registers, we can't load from it.
-        # Store idx to a temp buffer? That defeats the purpose.
-
-        # Best approach: explicitly pack using stride-4 indexing on the
-        # original dim-level vector.
-        idx_i32 = idx.to(tl.int32)
-        # Group 4 consecutive dims per byte
-        b_offs = tl.arange(0, BLOCK_MSE)
-        b_mask = b_offs < MSE_BYTES
-        # Load 4 indices per byte position by striding
-        i0 = tl.where(b_mask & (b_offs * 4 < D),
-                       tl.load(Key_ptr + 0, mask=False, other=0), 0)  # placeholder
-
-        # WORKAROUND: Since we can't gather from a register tensor in Triton,
-        # we store idx to a scratch area in global memory and read back.
-        # However, this adds a global memory round-trip which is expensive.
-
-        # BETTER APPROACH: Keep idx computation in the launcher (1 kernel: bucketize)
-        # and fuse everything else. This is the "semi-fused" path.
-        pass  # Will use semi-fused approach below
-
-    # Since fully-fused register-level packing is non-trivial in Triton,
-    # we use a different strategy — see _tq_semifused_store below.
-    pass
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Kernel 2: SEMI-FUSED — normalize + bucketize + residual IN-KERNEL,
+# Kernel 1: SEMI-FUSED — normalize + bucketize + residual IN-KERNEL,
 #           then pack from the resulting register values.
 #           Single kernel, reads raw key/value, writes packed cache.
 # ═══════════════════════════════════════════════════════════════════════
@@ -798,7 +622,7 @@ def triton_tq_store(
                 N, H, block_size,
                 stride_block, stride_pos, stride_head,
                 key_packed_size, value_packed_size,
-                False, no_qjl, value_quant_bits,
+                no_qjl, value_quant_bits,
             )
             return
 
@@ -808,10 +632,10 @@ def triton_tq_store(
     can_semifuse = (D % 8 == 0 and BLOCK_D == D
                     and BLOCK_MSE == mse_bytes and BLOCK_QJL == qjl_bytes
                     and mse_bits == 2)
-    logger.info("triton_tq_store: can_semifuse=%s "
-                "D=%d BLOCK_D=%d MSE_BYTES=%d BLOCK_MSE=%d QJL_BYTES=%d BLOCK_QJL=%d",
-                can_semifuse, D, BLOCK_D,
-                mse_bytes, BLOCK_MSE, qjl_bytes, BLOCK_QJL)
+    logger.debug("triton_tq_store: can_semifuse=%s "
+                 "D=%d BLOCK_D=%d MSE_BYTES=%d BLOCK_MSE=%d QJL_BYTES=%d BLOCK_QJL=%d",
+                 can_semifuse, D, BLOCK_D,
+                 mse_bytes, BLOCK_MSE, qjl_bytes, BLOCK_QJL)
 
     if can_semifuse:
         # Semi-fused with rotation: 1 GEMM + fused kernel
