@@ -31,9 +31,18 @@ query = torch.randn(NUM_TOKENS, NUM_Q_HEADS, HEAD_SIZE,
                      device=device, dtype=torch.bfloat16)
 key = torch.randn(NUM_TOKENS, NUM_KV_HEADS, HEAD_SIZE,
                    device=device, dtype=torch.bfloat16)
-# Inflate some channels to simulate RoPE
-key[..., 0:10] *= 20.0
-key[..., 64:74] *= 15.0
+# Test with both extreme and mild RoPE simulation
+import sys
+if "--mild" in sys.argv:
+    # Mild: 3x inflation (realistic RoPE ratio)
+    key[..., 0:10] *= 3.0
+    key[..., 64:74] *= 2.5
+    print("Using MILD RoPE inflation (3x)")
+else:
+    # Extreme: 20x inflation (worst case)
+    key[..., 0:10] *= 20.0
+    key[..., 64:74] *= 15.0
+    print("Using EXTREME RoPE inflation (20x)")
 value = torch.randn(NUM_TOKENS, NUM_KV_HEADS, HEAD_SIZE,
                      device=device, dtype=torch.bfloat16)
 
@@ -163,7 +172,13 @@ cos_k = torch.nn.functional.cosine_similarity(
     tq_key_cache[:1, :NUM_TOKENS].reshape(-1, HEAD_SIZE).float(),
     dim=1,
 ).mean().item()
-print(f"Key cosine (original vs decoded): {cos_k:.6f}")
+cos_v = torch.nn.functional.cosine_similarity(
+    bf16_val_cache[:1, :NUM_TOKENS].reshape(-1, HEAD_SIZE).float(),
+    tq_val_cache[:1, :NUM_TOKENS].reshape(-1, HEAD_SIZE).float(),
+    dim=1,
+).mean().item()
+print(f"Key cosine (original vs decoded):   {cos_k:.6f}")
+print(f"Value cosine (original vs decoded): {cos_v:.6f}")
 
 # Run attention on decoded cache
 output_b = torch.empty_like(output_a)
