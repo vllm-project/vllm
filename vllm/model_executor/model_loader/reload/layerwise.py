@@ -163,11 +163,8 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         )
 
         # Process and copy when all weights are loaded
-        if (
-            info.load_numel >= info.load_numel_total
-            and not isinstance(  # type: ignore[operator]
-                layer, (Attention, MLAAttention)
-            )
+        if info.load_numel >= info.load_numel_total and not isinstance(  # type: ignore[operator]
+            layer, (Attention, MLAAttention)
         ):
             _layerwise_process(layer, info)
 
