@@ -227,11 +227,38 @@ class WorkerBase:
         phase: str,
     ) -> None:
         """Notify SteeringManager of global vector changes for a given
-        phase (``"base"``, ``"prefill"``, or ``"decode"``)."""
+        phase (``"base"``, ``"prefill"``, or ``"decode"``).
+
+        When the manager has not been lazily initialized yet, captures
+        the current buffer tensor values (which were just written by
+        ``_apply_vectors_to_buffers``) along with the phase and stores
+        them in ``self.model_runner._pending_steering_globals`` for
+        replay during lazy init in ``_update_steering_buffers``.
+        """
         if not hasattr(self, "model_runner") or self.model_runner is None:
             return
         mgr = getattr(self.model_runner, "_steering_manager", None)
         if mgr is None:
+            # Manager not yet initialized -- capture current buffer
+            # values for replay during lazy init.
+            captured: dict[str, dict[int, torch.Tensor]] = {}
+            for hook_point_str, layer_vecs in vectors_data.items():
+                vec_attr = HOOK_POINT_VECTOR_ATTR[SteeringHookPoint(hook_point_str)]
+                captured_layers: dict[int, torch.Tensor] = {}
+                for idx in layer_vecs:
+                    if idx not in valid_indices or idx not in steerable:
+                        continue
+                    mod = steerable[idx]
+                    if hasattr(mod, vec_attr):
+                        captured_layers[idx] = getattr(mod, vec_attr).clone()
+                if captured_layers:
+                    captured[hook_point_str] = captured_layers
+            if captured:
+                pending = getattr(self.model_runner, "_pending_steering_globals", None)
+                if pending is None:
+                    self.model_runner._pending_steering_globals = []
+                    pending = self.model_runner._pending_steering_globals
+                pending.append((captured, phase))
             return
         for hook_point_str, layer_vecs in vectors_data.items():
             vec_attr = HOOK_POINT_VECTOR_ATTR[SteeringHookPoint(hook_point_str)]

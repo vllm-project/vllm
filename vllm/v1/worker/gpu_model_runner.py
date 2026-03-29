@@ -3093,19 +3093,39 @@ class GPUModelRunner(
 
                 self._steering_manager = SteeringManager(max_configs)
 
-                # Pick up any existing global vectors from the
-                # steering_vector_* buffers (set via the global API
-                # before this method was called).  These are base-phase
-                # globals.
-                for hp, vec_attr in HOOK_POINT_VECTOR_ATTR.items():
-                    for layer_idx, mod in steerable.items():
-                        if not hasattr(mod, vec_attr):
-                            continue
-                        vec = getattr(mod, vec_attr)
-                        if vec.any():
-                            self._steering_manager.update_global_vectors(
-                                hp.value, layer_idx, vec, phase="base"
-                            )
+                # Replay any pending phase-specific global vectors that
+                # were set via set_steering_vectors() before the manager
+                # existed.
+                pending = getattr(self, "_pending_steering_globals", None)
+                if pending:
+                    for captured_vectors, phase in pending:
+                        for hook_point_str, layer_vecs in captured_vectors.items():
+                            for layer_idx, vec in layer_vecs.items():
+                                self._steering_manager.update_global_vectors(
+                                    hook_point_str,
+                                    layer_idx,
+                                    vec,
+                                    phase=phase,
+                                )
+                    self._pending_steering_globals = None
+                else:
+                    # No pending phase-specific globals -- fall back to
+                    # reading the steering_vector_* buffers as base-phase
+                    # globals.  This handles the case where vectors were
+                    # set via a path that doesn't use phase-aware
+                    # notifications.
+                    for hp, vec_attr in HOOK_POINT_VECTOR_ATTR.items():
+                        for layer_idx, mod in steerable.items():
+                            if not hasattr(mod, vec_attr):
+                                continue
+                            vec = getattr(mod, vec_attr)
+                            if vec.any():
+                                self._steering_manager.update_global_vectors(
+                                    hp.value,
+                                    layer_idx,
+                                    vec,
+                                    phase="base",
+                                )
                 # Register any configs that were added to the batch
                 # before the manager existed (first-step race).
                 for i in range(self.input_batch.num_reqs):
