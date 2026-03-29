@@ -199,6 +199,20 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "cutlass_encode_and_reorder_int4b_grouped(Tensor b_tensors) -> (Tensor, "
       "Tensor)");
+
+  // SM100 CUTLASS MLA decode
+  // conditionally compiled so impl registrations are in source file
+  ops.def(
+      "sm100_cutlass_mla_decode(Tensor! out, Tensor! lse, Tensor q_nope,"
+      "                         Tensor q_pe, Tensor kv_c_and_k_pe_cache,"
+      "                         Tensor seq_lens, Tensor page_table,"
+      "                         Tensor workspace, float scale,"
+      "                         int num_kv_splits) -> ()");
+
+  ops.def(
+      "sm100_cutlass_mla_get_workspace_size(int max_seq_len, int num_batches,"
+      "                                     int sm_count, int num_kv_splits) "
+      "-> int");
 #endif
 }
 
