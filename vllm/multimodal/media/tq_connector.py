@@ -181,9 +181,7 @@ def _init_tq_client():
             raise
 
         _tq_client = client
-        logger.info(
-            "TQMediaConnector: TQ client initialised (pid=%s)", os.getpid()
-        )
+        logger.info("TQMediaConnector: TQ client initialised (pid=%s)", os.getpid())
 
     return _tq_client
 
@@ -220,9 +218,7 @@ def _tensor_to_numpy(tensor) -> np.ndarray:
     return tensor.numpy()
 
 
-def _extract_image_from_batch(
-    td: Any, index: int, url: str
-) -> tuple[np.ndarray, str]:
+def _extract_image_from_batch(td: Any, index: int, url: str) -> tuple[np.ndarray, str]:
     """Extract a single image's numpy pixels from a batched TQ entry.
 
     Returns:
@@ -348,9 +344,7 @@ class TQMediaConnector(MediaConnector):
             loop = asyncio.new_event_loop()
             try:
                 result_box.append(
-                    loop.run_until_complete(
-                        self._load_from_tq_async(url, media_io)
-                    )
+                    loop.run_until_complete(self._load_from_tq_async(url, media_io))
                 )
             except BaseException as e:
                 exc_box.append(e)

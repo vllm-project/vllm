@@ -8,9 +8,7 @@ without a real TQ cluster.
 
 from __future__ import annotations
 
-import asyncio
 from io import BytesIO
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -85,9 +83,7 @@ class TestParseTqUrl:
     def test_valid_url(self):
         from vllm.multimodal.media.tq_connector import _parse_tq_url
 
-        partition, batch_key, index = _parse_tq_url(
-            "tq://mm_images/abc123def/2"
-        )
+        partition, batch_key, index = _parse_tq_url("tq://mm_images/abc123def/2")
         assert partition == "mm_images"
         assert batch_key == "abc123def"
         assert index == 2
@@ -95,9 +91,7 @@ class TestParseTqUrl:
     def test_valid_url_zero_index(self):
         from vllm.multimodal.media.tq_connector import _parse_tq_url
 
-        partition, batch_key, index = _parse_tq_url(
-            "tq://my_partition/batchkey/0"
-        )
+        partition, batch_key, index = _parse_tq_url("tq://my_partition/batchkey/0")
         assert partition == "my_partition"
         assert batch_key == "batchkey"
         assert index == 0
@@ -234,6 +228,7 @@ class TestLoadFromTqAsync:
 
         # P0 fix: result should be MediaWithBytes, not raw PIL Image
         from vllm.multimodal.media.base import MediaWithBytes as MWB
+
         assert isinstance(result, MWB)
         assert result.media.mode == "RGB"
         assert result.media.size == (64, 48)
@@ -267,9 +262,7 @@ class TestLoadFromTqAsync:
                 url = f"tq://mm_images/batch42/{i}"
                 result = await connector._load_from_tq_async(url, media_io)
                 assert result.size == original.size
-                np.testing.assert_array_equal(
-                    np.asarray(result), np.asarray(original)
-                )
+                np.testing.assert_array_equal(np.asarray(result), np.asarray(original))
 
     @pytest.mark.asyncio
     async def test_grayscale_image(self):
@@ -289,9 +282,7 @@ class TestLoadFromTqAsync:
             from vllm.multimodal.media.image import ImageMediaIO
 
             media_io = ImageMediaIO(image_mode="L")
-            result = await connector._load_from_tq_async(
-                "tq://part/key/0", media_io
-            )
+            result = await connector._load_from_tq_async("tq://part/key/0", media_io)
 
         assert result.mode == "L"
         assert result.size == (32, 32)
@@ -315,9 +306,7 @@ class TestLoadFromTqAsync:
             from vllm.multimodal.media.image import ImageMediaIO
 
             media_io = ImageMediaIO(image_mode="RGBA")
-            result = await connector._load_from_tq_async(
-                "tq://part/key/0", media_io
-            )
+            result = await connector._load_from_tq_async("tq://part/key/0", media_io)
 
         assert result.mode == "RGBA"
         np.testing.assert_array_equal(np.asarray(result), np.asarray(img))
@@ -342,9 +331,7 @@ class TestLoadFromTqAsync:
             media_io = ImageMediaIO(image_mode="RGB")
 
             with pytest.raises(IndexError, match="out of range"):
-                await connector._load_from_tq_async(
-                    "tq://part/key/5", media_io
-                )
+                await connector._load_from_tq_async("tq://part/key/5", media_io)
 
     @pytest.mark.asyncio
     async def test_missing_field_raises_value_error(self):
@@ -366,9 +353,7 @@ class TestLoadFromTqAsync:
             media_io = ImageMediaIO(image_mode="RGB")
 
             with pytest.raises(ValueError, match="does not contain"):
-                await connector._load_from_tq_async(
-                    "tq://part/key/0", media_io
-                )
+                await connector._load_from_tq_async("tq://part/key/0", media_io)
 
     @pytest.mark.asyncio
     async def test_batch_cache_avoids_duplicate_fetches(self):
@@ -422,12 +407,8 @@ class TestLoadFromTqAsync:
 
             media_io = ImageMediaIO(image_mode="RGB")
 
-            await connector._load_from_tq_async(
-                "tq://part/batch_a/0", media_io
-            )
-            await connector._load_from_tq_async(
-                "tq://part/batch_b/0", media_io
-            )
+            await connector._load_from_tq_async("tq://part/batch_a/0", media_io)
+            await connector._load_from_tq_async("tq://part/batch_b/0", media_io)
 
         # Two different batch_keys → two TQ fetches.
         assert mock_client.async_kv_retrieve_meta.call_count == 2
@@ -456,9 +437,7 @@ class TestUrlRouting:
             from vllm.multimodal.media.image import ImageMediaIO
 
             media_io = ImageMediaIO(image_mode="RGB")
-            await connector.load_from_url_async(
-                "tq://partition/batchkey/0", media_io
-            )
+            await connector.load_from_url_async("tq://partition/batchkey/0", media_io)
             mock_tq.assert_called_once()
 
     @pytest.mark.asyncio
@@ -526,17 +505,19 @@ class TestInitTqClient:
 
         mock_client_cls = MagicMock()
         mock_client_instance = MagicMock()
-        mock_client_instance.initialize_storage_manager.side_effect = (
-            ConnectionError("TQ unavailable")
+        mock_client_instance.initialize_storage_manager.side_effect = ConnectionError(
+            "TQ unavailable"
         )
         mock_client_cls.return_value = mock_client_instance
 
-        with patch.dict(
-            "sys.modules",
-            {"transfer_queue": MagicMock(AsyncTransferQueueClient=mock_client_cls)},
+        with (
+            patch.dict(
+                "sys.modules",
+                {"transfer_queue": MagicMock(AsyncTransferQueueClient=mock_client_cls)},
+            ),
+            pytest.raises(ConnectionError, match="TQ unavailable"),
         ):
-            with pytest.raises(ConnectionError, match="TQ unavailable"):
-                mod._init_tq_client()
+            mod._init_tq_client()
 
         # Client should NOT have been cached
         assert mod._tq_client is None
@@ -567,9 +548,7 @@ class TestLoadFromTqSync:
             from vllm.multimodal.media.image import ImageMediaIO
 
             media_io = ImageMediaIO(image_mode="RGB")
-            result = connector._load_from_tq_sync(
-                "tq://part/batch/0", media_io
-            )
+            result = connector._load_from_tq_sync("tq://part/batch/0", media_io)
 
         assert isinstance(result, Image.Image)
         assert result.size == (16, 16)
@@ -592,9 +571,7 @@ class TestLoadFromTqSync:
             from vllm.multimodal.media.image import ImageMediaIO
 
             media_io = ImageMediaIO(image_mode="RGB")
-            result = connector.load_from_url(
-                "tq://part/batch/0", media_io
-            )
+            result = connector.load_from_url("tq://part/batch/0", media_io)
 
         assert isinstance(result, Image.Image)
 
@@ -618,9 +595,7 @@ class TestLoadFromTqSync:
             media_io = ImageMediaIO(image_mode="RGB")
             # Call the sync path from within a running async event loop.
             # The old implementation would deadlock here.
-            result = connector._load_from_tq_sync(
-                "tq://part/batch/0", media_io
-            )
+            result = connector._load_from_tq_sync("tq://part/batch/0", media_io)
 
         assert isinstance(result, Image.Image)
 
@@ -655,9 +630,7 @@ class TestDeserializeEnvVar:
         data = {"host": "localhost", "port": 5555}
         b64 = base64.b64encode(pickle.dumps(data)).decode()
 
-        with patch(
-            "vllm.multimodal.media.tq_connector.logger"
-        ) as mock_logger:
+        with patch("vllm.multimodal.media.tq_connector.logger") as mock_logger:
             result = _deserialize_env_var(b64)
             mock_logger.warning.assert_called_once()
             assert "pickle" in mock_logger.warning.call_args[0][0].lower()
@@ -666,7 +639,9 @@ class TestDeserializeEnvVar:
 
     def test_invalid_base64_raises(self):
         """Completely invalid data should raise an error."""
+        import binascii
+
         from vllm.multimodal.media.tq_connector import _deserialize_env_var
 
-        with pytest.raises(Exception):
+        with pytest.raises(binascii.Error, match="Incorrect padding"):
             _deserialize_env_var("not-valid-base64!!!")
