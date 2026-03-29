@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
@@ -574,6 +575,14 @@ class Fp8MoEKernelMixin:
     to share fp8 backend selection, kernel format conversion, and dispatch.
     """
 
+    # Type annotations for attributes provided by FusedMoEMethodBase at runtime.
+    # Bare annotations don't create descriptors and won't shadow the actual
+    # attributes/properties set by the base class.
+    moe: FusedMoEConfig
+    moe_quant_config: FusedMoEQuantConfig | None
+    moe_kernel: mk.FusedMoEKernel | None
+    is_monolithic: bool
+
     def _init_fp8_backend(self, quant_config: "Fp8Config") -> None:
         self.quant_config = quant_config
         self.weight_block_size = quant_config.weight_block_size
@@ -1005,8 +1014,10 @@ class Fp8OnlineMoEMethod(Fp8MoEKernelMixin, OnlineMoEMethodBase):
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
         w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
-        w13_scale = torch.ones(layer.num_experts, dtype=torch.float32)
-        w2_scale = torch.ones(layer.num_experts, dtype=torch.float32)
+        w13_scale = torch.ones(
+            layer.num_experts, device=w13.device, dtype=torch.float32
+        )
+        w2_scale = torch.ones(layer.num_experts, device=w2.device, dtype=torch.float32)
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
