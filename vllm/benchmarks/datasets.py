@@ -2441,7 +2441,7 @@ class SonnetDataset(BenchmarkDataset):
             raise RuntimeError(
                 f"Failed to generate {num_requests} samples within "
                 f"{self.DEFAULT_MAX_SAMPLE_ATTEMPTS} attempts. Consider increasing "
-                f"'input_len' or using 'no_oversample=True'."
+                f"'input_len'."
             )
         return samples
 
