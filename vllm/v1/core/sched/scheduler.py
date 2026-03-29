@@ -560,7 +560,7 @@ class Scheduler(SchedulerInterface):
         scheduled_steering_configs: set[int] = set()
         if self.steering_config:
             for req in scheduled_running_reqs:
-                if req.num_computed_tokens < req.num_tokens:
+                if req.num_computed_tokens < req.num_prompt_tokens:
                     # Still in prefill
                     if req.prefill_steering_config_hash != 0:
                         scheduled_steering_configs.add(req.prefill_steering_config_hash)
