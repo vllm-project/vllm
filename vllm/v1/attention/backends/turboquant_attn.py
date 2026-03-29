@@ -465,18 +465,23 @@ class TurboQuantAttentionImpl(AttentionImpl):
         if not hasattr(layer, "_tq_k_state"):
             return
 
-        # Calibrate outlier channels on first batch with real tokens.
-        # Filter out padding (slot_mapping == -1) which appears during
-        # profiling/warmup runs — calibrating on dummy padding data
-        # produces wrong outlier channels and corrupts output.
+        # Calibrate outlier channels on first REAL batch (not profiling).
+        # During profiling/warmup, attn_metadata is None and K/V values
+        # come from dummy inputs — calibrating on those produces wrong
+        # outlier channels. We detect profiling via the forward context.
         if getattr(layer, "_tq_needs_calibration", False):
-            valid = slot_mapping >= 0
-            if valid.any():
-                k_flat = key[valid].reshape(-1, key.shape[-1])
-                v_flat = value[valid].reshape(-1, value.shape[-1])
-                layer._tq_k_state.calibrate_outliers(k_flat)
-                layer._tq_v_state.calibrate_outliers(v_flat)
-                layer._tq_needs_calibration = False
+            from vllm.forward_context import get_forward_context
+
+            ctx = get_forward_context()
+            is_profile = ctx.attn_metadata is None
+            if not is_profile:
+                valid = slot_mapping >= 0
+                if valid.any():
+                    k_flat = key[valid].reshape(-1, key.shape[-1])
+                    v_flat = value[valid].reshape(-1, value.shape[-1])
+                    layer._tq_k_state.calibrate_outliers(k_flat)
+                    layer._tq_v_state.calibrate_outliers(v_flat)
+                    layer._tq_needs_calibration = False
 
         self._encode_turboquant_cache(key, value, kv_cache, slot_mapping, layer)
 
