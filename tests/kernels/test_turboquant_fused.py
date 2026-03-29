@@ -178,18 +178,11 @@ class TestFusedEncode:
         fused_slot = torch.stack(fused_slots)
 
         # Compare
-        diff_mask = ref_slot != fused_slot
-        if diff_mask.any():
-            diff_positions = diff_mask[0].nonzero(as_tuple=True)[0]
-            pos = diff_positions[:5].tolist()
-            raise AssertionError(
-                f"Fused encode mismatch at byte positions {pos} "
-                f"(slot_bytes={slot_bytes}, "
-                f"outlier={outlier_bytes_count}, "
-                f"packed={packed_bytes})!\n"
-                f"ref[{pos}]: {ref_slot[0, diff_positions[:5]]}\n"
-                f"fused[{pos}]: {fused_slot[0, diff_positions[:5]]}"
-            )
+        assert torch.equal(ref_slot, fused_slot), (
+            f"Fused encode mismatch! "
+            f"Differing rows: "
+            f"{(ref_slot != fused_slot).any(dim=1).nonzero().flatten()[:5].tolist()}"
+        )
 
 
 class TestFusedDecode:
