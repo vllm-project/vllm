@@ -149,6 +149,63 @@ def fused_add_rms_norm(
     return y, residual_new
 
 
+# Optimized for small hidden size
+@triton.jit
+def _layer_norm_kernel(
+    x_ptr,
+    x_stride,
+    w_ptr,
+    bias_ptr,
+    y_ptr,
+    y_stride,
+    eps,
+    HIDDEN_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row_idx = tl.program_id(0)
+    x_row_ptr = x_ptr + row_idx * x_stride
+    y_row_ptr = y_ptr + row_idx * y_stride
+
+    block = tl.arange(0, BLOCK_SIZE)
+    mask = block < HIDDEN_SIZE
+
+    x = tl.load(x_row_ptr + block, mask=mask, other=0.0).to(tl.float32)
+    mean = tl.sum(x, axis=0) / HIDDEN_SIZE
+    diff = tl.where(mask, x - mean, 0.0)
+    var = tl.sum(diff * diff, axis=0) / HIDDEN_SIZE
+    rstd = tl.rsqrt(var + eps)
+
+    w = tl.load(w_ptr + block, mask=mask).to(tl.float32)
+    b = tl.load(bias_ptr + block, mask=mask).to(tl.float32)
+    y = (x - mean) * rstd * w + b
+    tl.store(y_row_ptr + block, y, mask=mask)
+
+
+def layer_norm(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    assert x.ndim == 2
+    assert w.ndim == 1
+    assert bias.ndim == 1
+    num_tokens, hidden_size = x.shape
+    y = torch.empty_like(x)
+    _layer_norm_kernel[(num_tokens,)](
+        x,
+        x.stride(0),
+        w,
+        bias,
+        y,
+        y.stride(0),
+        eps,
+        hidden_size,
+        BLOCK_SIZE=triton.next_power_of_2(hidden_size),
+    )
+    return y
+
+
 # @triton.jit
 # def _qk_rope_kernel(
 #     q_ptr,

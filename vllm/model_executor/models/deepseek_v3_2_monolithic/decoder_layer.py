@@ -16,7 +16,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 
 from .attention import MonolithicMLAAttention
-from .ops import fused_add_rms_norm, rms_norm
+from .ops import fused_add_rms_norm, layer_norm, rms_norm
 
 
 class MonolithicDecoderLayer(nn.Module):
@@ -178,7 +178,12 @@ class MonolithicDecoderLayer(nn.Module):
         )
 
         index_k, _ = self.attn.indexer_wk(hidden_states)
-        index_k = self.attn.indexer_k_norm(index_k)
+        index_k = layer_norm(
+            index_k,
+            self.attn.indexer_k_norm.weight,
+            self.attn.indexer_k_norm.bias,
+            eps=self.attn.rms_norm_eps,
+        )
         index_k_pe, index_k_nope = index_k.split(
             [
                 self.attn.qk_rope_head_dim,
