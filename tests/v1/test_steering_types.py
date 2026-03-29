@@ -44,6 +44,30 @@ class TestNormalizeLayerEntry:
         assert isinstance(scale, float)
         assert scale == 2.0
 
+    def test_dict_missing_scale_raises(self):
+        """Dict with 'vector' but no 'scale' should raise ValueError."""
+        entry = {"vector": [1.0, 2.0]}
+        with pytest.raises(ValueError, match="missing required key"):
+            normalize_layer_entry(entry)
+
+    def test_dict_missing_vector_raises(self):
+        """Dict with 'scale' but no 'vector' should raise ValueError."""
+        entry = {"scale": 2.0}
+        with pytest.raises(ValueError, match="missing required key"):
+            normalize_layer_entry(entry)
+
+    def test_dict_missing_both_keys_raises(self):
+        """Dict with neither 'vector' nor 'scale' should raise ValueError."""
+        entry = {"foo": "bar"}
+        with pytest.raises(ValueError, match="missing required key"):
+            normalize_layer_entry(entry)
+
+    def test_dict_missing_key_error_lists_missing(self):
+        """Error message should list the specific missing key(s)."""
+        entry = {"vector": [1.0]}
+        with pytest.raises(ValueError, match=r"\['scale'\]"):
+            normalize_layer_entry(entry)
+
     def test_invalid_type_raises(self):
         with pytest.raises(TypeError, match="SteeringLayerEntry must be"):
             normalize_layer_entry("not a list or dict")  # type: ignore[arg-type]
