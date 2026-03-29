@@ -265,8 +265,14 @@ class Attention(nn.Module, AttentionLayerBase):
                 sliding_window,
             )
 
-        # For turboquant, the Triton backend handles it directly.
-        # No need to bypass with "auto".
+        # TurboQuant only supports full DECODER attention. Auto-skip for
+        # encoder layers and sliding-window layers in hybrid models.
+        if kv_cache_dtype == "turboquant" and (
+            attn_type != AttentionType.DECODER or sliding_window is not None
+        ):
+            kv_cache_dtype = "auto"
+            calculate_kv_scales = False
+
         backend_kv_cache_dtype = kv_cache_dtype
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
