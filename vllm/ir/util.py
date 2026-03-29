@@ -10,12 +10,19 @@ from typing import Any
 
 
 @functools.lru_cache(maxsize=None)
-def hash_file(path: Path) -> str:
-    """Hash the contents of a single file. Cached per path so multiple
-    implementations defined in the same file share one read."""
+def _hash_file_cached(path: Path, mtime_ns: int) -> str:  # noqa: ARG001
+    """Inner cached function keyed on (path, mtime_ns).
+    mtime_ns is included so that a modified file gets a cache miss."""
     hasher = hashlib.sha256()
     hasher.update(path.read_text().encode("utf-8"))
     return hasher.hexdigest()
+
+
+def hash_file(path: Path) -> str:
+    """Hash the contents of a single file.
+    Cached per (path, mtime): all impls in the same unchanged file share
+    one read, while a modified file correctly produces a new hash."""
+    return _hash_file_cached(path, path.stat().st_mtime_ns)
 
 
 def hash_source(*srcs: str | Any) -> str:
